@@ -7,6 +7,7 @@
  */
 
 #include <sqlite3.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <time.h>
 
@@ -75,6 +76,23 @@ void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *te
 /* Is `id` in the channel's <ext>.admin_ids? admin_ids are user ids — pass the
  * envelope's sender_id, not the chat id (they differ on Discord). */
 int channel_id_is_admin(sqlite3 *db, const char *channel_name, const char *id);
+
+/* Queue a plain-text reply to one chat (command feedback — not agent output,
+ * so it goes straight to the outbox like admin notices do). */
+void channel_chat_reply(sqlite3 *db, const char *channel_name,
+                        const char *chat_id, const char *text);
+
+/* Re-point the chat's pin (upsert, preserving delivery_mode/tool_filter on
+ * an existing row) and stamp the session's origin. The pin is the binding —
+ * this is the one write that moves a chat between conversations. */
+void channel_pin_session(sqlite3 *db, const char *channel_name,
+                         const char *chat_id, int64_t sid);
+
+/* Channel open-door policy: channels.default_agent (NULL = fail-closed).
+ * *filter_out (optional) receives channels.default_tool_filter — the tool
+ * scope for chats the gate accepts without a route. Caller frees both. */
+char *channel_default_agent(sqlite3 *db, const char *channel_name,
+                            char **filter_out);
 
 
 /* Resolve a channel's registry config key <extension>.<key> through the

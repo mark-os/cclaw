@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "channel.h"
+#include "channel_intent.h"
 #include "approval.h"
 #include "log.h"
 #include "db.h"
@@ -163,8 +164,8 @@ int channel_id_is_admin(sqlite3 *db, const char *channel_name, const char *id) {
  * scope for chats the gate accepts without a route. It is read independently
  * of default_agent: the admin fallback lands on the global default agent but
  * is still an unrouted chat, so it takes the same filter. */
-static char *channel_default_agent(sqlite3 *db, const char *channel_name,
-                                   char **filter_out) {
+char *channel_default_agent(sqlite3 *db, const char *channel_name,
+                            char **filter_out) {
     sqlite3_stmt *s;
     char *agent = NULL;
     if (filter_out) *filter_out = NULL;
@@ -185,8 +186,8 @@ static char *channel_default_agent(sqlite3 *db, const char *channel_name,
 
 /* Queue a plain-text reply to one chat (command feedback — not agent output,
  * so it goes straight to the outbox like admin notices do). */
-static void channel_chat_reply(sqlite3 *db, const char *channel_name,
-                               const char *chat_id, const char *text) {
+void channel_chat_reply(sqlite3 *db, const char *channel_name,
+                        const char *chat_id, const char *text) {
     sqlite3_stmt *ins;
     if (sqlite3_prepare_v2(db,
             "INSERT INTO channel_outbox(channel_name, session_id, payload)"
@@ -203,8 +204,8 @@ static void channel_chat_reply(sqlite3 *db, const char *channel_name,
 /* Re-point the chat's pin (upsert, preserving delivery_mode/tool_filter on
  * an existing row) and stamp the session's origin. The pin is the binding —
  * this is the one write that moves a chat between conversations. */
-static void channel_pin_session(sqlite3 *db, const char *channel_name,
-                                const char *chat_id, int64_t sid) {
+void channel_pin_session(sqlite3 *db, const char *channel_name,
+                         const char *chat_id, int64_t sid) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "INSERT INTO channel_routes(channel_name, chat_id, session_id)"
@@ -229,271 +230,6 @@ static void channel_pin_session(sqlite3 *db, const char *channel_name,
     }
 }
 
-/* "/cmd" or "/cmd <arg…>" — returns the (leading-space-stripped) argument
- * tail, "" for the bare command, or NULL when text isn't this command. */
-static const char *cmd_arg(const char *text, const char *cmd) {
-    size_t n = strlen(cmd);
-    if (strncmp(text, cmd, n) != 0) return NULL;
-    if (text[n] == '\0') return text + n;
-    if (text[n] != ' ') return NULL;
-    const char *p = text + n + 1;
-    while (*p == ' ') p++;
-    return p;
-}
-
-/* /approve <id> and /deny <id> — decide a parked approval from chat, so an
- * admin isn't forced onto the dashboard. The transition itself is NOT
- * reimplemented here: this is a scope+state check in front of the one entry
- * point every approver uses (resolve_approval, main.c).
- *
- * Strength mirrors the CLI's non-interactive approve: a "rerun" approval gets
- * ONCE (single-use — chat is the low-ceremony surface, it should not mint
- * standing authority), an "apply" grant gets ALWAYS because ONCE is incoherent
- * for it. "Allow and stop asking" stays a dashboard/button decision.
- *
- * Who decided is recorded in approvals.decided_via ("channel:<ch>:<sender>"),
- * the same audit column the dashboard and CLI write. */
-static int chat_cmd_decide(sqlite3 *db, const char *ch_name, const char *cid,
-                           const char *sender, const char *arg, int approve) {
-    const char *verb = approve ? "approve" : "deny";
-    char msg[320];
-    char *end = NULL;
-    long long id = (arg && *arg) ? strtoll(arg, &end, 10) : 0;
-    if (id <= 0 || (end && *end != '\0' && *end != ' ')) {
-        snprintf(msg, sizeof(msg),
-                 "usage: /%s <approval id> — see /approvals for pending ids", verb);
-        channel_chat_reply(db, ch_name, cid, msg);
-        return 1;
-    }
-
-    char state[32] = {0}, tool[64] = {0}, action[64] = {0}, resolve[16] = {0};
-    int found = 0, in_scope = 0;
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db,
-            "SELECT a.state, COALESCE(a.tool_name,'?'), COALESCE(a.action,'?'),"
-            "       COALESCE(a.resolve,'rerun'), s.channel_name IS ?2"
-            " FROM approvals a JOIN sessions s ON s.id = a.session_id"
-            " WHERE a.id = ?1;", -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(s, 1, id);
-        sqlite3_bind_text(s, 2, ch_name, -1, SQLITE_STATIC);
-        if (sqlite3_step(s) == SQLITE_ROW) {
-            found = 1;
-            snprintf(state, sizeof(state), "%s", sqlite3_column_text(s, 0));
-            snprintf(tool, sizeof(tool), "%s", sqlite3_column_text(s, 1));
-            snprintf(action, sizeof(action), "%s", sqlite3_column_text(s, 2));
-            snprintf(resolve, sizeof(resolve), "%s", sqlite3_column_text(s, 3));
-            in_scope = sqlite3_column_int(s, 4);
-        }
-        sqlite3_finalize(s);
-    }
-
-    /* Out of scope reads as "doesn't exist": only the channel an approval's
-     * session is bound to may decide it (same rule as approval_decision), and
-     * a mismatch must not confirm the id exists elsewhere. */
-    if (!found || !in_scope) {
-        snprintf(msg, sizeof(msg), "no approval #%lld on this channel", id);
-        channel_chat_reply(db, ch_name, cid, msg);
-        LOG_WARN_("channel /%s out of scope ch=%s sender=%s approval=%lld",
-                  verb, ch_name, sender, id);
-        return 1;
-    }
-    if (strcmp(state, "pending") != 0) {
-        snprintf(msg, sizeof(msg),
-                 "approval #%lld is already %s — nothing to %s", id, state, verb);
-        channel_chat_reply(db, ch_name, cid, msg);
-        return 1;
-    }
-
-    ApprovalDecision d = APPROVAL_DENY;
-    if (approve)
-        d = strcmp(resolve, "apply") == 0 ? APPROVAL_ALWAYS : APPROVAL_ONCE;
-    char decided_via[128];
-    snprintf(decided_via, sizeof(decided_via), "channel:%s:%s", ch_name, sender);
-    LOG_INFO_("channel /%s ch=%s chat=%s sender=%s approval=%lld tool=%s action=%s",
-              verb, ch_name, cid, sender, id, tool, action);
-    resolve_approval(id, d, decided_via, 0);
-
-    snprintf(msg, sizeof(msg), "%s #%lld (%s %s)%s",
-             approve ? "approved" : "denied", id, tool, action,
-             (approve && d == APPROVAL_ONCE) ? " — once" : "");
-    channel_chat_reply(db, ch_name, cid, msg);
-    return 1;
-}
-
-/* /status — one read-only query: what this chat is pinned to, which agent and
- * model answer it, and how much is outstanding/spent-ish. There is no cost
- * ledger (llm_responses carries no price), so "today" is request count. */
-static int chat_cmd_status(sqlite3 *db, const char *ch_name, const char *cid) {
-    char msg[512];
-    sqlite3_stmt *s;
-    int have = 0;
-    if (sqlite3_prepare_v2(db,
-            "SELECT s.id, s.agent_name, s.state,"
-            "       COALESCE(a.primary_model,'(provider default)'),"
-            "       (SELECT COUNT(*) FROM approvals ap"
-            "          JOIN sessions s2 ON s2.id = ap.session_id"
-            "         WHERE ap.state='pending' AND s2.channel_name = ?1),"
-            "       (SELECT COUNT(*) FROM llm_responses"
-            "         WHERE session_id = s.id"
-            "           AND created_at >= unixepoch('now','start of day'))"
-            " FROM channel_routes r JOIN sessions s ON s.id = r.session_id"
-            " LEFT JOIN agents a ON a.name = s.agent_name"
-            " WHERE r.channel_name = ?1 AND r.chat_id = ?2;",
-            -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(s, 1, ch_name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(s, 2, cid, -1, SQLITE_STATIC);
-        if (sqlite3_step(s) == SQLITE_ROW) {
-            have = 1;
-            snprintf(msg, sizeof(msg),
-                     "session #%lld (%s, %s)\nmodel: %s\nLLM calls today: %d\n"
-                     "pending approvals on this channel: %d",
-                     (long long)sqlite3_column_int64(s, 0),
-                     sqlite3_column_text(s, 1), sqlite3_column_text(s, 2),
-                     sqlite3_column_text(s, 3), sqlite3_column_int(s, 5),
-                     sqlite3_column_int(s, 4));
-        }
-        sqlite3_finalize(s);
-    }
-    channel_chat_reply(db, ch_name, cid,
-                       have ? msg : "no session pinned to this chat (try /new)");
-    return 1;
-}
-
-/* Chat commands — /new and /sessions rebind the chat, /approve and /deny
- * decide a parked approval, so they are authority actions: admin_ids senders
- * only, handled in C before any session dispatch (they must work even when the
- * pinned session is wedged). A non-admin's
- * /new is NOT swallowed — it falls through as an ordinary message for the
- * agent to answer. Returns 1 when the event was consumed as a command.
- * `cid` is the chat the command rebinds; `sender` is who is allowed to. */
-static int channel_chat_command(sqlite3 *db, const char *ch_name,
-                                const char *cid, const char *sender,
-                                const char *payload) {
-    char *text = NULL;
-    sqlite3_stmt *js;
-    if (sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.text');",
-                           -1, &js, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(js, 1, payload, -1, SQLITE_STATIC);
-        if (sqlite3_step(js) == SQLITE_ROW) {
-            const char *v = (const char *)sqlite3_column_text(js, 0);
-            if (v) text = strdup(v);
-        }
-        sqlite3_finalize(js);
-    }
-    if (!text) return 0;
-    int is_new = strcmp(text, "/new") == 0;
-    const char *list_arg = cmd_arg(text, "/sessions");
-    const char *approve_arg = cmd_arg(text, "/approve");
-    const char *deny_arg = cmd_arg(text, "/deny");
-    const char *status_arg = cmd_arg(text, "/status");
-    int known = is_new || list_arg || approve_arg || deny_arg || status_arg;
-    if (!known || !channel_id_is_admin(db, ch_name, sender)) {
-        free(text);
-        return 0;
-    }
-
-    if (approve_arg || deny_arg) {
-        int r = chat_cmd_decide(db, ch_name, cid, sender,
-                                approve_arg ? approve_arg : deny_arg,
-                                approve_arg != NULL);
-        free(text);
-        return r;
-    }
-    if (status_arg) {
-        int r = chat_cmd_status(db, ch_name, cid);
-        free(text);
-        return r;
-    }
-
-    if (is_new) {
-        /* Same agent as the current pin; open-door default, then the global
-         * default_agent, when the chat has never been routed. */
-        char *agent = db_channel_binding_get(db, ch_name, cid);
-        /* An unrouted chat's fresh session is still an unrouted session: it
-         * takes the channel's default filter, so /new can't launder the open
-         * door into full authority. A routed chat keeps today's behaviour. */
-        char *gate_filter = NULL;
-        if (!agent) {
-            agent = channel_default_agent(db, ch_name, &gate_filter);
-            if (!agent) agent = config_get(db, "default_agent");
-        }
-        if (!agent) {
-            free(gate_filter);
-            channel_chat_reply(db, ch_name, cid, "no agent for this chat");
-            free(text);
-            return 1;
-        }
-        int64_t sid = session_create_filtered(db, ch_name, agent, -1, 0, gate_filter);
-        free(gate_filter);
-        if (sid > 0) {
-            channel_pin_session(db, ch_name, cid, sid);
-            char msg[96];
-            snprintf(msg, sizeof(msg), "new session #%lld (%s)",
-                     (long long)sid, agent);
-            channel_chat_reply(db, ch_name, cid, msg);
-            LOG_INFO_("channel /new ch=%s chat=%s sid=%lld agent=%s",
-                      ch_name, cid, (long long)sid, agent);
-        } else {
-            channel_chat_reply(db, ch_name, cid, "session create failed");
-        }
-        free(agent);
-        free(text);
-        return 1;
-    }
-
-    /* "/sessions <id>" re-pins; bare "/sessions" lists this chat's history. */
-    int64_t pick = list_arg[0] ? strtoll(list_arg, NULL, 10) : 0;
-    if (pick > 0) {
-        sqlite3_stmt *chk;
-        int found = 0;
-        if (sqlite3_prepare_v2(db, "SELECT 1 FROM sessions WHERE id=?;",
-                               -1, &chk, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(chk, 1, pick);
-            if (sqlite3_step(chk) == SQLITE_ROW) found = 1;
-            sqlite3_finalize(chk);
-        }
-        if (found) {
-            channel_pin_session(db, ch_name, cid, pick);
-            char msg[64];
-            snprintf(msg, sizeof(msg), "attached session #%lld", (long long)pick);
-            channel_chat_reply(db, ch_name, cid, msg);
-            LOG_INFO_("channel /sessions attach ch=%s chat=%s sid=%lld",
-                      ch_name, cid, (long long)pick);
-        } else {
-            channel_chat_reply(db, ch_name, cid, "no such session");
-        }
-        free(text);
-        return 1;
-    }
-
-    /* List: this chat's sessions newest-first, current pin starred. */
-    char *listing = NULL;
-    sqlite3_stmt *ls;
-    if (sqlite3_prepare_v2(db,
-            "SELECT COALESCE(group_concat("
-            "  CASE WHEN s.id = (SELECT session_id FROM channel_routes"
-            "                    WHERE channel_name=?1 AND chat_id=?2)"
-            "       THEN '* ' ELSE '  ' END"
-            "  || '#' || s.id || ' ' || s.agent_name || ' ' || s.state,"
-            "  char(10)), 'no sessions for this chat')"
-            " FROM (SELECT id, agent_name, state FROM sessions"
-            "       WHERE channel_name=?1 AND chat_id=?2"
-            "       ORDER BY id DESC LIMIT 10) s;",
-            -1, &ls, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(ls, 1, ch_name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(ls, 2, cid, -1, SQLITE_STATIC);
-        if (sqlite3_step(ls) == SQLITE_ROW) {
-            const char *v = (const char *)sqlite3_column_text(ls, 0);
-            if (v) listing = strdup(v);
-        }
-        sqlite3_finalize(ls);
-    }
-    channel_chat_reply(db, ch_name, cid,
-                       listing ? listing : "no sessions for this chat");
-    free(listing);
-    free(text);
-    return 1;
-}
 
 /* One-time admin notification for a dropped unrouted sender. The dedup set is
  * in-memory, per-process — ephemeral politeness state, not authority: a
@@ -1116,60 +852,22 @@ void channel_consume_events(sqlite3 *db) {
             goto del;
 
         /* Structural approval decision (inline-button tap, or any other
-         * channel-specific UI for a yes/once/no answer). Channel-agnostic:
-         * the daemon never interprets raw chat text as a decision — that's
-         * entirely the channel extension's concern (see channel_telegram.qjs
-         * processCallback). The approval carries its own session_id, so this
-         * skips channel_routes/session lookup entirely. */
+         * channel-specific UI for a yes/once/no answer). The extension
+         * already interpreted its platform's surface and gated the sender
+         * (see channel_telegram.qjs processCallback); here it becomes a
+         * DECIDE intent like any other and runs the same allow → execute
+         * pipeline the chat commands use. The approval carries its own
+         * session_id, so this skips channel_routes/session lookup. */
         if (strcmp(etype, "approval_decision") == 0) {
             processed++;
-            int64_t approval_id = -1;
-            char decision_str[16] = {0};
-            const char *jsql =
-                "SELECT json_extract(?1,'$.approval_id'), json_extract(?1,'$.decision');";
-            sqlite3_stmt *js;
-            if (sqlite3_prepare_v2(db, jsql, -1, &js, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(js, 1, payload, -1, SQLITE_STATIC);
-                if (sqlite3_step(js) == SQLITE_ROW) {
-                    approval_id = sqlite3_column_int64(js, 0);
-                    const char *dv = (const char *)sqlite3_column_text(js, 1);
-                    if (dv) snprintf(decision_str, sizeof(decision_str), "%s", dv);
-                }
-                sqlite3_finalize(js);
-            }
-            if (approval_id > 0 && decision_str[0]) {
-                /* Scope check: only the channel the approval's session is
-                 * bound to may decide it — otherwise any channel could
-                 * approve another channel's (or the CLI's) pending action
-                 * by forging an approval_id. Mismatch or unbound session →
-                 * ignore the event, approval stays pending. */
-                int in_scope = 0;
-                sqlite3_stmt *sc;
-                if (sqlite3_prepare_v2(db,
-                        "SELECT 1 FROM approvals a JOIN sessions s ON s.id=a.session_id"
-                        " WHERE a.id=?1 AND s.channel_name=?2",
-                        -1, &sc, NULL) == SQLITE_OK) {
-                    sqlite3_bind_int64(sc, 1, approval_id);
-                    sqlite3_bind_text(sc, 2, ch_name, -1, SQLITE_STATIC);
-                    if (sqlite3_step(sc) == SQLITE_ROW) in_scope = 1;
-                    sqlite3_finalize(sc);
-                }
-                if (!in_scope) {
-                    LOG_WARN_("channel approval_decision out of scope ch=%s"
-                              " approval=%lld — ignored",
-                              ch_name, (long long)approval_id);
-                    goto del;
-                }
-                ApprovalDecision d = APPROVAL_DENY;
-                if (strcmp(decision_str, "yes") == 0) d = APPROVAL_ALWAYS;
-                else if (strcmp(decision_str, "once") == 0) d = APPROVAL_ONCE;
-                char decided[128];
-                snprintf(decided, sizeof(decided), "channel:%s", ch_name);
-                resolve_approval(approval_id, d, decided, 0);
-            } else {
+            ChannelIntent it;
+            if (channel_intent_from_decision_event(db, payload, &it) != 0) {
                 LOG_ERROR_("channel approval_decision malformed ch=%s eid=%lld payload=%s",
                            ch_name, (long long)eid, payload);
+                goto del;
             }
+            if (channel_intent_allowed(db, ch_name, NULL, &it))
+                channel_intent_execute(db, ch_name, NULL, NULL, &it);
             goto del;
         }
 
@@ -1219,9 +917,31 @@ void channel_consume_events(sqlite3 *db) {
                 }
             }
 
-            if (channel_chat_command(db, ch_name, cid, sender, payload)) {
-                processed++;
-                goto del;
+            /* Admin intents are peeled off before any session dispatch, so
+             * they work even when the pinned session is wedged. Parse →
+             * allow → execute (channel_intent.c); a non-admin's recognized
+             * command is NOT swallowed — it falls through as ordinary chat
+             * text for the agent to answer. */
+            {
+                char *text = NULL;
+                sqlite3_stmt *js;
+                if (sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.text');",
+                                       -1, &js, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(js, 1, payload, -1, SQLITE_STATIC);
+                    if (sqlite3_step(js) == SQLITE_ROW) {
+                        const char *val = (const char *)sqlite3_column_text(js, 0);
+                        if (val) text = strdup(val);
+                    }
+                    sqlite3_finalize(js);
+                }
+                ChannelIntent it = channel_intent_from_text(text);
+                free(text);
+                if (it.kind != CHANNEL_INTENT_NONE &&
+                    channel_intent_allowed(db, ch_name, sender, &it) &&
+                    channel_intent_execute(db, ch_name, cid, sender, &it)) {
+                    processed++;
+                    goto del;
+                }
             }
 
             /* The pin IS the binding: route → session, session → agent
@@ -1350,11 +1070,11 @@ void channel_consume_events(sqlite3 *db) {
                     free(agent);
                     goto del;
                 }
-                /* Every inbound chat message is forwarded as-is — approval
-                 * decisions arrive as their own structural event type
-                 * (approval_decision, above), never by interpreting chat
-                 * text. A pending approval simply stays pending until a
-                 * decision event resolves it (or it expires). */
+                /* Everything that wasn't an allowed admin intent (peeled off
+                 * above) is ordinary conversation, forwarded as-is. Free
+                 * text is never an implicit decision: a pending approval
+                 * stays pending until a structural DECIDE intent resolves it
+                 * (or it expires). */
                 /* The raw envelope never reaches entries (F19): hand the inbox
                  * extracted plain text — bare text for DMs, sender-prefixed
                  * for groups (attribution is load-bearing in explicit-mode

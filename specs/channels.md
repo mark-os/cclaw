@@ -112,6 +112,18 @@ one), plus `/approve <id>` / `/deny <id>` (decide a parked approval) and
 authority actions that must work even when the pinned session is wedged. A
 non-admin's `/new` is an ordinary message.
 
+Administration is three separated concerns (`src/channel_intent.c`):
+**surface interpretation** turns platform input into a structural
+`ChannelIntent` (the daemon parses chat text; the extension interprets its
+own surfaces — an inline-button tap arrives as an `approval_decision` event
+and becomes the same DECIDE intent); **authority**
+(`channel_intent_allowed`) is the single policy point — text commands
+require an `admin_ids` sender, structural events are trusted because the
+emitting extension gates the sender itself; **execution**
+(`channel_intent_execute`) checks object scope/state and performs the read
+or transition. The consumer wires parse → allow → execute; anything else
+falls through as conversation.
+
 `/approve` and `/deny` are a scope + state check in front of
 `resolve_approval()` — the same entry point the dashboard, the CLI prompt and
 the inline-button `approval_decision` event use. An approval is decidable only

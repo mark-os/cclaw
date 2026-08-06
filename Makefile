@@ -73,7 +73,8 @@ SMOKE := test_db test_config test_advance_session test_streak_guard \
          test_sensitive test_secret_bind test_secret_store test_secret_capture \
          test_tool_secret_create test_tool_args \
          test_skills \
-         test_approval_block_window test_approval_postwindow test_approval_summary
+         test_approval_block_window test_approval_postwindow test_approval_summary \
+         test_channel_intent
 SMOKE_BIN := $(patsubst %,$(BUILDDIR)/%,$(SMOKE))
 
 all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw.a $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/net_shim compile_commands.json

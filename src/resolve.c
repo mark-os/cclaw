@@ -359,8 +359,19 @@ void approval_flush_deferred(void) {
 
 /* ── handle_approval_park: prompt the approver ────────────────── */
 
-void handle_approval_park(int64_t session_id) {
-    Approval *a = approval_get_pending(proc_db(), session_id);
+void handle_approval_park(int64_t session_id, const char *tool_call_id) {
+    /* Daemon: prompt the approval belonging to the call that just parked.
+     * CLI keeps oldest-first — its printed prompt must name the same row the
+     * y/n reader answers (approval_get_pending_subtree ordering). */
+    Approval *a = NULL;
+    if (proc_is_daemon() && tool_call_id) {
+        a = approval_get_for_tool_call(proc_db(), session_id, tool_call_id);
+        if (a && (!a->state || strcmp(a->state, "pending") != 0)) {
+            approval_free(a);
+            a = NULL;
+        }
+    }
+    if (!a) a = approval_get_pending(proc_db(), session_id);
     if (!a) return;
 
     if (!proc_is_daemon()) {

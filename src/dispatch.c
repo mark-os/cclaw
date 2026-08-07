@@ -596,6 +596,8 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
             if (bind_hit && gate < HOOK_GATE_ASK) gate = HOOK_GATE_ASK;
         }
         if (gate == HOOK_GATE_ASK) {
+            const char *ask_action = sens_hit ? "sensitive"
+                                   : (bind_hit ? "secret_bind" : tc->name);
             Approval *ap = approval_get_for_tool_call(proc_db(), session_id, tc->call_id);
             int approved = ap && ap->state && strcmp(ap->state, "approved") == 0;
             int denied   = ap && ap->state && strcmp(ap->state, "denied") == 0;
@@ -611,18 +613,64 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 approval_free(ap);
                 return 1;
             }
+            /* Ticket transfer: a post-window YES lands on a frozen call that
+             * was already answered "still pending" — its approval row stays
+             * approved and unconsumed. It covers the next call asking for the
+             * same capability, once, so the model's instructed re-issue runs
+             * instead of re-asking the human. Sensitivity parks never
+             * transfer (per-call, trust.md rule 1). */
+            int via_ticket = 0;
+            if (!approved && !pending && !sens_hit) {
+                int64_t tk = approval_take_ticket(proc_db(), session_id, ask_action,
+                                                  tc->name, tc->arguments);
+                if (tk > 0) {
+                    LOG_INFO_("approval ticket consumed id=%lld tool=%s call=%s",
+                              (long long)tk, tc->name, tc->call_id);
+                    approved = 1;
+                    via_ticket = 1;
+                }
+            }
             if (!approved) {
                 /* none → create + park; pending → re-park idempotently.
                  * A sensitivity hit is recorded as action='sensitive' so the
                  * resolve path can refuse to mint anything standing from it. */
-                if (!pending)
+                if (!pending) {
+                    /* Dedupe: this capability is already parked on another
+                     * call — a second row storms the approver, and every
+                     * duplicate park costs a full LLM iteration to unpark. */
+                    int64_t dup = approval_find_pending_match(proc_db(), session_id,
+                                      ask_action, tc->name, tc->arguments);
+                    if (dup > 0) {
+                        char err[256];
+                        snprintf(err, sizeof(err),
+                                 "error: %s needs approval and a matching request is "
+                                 "already parked as approval #%lld — do not re-issue "
+                                 "this call or a variant; you'll be notified when it's "
+                                 "decided", tc->name, (long long)dup);
+                        approval_free(ap);
+                        return tool_inline_error(session_id, tc, err, "approval:dup");
+                    }
+                    char idlist[96];
+                    int npend = approval_pending_ids(proc_db(), session_id,
+                                                     idlist, sizeof(idlist));
+                    int cap = config_get_int(proc_db(), "approval_max_pending");
+                    if (cap <= 0) cap = config_default_int("approval_max_pending");
+                    if (npend >= cap) {
+                        char err[256];
+                        snprintf(err, sizeof(err),
+                                 "error: %d approvals already pending (%s) — no more "
+                                 "will be requested; wait for those decisions or work "
+                                 "on something that doesn't need approval",
+                                 npend, idlist);
+                        approval_free(ap);
+                        return tool_inline_error(session_id, tc, err, "approval:cap");
+                    }
                     approval_create(proc_db(), session_id, tc->call_id, tc->name,
-                                    sens_hit ? "sensitive"
-                                             : (bind_hit ? "secret_bind" : tc->name),
-                                    tc->arguments, "rerun");
+                                    ask_action, tc->arguments, "rerun");
+                }
                 session_set_state(proc_db(), session_id, "awaiting_approval");
                 approval_free(ap);
-                handle_approval_park(session_id);
+                handle_approval_park(session_id, tc->call_id);
                 return 2; /* parked */
             }
             /* approved → consume (single-use) and fall through to execute the
@@ -630,10 +678,11 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
              * it never reaches the gate again; only a "once" approval lands
              * here, and consuming it stops a replayed tool_call_id from
              * re-using the same grant. A consumed sensitivity approval opens a
-             * per-call exception for the matched host (network tiers below). */
+             * per-call exception for the matched host (network tiers below).
+             * A ticket was already consumed inside approval_take_ticket. */
             *sens_once = sens_hit;
             *bind_once = bind_hit;
-            approval_consume(proc_db(), ap->id);
+            if (!via_ticket) approval_consume(proc_db(), ap->id);
             approval_free(ap);
         }
     }
@@ -713,7 +762,7 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
             /* Approval gate: the session is parked in awaiting_approval; the
              * dispatch loop releases this call's claim back to pending, where
              * it stays until resolve_approval re-runs it or writes the result. */
-            handle_approval_park(session_id);
+            handle_approval_park(session_id, tc->call_id);
             return 2; /* parked, don't advance */
         }
         result = strdup("error: tool returned null");

@@ -41,6 +41,11 @@ pair (known-sensitive vs unknown-plus-credential); neither may be
    unbound secret means deny-all unless a human approved that exact call.
    ALWAYS on a url-carrying park records the binding; shell/js ALWAYS
    coerces to ONCE (no standing binding without an attributable target).
+   A ONCE that lands after the block window leaves a single-use *ticket*:
+   the next call using the same secret set consumes it at the gate
+   (`approval_take_ticket`, dead at the original park expiry) — one human
+   decision covers the model's instructed re-issue, never a standing grant.
+   Sensitivity parks (rule 1) never ticket: per-call means per-call.
 
 **Every secret birth path composes with rule 2 for free.** Whether a secret
 arrives as a `CCLAW_SECRET_*` env var at startup, via `cclaw secret set`, via

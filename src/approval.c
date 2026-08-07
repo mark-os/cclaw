@@ -92,9 +92,11 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
     return id;
 }
 
-/* Ordered like approval_get_pending_subtree, deliberately: the park prompt
- * (this) and the CLI's y/n reader (that) must name the same row, or the user
- * is shown one approval and decides another. */
+/* Ordered like approval_get_pending_subtree, deliberately: the CLI park
+ * prompt (this) and the CLI's y/n reader (that) must name the same row, or
+ * the user is shown one approval and decides another. The daemon prompt path
+ * resolves the just-parked approval by tool_call_id instead
+ * (handle_approval_park). */
 Approval *approval_get_pending(sqlite3 *db, int64_t session_id) {
     const char *sql =
         "SELECT id, session_id, tool_call_id, tool_name, action,"
@@ -169,6 +171,115 @@ int approval_consume(sqlite3 *db, int64_t id) {
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
+}
+
+/* ── capability matching: dedupe + ticket transfer ─────────────────
+ * Two calls ask for the same capability when one human decision honestly
+ * covers both. secret_bind: the same set of secret placeholders — the prompt
+ * names the secrets and the egress waiver, the code text is incidental (the
+ * incident storm was ten mutated re-issues of one capability). Everything
+ * else: byte-identical args. A 'sensitive' park is per-call by trust.md
+ * rule 1, so only an exact re-issue of the frozen call may dedupe against
+ * it, and it never transfers (the gate excludes it from tickets). */
+static int names_subset(char **a, size_t an, char **b, size_t bn) {
+    for (size_t i = 0; i < an; i++) {
+        int found = 0;
+        for (size_t j = 0; j < bn && !found; j++)
+            if (strcmp(a[i], b[j]) == 0) found = 1;
+        if (!found) return 0;
+    }
+    return 1;
+}
+
+static int capability_match(const char *action, const char *args_a, const char *args_b) {
+    if (!args_a || !args_b) return 0;
+    if (action && strcmp(action, "secret_bind") == 0) {
+        size_t an = 0, bn = 0;
+        char **a = secret_placeholder_names(args_a, &an);
+        char **b = secret_placeholder_names(args_b, &bn);
+        /* Set equality via two-way subset — the extractor reports every
+         * occurrence, so counts can differ while the sets match. */
+        int m = an > 0 && bn > 0 &&
+                names_subset(a, an, b, bn) && names_subset(b, bn, a, an);
+        secret_names_free(a, an);
+        secret_names_free(b, bn);
+        return m;
+    }
+    return strcmp(args_a, args_b) == 0;
+}
+
+/* Scan this session's rerun approvals in `state` for a capability match.
+ * unexpired_only guards the ticket path: an approved row past its original
+ * park deadline is stale authority, not a ticket. Returns row id or 0. */
+static int64_t approval_match_state(sqlite3 *db, int64_t session_id,
+                                    const char *state, int unexpired_only,
+                                    const char *action, const char *tool_name,
+                                    const char *args_json) {
+    const char *sql =
+        "SELECT id, args_json FROM approvals"
+        " WHERE session_id=?1 AND state=?2 AND resolve='rerun'"
+        "   AND action IS ?3 AND tool_name IS ?4"
+        "   AND (?5 = 0 OR (expires_at IS NOT NULL AND expires_at > unixepoch()))"
+        " ORDER BY id DESC LIMIT 8";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 2, state, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, action, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, tool_name, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 5, unexpired_only);
+    int64_t id = 0;
+    while (id == 0 && sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *row_args = (const char *)sqlite3_column_text(stmt, 1);
+        if (capability_match(action, row_args, args_json))
+            id = sqlite3_column_int64(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    return id;
+}
+
+int64_t approval_find_pending_match(sqlite3 *db, int64_t session_id,
+                                    const char *action, const char *tool_name,
+                                    const char *args_json) {
+    return approval_match_state(db, session_id, "pending", 0,
+                                action, tool_name, args_json);
+}
+
+int64_t approval_take_ticket(sqlite3 *db, int64_t session_id,
+                             const char *action, const char *tool_name,
+                             const char *args_json) {
+    int64_t id = approval_match_state(db, session_id, "approved", 1,
+                                      action, tool_name, args_json);
+    if (id <= 0) return 0;
+    /* approval_consume is a CAS on state='approved' — a concurrent taker
+     * loses cleanly and parks instead of double-spending the ticket. */
+    return approval_consume(db, id) == 0 ? id : 0;
+}
+
+int approval_pending_ids(sqlite3 *db, int64_t session_id, char *buf, size_t cap) {
+    if (buf && cap) buf[0] = '\0';
+    const char *sql =
+        "SELECT id FROM approvals WHERE session_id=? AND state='pending'"
+        " ORDER BY id ASC";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    int n = 0;
+    size_t used = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int64_t id = sqlite3_column_int64(stmt, 0);
+        if (buf && used < cap) {
+            int w = snprintf(buf + used, cap - used, "%s#%lld",
+                             n ? " " : "", (long long)id);
+            if (w > 0 && (size_t)w < cap - used) used += (size_t)w;
+            else buf[used] = '\0';   /* truncated: keep what fit */
+        }
+        n++;
+    }
+    sqlite3_finalize(stmt);
+    return n;
 }
 
 Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *decided_via) {
@@ -275,10 +386,23 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPost
     char buf[512];
     switch (outcome) {
     case APPROVAL_PW_RERUN_APPROVED:
-        snprintf(buf, sizeof(buf),
-                 "Approval #%lld for '%s' was approved after the wait window — "
-                 "re-issue the call if it's still needed.",
-                 (long long)a->id, what);
+        /* Sensitivity approvals are per-call (trust.md rule 1): the frozen
+         * call was already answered, so nothing transfers — say so instead of
+         * implying a silent retry. Everything else leaves a ticket the gate
+         * transfers to the next matching call (approval_take_ticket). */
+        if (a->action && strcmp(a->action, "sensitive") == 0)
+            snprintf(buf, sizeof(buf),
+                     "Approval #%lld for '%s' was approved after the wait "
+                     "window, but a sensitivity approval covers only that one "
+                     "frozen call, which was already answered — re-issue the "
+                     "call if still needed and it will ask the operator again.",
+                     (long long)a->id, what);
+        else
+            snprintf(buf, sizeof(buf),
+                     "Approval #%lld for '%s' was approved — re-issue the call "
+                     "now if it's still needed; the approval covers the next "
+                     "matching call, so it will run without asking again.",
+                     (long long)a->id, what);
         break;
     case APPROVAL_PW_RERUN_DENIED:
         snprintf(buf, sizeof(buf),
@@ -300,9 +424,10 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPost
     case APPROVAL_PW_EXPIRED:
     default:
         snprintf(buf, sizeof(buf),
-                 "Approval #%lld for '%s' expired without a decision. Not a "
-                 "denial — re-request only if the task still needs it, and "
-                 "mention that it expired.",
+                 "Approval #%lld for '%s' expired without a decision — the "
+                 "operator may not have seen it. Not a denial — re-request "
+                 "only if the task still needs it, and mention that it "
+                 "expired.",
                  (long long)a->id, what);
         break;
     }

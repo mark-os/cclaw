@@ -17,11 +17,14 @@
 void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via,
                       int64_t grant_expires_at);
 
-/* Prompt the approver for the session's pending approval: CLI prompt (or
- * --auto-approve / non-tty auto-decision, recorded as deferred), daemon
- * channel outbox prompt, or fail-closed auto-deny when there is no approver.
- * Called from the dispatch gate when a call parks. */
-void handle_approval_park(int64_t session_id);
+/* Prompt the approver for a pending approval: CLI prompt (or --auto-approve /
+ * non-tty auto-decision, recorded as deferred), daemon channel outbox prompt,
+ * or fail-closed auto-deny when there is no approver. Called from the
+ * dispatch gate when a call parks; tool_call_id names the call that parked so
+ * the daemon prompts THAT approval — with a queue, oldest-first would DM a
+ * row whose block window already lapsed while the fresh one goes
+ * unannounced. NULL falls back to the oldest pending. */
+void handle_approval_park(int64_t session_id, const char *tool_call_id);
 
 /* Apply the auto-decision handle_approval_park recorded, once the dispatch
  * loop has released its CAS claim on the parked tool_call — resolving inside

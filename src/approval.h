@@ -6,6 +6,7 @@
  * settles it. Owns the approvals table's row shape.
  */
 
+#include <stddef.h>
 #include <stdint.h>
 #include <sqlite3.h>
 
@@ -60,6 +61,27 @@ Approval *approval_get_for_tool_call(sqlite3 *db, int64_t session_id,
  * single-use. Returns 0 if a row transitioned, -1 otherwise (already consumed,
  * not approved, or missing). */
 int approval_consume(sqlite3 *db, int64_t id);
+
+/* Dedupe lookup: a pending rerun approval in this session asking for the same
+ * capability (secret_bind: same secret-placeholder set; otherwise identical
+ * args). Returns the row id or 0 — the gate answers the duplicate call inline
+ * instead of parking a second row. */
+int64_t approval_find_pending_match(sqlite3 *db, int64_t session_id,
+                                    const char *action, const char *tool_name,
+                                    const char *args_json);
+
+/* Ticket transfer: an approved, unconsumed, unexpired rerun approval whose
+ * frozen call could no longer use it (decided post-window) covers the next
+ * call asking for the same capability — once. On match the row is consumed
+ * (CAS) and its id returned; 0 when nothing transfers. Callers must exclude
+ * sensitivity parks (per-call by trust.md rule 1). */
+int64_t approval_take_ticket(sqlite3 *db, int64_t session_id,
+                             const char *action, const char *tool_name,
+                             const char *args_json);
+
+/* Count this session's pending approvals; when buf is non-NULL, format their
+ * ids into it ("#4 #7 #9", truncating silently). Returns the count. */
+int approval_pending_ids(sqlite3 *db, int64_t session_id, char *buf, size_t cap);
 
 /* Resolve an approval (approve or deny). Returns heap-allocated resolved Approval or NULL. */
 Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *decided_via);

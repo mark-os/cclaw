@@ -54,8 +54,13 @@ static const ConfigDef s_defs[] = {
       "Token budget for auto-recalled memory" },
     { "approval_timeout_sec", "3600",
       "Seconds before a parked approval expires" },
-    { "approval_block_sec", "60",
-      "Seconds a foreground approval blocks before backgrounding" },
+    { "approval_block_sec", "600",
+      "Seconds a foreground approval blocks before backgrounding — the window"
+      " a decision runs the frozen call in place; with one-tap channel buttons"
+      " a long hold costs nothing when the approver is present" },
+    { "approval_max_pending", "3",
+      "Max pending approvals per session — further park-worthy calls fail"
+      " inline (naming the outstanding ids) until one is decided" },
     { "agent_max_depth",    "2",
       "Max sub-agent nesting depth for launch_agent" },
     { "session_max_active", "20",

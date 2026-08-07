@@ -214,6 +214,8 @@ function onDispatch(m) {
         channel.log("RESUMED session=" + sessionId);
     } else if (t === "MESSAGE_CREATE") {
         onMessageCreate(d);
+    } else if (t === "INTERACTION_CREATE") {
+        onInteraction(d);
     } else if (t === "GUILD_CREATE") {
         if (d.id) {
             guildNames["" + d.id] = d.name || "";
@@ -415,6 +417,73 @@ function onMessageCreate(d) {
     deliver(env, "disc_" + d.id, isDm);
 }
 
+// ── Button interactions (message components) ─────────────────────
+//
+// The mirror of channel_telegram.qjs's processCallback: an approval prompt's
+// buttons come back as INTERACTION_CREATE. The isAdmin gate here is
+// MANDATORY — the daemon trusts structural events from registered extensions
+// unconditionally (channel_intent_allowed, CHANNEL_ORIGIN_EVENT), so this
+// check IS the authority boundary for button decisions.
+
+var INTERACTION_MESSAGE_COMPONENT = 3;
+var CALLBACK_UPDATE_MESSAGE = 7;          // edit the message the button lives on
+var CALLBACK_DEFERRED_UPDATE = 6;         // ack silently, change nothing
+
+function onInteraction(d) {
+    if (!d || d.type !== INTERACTION_MESSAGE_COMPONENT || !d.id || !d.token) return;
+    var customId = (d.data && d.data.custom_id) || "";
+    var user = (d.member && d.member.user) || d.user || {};
+    var fromId = "" + (user.id || "");
+
+    // Non-admin (or unrecognized button): clear the client's spinner, do
+    // nothing — same silent-drop semantics as Telegram's processCallback.
+    if (!channel.admin.isAdmin(fromId) || customId.indexOf("appr:") !== 0) {
+        interactionRespond(d, { type: CALLBACK_DEFERRED_UPDATE });
+        return;
+    }
+
+    // "appr:<approval_id>:<yes|once|no>"
+    var parts = customId.substring(5).split(":");
+    var approvalId = parseInt(parts[0], 10);
+    var decision = parts[1] || "no";
+    var toast = decision === "yes" ? "Approved" :
+                decision === "once" ? "Approved once" : "Denied";
+
+    // Interaction ids are unique per click — free idempotency via the
+    // channel_events UNIQUE(channel_name, external_id) constraint.
+    channel.emit("approval_decision",
+        JSON.stringify({ approval_id: approvalId, decision: decision }),
+        "disc_int_" + d.id);
+
+    // Resolve the prompt in place so stale buttons can't be clicked twice.
+    // The original content rides d.message; cap the edit under the message
+    // limit before appending the receipt line.
+    var who = user.global_name || user.username || fromId;
+    var orig = (d.message && d.message.content) || "Approval";
+    var suffix = "\n\n" + toast + " by " + who;
+    if (orig.length + suffix.length > DISCORD_MAX_MSG_LEN)
+        orig = orig.substring(0, findSplit(orig, 0, DISCORD_MAX_MSG_LEN - suffix.length));
+    interactionRespond(d, {
+        type: CALLBACK_UPDATE_MESSAGE,
+        data: { content: orig + suffix, components: [] }
+    });
+}
+
+// POST the interaction callback. Authenticated by the interaction token in
+// the URL — no Authorization header needed (and none is sent).
+function interactionRespond(d, body) {
+    channel.http({
+        method: "POST",
+        url: config.base + "/api/v10/interactions/" + d.id + "/" + d.token + "/callback",
+        headers: ["Content-Type: application/json"],
+        body: JSON.stringify(body)
+    }).then(function (r) {
+        if (r.error || r.status < 200 || r.status >= 300)
+            channel.log("interaction callback failed status=" + r.status +
+                        " error=" + r.error);
+    });
+}
+
 // "Mark (parson_mark)" — display name for reading, unique handle for
 // addressing. Collapses when they match (or there is no display name).
 function displayName(u) {
@@ -561,8 +630,33 @@ function onOutbox(item) {
     var chatId = payload.chat_id, text = payload.text;
     if (!chatId || !text) { channel.failOutbox(item.id, "missing chat_id or text"); return; }
     text = rewriteEmojis(rewriteMentions(text));
-    if (payload.to_user) { sendToUser(chatId, text, item.id); return; }
-    sendChunked(chatId, text, item.id);
+    // Buttoned prompts (approvals): the C side emits a Telegram-shaped
+    // keyboard; render it as Discord message components on the final chunk.
+    var comps = payload.keyboard ? kbToComponents(payload.keyboard) : null;
+    if (payload.to_user) { sendToUser(chatId, text, item.id, comps); return; }
+    sendChunked(chatId, text, item.id, comps);
+}
+
+// Telegram-shaped [[{text, callback_data}]] -> Discord action rows. The
+// callback_data rides custom_id verbatim ("appr:<id>:<yes|once|no>", well
+// under Discord's 100-char limit); styles are keyed on the decision suffix
+// so the deny button reads as destructive. Discord caps: 5 buttons per row,
+// 5 rows per message — the C prompts use one short row, but clamp anyway.
+function kbToComponents(keyboard) {
+    var rows = [];
+    for (var i = 0; i < keyboard.length && rows.length < 5; i++) {
+        var btns = [];
+        for (var j = 0; j < keyboard[i].length && btns.length < 5; j++) {
+            var b = keyboard[i][j];
+            if (!b || !b.text || !b.callback_data) continue;
+            var style = /:no$/.test(b.callback_data) ? 4 :      // danger
+                        /:once$/.test(b.callback_data) ? 2 : 1; // secondary/primary
+            btns.push({ type: 2, style: style,
+                        label: b.text.substring(0, 80), custom_id: b.callback_data });
+        }
+        if (btns.length) rows.push({ type: 1, components: btns });
+    }
+    return rows.length ? rows : null;
 }
 
 // to_user=1 means the destination is a user id (an admin_ids entry), not a
@@ -572,9 +666,9 @@ function onOutbox(item) {
 // just re-opens (the endpoint is idempotent, it returns the existing DM).
 var dmChannels = {};
 
-function sendToUser(userId, text, outboxId) {
+function sendToUser(userId, text, outboxId, comps) {
     var dm = dmChannels[userId];
-    if (dm) { sendChunked(dm, text, outboxId); return; }
+    if (dm) { sendChunked(dm, text, outboxId, comps); return; }
     channel.http({
         method: "POST",
         url: config.base + "/api/v10/users/@me/channels",
@@ -595,13 +689,14 @@ function sendToUser(userId, text, outboxId) {
             return;
         }
         dmChannels[userId] = "" + id;
-        sendChunked("" + id, text, outboxId);
+        sendChunked("" + id, text, outboxId, comps);
     });
 }
 
 // Queue all chunks; the C loop sends them in order and acks the outbox row
 // when the final chunk gets a 2xx (rate-limit 429 retry lives in the loop).
-function sendChunked(chatId, text, outboxId) {
+// Components (buttons) ride the final chunk so they sit under the full text.
+function sendChunked(chatId, text, outboxId, comps) {
     var total = text.length, pos = 0;
     while (pos < total) {
         var remaining = total - pos;
@@ -609,16 +704,19 @@ function sendChunked(chatId, text, outboxId) {
             remaining : findSplit(text, pos, DISCORD_MAX_MSG_LEN);
         var chunk = text.substring(pos, pos + chunkLen);
         pos += chunkLen;
-        postMessage(chatId, chunk, outboxId, pos >= total);
+        var isFinal = pos >= total;
+        postMessage(chatId, chunk, outboxId, isFinal, isFinal ? comps : null);
     }
 }
 
-function postMessage(chatId, content, outboxId, isFinal) {
+function postMessage(chatId, content, outboxId, isFinal, comps) {
+    var body = { content: content };
+    if (comps) body.components = comps;
     channel.send({
         method: "POST",
         url: config.base + "/api/v10/channels/" + chatId + "/messages",
         headers: ["Authorization: Bot " + config.token, "Content-Type: application/json"],
-        body: JSON.stringify({ content: content }),
+        body: JSON.stringify(body),
         outbox_id: outboxId,
         final: isFinal ? 1 : 0
     });
@@ -635,22 +733,46 @@ function sendDashboard(chatId) {
 function sendApprovals(chatId) {
     var list = channel.admin.listPendingApprovals();
     if (!list || list.length === 0) { postSimple(chatId, "No pending approvals."); return; }
-    var lines = ["Pending approvals — decide with /approve <id> or /deny <id> " +
-                 "(full controls on the dashboard — /admin):"];
+    // One line + one button row per approval (mirrors telegram's digest).
+    // Discord allows 5 action rows per message, and many args easily exceed
+    // the 2000-char content limit — flush a batch when either cap is near.
+    var header = "Pending approvals — buttons below, or /approve <id> | " +
+                 "/deny <id> (full controls on the dashboard — /admin):";
+    var buf = header, rows = [];
     for (var i = 0; i < list.length; i++) {
         var a = list[i];
-        lines.push("#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.action +
-                   "\n    " + argsSummary(a.args_json));
+        var line = "#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.action +
+                   "\n    " + argsSummary(a.args_json);
+        var next = buf ? buf + "\n" + line : line;
+        if ((next.length > DISCORD_MAX_MSG_LEN || rows.length >= 5) && buf) {
+            postButtons(chatId, buf, rows);
+            buf = line; rows = [];
+        } else buf = next;
+        rows.push({ type: 1, components: [
+            { type: 2, style: 1, label: "Approve #" + a.id,
+              custom_id: "appr:" + a.id + ":yes" },
+            { type: 2, style: 4, label: "Deny #" + a.id,
+              custom_id: "appr:" + a.id + ":no" }
+        ]});
     }
-    // Many pending approvals with args easily exceed Discord's 2000-char
-    // limit; postSimple truncates, so pack whole lines into messages instead.
-    var buf = "";
-    for (var k = 0; k < lines.length; k++) {
-        var next = buf ? buf + "\n" + lines[k] : lines[k];
-        if (next.length > DISCORD_MAX_MSG_LEN && buf) { postSimple(chatId, buf); buf = lines[k]; }
-        else buf = next;
-    }
-    if (buf) postSimple(chatId, buf);
+    if (buf) postButtons(chatId, buf, rows);
+}
+
+// Fire-and-forget buttoned message (digest replies — no outbox tracking,
+// like postSimple).
+function postButtons(chatId, content, rows) {
+    if (content.length > DISCORD_MAX_MSG_LEN)
+        content = content.substring(0, findSplit(content, 0, DISCORD_MAX_MSG_LEN));
+    channel.http({
+        method: "POST",
+        url: config.base + "/api/v10/channels/" + chatId + "/messages",
+        headers: ["Authorization: Bot " + config.token, "Content-Type: application/json"],
+        body: JSON.stringify({ content: content, components: rows })
+    }).then(function (r) {
+        if (r.error || r.status < 200 || r.status >= 300)
+            channel.log("postButtons failed status=" + r.status + " error=" + r.error +
+                        " body=" + (r.body || "").substring(0, 200));
+    });
 }
 
 // One-line, length-capped view of an approval's arguments, so an admin can see

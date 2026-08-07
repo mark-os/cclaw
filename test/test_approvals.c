@@ -452,34 +452,33 @@ static void test_pending_order_matches_subtree(void) {
 
 /* ── dedupe + ticket transfer (capability matching) ───────────────── */
 
-static const char *ARGS_BIND_A =
-    "{\"code\":\"fetch('https://x/1', '{{SECRET:ALPACA_KEY}}', '{{SECRET:ALPACA_SECRET}}')\"}";
-/* Mutated code, same secret set — the incident shape. */
-static const char *ARGS_BIND_B =
-    "{\"code\":\"var r = go('{{SECRET:ALPACA_SECRET}}'); use('{{SECRET:ALPACA_KEY}}')\"}";
-static const char *ARGS_BIND_OTHER =
-    "{\"code\":\"use('{{SECRET:TIINGO_KEY}}')\"}";
+static const char *ARGS_ASK_A =
+    "{\"code\":\"fetch('https://x/1', 'token')\"}";
+/* Mutated code — must NOT dedupe: capability match is byte-identical args
+ * (the placeholder-set special case died with the secret_bind park, D17). */
+static const char *ARGS_ASK_B =
+    "{\"code\":\"var r = go('token'); use(r)\"}";
 
 static void test_pending_match_dedupe(void) {
     sqlite3 *db = fresh_db();
     db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
-    int64_t id = approval_create(db, sid, "call_d1", "js_eval", "secret_bind",
-                                 ARGS_BIND_A, "rerun");
+    int64_t id = approval_create(db, sid, "call_d1", "js_eval", "js_eval",
+                                 ARGS_ASK_A, "rerun");
     assert(id > 0);
 
-    /* Same secret set, different code → match (dedupe hit). */
-    assert(approval_find_pending_match(db, sid, "secret_bind", "js_eval",
-                                       ARGS_BIND_B) == id);
-    /* Different secret set → no match. */
-    assert(approval_find_pending_match(db, sid, "secret_bind", "js_eval",
-                                       ARGS_BIND_OTHER) == 0);
+    /* Byte-identical re-issue → match (dedupe hit). */
+    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval",
+                                       ARGS_ASK_A) == id);
+    /* Mutated args → no match. */
+    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval",
+                                       ARGS_ASK_B) == 0);
     /* Different tool → no match. */
-    assert(approval_find_pending_match(db, sid, "secret_bind", "file_write",
-                                       ARGS_BIND_B) == 0);
-    /* Non-bind actions match only byte-identical args ('sensitive' stays
-     * per-call: an exact re-issue may dedupe, a variant may not). */
+    assert(approval_find_pending_match(db, sid, "js_eval", "file_write",
+                                       ARGS_ASK_A) == 0);
+    /* 'sensitive' stays per-call: an exact re-issue may dedupe, a variant
+     * may not. */
     int64_t s2 = approval_create(db, sid, "call_d2", "web_fetch", "sensitive",
                                  "{\"url\":\"https://bank.example\"}", "rerun");
     assert(s2 > 0);
@@ -498,24 +497,26 @@ static void test_take_ticket(void) {
     db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
-    int64_t id = approval_create(db, sid, "call_t1", "js_eval", "secret_bind",
-                                 ARGS_BIND_A, "rerun");
+    int64_t id = approval_create(db, sid, "call_t1", "js_eval", "js_eval",
+                                 ARGS_ASK_A, "rerun");
     assert(id > 0);
 
     /* Pending rows are not tickets. */
-    assert(approval_take_ticket(db, sid, "secret_bind", "js_eval", ARGS_BIND_B) == 0);
+    assert(approval_take_ticket(db, sid, "js_eval", "js_eval", ARGS_ASK_A) == 0);
 
     Approval *a = approval_resolve(db, id, 1, "test");
     assert(a != NULL);
     approval_free(a);
 
-    /* Approved + matching → consumed once; the second taker gets nothing. */
-    assert(approval_take_ticket(db, sid, "secret_bind", "js_eval", ARGS_BIND_B) == id);
-    assert(approval_take_ticket(db, sid, "secret_bind", "js_eval", ARGS_BIND_B) == 0);
+    /* Approved + matching → consumed once; the second taker gets nothing.
+     * A mutated re-issue is not a match. */
+    assert(approval_take_ticket(db, sid, "js_eval", "js_eval", ARGS_ASK_B) == 0);
+    assert(approval_take_ticket(db, sid, "js_eval", "js_eval", ARGS_ASK_A) == id);
+    assert(approval_take_ticket(db, sid, "js_eval", "js_eval", ARGS_ASK_A) == 0);
 
     /* An approved row past its park expiry is stale, not a ticket. */
-    int64_t id2 = approval_create(db, sid, "call_t2", "js_eval", "secret_bind",
-                                  ARGS_BIND_A, "rerun");
+    int64_t id2 = approval_create(db, sid, "call_t2", "js_eval", "js_eval",
+                                  ARGS_ASK_A, "rerun");
     a = approval_resolve(db, id2, 1, "test");
     assert(a != NULL);
     approval_free(a);
@@ -524,7 +525,7 @@ static void test_take_ticket(void) {
              "UPDATE approvals SET expires_at = unixepoch()-5 WHERE id=%lld;",
              (long long)id2);
     assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
-    assert(approval_take_ticket(db, sid, "secret_bind", "js_eval", ARGS_BIND_B) == 0);
+    assert(approval_take_ticket(db, sid, "js_eval", "js_eval", ARGS_ASK_A) == 0);
 
     db_close(db);
     clean_db();
@@ -540,8 +541,8 @@ static void test_pending_ids(void) {
     assert(approval_pending_ids(db, sid, buf, sizeof(buf)) == 0);
     assert(buf[0] == '\0');
 
-    int64_t a1 = approval_create(db, sid, "c1", "js_eval", "secret_bind", "{}", "rerun");
-    int64_t a2 = approval_create(db, sid, "c2", "js_eval", "secret_bind", "{}", "rerun");
+    int64_t a1 = approval_create(db, sid, "c1", "js_eval", "js_eval", "{}", "rerun");
+    int64_t a2 = approval_create(db, sid, "c2", "js_eval", "js_eval", "{}", "rerun");
     assert(a1 > 0 && a2 > 0);
     assert(approval_pending_ids(db, sid, buf, sizeof(buf)) == 2);
     char want[64];

@@ -227,27 +227,6 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                  * to the same target parks again. */
                 LOG_INFO_("approval always coerced to once reason=sensitive tool=%s",
                           a->tool_name ? a->tool_name : "?");
-            } else if (a->action && strcmp(a->action, "secret_bind") == 0) {
-                /* Approve & bind: a durable binding needs a static target —
-                 * only a url-carrying call has one. shell/js calls coerce to
-                 * ONCE (nothing standing is minted from an unattributable
-                 * target); pre-seed those with `cclaw secret-bind`. */
-                char host[254];
-                if (a->tool_name && strcmp(a->tool_name, "web_fetch") == 0 &&
-                    a->args_json &&
-                    web_args_url_host(proc_db(), a->args_json, host, sizeof(host))) {
-                    size_t un = 0;
-                    char **names = secret_placeholder_names(a->args_json, &un);
-                    for (size_t i = 0; i < un; i++) {
-                        if (db_secret_host_bind(proc_db(), names[i], host) == 0)
-                            LOG_INFO_("secret binding recorded name=%s host=%s via=approval",
-                                      names[i], host);
-                    }
-                    secret_names_free(names, un);
-                } else {
-                    LOG_INFO_("approval always coerced to once reason=secret_bind_no_static_target tool=%s",
-                              a->tool_name ? a->tool_name : "?");
-                }
             } else {
                 /* "Allow and stop asking" — flip the standing mode to silent. */
                 agent_config_set_tool_mode(proc_db(), agent, a->action, "silent");
@@ -477,21 +456,11 @@ void handle_approval_park(int64_t session_id, const char *tool_call_id) {
         /* Buttons are labeled with their EFFECT, and a decision that cannot
          * happen is not offered: "apply" approvals have no once semantics
          * (resolve_approval rejects APPROVAL_ONCE outright), and ALWAYS is
-         * coerced to ONCE for sensitivity parks and for secret_bind parks
-         * with no static target (shell/js) — mirror resolve_approval's
+         * coerced to ONCE for sensitivity parks — mirror resolve_approval's
          * coercion conditions exactly, or the button lies. */
         char keyboard[320];
         int is_apply = a->resolve && strcmp(a->resolve, "apply") == 0;
-        int coerced = 0, can_bind = 0;
-        if (a->action && strcmp(a->action, "sensitive") == 0) {
-            coerced = 1;
-        } else if (a->action && strcmp(a->action, "secret_bind") == 0) {
-            char bh[254];
-            can_bind = a->tool_name && strcmp(a->tool_name, "web_fetch") == 0 &&
-                       a->args_json &&
-                       web_args_url_host(proc_db(), a->args_json, bh, sizeof(bh));
-            coerced = !can_bind;
-        }
+        int coerced = a->action && strcmp(a->action, "sensitive") == 0;
         if (is_apply) {
             snprintf(keyboard, sizeof(keyboard),
                      "[[{\"text\":\"Grant\",\"callback_data\":\"appr:%lld:yes\"},"
@@ -504,10 +473,9 @@ void handle_approval_park(int64_t session_id, const char *tool_call_id) {
                      (long long)a->id, (long long)a->id);
         } else {
             snprintf(keyboard, sizeof(keyboard),
-                     "[[{\"text\":\"%s\",\"callback_data\":\"appr:%lld:yes\"},"
+                     "[[{\"text\":\"Always allow\",\"callback_data\":\"appr:%lld:yes\"},"
                      "{\"text\":\"Once\",\"callback_data\":\"appr:%lld:once\"},"
                      "{\"text\":\"Deny\",\"callback_data\":\"appr:%lld:no\"}]]",
-                     can_bind ? "Approve & bind host" : "Always allow",
                      (long long)a->id, (long long)a->id, (long long)a->id);
         }
 

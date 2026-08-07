@@ -1,8 +1,9 @@
 /* Test approval_format_summary: the (tool × gate-reason) matrix.
  * Axis 1 = tool + args rendering (generic json_each tail, bespoke document
- * branches); axis 2 = why it parked (secret_bind / sensitive overlays).
- * Plus the R1 mitigations: fence-escape of model-authored content, facts
- * before code so bottom-up truncation eats the code first. */
+ * branches); axis 2 = why it parked (sensitive overlay). Plus the R1
+ * mitigations: fence-escape of model-authored content, facts before code so
+ * bottom-up truncation eats the code first. (The secret_bind overlay was
+ * deleted with the park itself — runtime-bind-discovery, D17.) */
 #define _POSIX_C_SOURCE 200809L
 #include "approval.h"
 #include "db.h"
@@ -47,80 +48,6 @@ static char *summarize(sqlite3 *db, const char *tool, const char *action,
     return s;
 }
 
-/* secret_bind on js_eval: both secrets named, bindings shown, egress bound
- * rendered from the grants table. The one approval class where blind DMs
- * were the original bug (approvals #9/#10, 2026-07-31). */
-static void test_secret_bind_js_eval(void) {
-    sqlite3 *db = fresh_db();
-    exec_sql(db, "INSERT INTO secrets(name,value,scope) VALUES"
-                 " ('ALPACA_API_KEY','enc:00','agent'),"
-                 " ('PROV_KEY','enc:00','system');");
-    exec_sql(db, "INSERT INTO secret_hosts(secret_name,host) VALUES"
-                 " ('ALPACA_API_KEY','api.alpaca.markets');");
-    exec_sql(db, "INSERT INTO grants(agent_name,kind,value) VALUES"
-                 " ('bot','host','api.alpaca.markets'),"
-                 " ('bot','host','.tiingo.com');");
-    /* Expired grant must not render as reachable egress. */
-    exec_sql(db, "INSERT INTO grants(agent_name,kind,value,expires_at) VALUES"
-                 " ('bot','host','expired.example.com',1);");
-
-    char *s = summarize(db, "js_eval", "secret_bind",
-        "{\"code\":\"fetch('https://api.alpaca.markets',"
-        "{headers:{k:'{{SECRET:ALPACA_API_KEY}}',p:'{{SECRET:PROV_KEY}}'}})\"}");
-
-    assert(strstr(s, "js_eval — parked: the call carries a stored secret"));
-    assert(strstr(s, "ALPACA_API_KEY — bound to: api.alpaca.markets"));
-    /* system-scoped secret is not in the agent snapshot — must render
-     * visibly, not vanish. */
-    assert(strstr(s, "PROV_KEY — not a loaded secret"));
-    assert(strstr(s, "every host granted to this agent"));
-    assert(strstr(s, ".tiingo.com"));
-    assert(!strstr(s, "expired.example.com"));
-    /* The full code, fenced, and AFTER the facts (R1 ordering). */
-    assert(strstr(s, "Code:\n```"));
-    assert(strstr(s, "fetch('https://api.alpaca.markets'"));
-    assert(strstr(s, "every host granted") < strstr(s, "Code:\n```"));
-    free(s);
-    db_close(db);
-    printf("  secret_bind js_eval: OK\n");
-}
-
-/* First use: no bindings yet. */
-static void test_secret_bind_first_use(void) {
-    sqlite3 *db = fresh_db();
-    exec_sql(db, "INSERT INTO secrets(name,value,scope) VALUES"
-                 " ('FRESH_KEY','enc:00','agent');");
-    char *s = summarize(db, "shell_exec", "secret_bind",
-        "{\"command\":\"curl -H 'x: {{SECRET:FRESH_KEY}}' https://x.y\"}");
-    assert(strstr(s, "FRESH_KEY — unbound, first use"));
-    /* No host grants at all: the fail-closed outcome is stated, not blank. */
-    assert(strstr(s, "Egress if approved: none"));
-    assert(strstr(s, "Command:\n```"));
-    free(s);
-    db_close(db);
-    printf("  secret_bind first use: OK\n");
-}
-
-/* A promoted tool's declared hosts replace agent grants — the DM must
- * mirror that precedence (call_egress_build Q1). */
-static void test_secret_bind_declared_hosts(void) {
-    sqlite3 *db = fresh_db();
-    exec_sql(db, "INSERT INTO secrets(name,value,scope) VALUES"
-                 " ('STRIPE_KEY','enc:00','agent');");
-    exec_sql(db, "INSERT INTO grants(agent_name,kind,value) VALUES"
-                 " ('bot','host','should.not.render.example');");
-    exec_sql(db, "INSERT INTO tools(name,extension_name,egress_hosts) VALUES"
-                 " ('stripe_call','payments','api.stripe.com');");
-    char *s = summarize(db, "stripe_call", "secret_bind",
-        "{\"amount\":\"5\",\"key\":\"{{SECRET:STRIPE_KEY}}\"}");
-    assert(strstr(s, "the tool's declared hosts"));
-    assert(strstr(s, "api.stripe.com"));
-    assert(!strstr(s, "should.not.render.example"));
-    free(s);
-    db_close(db);
-    printf("  secret_bind declared hosts: OK\n");
-}
-
 /* Sensitivity park: the matched target is re-derived and named. */
 static void test_sensitive_target(void) {
     sqlite3 *db = fresh_db();
@@ -156,21 +83,6 @@ static void test_fence_escape(void) {
     printf("  fence escape: OK\n");
 }
 
-/* A placeholder NAME is model-authored too — secret_placeholder_names takes
- * whatever sits between the delimiters, so it gets the same fence escape the
- * body block does, or a crafted ``` mangles the egress facts below it. */
-static void test_fence_escape_secret_name(void) {
-    sqlite3 *db = fresh_db();
-    char *s = summarize(db, "js_eval", "secret_bind",
-        "{\"code\":\"x={{SECRET:```}}\"}");
-    assert(strstr(s, "Secrets used:\n```\n`` `"));
-    /* The block still closes where we closed it, so the egress line below
-     * stays inside the summary's own structure. */
-    assert(strstr(s, "Egress if approved"));
-    free(s);
-    db_close(db);
-    printf("  fence escape (secret name): OK\n");
-}
 
 /* command and code both present: neither may vanish. SQL_ARGS_LINES excludes
  * the pair unconditionally, so a first-match-wins body block would drop the
@@ -294,12 +206,8 @@ static void test_provider_swap_names_model(void) {
 int main(void) {
     TEST_INIT();
     printf("test_approval_summary:\n");
-    test_secret_bind_js_eval();
-    test_secret_bind_first_use();
-    test_secret_bind_declared_hosts();
     test_sensitive_target();
     test_fence_escape();
-    test_fence_escape_secret_name();
     test_body_block_both_keys();
     test_generic_args();
     test_request_changes_branch();

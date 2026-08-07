@@ -5,7 +5,6 @@
 #include "db.h"
 #include "host_match.h"
 #include "log.h"
-#include "secret_interp.h"
 #include "tool_args.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -175,36 +174,12 @@ int approval_consume(sqlite3 *db, int64_t id) {
 
 /* ── capability matching: dedupe + ticket transfer ─────────────────
  * Two calls ask for the same capability when one human decision honestly
- * covers both. secret_bind: the same set of secret placeholders — the prompt
- * names the secrets and the egress waiver, the code text is incidental (the
- * incident storm was ten mutated re-issues of one capability). Everything
- * else: byte-identical args. A 'sensitive' park is per-call by trust.md
- * rule 1, so only an exact re-issue of the frozen call may dedupe against
- * it, and it never transfers (the gate excludes it from tickets). */
-static int names_subset(char **a, size_t an, char **b, size_t bn) {
-    for (size_t i = 0; i < an; i++) {
-        int found = 0;
-        for (size_t j = 0; j < bn && !found; j++)
-            if (strcmp(a[i], b[j]) == 0) found = 1;
-        if (!found) return 0;
-    }
-    return 1;
-}
-
+ * covers both: byte-identical args. A 'sensitive' park is per-call by
+ * trust.md rule 1, so only an exact re-issue of the frozen call may dedupe
+ * against it, and it never transfers (the gate excludes it from tickets). */
 static int capability_match(const char *action, const char *args_a, const char *args_b) {
+    (void)action;
     if (!args_a || !args_b) return 0;
-    if (action && strcmp(action, "secret_bind") == 0) {
-        size_t an = 0, bn = 0;
-        char **a = secret_placeholder_names(args_a, &an);
-        char **b = secret_placeholder_names(args_b, &bn);
-        /* Set equality via two-way subset — the extractor reports every
-         * occurrence, so counts can differ while the sets match. */
-        int m = an > 0 && bn > 0 &&
-                names_subset(a, an, b, bn) && names_subset(b, bn, a, an);
-        secret_names_free(a, an);
-        secret_names_free(b, bn);
-        return m;
-    }
     return strcmp(args_a, args_b) == 0;
 }
 
@@ -568,21 +543,6 @@ static const char *SQL_ARGS_LINES =
     " FROM json_each(?1)"
     " WHERE type NOT IN ('object','array') AND key NOT IN ('code','command')";
 
-/* A placeholder is "loaded" iff a scope='agent' secret with that name exists —
- * system-scoped secrets never enter the agent-facing snapshot, so for this
- * call they interpolate to nothing exactly like a typo would. */
-static int secret_is_loaded(sqlite3 *db, const char *name) {
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db,
-            "SELECT 1 FROM secrets WHERE name=?1 AND scope='agent'",
-            -1, &s, NULL) != SQLITE_OK)
-        return 0;
-    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
-    int found = sqlite3_step(s) == SQLITE_ROW;
-    sqlite3_finalize(s);
-    return found;
-}
-
 /* Axis-2 overlay for a sensitivity park: re-derive the matched target the
  * same way the gate did (raw-args scan, then the decoded url host second
  * chance) — the approval row records only the reason, and the label list has
@@ -607,86 +567,6 @@ static void overlay_sensitive(sqlite3 *db, Buf *out, const char *args) {
                      "No standing grant covers a sensitive target — 'always' "
                      "still passes only this one call.\n",
                 host[0] ? host : "(no label matches now — list changed since park?)");
-}
-
-/* Axis-2 overlay for a secret_bind park: name every placeholder the args
- * carry, its current bindings, and the egress bound the child would run
- * under if approved. Placeholders are matched text-only
- * (secret_placeholder_names) and then resolved against the DB, so a name
- * that references no loaded secret renders visibly instead of being
- * filtered out. */
-static void overlay_secret_bind(sqlite3 *db, Buf *out, const Approval *a) {
-    const char *args = a->args_json ? a->args_json : "";
-    size_t un = 0;
-    char **names = secret_placeholder_names(args, &un);
-    if (un) {
-        buf_append_str(out, "Secrets used:\n```\n");
-        for (size_t i = 0; i < un; i++) {
-            /* The name is model-authored: secret_placeholder_names takes
-             * whatever sits between the delimiters, so a crafted ``` would
-             * close this block and mangle the egress facts below it. */
-            append_fence_escaped(out, names[i]);
-            buf_append_str(out, " — ");
-            if (!secret_is_loaded(db, names[i])) {
-                buf_append_str(out, "not a loaded secret (interpolates to nothing)\n");
-                continue;
-            }
-            int bn = 0;
-            char **bh = db_secret_hosts(db, names[i], &bn);
-            if (!bh || bn == 0) {
-                buf_append_str(out, "unbound, first use\n");
-            } else {
-                buf_append_str(out, "bound to:");
-                for (int j = 0; j < bn; j++) buf_appendf(out, " %s", bh[j]);
-                buf_append_char(out, '\n');
-            }
-            if (bh) { for (int j = 0; j < bn; j++) free(bh[j]); free(bh); }
-        }
-        buf_append_str(out, "```\n");
-    }
-    secret_names_free(names, un);
-
-    /* The effective egress bound. Declared hosts REPLACE agent grants and
-     * grants never widen them (call_egress_build) — the DM must mirror that
-     * precedence or it lies about what approval authorizes. */
-    int dn = 0;
-    char **decl = db_tool_declared_hosts(db, a->tool_name ? a->tool_name : "", &dn);
-    if (decl && dn > 0) {
-        buf_append_str(out, "Egress if approved — the tool's declared hosts "
-                            "(agent grants don't apply):\n```\n");
-        for (int i = 0; i < dn; i++) buf_appendf(out, "%s\n", decl[i]);
-        buf_append_str(out, "```\n");
-    } else {
-        /* Approval waives the secret-host narrowing for exactly this call
-         * (skip_bind), leaving the agent's base host grants. Render them from
-         * the grants table — the single source of truth — not the in-memory
-         * caps snapshot. */
-        char *agent = session_get_agent_name(db, a->session_id);
-        int n = 0;
-        sqlite3_stmt *s;
-        if (agent && sqlite3_prepare_v2(db,
-                "SELECT value FROM grants WHERE agent_name=?1 AND kind='host'"
-                " AND (expires_at IS NULL OR expires_at > unixepoch())"
-                " ORDER BY value", -1, &s, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, agent, -1, SQLITE_STATIC);
-            while (sqlite3_step(s) == SQLITE_ROW) {
-                const char *v = (const char *)sqlite3_column_text(s, 0);
-                if (!v) continue;
-                if (n++ == 0)
-                    buf_append_str(out,
-                        "Egress if approved — every host granted to this agent "
-                        "(the secret-host binding is waived for this one call):\n```\n");
-                buf_appendf(out, "%s\n", v);
-            }
-            if (n) buf_append_str(out, "```\n");
-            sqlite3_finalize(s);
-        }
-        if (n == 0)
-            buf_append_str(out, "Egress if approved: none — the agent holds no "
-                                "host grants, the call can reach nothing.\n");
-        free(agent);
-    }
-    if (decl) { for (int i = 0; i < dn; i++) free(decl[i]); free(decl); }
 }
 
 /* The full command/code the frozen call would run, fenced, LAST in the
@@ -774,17 +654,13 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
          * truncation backstop eats the code before the facts. */
         const char *tn = a->tool_name ? a->tool_name : "?";
         int is_sens = a->action && strcmp(a->action, "sensitive") == 0;
-        int is_bind = a->action && strcmp(a->action, "secret_bind") == 0;
         if (is_sens)
             buf_appendf(&out, "%s — parked: targets a sensitive-labeled host\n", tn);
-        else if (is_bind)
-            buf_appendf(&out, "%s — parked: the call carries a stored secret\n", tn);
         else if (a->action && strcmp(a->action, tn) != 0)
             buf_appendf(&out, "%s (%s)\n", tn, a->action);
         else
             buf_appendf(&out, "%s\n", tn);
         if (is_sens) overlay_sensitive(db, &out, args);
-        if (is_bind) overlay_secret_bind(db, &out, a);
         append_enum_block(db, &out, "Args:", SQL_ARGS_LINES, args);
         append_body_block(db, &out, args);
     }

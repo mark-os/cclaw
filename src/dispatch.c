@@ -326,9 +326,10 @@ static void wire_params_interpolate(ToolWireArg *params, size_t n,
  *    not widen it. A tool that declares none (every builtin, every draft —
  *    drafts have no `tools` row at all) runs under the agent's grants.
  *  - credential narrowing: a call whose args carry loaded secrets talks ONLY
- *    to the union of those secrets' bound hosts. Fail-closed: an unbound
- *    secret yields an empty allow list (deny-all); the only way past is a
- *    human approval of this exact frozen call (skip_bind). */
+ *    to the union of those secrets' bound hosts, unconditionally — no
+ *    approval waives it. Fail-closed: an unbound secret yields an empty
+ *    allow list (deny-all); the way past is a request_config
+ *    secret_bindings document (D17), never a wider run. */
 typedef struct {
     char **deny; size_t deny_n;          /* owned labels for req.deny_rules */
     char **bound; size_t bound_n;        /* owned union of bound hosts */
@@ -339,7 +340,7 @@ typedef struct {
 } CallEgress;
 
 static void call_egress_build(CallEgress *ce, const char *tool_name,
-                              const char *args, int skip_bind,
+                              const char *args,
                               const char *sens_exception,
                               char **base_hosts, size_t base_n,
                               const ShellSecret *secrets, size_t secret_count) {
@@ -367,7 +368,7 @@ static void call_egress_build(CallEgress *ce, const char *tool_name,
     const char **hosts = ce->decl ? (const char **)ce->decl
                                   : (const char **)base_hosts;
     size_t hosts_n = ce->decl ? ce->decl_n : base_n;
-    if (!skip_bind && args) {
+    if (args) {
         size_t un = 0;
         char **names = used_secret_names(args, secrets, secret_count, &un);
         if (names) {
@@ -423,18 +424,18 @@ static void call_egress_free(CallEgress *ce) {
 }
 
 /* §4+§8 dispatch gate, split from dispatch_tool_inner (2026-07-19).
- * Capability ceiling → policy → gating hook → sensitivity/secret-bind scan →
- * approval gate, in fixed restrict-only order. Returns 0 = proceed (an
- * approved once-only sensitivity/bind park is reported via *sens_once /
- * *bind_once and sens_host for the per-call egress exception), 1 = handled
+ * Capability ceiling → policy → gating hook → sensitivity scan →
+ * unbound-secret deny → approval gate, in fixed restrict-only order. Returns
+ * 0 = proceed (an approved once-only sensitivity park is reported via
+ * *sens_once and sens_host for the per-call egress exception), 1 = handled
  * (error result written), 2 = parked awaiting approval. */
 static int dispatch_gate(int64_t session_id, const char *agent_name,
                          PendingToolCall *tc, ToolEntry *te,
                          const ShellSecret *secrets, size_t secret_count,
                          char *sens_host, size_t sens_host_cap,
-                         int *sens_once, int *bind_once) {
-    int sens_hit = 0, bind_hit = 0;
-    *sens_once = 0; *bind_once = 0;
+                         int *sens_once) {
+    int sens_hit = 0;
+    *sens_once = 0;
     sens_host[0] = '\0';
     /* §4+§8 dispatch gate (fixed order: capability ceiling → gating hook →
      * approval gate). The gating hook may only *raise* restriction
@@ -566,11 +567,17 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
             }
             if (sens_hit && gate < HOOK_GATE_ASK) gate = HOOK_GATE_ASK;
         }
-        /* Fail-closed credential rule (specs/trust.md): submitting a loaded
-         * secret is gated by its host bindings. First use (no bindings) parks;
-         * a web call whose url host isn't covered by every used secret's
-         * bindings parks. shell/js have no static target — their enforcement
-         * is the egress narrowing in call_egress_build below. */
+        /* Fail-closed credential rule (specs/trust.md rule 2): a loaded
+         * secret may only be submitted to its bound hosts. No park, no
+         * approval class — the gate denies with attribution and the agent
+         * requests the binding via request_config (secret_bindings), the
+         * same shape as a proxy host denial (D17). An unbound secret denies
+         * on every tier: the call would run narrowed to deny-all, so nothing
+         * useful can happen with the credential anyway, and the secret never
+         * enters a child that couldn't use it. The web tier's static url
+         * host makes the uncovered-host case precise; shell/js runtime
+         * targets are enforced by the narrowing in call_egress_build and
+         * attributed by the proxy-deny note. */
         {
             size_t un = 0;
             char **names = used_secret_names(tc->arguments, secrets, secret_count, &un);
@@ -579,25 +586,36 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 int have_url = (te->recipe.tier == SBX_WEB) &&
                     web_args_url_host(proc_db(), tc->arguments, url_host,
                                       sizeof(url_host));
-                for (size_t i = 0; i < un && !bind_hit; i++) {
+                char err[1024] = "";
+                for (size_t i = 0; i < un && !err[0]; i++) {
                     int bn = 0;
                     char **bh = db_secret_hosts(proc_db(), names[i], &bn);
                     if (!bh) {
-                        bind_hit = 1;   /* first use: no bindings yet */
+                        snprintf(err, sizeof(err),
+                                 "error: secret %.63s has no host binding — request "
+                                 "one with request_config (secret_bindings: {\"%.63s\": "
+                                 "[\"%.253s\"]}), then re-issue this call",
+                                 names[i], names[i],
+                                 have_url ? url_host : "<host it needs>");
                     } else {
                         if (have_url && !host_covered(bh, (size_t)bn, url_host))
-                            bind_hit = 1;
+                            snprintf(err, sizeof(err),
+                                     "error: secret %.63s is not bound to %.253s — "
+                                     "request the binding with request_config "
+                                     "(secret_bindings: {\"%.63s\": [\"%.253s\"]}), "
+                                     "then re-issue this call",
+                                     names[i], url_host, names[i], url_host);
                         for (int j = 0; j < bn; j++) free(bh[j]);
                         free(bh);
                     }
                 }
                 secret_names_free(names, un);
+                if (err[0])
+                    return tool_inline_error(session_id, tc, err, "secret:unbound");
             }
-            if (bind_hit && gate < HOOK_GATE_ASK) gate = HOOK_GATE_ASK;
         }
         if (gate == HOOK_GATE_ASK) {
-            const char *ask_action = sens_hit ? "sensitive"
-                                   : (bind_hit ? "secret_bind" : tc->name);
+            const char *ask_action = sens_hit ? "sensitive" : tc->name;
             Approval *ap = approval_get_for_tool_call(proc_db(), session_id, tc->call_id);
             int approved = ap && ap->state && strcmp(ap->state, "approved") == 0;
             int denied   = ap && ap->state && strcmp(ap->state, "denied") == 0;
@@ -681,7 +699,6 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
              * per-call exception for the matched host (network tiers below).
              * A ticket was already consumed inside approval_take_ticket. */
             *sens_once = sens_hit;
-            *bind_once = bind_hit;
             if (!via_ticket) approval_consume(proc_db(), ap->id);
             approval_free(ap);
         }
@@ -843,7 +860,7 @@ static const char *dispatch_scratch_dir(const char *agent_name,
  * *out_len set, or NULL if it exceeds the wire cap. */
 static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
                                   const char *egress_tool, const char *egress_args,
-                                  int skip_bind, const char *sens_host,
+                                  const char *sens_host,
                                   const ShellSecret *secrets, size_t secret_count,
                                   ToolWireArg *params, size_t param_n,
                                   size_t *out_len) {
@@ -891,7 +908,7 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
     req.read_count = rc_count;
     req.agent_dir = agent_dir;
     CallEgress se;
-    call_egress_build(&se, egress_tool, egress_args, skip_bind, sens_host,
+    call_egress_build(&se, egress_tool, egress_args, sens_host,
                       jc->allowed_hosts, jc->allowed_hosts_count,
                       secrets, secret_count);
     req.host_rules = se.hosts;
@@ -941,17 +958,17 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         return 1; /* Signal: handled inline, check for more */
     }
 
-    /* Dispatch gate (capability → policy → hooks → sensitivity/bind →
+    /* Dispatch gate (capability → policy → hooks → sensitivity/secret →
      * approval). sens_host survives the gate: an approved once-only
      * sensitivity park grants that host to THIS call via a per-call
      * exception in the network-tier sections below. */
     char sens_host[254];
-    int sens_once = 0, bind_once = 0;
+    int sens_once = 0;
     {
         int g = dispatch_gate(session_id, agent_name, tc, te,
                               secrets, secret_count,
                               sens_host, sizeof(sens_host),
-                              &sens_once, &bind_once);
+                              &sens_once);
         if (g != 0) return g;
     }
 
@@ -1105,7 +1122,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
             req.agent_dir = agent_dir;
             CallEgress se;
-            call_egress_build(&se, tc->name, tc->arguments, bind_once,
+            call_egress_build(&se, tc->name, tc->arguments,
                               sens_once ? sens_host : NULL,
                               sc->allowed_hosts, sc->allowed_host_count,
                               secrets, secret_count);
@@ -1183,7 +1200,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         req.param_count = param_n;
         req.agent_dir = agent_dir;
         CallEgress se;
-        call_egress_build(&se, tc->name, tc->arguments, bind_once,
+        call_egress_build(&se, tc->name, tc->arguments,
                           sens_once ? sens_host : NULL,
                           wc->allowed_hosts, wc->allowed_host_count,
                           secrets, secret_count);
@@ -1271,7 +1288,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 
         size_t blob_len = 0;
         char *blob = js_request_serialize(jc, agent_name, tc->name, tc->arguments,
-                                          bind_once, sens_once ? sens_host : NULL,
+                                          sens_once ? sens_host : NULL,
                                           secrets, secret_count,
                                           params, param_n, &blob_len);
         if (!blob)
@@ -1410,7 +1427,7 @@ CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len)
 
     size_t blob_len = 0;
     char *blob = js_request_serialize(jc, f->agent_name, "js_eval", "{}",
-                                      0, NULL, NULL, 0, params, 1, &blob_len);
+                                      NULL, NULL, 0, params, 1, &blob_len);
     if (!blob) {
         snprintf(err, err_len, "the script request exceeds the 32KB wire cap");
         return CRON_SCRIPT_FAILED;

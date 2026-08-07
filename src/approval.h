@@ -63,9 +63,8 @@ Approval *approval_get_for_tool_call(sqlite3 *db, int64_t session_id,
 int approval_consume(sqlite3 *db, int64_t id);
 
 /* Dedupe lookup: a pending rerun approval in this session asking for the same
- * capability (secret_bind: same secret-placeholder set; otherwise identical
- * args). Returns the row id or 0 — the gate answers the duplicate call inline
- * instead of parking a second row. */
+ * capability (byte-identical args). Returns the row id or 0 — the gate
+ * answers the duplicate call inline instead of parking a second row. */
 int64_t approval_find_pending_match(sqlite3 *db, int64_t session_id,
                                     const char *action, const char *tool_name,
                                     const char *args_json);

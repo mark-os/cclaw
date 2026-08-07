@@ -14,6 +14,7 @@
 
 #include "advance.h"
 #include "agent_config.h"
+#include "buf.h"
 #include "agent_setup.h"
 #include "approval.h"
 #include "channel.h"
@@ -335,6 +336,7 @@ typedef struct {
     char **bound; size_t bound_n;        /* owned union of bound hosts */
     char **decl; size_t decl_n;          /* owned declared hosts (promoted tool) */
     int narrowed;
+    char *note;                          /* owned req.egress_note when narrowed */
     const char **ext; size_t ext_n;      /* owned array, borrowed strings */
     const char **hosts; size_t hosts_n;  /* what the req should carry */
 } CallEgress;
@@ -372,11 +374,20 @@ static void call_egress_build(CallEgress *ce, const char *tool_name,
         size_t un = 0;
         char **names = used_secret_names(args, secrets, secret_count, &un);
         if (names) {
+            /* Compose the deny-summary advice alongside the union: the child
+             * appends it when the proxy denies, so the model learns the deny
+             * was a missing *binding*, not a missing host grant. */
+            Buf nb = {0};
+            buf_append_str(&nb, "this call ran narrowed to its secrets' "
+                                "bound hosts (");
             char **u = NULL; size_t uc = 0, ucap = 0;
             for (size_t i = 0; i < un; i++) {
                 int bn = 0;
                 char **bh = db_secret_hosts(proc_db(), names[i], &bn);
+                buf_appendf(&nb, "%s%s ->", i ? "; " : "", names[i]);
+                if (bn == 0) buf_append_str(&nb, " none");
                 for (int j = 0; j < bn; j++) {
+                    buf_appendf(&nb, " %s", bh[j]);
                     int dup = 0;
                     for (size_t d = 0; d < uc; d++)
                         if (strcasecmp(u[d], bh[j]) == 0) { dup = 1; break; }
@@ -392,6 +403,11 @@ static void call_egress_build(CallEgress *ce, const char *tool_name,
                 free(bh);
             }
             secret_names_free(names, un);
+            buf_append_str(&nb, ") — a blocked host means that secret lacks "
+                                "a binding for it; request the pair via "
+                                "request_config (secret_bindings), then "
+                                "re-issue");
+            ce->note = buf_take(&nb);   /* NULL on OOM: generic advice then */
             ce->bound = u; ce->bound_n = uc;
             ce->narrowed = 1;
             hosts = (const char **)u;   /* uc==0 → NULL/0 → proxy deny-all */
@@ -419,6 +435,7 @@ static void call_egress_free(CallEgress *ce) {
     free(ce->bound);
     for (size_t i = 0; i < ce->decl_n; i++) free(ce->decl[i]);
     free(ce->decl);
+    free(ce->note);
     free((void *)ce->ext);
     memset(ce, 0, sizeof(*ce));
 }
@@ -915,6 +932,7 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
     req.host_count = se.hosts_n;
     req.deny_rules = (const char **)se.deny;
     req.deny_count = se.deny_n;
+    req.egress_note = se.note;
     req.timeout = 120;
     char *blob = run_tool_serialize_request(&req, out_len);
     call_egress_free(&se);
@@ -1130,6 +1148,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             req.host_count = se.hosts_n;
             req.deny_rules = (const char **)se.deny;
             req.deny_count = se.deny_n;
+            req.egress_note = se.note;
             req.command = resolved_cmd;
             req.shell_path = sc->shell_path;
             req.timeout = cmd_timeout;
@@ -1208,6 +1227,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         req.host_count = se.hosts_n;
         req.deny_rules = (const char **)se.deny;
         req.deny_count = se.deny_n;
+        req.egress_note = se.note;
         req.timeout = 60;
         char *blob = run_tool_serialize_request(&req, &blob_len);
         call_egress_free(&se);

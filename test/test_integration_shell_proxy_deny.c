@@ -144,6 +144,48 @@ static void test_shell_allowed_vs_denied(void) {
     free(result);
 }
 
+/* A narrowed call's deny summary carries the parent-composed binding note in
+ * place of the generic grants.hosts advice; without a note the generic line
+ * still renders (runtime-bind-discovery, D17). */
+static void test_denied_summary_advice(void) {
+    if (!ns_available) {
+        printf("  SKIP test_denied_summary_advice (namespaces unavailable)\n");
+        return;
+    }
+
+    /* An https CONNECT is denied by the allowlist before any DNS. (A plain
+     * http GET via the http_proxy env takes net_shim's CONNECT-only 405 and
+     * never reaches policy; an in-namespace loopback connect never leaves
+     * the netns at all — neither records an attributable denial.) */
+    ShellToolReq r = SHELL_REQ_DEFAULTS;
+    r.command = "curl -s --max-time 5 https://denied.test/";
+    r.workspace = workspace;
+    r.timeout = 10;
+    r.sandbox = 1;
+    r.host_rules = allow_named;
+    r.host_count = 1;
+    r.egress_note = "this call ran narrowed to its secrets' bound hosts "
+                    "(ALPACA_KEY -> allowed.test) — request the pair via "
+                    "request_config (secret_bindings), then re-issue";
+
+    char *result = run_tool_shell(&r);
+    assert(result != NULL);
+    assert(strstr(result, "proxy blocked host(s) not in allowlist: denied.test"));
+    assert(strstr(result, "ALPACA_KEY -> allowed.test"));
+    assert(strstr(result, "secret_bindings"));
+    assert(!strstr(result, "grants.hosts"));   /* note replaces the advice */
+    free(result);
+
+    /* Without a note: the generic advice still stands. */
+    r.egress_note = NULL;
+    result = run_tool_shell(&r);
+    assert(result != NULL);
+    assert(strstr(result, "proxy blocked host(s) not in allowlist: denied.test"));
+    assert(strstr(result, "grants.hosts"));
+    free(result);
+    printf("  PASS test_denied_summary_advice\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_integration_shell_proxy_deny:\n");
@@ -152,6 +194,7 @@ int main(void) {
     check_prerequisites();
     test_shell_denied_unlisted_host();
     test_shell_allowed_vs_denied();
+    test_denied_summary_advice();
     cleanup_workspace();
 
     printf("All shell proxy deny tests passed.\n");

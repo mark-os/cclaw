@@ -48,6 +48,7 @@ typedef struct {
     size_t write_count;
     const RunToolSecret *secrets;
     size_t secret_count;
+    const char *egress_note;    /* parent-composed proxy-deny advice */
 } ShellToolReq;
 
 #define SHELL_REQ_DEFAULTS { \
@@ -94,6 +95,7 @@ static inline char *run_tool_shell(const ShellToolReq *r) {
         .timeout = r->timeout,
         .secrets = r->secrets,
         .secret_count = r->secret_count,
+        .egress_note = r->egress_note,
     };
 
     size_t blob_len = 0;
@@ -191,6 +193,7 @@ static inline char *run_tool_shell_with_hosts(const ShellToolReq *r, char **out_
         .timeout = r->timeout,
         .secrets = r->secrets,
         .secret_count = r->secret_count,
+        .egress_note = r->egress_note,
     };
 
     size_t blob_len = 0;

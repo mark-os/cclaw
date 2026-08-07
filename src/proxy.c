@@ -932,15 +932,19 @@ char *proxy_hosts_json(ProxyContext *ctx) {
     return out;
 }
 
-char *proxy_denied_summary(ProxyContext *ctx) {
+char *proxy_denied_summary(ProxyContext *ctx, const char *advice) {
     pthread_mutex_lock(&ctx->blessed_mu);
     if (ctx->denied_count == 0) {
         pthread_mutex_unlock(&ctx->blessed_mu);
         return NULL;
     }
     /* Build: "\ncclaw: proxy blocked host(s) not in allowlist: foo.com, bar.com
-     * — request access via request_config (grants.hosts) if needed\n" */
-    size_t cap = 192;
+     * — <advice>\n". Default advice suggests a grants.hosts request; a
+     * narrowed call carries a parent-composed note instead, because for it a
+     * host grant would not help — the missing thing is a secret binding. */
+    if (!advice)
+        advice = "request access via request_config (grants.hosts) if needed";
+    size_t cap = 96 + strlen(advice);
     for (int i = 0; i < ctx->denied_count; i++)
         cap += strlen(ctx->denied[i]) + 4;
     char *out = malloc(cap);
@@ -952,8 +956,7 @@ char *proxy_denied_summary(ProxyContext *ctx) {
         if (i > 0) o += (size_t)snprintf(out + o, cap - o, ", ");
         o += (size_t)snprintf(out + o, cap - o, "%s", ctx->denied[i]);
     }
-    o += (size_t)snprintf(out + o, cap - o,
-        " — request access via request_config (grants.hosts) if needed\n");
+    o += (size_t)snprintf(out + o, cap - o, " — %s\n", advice);
     pthread_mutex_unlock(&ctx->blessed_mu);
     return out;
 }

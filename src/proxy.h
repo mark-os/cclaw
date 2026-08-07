@@ -103,7 +103,9 @@ char *proxy_hosts_json(ProxyContext *ctx);
 
 /* Human-readable summary of hosts denied during this call, malloc'd; NULL if
  * none were denied. Intended for appending to tool results so the model knows
- * which hosts were blocked by the proxy. Call before proxy_stop(). */
-char *proxy_denied_summary(ProxyContext *ctx);
+ * which hosts were blocked by the proxy. advice overrides the trailing
+ * request-a-grant hint (NULL = generic grants.hosts wording) — a narrowed
+ * call passes the parent-composed binding note. Call before proxy_stop(). */
+char *proxy_denied_summary(ProxyContext *ctx, const char *advice);
 
 #endif

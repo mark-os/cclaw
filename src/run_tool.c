@@ -115,6 +115,7 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
         else
             w_str(&b, p->value);
     }
+    w_str(&b, req->egress_note);
 
     size_t total = w_finalize(&b);
     if (total == 0) { free(blob); return NULL; }
@@ -250,6 +251,7 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
             q->param_count = pc;
         }
     }
+    q->egress_note = r_str(r);
     return r->err ? -1 : 0;
 }
 
@@ -612,7 +614,8 @@ static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
 
     /* Capture the contacted-hosts tag before proxy_stop frees the list. */
     char *hosts_json = proxy_active ? proxy_hosts_json(&proxy) : NULL;
-    char *denied = proxy_active ? proxy_denied_summary(&proxy) : NULL;
+    char *denied = proxy_active ? proxy_denied_summary(&proxy, q->egress_note)
+                                : NULL;
     if (proxy_active) proxy_stop(&proxy);
     output[out_len] = '\0';
 

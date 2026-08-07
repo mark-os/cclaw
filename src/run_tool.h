@@ -76,6 +76,11 @@ typedef struct {
     /* Pre-extracted tool params (tool_args_extract in the parent) — the
      * child never parses argument JSON. file/web/js tiers. */
     const ToolWireArg *params; size_t param_count;
+    /* Parent-composed advice for the proxy-deny summary — set when the call's
+     * egress was narrowed to its secrets' bound hosts, so a denial names the
+     * missing binding instead of suggesting a grants.hosts request that
+     * wouldn't help. The child appends it verbatim; it stays dumb. */
+    const char *egress_note;
 } RunToolReq;
 
 /* Child-side parsed request (owned strings). Mirrors RunToolReq's wire order.
@@ -104,6 +109,7 @@ typedef struct {
     struct RunToolParam { char *key; int kind; char *value;
                           char **list; size_t list_n; } *params;
     size_t param_count;
+    char *egress_note;
 } RunToolParsed;
 
 /* Child-side param lookup (pre-extracted by the parent). *_str returns the

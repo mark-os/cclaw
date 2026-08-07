@@ -562,10 +562,11 @@ CREATE TABLE IF NOT EXISTS sensitive_targets (
 );
 
 -- Fail-closed credential rule (specs/trust.md): a secret may only be
--- submitted to hosts it is bound to. First use of a loaded secret with no
--- bindings always parks; ALWAYS on that approval records the binding
--- ("approve & bind"). For shell/js calls carrying a secret, the call's
--- egress allow-list IS the union of the used secrets' bound hosts.
+-- submitted to hosts it is bound to. A call using a secret with zero
+-- bindings is denied inline with the missing pair named; bindings mint from
+-- an approved request_config secret_bindings document or `cclaw secret-bind`
+-- (D17). For shell/js calls carrying a secret, the call's egress allow-list
+-- IS the union of the used secrets' bound hosts, unconditionally.
 CREATE TABLE IF NOT EXISTS secret_hosts (
   secret_name TEXT NOT NULL,
   host        TEXT NOT NULL,                 -- exact host or '.suffix' rule
@@ -577,7 +578,7 @@ CREATE TABLE IF NOT EXISTS secret_hosts (
 -- `cclaw secret set` operator verb, the secret_create tool, or a save_secret
 -- capture. value is always "enc:<hex(...)>" (never plaintext). Enforcement
 -- comes free from secret_hosts having zero rows for a new secret (first use
--- always parks; ALWAYS-approval on a url-carrying call records the binding).
+-- is denied until a requested binding is approved — D17).
 -- scope: 'agent' secrets feed {{SECRET:name}} interpolation + child injection;
 -- 'system' secrets (provider API keys) are daemon-consumed only and are never
 -- loaded into the agent-facing snapshot — an agent cannot interpolate them.

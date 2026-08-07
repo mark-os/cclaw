@@ -32,27 +32,30 @@ pair (known-sensitive vs unknown-plus-credential); neither may be
    lookalike-robust) and parks any match (`action='sensitive'`). An approval
    is consumed per call — ALWAYS is coerced to ONCE in `resolve_approval`,
    and an approved call gets only a per-call egress exception.
-2. **Unrecognized target + credential ⇒ escalate** (`secret_hosts`, seeded
-   via `cclaw secret-bind` or accreted by "approve & bind"). A loaded secret
-   with no bindings parks on first use; a url-carrying call parks unless the
-   url host is covered by every used secret's bindings; and a shell/js call
-   carrying secrets has its egress *narrowed to the union of the bound
-   hosts* — the proxy enforces the binding at the actual connection, so an
-   unbound secret means deny-all unless a human approved that exact call.
-   ALWAYS on a url-carrying park records the binding; shell/js ALWAYS
-   coerces to ONCE (no standing binding without an attributable target).
-   A ONCE that lands after the block window leaves a single-use *ticket*:
-   the next call using the same secret set consumes it at the gate
-   (`approval_take_ticket`, dead at the original park expiry) — one human
-   decision covers the model's instructed re-issue, never a standing grant.
-   Sensitivity parks (rule 1) never ticket: per-call means per-call.
+2. **Unrecognized target + credential ⇒ deny with attribution** — the
+   binding is *requested*, never inferred (`secret_hosts`, seeded via
+   `cclaw secret-bind` or minted by an approved `request_config`
+   `secret_bindings` document). Enforcement is two-fold and fail-closed:
+   the dispatch gate denies inline any call using a secret with zero
+   bindings (any tier — the call would run narrowed to deny-all anyway)
+   or, on the web tier, a url host not covered by every used secret's
+   bindings; and a shell/js call carrying secrets has its egress *narrowed
+   to the union of the bound hosts* — the proxy enforces the binding at
+   the actual connection, unconditionally (no approval waives narrowing).
+   Escalation is agent-initiated: the deny names the secret and (where
+   static) the host, a runtime proxy denial carries a parent-composed note
+   naming the pair, and the agent asks through `request_config` — one
+   human approval mints the durable rows, exactly like a host grant. No
+   approval class exists for bindings, so nothing can be approved blind or
+   run un-narrowed. Sensitivity parks (rule 1) never ticket: per-call
+   means per-call.
 
 **Every secret birth path composes with rule 2 for free.** Whether a secret
 arrives as a `CCLAW_SECRET_*` env var at startup, via `cclaw secret set`, via
 the `secret_create` tool, or via a `save_secret` capture on a tool call
 (specs/security.md), it lands with zero `secret_hosts` rows — so its very
-first use always parks, no matter how it was born. No secret-store-specific
-enforcement exists or is needed.
+first use is denied until a binding is granted, no matter how it was born. No
+secret-store-specific enforcement exists or is needed.
 
 ## The invariant
 

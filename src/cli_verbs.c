@@ -77,8 +77,8 @@ int sensitive_main(int argc, char *argv[]) {
 
 /* `cclaw secret-bind <name> <host> | rm <name> <host> | list` — operator verb
  * for the fail-closed credential rule (specs/trust.md): pre-seed or revoke
- * secret→host bindings. Bindings also accrete from ALWAYS approvals of
- * url-carrying calls ("approve & bind"). */
+ * secret→host bindings. Bindings also mint from an approved request_config
+ * secret_bindings document (D17). */
 int secret_bind_main(int argc, char *argv[]) {
     sqlite3 *db = verb_db_open();
     if (!db) return 1;

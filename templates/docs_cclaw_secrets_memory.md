@@ -29,10 +29,13 @@ curl -H "Authorization: Bearer {{SECRET:GITHUB_TOKEN}}" https://api.github.com/u
 - `secret_create {name}` — mint a new random credential (stored encrypted;
   you get only the `{{SECRET:name}}` placeholder back).
 
-Secrets have scopes (`system` vs agent) and host bindings — a secret bound to
-a host will only interpolate into requests to that host. If a tool result
-shows `[REDACTED:…]`, the scanner caught a credential; use `save_secret` if it
-should be kept, and never try to reconstruct it.
+Secrets have scopes (`system` vs agent) and host bindings — a secret may only
+be submitted to hosts it is bound to. A call using an unbound secret (or
+aiming at an uncovered host) is denied with the missing pair named: request it
+with `request_config` (`secret_bindings: {"NAME": ["host"]}`), batching every
+host a denial named into one document, then re-issue the call. If a tool
+result shows `[REDACTED:…]`, the scanner caught a credential; use
+`save_secret` if it should be kept, and never try to reconstruct it.
 
 ## Memory blocks
 

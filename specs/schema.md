@@ -235,7 +235,7 @@ Audit log for tool-call approvals. When a tool call is parked (`sessions.state` 
 
 Index: `approvals_pending ON approvals(session_id, state) WHERE state='pending'`.
 
-`approvals.action` values beyond tool names: `sensitive` (sensitivity-axis park — ALWAYS is coerced to ONCE at resolve) and `secret_bind` (credential-binding park — ALWAYS on a url-carrying call records the binding).
+`approvals.action` values beyond tool names: `sensitive` (sensitivity-axis park — ALWAYS is coerced to ONCE at resolve) and the `request_config` document actions (`request_changes`, `rename_agent`). The former `secret_bind` action was deleted with the bind park (D17) — an unbound secret denies inline and the agent requests the binding via `request_config` `secret_bindings`.
 
 ---
 
@@ -254,7 +254,7 @@ Sensitivity axis (specs/trust.md): operator-owned labels on targets, global — 
 
 ## secret_hosts
 
-Fail-closed credential rule (specs/trust.md): a secret may only be submitted to hosts it is bound to. Zero bindings → first use parks; shell/js calls carrying a secret get their egress narrowed to the union of bound hosts. Rows come from `cclaw secret-bind` or from ALWAYS approvals of url-carrying parks ("approve & bind").
+Fail-closed credential rule (specs/trust.md): a secret may only be submitted to hosts it is bound to. Zero bindings → the gate denies inline with the missing pair named; shell/js calls carrying a secret get their egress narrowed to the union of bound hosts, unconditionally. Rows come from `cclaw secret-bind` or an approved `request_config` `secret_bindings` document.
 
 | Column | Type | Notes |
 |--------|------|-------|

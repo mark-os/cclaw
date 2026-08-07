@@ -63,17 +63,20 @@ static void approval_unpark_block_window(int64_t approval_id) {
 
     /* The AX contract at the moment the turn unblocks: not blocked, no
      * re-issues or variants (the gate would dedupe them to an error anyway),
-     * no narrating the wait, and a legal exit. This text is what's in context
-     * when the model decides what to do next — the system prompt's general
-     * escalation guidance is not (approval-storm incident, 2026-08-06). */
+     * at most one status mention, and a legal exit. This text is what's in
+     * context when the model decides what to do next — the system prompt's
+     * general escalation guidance is not (approval-storm incident,
+     * 2026-08-06; one clean mention re-allowed with D17, since a pending
+     * request is something the human may want to hear about once). */
     char buf[512];
     snprintf(buf, sizeof(buf),
              "approval #%lld still pending — the operator has been notified. "
              "You are not blocked: continue with whatever doesn't need it. "
-             "Do NOT re-issue this call or a variant (that parks a duplicate), "
-             "and don't narrate the wait to the channel. You'll get a message "
-             "here when it's decided; if nothing else is actionable, end the "
-             "turn.", (long long)approval_id);
+             "Do NOT re-issue this call or a variant (that parks a duplicate). "
+             "One brief status mention to the channel is fine; don't keep "
+             "narrating the wait. You'll get a message here when it's decided; "
+             "if nothing else is actionable, end the turn.",
+             (long long)approval_id);
     ToolResult tr = { .tool_call_id = call_id, .content = buf };
     Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                     .tool_name = tool_name, .is_error = 0 };

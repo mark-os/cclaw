@@ -225,6 +225,21 @@ static void test_request_changes_branch(void) {
     printf("  request_changes branch: OK\n");
 }
 
+/* A secret_bindings document renders one 'secret X -> host' line per pair —
+ * the pair is the decision, and it lands durably on approval. */
+static void test_secret_bindings_lines(void) {
+    sqlite3 *db = fresh_db();
+    char *s = summarize(db, "request_config", "request_changes",
+        "{\"changes\":{\"secret_bindings\":{\"ALPACA_KEY\":"
+        "[\"api.alpaca.markets\",\".example.com\"]}}}");
+    assert(strstr(s, "System-wide:"));
+    assert(strstr(s, "secret ALPACA_KEY -> api.alpaca.markets"));
+    assert(strstr(s, "secret ALPACA_KEY -> .example.com"));
+    free(s);
+    db_close(db);
+    printf("  secret_bindings lines: OK\n");
+}
+
 /* create_agent mints a new autonomous actor, so the definition's scalars —
  * above all the standing instructions it boots with — must reach the
  * approver. Regression: the hand-listed union rendered grants and a memory
@@ -288,6 +303,7 @@ int main(void) {
     test_body_block_both_keys();
     test_generic_args();
     test_request_changes_branch();
+    test_secret_bindings_lines();
     test_create_agent_discloses_scalars();
     test_provider_swap_names_model();
     test_db_clean(DB_PATH);

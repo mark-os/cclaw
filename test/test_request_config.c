@@ -932,6 +932,126 @@ static void test_redundant_filtered(void) {
     printf("  PASS test_redundant_filtered\n");
 }
 
+/* secret_bindings section: validation rejections, park, apply mints
+ * secret_hosts rows, redundancy filter. */
+static void test_secret_bindings_section(void) {
+    sqlite3 *db = test_db_open_seeded(":memory:");
+    assert(db);
+    config_registry_sync(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+    assert(sid > 0);
+    assert(sqlite3_exec(db,
+        "INSERT INTO secrets(name,value,scope) VALUES"
+        " ('ALPACA_KEY','enc:00','agent'),('SYS_KEY','enc:00','system')",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    RequestConfigCtx ctx = {
+        .db = db, .agent_name = "test", .session_id = sid,
+        .agents_dir = NULL, .current_tool_call_id = "sb1"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+
+    /* Unknown secret name is refused — a binding request is not where a
+     * secret is born. */
+    char *r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{"
+        "\"secret_bindings\":{\"NOPE\":[\"api.example.com\"]}}}");
+    assert(r && strstr(r, "unknown secret 'NOPE'"));
+    free(r);
+
+    /* System-scoped secrets never interpolate — binding one is refused. */
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{"
+        "\"secret_bindings\":{\"SYS_KEY\":[\"api.example.com\"]}}}");
+    assert(r && strstr(r, "unknown secret 'SYS_KEY'"));
+    free(r);
+
+    /* Host shape: no wildcards, no bare TLD, no single label. */
+    static const char *bad_hosts[] = {"*.example.com", ".com", "localhost"};
+    for (size_t i = 0; i < 3; i++) {
+        char args[192];
+        snprintf(args, sizeof(args),
+            "{\"action\":\"request_changes\",\"changes\":{"
+            "\"secret_bindings\":{\"ALPACA_KEY\":[\"%s\"]}}}", bad_hosts[i]);
+        r = call_handler(&reg, args);
+        assert(r && strstr(r, "not a valid hostname"));
+        free(r);
+    }
+
+    /* Value must be an array. */
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{"
+        "\"secret_bindings\":{\"ALPACA_KEY\":\"api.example.com\"}}}");
+    assert(r && strstr(r, "must be an array"));
+    free(r);
+
+    /* Valid document parks exactly one approval carrying the section. */
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{"
+        "\"secret_bindings\":{\"ALPACA_KEY\":"
+        "[\"api.alpaca.markets\",\".example.com\"]}}}");
+    assert(r == NULL); /* parked */
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT args_json FROM approvals WHERE session_id=?1"
+        " AND state='pending' AND tool_call_id='sb1'", -1, &s, NULL)
+        == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    char *args_copy = strdup((const char *)sqlite3_column_text(s, 0));
+    assert(args_copy && strstr(args_copy, "secret_bindings"));
+    sqlite3_finalize(s);
+
+    /* No rows minted while the approval is merely pending. */
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM secret_hosts", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 0);
+    sqlite3_finalize(s);
+
+    /* Apply mints both pairs, durably. */
+    assert(request_config_changes_apply(db, "test", args_copy, 0) == 0);
+    free(args_copy);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM secret_hosts WHERE secret_name='ALPACA_KEY'"
+        " AND host IN ('api.alpaca.markets','.example.com')", -1, &s, NULL)
+        == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 2);
+    sqlite3_finalize(s);
+
+    /* Redundancy: the recorded pairs no longer park. */
+    ctx.current_tool_call_id = "sb2";
+    assert(session_set_state(db, sid, "tool_running") == 0);
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{"
+        "\"secret_bindings\":{\"ALPACA_KEY\":[\"api.alpaca.markets\"]}}}");
+    assert(r && strstr(r, "already in effect"));
+    free(r);
+
+    /* Partially redundant: parked document keeps only the new host. */
+    ctx.current_tool_call_id = "sb3";
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{"
+        "\"secret_bindings\":{\"ALPACA_KEY\":"
+        "[\"api.alpaca.markets\",\"api.tiingo.com\"]}}}");
+    assert(r == NULL); /* parked */
+    assert(sqlite3_prepare_v2(db,
+        "SELECT json_extract(args_json,'$.changes.secret_bindings.ALPACA_KEY')"
+        " FROM approvals WHERE session_id=?1 AND state='pending'"
+        " AND tool_call_id='sb3'", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0),
+                  "[\"api.tiingo.com\"]") == 0);
+    sqlite3_finalize(s);
+
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_secret_bindings_section\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_request_config:\n");
@@ -952,6 +1072,7 @@ int main(void) {
     test_unknown_action();
     test_add_tool_to_config();
     test_redundant_filtered();
+    test_secret_bindings_section();
     printf("\nAll request_config tests passed.\n");
     return 0;
 }

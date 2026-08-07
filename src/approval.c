@@ -488,6 +488,10 @@ static const char *SQL_CHANGES_AGENT_SCOPED =
 
 static const char *SQL_CHANGES_SYSTEM_WIDE =
     "SELECT format('%s = %s',key,atom) FROM json_each(?1,'$.changes.config')"
+    /* One line per (secret, host) pair — the pair IS the decision: after
+     * approval this credential may be submitted to that host, durably. */
+    " UNION ALL SELECT format('secret %s -> %s', s.key, h.atom)"
+    "   FROM json_each(?1,'$.changes.secret_bindings') s, json_each(s.value) h"
     /* All four keys validate_provider accepts, model included: the model is
      * what actually answers after the swap, and it is upserted from this
      * document — a prompt naming only the endpoint and the paying secret

@@ -29,7 +29,8 @@ static const char *PARAMS_JSON =
     "{grants:{tools:[names],hosts:[hostnames],read_paths:[abs paths],write_paths:[abs paths]}, "
     "agent:{primary_model?,secondary_model?,max_iterations?,shell_timeout?}, "
     "routes:['channel:chat_id',...], "
-    "config:{key:value-string,...}, provider:{provider,base_url?,model?,api_key_env?}}. "
+    "config:{key:value-string,...}, provider:{provider,base_url?,model?,api_key_env?}, "
+    "secret_bindings:{SECRET_NAME:[hostnames]}}. "
     "One human approval covers the whole document. Host prefix '.' covers subdomains "
     "('.example.com' covers example.com AND sub.example.com). agent updates YOUR OWN row "
     "(models accept 'model' or 'model@provider'). routes let you send to a chat via "
@@ -39,7 +40,10 @@ static const char *PARAMS_JSON =
     "custom name with base_url; api_key_env is the secret NAME holding the API key "
     "(defaults to <PROVIDER>_API_KEY) — store the key first with save_secret, never pass "
     "key material. Defining a provider also registers its model, so one document can "
-    "define a provider AND point your agent at it via agent.primary_model\"},"
+    "define a provider AND point your agent at it via agent.primary_model. "
+    "secret_bindings bind a saved secret to the hosts it may be submitted to — a "
+    "{{SECRET:X}} call is denied when its target isn't bound; batch every host a "
+    "denial named into one document\"},"
     "\"name\":{\"type\":\"string\",\"description\":\"New agent name (for rename_agent)\"},"
     "\"preamble\":{\"type\":\"string\",\"description\":\"New system prompt preamble (for rename_agent, optional)\"},"
     "\"reason\":{\"type\":\"string\",\"description\":\"Short justification shown to the human approver (optional, recommended)\"}"
@@ -201,6 +205,87 @@ static char *validate_config(sqlite3 *db, const char *changes) {
         else if (secret)
             err = errf("error: config key '%s' is secret — store it with "
                        "save_secret, not set_config", key);
+    }
+    sqlite3_finalize(st);
+    return err;
+}
+
+/* A binding host is grants.hosts syntax (exact host, or a '.suffix' rule that
+ * covers subdomains) with the shape actually checked: hostname characters
+ * only, and — since a binding is a durable secret_hosts row a typo would
+ * silently never match — no '*' and no bare TLD ('.com' would bind the
+ * secret to half the internet). */
+static int binding_host_valid(const char *h) {
+    if (!h || !h[0]) return 0;
+    size_t len = strlen(h);
+    if (len > 253) return 0;
+    const char *body = h[0] == '.' ? h + 1 : h;
+    if (!body[0] || !strchr(body, '.')) return 0;   /* bare TLD / single label */
+    for (const char *p = body; *p; p++) {
+        char c = *p;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '-'))
+            return 0;
+    }
+    return 1;
+}
+
+/* Validate $.secret_bindings — {SECRET_NAME: [hosts]}. The secret must
+ * already exist agent-scoped (system secrets never interpolate, so a binding
+ * for one is meaningless); hosts must be shaped per binding_host_valid;
+ * the document is bounded so one park can't smuggle an unreviewable list. */
+#define SECRET_BINDINGS_MAX 32
+
+static char *validate_secret_bindings(sqlite3 *db, const char *changes) {
+    if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.secret_bindings')='object'",
+                 changes))
+        return strdup("error: changes.secret_bindings must be an object of "
+                      "SECRET_NAME: [hostnames]");
+    char *bad = q1_text(db,
+        "SELECT key FROM json_each(?1,'$.secret_bindings')"
+        " WHERE type!='array' LIMIT 1", changes);
+    if (bad) {
+        char *m = errf("error: secret_bindings.%s must be an array of hostnames", bad);
+        free(bad);
+        return m;
+    }
+    bad = q1_text(db,
+        "SELECT s.key FROM json_each(?1,'$.secret_bindings') s, json_each(s.value) h"
+        " WHERE h.type!='text' OR h.atom='' LIMIT 1", changes);
+    if (bad) {
+        char *m = errf("error: secret_bindings.%s entries must be non-empty "
+                       "hostname strings", bad);
+        free(bad);
+        return m;
+    }
+    /* Secret must exist, agent-scoped — a binding request is not the place a
+     * secret is born; save_secret first. */
+    bad = q1_text(db,
+        "SELECT s.key FROM json_each(?1,'$.secret_bindings') s"
+        " WHERE NOT EXISTS(SELECT 1 FROM secrets"
+        "   WHERE name=s.key AND scope='agent') LIMIT 1", changes);
+    if (bad) {
+        char *m = errf("error: secret_bindings names unknown secret '%s' — "
+                       "store it with save_secret first", bad);
+        free(bad);
+        return m;
+    }
+    char *err = NULL;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT h.atom FROM json_each(?1,'$.secret_bindings') s,"
+            " json_each(s.value) h", -1, &st, NULL) != SQLITE_OK)
+        return strdup("error: secret_bindings validation failed");
+    sqlite3_bind_text(st, 1, changes, -1, SQLITE_STATIC);
+    int pairs = 0;
+    while (!err && sqlite3_step(st) == SQLITE_ROW) {
+        const char *h = (const char *)sqlite3_column_text(st, 0);
+        if (h && !binding_host_valid(h))
+            err = errf("error: secret_bindings host '%s' is not a valid "
+                       "hostname or '.suffix' rule", h);
+        else if (++pairs > SECRET_BINDINGS_MAX)
+            err = strdup("error: too many secret_bindings pairs "
+                         "(max 32 per document)");
     }
     sqlite3_finalize(st);
     return err;
@@ -456,16 +541,17 @@ static char *validate_changes(sqlite3 *db, const char *changes,
         return strdup("error: 'changes' must be a JSON object (see the tool schema)");
     char *bad = q1_text(db,
         "SELECT key FROM json_each(?1)"
-        " WHERE key NOT IN ('grants','config','provider','agent','routes')"
+        " WHERE key NOT IN ('grants','config','provider','agent','routes',"
+        "                   'secret_bindings')"
         " LIMIT 1", changes);
     if (bad) {
         char *m = errf("error: unknown changes section '%s' (use grants, "
-                       "agent, routes, config, provider)", bad);
+                       "agent, routes, config, provider, secret_bindings)", bad);
         free(bad);
         return m;
     }
     char *grants = NULL, *config = NULL, *provider = NULL;
-    char *agent = NULL, *routes = NULL, *err = NULL;
+    char *agent = NULL, *routes = NULL, *bindings = NULL, *err = NULL;
     int has_grants = q1_true(db,
         "SELECT 1 WHERE json_type(?1,'$.grants') IS NOT NULL", changes);
     int has_config = q1_true(db,
@@ -476,9 +562,12 @@ static char *validate_changes(sqlite3 *db, const char *changes,
         "SELECT 1 WHERE json_type(?1,'$.agent') IS NOT NULL", changes);
     int has_routes = q1_true(db,
         "SELECT 1 WHERE json_type(?1,'$.routes') IS NOT NULL", changes);
+    int has_bindings = q1_true(db,
+        "SELECT 1 WHERE json_type(?1,'$.secret_bindings') IS NOT NULL", changes);
 
     if (has_grants && (err = validate_grants(db, changes))) goto out;
     if (has_config && (err = validate_config(db, changes))) goto out;
+    if (has_bindings && (err = validate_secret_bindings(db, changes))) goto out;
     /* provider before agent: agent.primary_model may adopt the model this
      * same document defines, checked against the canonical provider JSON. */
     if (has_provider && (err = validate_provider(db, changes, &provider))) goto out;
@@ -493,6 +582,8 @@ static char *validate_changes(sqlite3 *db, const char *changes,
             "          FROM json_each(?1,'$.grants') g)"
             "     + (SELECT COUNT(*) FROM json_each(?1,'$.config'))"
             "     + (SELECT COUNT(*) FROM json_each(?1,'$.agent'))"
+            "     + (SELECT COALESCE(SUM(json_array_length(s.value)),0)"
+            "          FROM json_each(?1,'$.secret_bindings') s)"
             "     + COALESCE(json_array_length(?1,'$.routes'),0)", changes);
         long total = n ? atol(n) : 0;
         free(n);
@@ -502,20 +593,22 @@ static char *validate_changes(sqlite3 *db, const char *changes,
         }
     }
 
-    if (has_grants) grants = tool_args_json(db, changes, "grants");
-    if (has_config) config = tool_args_json(db, changes, "config");
-    if (has_agent)  agent  = tool_args_json(db, changes, "agent");
-    if (has_routes) routes = tool_args_json(db, changes, "routes");
+    if (has_grants)   grants   = tool_args_json(db, changes, "grants");
+    if (has_config)   config   = tool_args_json(db, changes, "config");
+    if (has_agent)    agent    = tool_args_json(db, changes, "agent");
+    if (has_routes)   routes   = tool_args_json(db, changes, "routes");
+    if (has_bindings) bindings = tool_args_json(db, changes, "secret_bindings");
 
     /* Canonical document: only present sections, minified by json(). */
     {
-        char sql[256];
+        char sql[320];
         int off = snprintf(sql, sizeof(sql), "SELECT json_object(");
         int next = 1, first = 1;
-        const char *sec[5][2] = {
+        const char *sec[6][2] = {
             {"grants", grants}, {"agent", agent}, {"routes", routes},
-            {"config", config}, {"provider", provider}};
-        for (int i = 0; i < 5; i++) {
+            {"config", config}, {"provider", provider},
+            {"secret_bindings", bindings}};
+        for (int i = 0; i < 6; i++) {
             if (!sec[i][1]) continue;
             off += snprintf(sql + off, sizeof(sql) - (size_t)off, "%s'%s',json(?%d)",
                             first ? "" : ",", sec[i][0], next++);
@@ -525,7 +618,7 @@ static char *validate_changes(sqlite3 *db, const char *changes,
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
             next = 1;
-            for (int i = 0; i < 5; i++)
+            for (int i = 0; i < 6; i++)
                 if (sec[i][1])
                     sqlite3_bind_text(st, next++, sec[i][1], -1, SQLITE_STATIC);
             if (sqlite3_step(st) == SQLITE_ROW) {
@@ -538,6 +631,7 @@ static char *validate_changes(sqlite3 *db, const char *changes,
     }
 out:
     free(grants); free(config); free(provider); free(agent); free(routes);
+    free(bindings);
     return err;
 }
 
@@ -598,6 +692,24 @@ static char *filter_satisfied(sqlite3 *db, const char *agent,
         " WHERE json_type(?1,'$.routes')='array'", cur, agent);
     if (next) { free(cur); cur = next; }
 
+    /* Secret bindings: drop (secret, host) pairs already recorded (exact
+     * match only — a host covered by an existing '.suffix' binding still
+     * parks, same contract as the grants filter above). Keys whose hosts all
+     * exist drop out of the object entirely. */
+    next = q2_text(db,
+        "SELECT json_set(?1,'$.secret_bindings',json((SELECT"
+        "  COALESCE(json_group_object(k, json(v)),'{}') FROM ("
+        "   SELECT s.key AS k,"
+        "          (SELECT json_group_array(h.atom) FROM json_each(s.value) h"
+        "            WHERE NOT EXISTS(SELECT 1 FROM secret_hosts sh"
+        "              WHERE sh.secret_name=s.key AND sh.host=h.atom)) AS v"
+        "     FROM json_each(?1,'$.secret_bindings') s"
+        "    WHERE (SELECT COUNT(*) FROM json_each(s.value) h"
+        "            WHERE NOT EXISTS(SELECT 1 FROM secret_hosts sh"
+        "              WHERE sh.secret_name=s.key AND sh.host=h.atom)) > 0))))"
+        " WHERE json_type(?1,'$.secret_bindings')='object'", cur, agent);
+    if (next) { free(cur); cur = next; }
+
     /* Drop now-empty arrays, then a now-empty grants object ('$.zz' is a
      * deliberately absent path — json_remove ignores it). */
     next = q2_text(db,
@@ -617,7 +729,10 @@ static char *filter_satisfied(sqlite3 *db, const char *agent,
         "SELECT json_remove(?1,"
         " CASE WHEN json_type(?1,'$.grants')='object'"
         "  AND (SELECT COUNT(*) FROM json_each(?1,'$.grants'))=0"
-        " THEN '$.grants' ELSE '$.zz' END)", cur, agent);
+        " THEN '$.grants' ELSE '$.zz' END,"
+        " CASE WHEN json_type(?1,'$.secret_bindings')='object'"
+        "  AND (SELECT COUNT(*) FROM json_each(?1,'$.secret_bindings'))=0"
+        " THEN '$.secret_bindings' ELSE '$.zz' END)", cur, agent);
     if (next) { free(cur); cur = next; }
 
     if (q1_true(db, "SELECT 1 WHERE (SELECT COUNT(*) FROM json_each(?1))=0", cur))
@@ -763,9 +878,10 @@ static char *handler(const char *arguments, void *user_data) {
                 if (!kept)
                     result = strdup("error: failed to check existing grants");
                 else if (fully)
-                    result = strdup("already in effect: every grant/route in "
-                                    "this request is one you already have — "
-                                    "no approval needed, proceed and use it");
+                    result = strdup("already in effect: every grant/route/"
+                                    "binding in this request is one you "
+                                    "already have — no approval needed, "
+                                    "proceed and use it");
                 else
                     result = park_changes(ctx, kept, reason);
                 free(kept);
@@ -814,7 +930,9 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             " UNION ALL SELECT 'host', atom FROM json_each(?1,'$.changes.grants.hosts')"
             " UNION ALL SELECT 'read_path', atom FROM json_each(?1,'$.changes.grants.read_paths')"
             " UNION ALL SELECT 'write_path', atom FROM json_each(?1,'$.changes.grants.write_paths')"
-            " UNION ALL SELECT 'config:'||key, atom FROM json_each(?1,'$.changes.config')",
+            " UNION ALL SELECT 'config:'||key, atom FROM json_each(?1,'$.changes.config')"
+            " UNION ALL SELECT 'secret_bind:'||s.key, h.atom"
+            "   FROM json_each(?1,'$.changes.secret_bindings') s, json_each(s.value) h",
             -1, &st, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_text(st, 1, args_json, -1, SQLITE_STATIC);
@@ -846,6 +964,9 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             int lrc;
             if (strncmp(lines[i].kind, "config:", 7) == 0)
                 lrc = config_set(db, lines[i].kind + 7, lines[i].value);
+            else if (strncmp(lines[i].kind, "secret_bind:", 12) == 0)
+                lrc = db_secret_host_bind(db, lines[i].kind + 12,
+                                          lines[i].value);
             else
                 lrc = agent_config_grant(db, agent, lines[i].kind,
                                          lines[i].value, expires_at);

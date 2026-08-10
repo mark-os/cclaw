@@ -439,15 +439,16 @@ void handle_approval_park(int64_t session_id, const char *tool_call_id) {
         char *agent = session_get_agent_name(proc_db(), session_id);
         char *summary = approval_format_summary(proc_db(), a);
         Buf pb = {0};
-        /* The approval id is part of the prompt text, not just the button
-         * payload: a channel without inline buttons (Discord) decides with
-         * "/approve <id>", and the admin must see the id and the full summary
-         * in the same message they are deciding from. */
-        buf_appendf(&pb, "**Approval #%lld** — agent %s (session %lld, channel %s):\n%s"
-                         "\nDecide here: /approve %lld or /deny %lld",
+        /* The approval id stays in the header even though the buttons carry it
+         * in their payload: it names the row in the follow-up ("approved #7"),
+         * and /approve <id> remains available for deciding a stale card whose
+         * buttons have scrolled away. Not spelled out as an instruction — an
+         * approval prompt always ships a keyboard, and every channel that
+         * receives one renders it, so a written command line beside the
+         * buttons is a second way to do the one thing already on screen. */
+        buf_appendf(&pb, "**Approval #%lld** — agent %s (session %lld, channel %s):\n%s",
                     (long long)a->id, agent ? agent : "?",
-                    (long long)session_id, ch_name, summary ? summary : "?",
-                    (long long)a->id, (long long)a->id);
+                    (long long)session_id, ch_name, summary ? summary : "?");
         free(agent);
         free(summary);
         char *prompt = buf_take(&pb);

@@ -52,13 +52,74 @@ int approval_timeout_seconds(sqlite3 *db) {
 }
 
 /* approval_block_sec, clamped to approval_timeout_sec so the short block
- * never outlasts the final expiry deadline. */
+ * never outlasts the final expiry deadline. An explicit 0 is a real value
+ * ("never freeze"), not "unset" — so read the raw string rather than
+ * config_get_int, which cannot tell 0 from absent. */
 int approval_block_seconds(sqlite3 *db) {
-    int block = config_get_int(db, "approval_block_sec");
-    if (block <= 0) block = config_default_int("approval_block_sec");
+    int block;
+    char *raw = config_get(db, "approval_block_sec");
+    if (raw && raw[0]) block = atoi(raw);
+    else block = config_default_int("approval_block_sec");
+    free(raw);
+    if (block < 0) block = 0;
     int timeout = approval_timeout_seconds(db);
     if (block > timeout) block = timeout;
     return block;
+}
+
+/* True when the session is pinned to a route on an ambient channel — one the
+ * agent listens to passively, where a frozen turn reads as a dead bot rather
+ * than as work in progress. Ambience is the channel extension's own config
+ * (`<channel>.ambient_channels`, comma-separated chat ids — the same key the
+ * Discord runner reads), so this stays a convention any channel can adopt
+ * without a schema column. */
+static int session_is_ambient(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT channel_name, chat_id FROM channel_routes WHERE session_id=?1",
+            -1, &st, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(st, 1, session_id);
+    int ambient = 0;
+    while (!ambient && sqlite3_step(st) == SQLITE_ROW) {
+        const char *chan = (const char *)sqlite3_column_text(st, 0);
+        const char *chat = (const char *)sqlite3_column_text(st, 1);
+        if (!chan || !chat || !chat[0]) continue;
+        char key[128];
+        snprintf(key, sizeof(key), "%s.ambient_channels", chan);
+        char *list = config_get(db, key);
+        for (const char *p = list; p && *p;) {
+            while (*p == ' ' || *p == ',') p++;
+            const char *end = p;
+            while (*end && *end != ',') end++;
+            const char *tail = end;
+            while (tail > p && tail[-1] == ' ') tail--;
+            size_t n = (size_t)(tail - p);
+            if (n && n == strlen(chat) && strncmp(p, chat, n) == 0) ambient = 1;
+            p = *end ? end + 1 : end;
+        }
+        free(list);
+    }
+    sqlite3_finalize(st);
+    return ambient;
+}
+
+int approval_block_seconds_for_session(sqlite3 *db, int64_t session_id) {
+    if (session_is_ambient(db, session_id)) return 0;
+    return approval_block_seconds(db);
+}
+
+/* The one background-notice text, shared by the park-time inline path and the
+ * block-window unpark. Kept terse on purpose: it is what the model reads when
+ * deciding what to do next, and a long instruction block invites narration.
+ * The anti-re-issue rule it used to spell out is enforced in code — the
+ * dispatch gate answers a duplicate park with an error naming the pending
+ * approval — so it does not need to be said here too. */
+void approval_background_notice(int64_t approval_id, char *buf, size_t len) {
+    snprintf(buf, len,
+             "approval %lld requested. Continue with whatever doesn't need it. "
+             "You will be notified when the operator decides on the approval.",
+             (long long)approval_id);
 }
 
 int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_id,

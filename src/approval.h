@@ -33,6 +33,15 @@ typedef struct {
 int approval_timeout_seconds(sqlite3 *db);
 int approval_block_seconds(sqlite3 *db);
 
+/* Per-session block window: 0 when the session is pinned to a route on an
+ * ambient channel (never freeze a passively-listened room), else the global
+ * approval_block_seconds. A 0 window is served inline at park time, so a
+ * session that resolves to 0 never reaches the sweep at all. */
+int approval_block_seconds_for_session(sqlite3 *db, int64_t session_id);
+
+/* Render the shared background notice ("approval N requested...") into buf. */
+void approval_background_notice(int64_t approval_id, char *buf, size_t len);
+
 /* Insert a pending approval.
  * resolve is "rerun" (re-execute frozen call) or "apply" (invoke tool's apply handler).
  * Returns the new row id (>0) or -1 on error. */

@@ -222,6 +222,17 @@ the already-attributed text through unchanged. DMs and mention-gated channels
 are never debounced. Buffers are runner-process memory: a crash loses at most
 one window of chatter nobody addressed to us.
 
+Ambience also decides how an approval behaves. A parked approval normally
+freezes the turn for `approval_block_sec` (60s) so a present approver's tap
+resumes the frozen call in place; past that the sweep unparks it with a
+background notice and the late decision arrives as an inbox follow-up. A
+session pinned to a route on an **ambient channel resolves that window to 0** —
+the notice is written inline at park time and the turn continues immediately,
+because a silent room reads as a hung bot rather than as work in progress. The
+approval card still posts at t=0 either way; only the freeze differs.
+`<channel>.ambient_channels` is the same key the runner reads, so the
+convention carries to any channel extension.
+
 ## channel_send (outbound tool)
 
 Fixed schema `{channel, chat_id, message}` (+ `action: "list"` to enumerate

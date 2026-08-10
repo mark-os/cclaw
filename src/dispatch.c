@@ -304,6 +304,20 @@ static int tool_inline_error(int64_t session_id, PendingToolCall *tc,
     return 1;
 }
 
+/* Same, for a non-error inline result (the approval background notice): the
+ * call is answered and done, but nothing went wrong. Always returns 1. */
+static int tool_inline_notice(int64_t session_id, PendingToolCall *tc,
+                              const char *msg, const char *detail) {
+    char *note = strdup(msg);
+    ToolResult tr = {.tool_call_id = tc->call_id, .content = note};
+    Message m = {.role = ROLE_TOOL, .tool_result = &tr,
+                 .tool_name = tc->name, .is_error = 0};
+    entry_append_with_iteration(proc_db(), session_id, &m, tc->iteration_id);
+    db_tool_call_set_status(proc_db(), session_id, tc->call_id, "done", detail);
+    free(note);
+    return 1;
+}
+
 /* Interpolate {{SECRET:name}} into extracted wire-param values (TEXT/JSON
  * kinds; LIST params are file_edit's — never secret-bearing). After this the
  * array carries plaintext: free with tool_wire_args_wipe_free. */
@@ -706,6 +720,27 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 session_set_state(proc_db(), session_id, "awaiting_approval");
                 approval_free(ap);
                 handle_approval_park(session_id, tc->call_id);
+                /* Zero block window (ambient route, or approval_block_sec=0):
+                 * the operator has been prompted, so answer the call inline
+                 * with the background notice instead of freezing the turn.
+                 * The late decision still arrives as an inbox follow-up.
+                 * Daemon only — in CLI mode handle_approval_park may have
+                 * *deferred* an auto-decision that the loop applies against a
+                 * still-parked call, and unparking here would strand it. */
+                if (proc_is_daemon() &&
+                    approval_block_seconds_for_session(proc_db(), session_id) == 0) {
+                    Approval *bg = approval_get_for_tool_call(proc_db(), session_id,
+                                                             tc->call_id);
+                    if (bg && bg->state && strcmp(bg->state, "pending") == 0) {
+                        char note[256];
+                        approval_background_notice(bg->id, note, sizeof(note));
+                        approval_free(bg);
+                        session_set_state(proc_db(), session_id, "tool_running");
+                        return tool_inline_notice(session_id, tc, note,
+                                                  "approval:background");
+                    }
+                    approval_free(bg);
+                }
                 return 2; /* parked */
             }
             /* approved → consume (single-use) and fall through to execute the

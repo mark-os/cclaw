@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "agent_config.h"
 #include "approval.h"
+#include "config_registry.h"
 #include "db.h"
 #include "test_util.h"
 #include <assert.h>
@@ -554,6 +555,60 @@ static void test_pending_ids(void) {
     printf("  PASS: test_pending_ids\n");
 }
 
+/* Block window: global knob honours an explicit 0, and a session pinned to a
+ * route on an ambient channel always resolves to 0 (never freeze a room). */
+static void test_block_window_ambient(void) {
+    sqlite3 *db = fresh_db();
+    db_agent_upsert(db, "bot", NULL, NULL);
+    int64_t plain = session_create(db, "test", "bot", -1, 0);
+    int64_t amb = session_create(db, "test", "bot", -1, 0);
+    assert(plain > 0 && amb > 0);
+
+    /* Unset → registry default (60), not the old 600. */
+    assert(approval_block_seconds(db) == 60);
+    assert(approval_block_seconds_for_session(db, plain) == 60);
+
+    /* Two routes; only the second chat id is listed as ambient. */
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO channel_routes(channel_name,chat_id,session_id) "
+             "VALUES('discord','111',%lld),('discord','222',%lld);",
+             (long long)plain, (long long)amb);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+    /* Seeded directly: `<ext>.<key>` rows are minted by extension_install, so
+     * config_set no-ops on a DB with no channel extension installed. Leading
+     * space + a decoy entry: membership is exact, not substring. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO config(key,value,default_value) "
+        "VALUES('discord.ambient_channels','999, 222','');",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    assert(approval_block_seconds_for_session(db, amb) == 0);
+    assert(approval_block_seconds_for_session(db, plain) == 60);
+
+    /* Explicit 0 is a value, not "unset" — config_get_int can't tell them apart. */
+    config_set(db, "approval_block_sec", "0");
+    assert(approval_block_seconds(db) == 0);
+    assert(approval_block_seconds_for_session(db, plain) == 0);
+
+    config_set(db, "approval_block_sec", "30");
+    assert(approval_block_seconds_for_session(db, plain) == 30);
+    assert(approval_block_seconds_for_session(db, amb) == 0);
+
+    /* Clamped to the expiry deadline, as before. */
+    config_set(db, "approval_timeout_sec", "10");
+    assert(approval_block_seconds(db) == 10);
+
+    char note[256];
+    approval_background_notice(42, note, sizeof(note));
+    assert(strstr(note, "approval 42 requested") != NULL);
+    assert(strstr(note, "notified") != NULL);
+
+    db_close(db);
+    clean_db();
+    printf("  PASS: test_block_window_ambient\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_approvals:\n");
@@ -573,6 +628,7 @@ int main(void) {
     test_pending_match_dedupe();
     test_take_ticket();
     test_pending_ids();
+    test_block_window_ambient();
     printf("all approval tests passed\n");
     return 0;
 }

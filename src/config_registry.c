@@ -54,10 +54,11 @@ static const ConfigDef s_defs[] = {
       "Token budget for auto-recalled memory" },
     { "approval_timeout_sec", "3600",
       "Seconds before a parked approval expires" },
-    { "approval_block_sec", "600",
+    { "approval_block_sec", "60",
       "Seconds a foreground approval blocks before backgrounding — the window"
-      " a decision runs the frozen call in place; with one-tap channel buttons"
-      " a long hold costs nothing when the approver is present" },
+      " a decision runs the frozen call in place. 0 = never freeze: the notice"
+      " is written inline and the turn continues. A route on an ambient channel"
+      " is always 0 (a quiet room reads as a hung bot, so it never holds)" },
     { "approval_max_pending", "3",
       "Max pending approvals per session — further park-worthy calls fail"
       " inline (naming the outstanding ids) until one is decided" },

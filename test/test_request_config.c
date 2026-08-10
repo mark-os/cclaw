@@ -470,8 +470,14 @@ static void test_batch_apply(void) {
     char *args_copy = strdup(args_json);
     sqlite3_finalize(s);
 
-    rc = request_config_changes_apply(db, "test", args_copy, 0);
+    char *receipt = NULL;
+    rc = request_config_changes_apply(db, "test", args_copy, 0, &receipt);
     assert(rc == 0);
+    /* Success receipt reports applied lines and the defined provider. */
+    assert(receipt != NULL);
+    assert(strstr(receipt, "applied") != NULL);
+    assert(strstr(receipt, "provider 'openrouter'") != NULL);
+    free(receipt);
     free(args_copy);
 
     /* Verify grants exist (agent_caps). */
@@ -596,7 +602,7 @@ static void test_agent_routes_sections(void) {
     char *args_copy = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
 
-    assert(request_config_changes_apply(db, "test", args_copy, 0) == 0);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, NULL) == 0);
     free(args_copy);
 
     /* models row seeded → the adopted id resolves. */
@@ -650,7 +656,7 @@ static void test_agent_routes_sections(void) {
     assert(sqlite3_step(s) == SQLITE_ROW);
     args_copy = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
-    assert(request_config_changes_apply(db, "test", args_copy, 0) == -1);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, NULL) == -1);
     free(args_copy);
     assert(sqlite3_prepare_v2(db,
         "SELECT max_iterations FROM agents WHERE name='test'",
@@ -681,7 +687,7 @@ static void test_apply_rollback(void) {
         "\"grants\":{\"tools\":[\"web_fetch\"]},"
         "\"config\":{\"nonexistent_key_xyz\":\"boom\"}}}";
 
-    int rc = request_config_changes_apply(db, "test", bad_args, 0);
+    int rc = request_config_changes_apply(db, "test", bad_args, 0, NULL);
     assert(rc == -1); /* config_set fails for unregistered key */
 
     /* Verify the tool grant did NOT land (rollback). */
@@ -1012,7 +1018,7 @@ static void test_secret_bindings_section(void) {
     sqlite3_finalize(s);
 
     /* Apply mints both pairs, durably. */
-    assert(request_config_changes_apply(db, "test", args_copy, 0) == 0);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, NULL) == 0);
     free(args_copy);
     assert(sqlite3_prepare_v2(db,
         "SELECT COUNT(*) FROM secret_hosts WHERE secret_name='ALPACA_KEY'"

@@ -59,8 +59,10 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
     }
     buf_append_char(&b, '\n');
 
-    int rows = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW && rows < MAX_ROWS) {
+    int rows = 0, withheld = 0, truncated = 0;
+    int step_rc;
+    while ((step_rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        if (rows >= MAX_ROWS) { truncated = 1; break; }
         /* skip rows containing encrypted secret values */
         int has_secret = 0;
         for (int i = 0; i < col_count; i++) {
@@ -69,7 +71,7 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
                 if (val && strncmp(val, "enc:", 4) == 0) { has_secret = 1; break; }
             }
         }
-        if (has_secret) continue;
+        if (has_secret) { withheld++; continue; }
 
         for (int i = 0; i < col_count; i++) {
             const char *val;
@@ -95,6 +97,20 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
     }
 
     sqlite3_finalize(stmt);
+
+    /* Invisible truncation is a lie of omission — always say what was cut. */
+    if (truncated) {
+        char note[64];
+        snprintf(note, sizeof(note), "(truncated at %d rows)\n", MAX_ROWS);
+        buf_append(&b, note, strlen(note));
+    }
+    if (withheld) {
+        char note[80];
+        snprintf(note, sizeof(note),
+                 "(%d row%s withheld: encrypted secret values)\n",
+                 withheld, withheld == 1 ? "" : "s");
+        buf_append(&b, note, strlen(note));
+    }
 
     char *out = buf_take(&b);
     if (!out) return strdup("error: OOM");

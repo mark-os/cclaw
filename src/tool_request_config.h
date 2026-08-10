@@ -19,8 +19,11 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx);
  * approval args; the document lives at $.changes). Applies grants, config
  * values, and the provider upsert inside one savepoint — all-or-nothing.
  * Shared by apply_grant (main.c) and admin grant-from-history (admin_api.c).
- * Returns 0 iff every line applied. */
+ * Returns 0 iff every line applied. detail_out (nullable): malloc'd receipt —
+ * on success what is now in effect (verified by re-read), on failure which
+ * step failed. Caller frees. */
 int request_config_changes_apply(sqlite3 *db, const char *agent,
-                                 const char *args_json, int64_t expires_at);
+                                 const char *args_json, int64_t expires_at,
+                                 char **detail_out);
 
 #endif

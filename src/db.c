@@ -2732,6 +2732,19 @@ int db_recover_stale_sessions(sqlite3 *db) {
     /* c) Deny pending approvals for dead-owned sessions (their approver is
      * gone). Keyed on the dead-owner predicate directly — must precede the
      * reset, which would otherwise clear the stale state this selects on. */
+    /* Tell the session its parked request died with the daemon — a silently
+     * vanished approval leaves the agent believing it is still pending. The
+     * notice must be written before the deny flips state='pending'. */
+    const char *orphan_notice_sql =
+        "INSERT INTO inbox(session_id, source, payload)"
+        " SELECT a.session_id, 'approval',"
+        "        'Approval #'||a.id||' for '''||COALESCE(a.action,a.tool_name,'tool')"
+        "        ||''' was cancelled: the daemon restarted while it was pending."
+        "        Not a denial - re-request if the task still needs it.'"
+        " FROM approvals a WHERE a.state='pending'"
+        "   AND a.session_id IN (SELECT id FROM sessions WHERE " RECOVER_DEAD_OWNER ");";
+    if (sqlite3_exec(db, orphan_notice_sql, NULL, NULL, NULL) != SQLITE_OK)
+        goto rollback;
     const char *orphan_approvals_sql =
         "UPDATE approvals SET state='denied', decided_via='recovery'"
         " WHERE state='pending'"

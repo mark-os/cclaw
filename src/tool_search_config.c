@@ -23,26 +23,50 @@ static char *handler(const char *arguments, void *user_data) {
 
     Buf out = {0};
 
-    /* Section 1: current grants */
+    /* Section 0: the agent's own settings row — "what is my config now" must
+     * be answerable here (validate_agent's error refers agents to this tool).
+     * shell_path comes from the DB, not CCLAW_SHELL_PATH: the env var is
+     * process-global and holds whichever agent dispatched last. The env
+     * override, when set, applies to every agent equally, so show it. */
     sqlite3_stmt *st = NULL;
     int rc = sqlite3_prepare_v2(ctx->db,
+        "SELECT COALESCE(NULLIF(primary_model,''),'(system default)'),"
+        "       COALESCE(NULLIF(secondary_model,''),'(none)'),"
+        "       max_iterations, shell_timeout,"
+        "       COALESCE(NULLIF(?2,''),NULLIF(shell_path,''),'/bin/sh')"
+        " FROM agents WHERE name=?1", -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        const char *env_shell = getenv("CCLAW_SHELL_PATH");
+        sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, env_shell ? env_shell : "", -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            buf_appendf(&out,
+                "## Your settings (agent: %s)\n"
+                "primary_model: %s\n"
+                "secondary_model: %s\n"
+                "max_iterations: %lld\n"
+                "shell_timeout: %lld\n"
+                "shell_path: %s\n",
+                ctx->agent_name,
+                sqlite3_column_text(st, 0),
+                sqlite3_column_text(st, 1),
+                (long long)sqlite3_column_int64(st, 2),
+                (long long)sqlite3_column_int64(st, 3),
+                sqlite3_column_text(st, 4));
+        }
+        sqlite3_finalize(st);
+    }
+
+    /* Section 1: current grants */
+    rc = sqlite3_prepare_v2(ctx->db,
         "SELECT sandbox_profile FROM agents WHERE name=?1", -1, &st, NULL);
     if (rc == SQLITE_OK) {
         sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
-            const char *trust = (const char *)sqlite3_column_text(st, 0);
-            /* agent_setup.c re-resolves CCLAW_SHELL_PATH per tool dispatch
-             * (env override, else the agents.shell_path column) and exports
-             * it — reading it back here is the effective value as of the
-             * last dispatch, not a re-derivation. */
-            const char *shell_path = getenv("CCLAW_SHELL_PATH");
             buf_appendf(&out,
-                "## Your current grants (agent: %s)\n"
-                "sandbox_profile: %s\n"
-                "shell_path: %s\n",
-                ctx->agent_name,
-                trust ? trust : "(unknown)",
-                (shell_path && shell_path[0]) ? shell_path : "/bin/sh");
+                "\n## Your current grants (agent: %s)\n"
+                "sandbox_profile: %s\n",
+                ctx->agent_name, sqlite3_column_text(st, 0));
         }
         sqlite3_finalize(st);
     }
@@ -52,7 +76,8 @@ static char *handler(const char *arguments, void *user_data) {
     for (int ki = 0; ki < 4; ki++) {
         rc = sqlite3_prepare_v2(ctx->db,
             "SELECT COALESCE(group_concat(value, ', '), '(none)')"
-            " FROM grants WHERE agent_name=?1 AND kind=?2",
+            " FROM grants WHERE agent_name=?1 AND kind=?2"
+            " AND (expires_at IS NULL OR expires_at > unixepoch())",
             -1, &st, NULL);
         if (rc == SQLITE_OK) {
             sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
@@ -118,7 +143,63 @@ static char *handler(const char *arguments, void *user_data) {
         sqlite3_finalize(st);
     }
 
-    /* Section 2: tools list with grant status */
+    /* Providers: transport config only — endpoint + protocol, never key
+     * material (api_key_env is a secret NAME; the value stays encrypted). */
+    buf_appendf(&out, "\n## Providers\n");
+    rc = sqlite3_prepare_v2(ctx->db,
+        "SELECT name, endpoint_type, base_url,"
+        "       COALESCE(NULLIF(default_model,''),'(none)')"
+        " FROM providers ORDER BY name", -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        int any = 0;
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            any = 1;
+            buf_appendf(&out, "%s [%s] %s (default_model: %s)\n",
+                        sqlite3_column_text(st, 0), sqlite3_column_text(st, 1),
+                        sqlite3_column_text(st, 2), sqlite3_column_text(st, 3));
+        }
+        sqlite3_finalize(st);
+        if (!any) buf_appendf(&out, "(none)\n");
+    }
+
+    /* Registered models: the valid values for agent.primary_model. Marks the
+     * caller's active one so "what am I running" is a one-call lookup. */
+    buf_appendf(&out, "\n## Registered models\n");
+    rc = sqlite3_prepare_v2(ctx->db,
+        "SELECT m.id, m.status, COALESCE(m.context_window,0),"
+        "       (m.id=a.primary_model OR m.model=a.primary_model) AS is_primary,"
+        "       (m.id=a.secondary_model OR m.model=a.secondary_model) AS is_secondary"
+        " FROM models m, agents a"
+        " WHERE a.name=?2"
+        "   AND (?1 IS NULL OR m.id LIKE '%'||?1||'%')"
+        " ORDER BY m.priority, m.id", -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        int any = 0;
+        if (query)
+            sqlite3_bind_text(st, 1, query, -1, SQLITE_STATIC);
+        else
+            sqlite3_bind_null(st, 1);
+        sqlite3_bind_text(st, 2, ctx->agent_name, -1, SQLITE_STATIC);
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            any = 1;
+            long long cw = sqlite3_column_int64(st, 2);
+            buf_appendf(&out, "%s [%s]", sqlite3_column_text(st, 0),
+                        sqlite3_column_text(st, 1));
+            if (cw > 0) buf_appendf(&out, " ctx:%lld", cw);
+            if (sqlite3_column_int(st, 3)) buf_appendf(&out, " <- your primary");
+            if (sqlite3_column_int(st, 4)) buf_appendf(&out, " <- your secondary");
+            buf_appendf(&out, "\n");
+        }
+        sqlite3_finalize(st);
+        if (!any)
+            buf_appendf(&out, query ? "(no registered model matches the query)\n"
+                                    : "(none)\n");
+    }
+
+    /* Section 2: tools list with grant status. Scope like the system prompt's
+     * tool section (agent_config.c): disabled or other-agent tools are not
+     * requestable — showing them invites approvals on tools that can never
+     * load for this agent. */
     buf_appendf(&out, "\n## Tools you can use or request\n");
     rc = sqlite3_prepare_v2(ctx->db,
         "SELECT t.name, t.description,"
@@ -127,7 +208,8 @@ static char *handler(const char *arguments, void *user_data) {
         " FROM tools t"
         " LEFT JOIN grants g ON g.agent_name=?2 AND g.kind='tool' AND g.value=t.name"
         "      AND (g.expires_at IS NULL OR g.expires_at > unixepoch())"
-        " WHERE (?1 IS NULL OR t.name LIKE '%'||?1||'%' OR t.description LIKE '%'||?1||'%')"
+        " WHERE t.enabled=1 AND (t.agent_name IS NULL OR t.agent_name=?2)"
+        " AND (?1 IS NULL OR t.name LIKE '%'||?1||'%' OR t.description LIKE '%'||?1||'%')"
         " ORDER BY t.name", -1, &st, NULL);
     if (rc == SQLITE_OK) {
         if (query)

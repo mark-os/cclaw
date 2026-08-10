@@ -29,16 +29,20 @@ static void test_postwindow_outcomes(void) {
     /* One session per outcome to avoid inbox cross-contamination */
     struct {
         ApprovalPostWindow outcome;
+        const char *detail;
         const char *substr;
     } cases[] = {
-        { APPROVAL_PW_RERUN_APPROVED,  "re-issue" },
-        { APPROVAL_PW_RERUN_DENIED,    "denied"   },
-        { APPROVAL_PW_APPLY_GRANTED,   "granted"  },
-        { APPROVAL_PW_APPLY_DENIED,    "denied"   },
-        { APPROVAL_PW_EXPIRED,         "expired"  },
+        { APPROVAL_PW_RERUN_APPROVED, NULL,        "re-issue"        },
+        { APPROVAL_PW_RERUN_DENIED,   NULL,        "denied"          },
+        { APPROVAL_PW_APPLY_GRANTED,  NULL,        "granted"         },
+        { APPROVAL_PW_APPLY_GRANTED,  "2 lines",   "2 lines"         },
+        { APPROVAL_PW_APPLY_DENIED,   NULL,        "denied"          },
+        { APPROVAL_PW_APPLY_FAILED,   NULL,        "not a denial"    },
+        { APPROVAL_PW_APPLY_FAILED,   "bad row",   "bad row"         },
+        { APPROVAL_PW_EXPIRED,        NULL,        "expired"         },
     };
 
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 8; i++) {
         int64_t sid = session_create(db, "test", "bot", -1, 0);
         assert(sid > 0);
 
@@ -49,7 +53,8 @@ static void test_postwindow_outcomes(void) {
         Approval *a = approval_get_pending(db, sid);
         assert(a != NULL);
 
-        int64_t inbox_id = approval_deliver_postwindow(db, a, cases[i].outcome);
+        int64_t inbox_id = approval_deliver_postwindow(db, a, cases[i].outcome,
+                                                       cases[i].detail);
         assert(inbox_id > 0);
         approval_free(a);
 

@@ -323,9 +323,17 @@ int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
     if ((strcmp(kind, "read_path") == 0 || strcmp(kind, "write_path") == 0)
         && realpath(value, canon))
         value = canon;
+    /* An expired row is authority-dead but still occupies the PK, so a plain
+     * INSERT OR IGNORE would make re-granting a once-expired value impossible
+     * (observed: prod db_query, 2026-08-10). Revive expired rows; never touch
+     * a live one (a re-grant must not shorten an existing grant's life). */
     const char *sql =
-        "INSERT OR IGNORE INTO grants (agent_name, kind, value, expires_at)"
-        " VALUES (?1, ?2, ?3, ?4);";
+        "INSERT INTO grants (agent_name, kind, value, expires_at)"
+        " VALUES (?1, ?2, ?3, ?4)"
+        " ON CONFLICT(agent_name, kind, value) DO UPDATE SET"
+        "   expires_at=excluded.expires_at"
+        " WHERE grants.expires_at IS NOT NULL"
+        "   AND grants.expires_at <= unixepoch();";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
@@ -424,8 +432,13 @@ void agent_grant_defaults(sqlite3 *db, const char *agent) {
     char *list = config_get(db, "agent_default_tools");
     if (!list) return;
     const char *sql =
-        "INSERT OR IGNORE INTO grants (agent_name, kind, value, expires_at)"
-        " SELECT ?1, 'tool', value, NULL FROM json_each(?2);";
+        "INSERT INTO grants (agent_name, kind, value, expires_at)"
+        " SELECT ?1, 'tool', value, NULL FROM json_each(?2)"
+        " WHERE true"
+        " ON CONFLICT(agent_name, kind, value) DO UPDATE SET"
+        "   expires_at=NULL"
+        " WHERE grants.expires_at IS NOT NULL"
+        "   AND grants.expires_at <= unixepoch();";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);

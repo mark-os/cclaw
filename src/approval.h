@@ -112,14 +112,20 @@ typedef enum {
     APPROVAL_PW_RERUN_DENIED,
     APPROVAL_PW_APPLY_GRANTED,    /* capability grant applied by the caller */
     APPROVAL_PW_APPLY_DENIED,
+    APPROVAL_PW_APPLY_FAILED,     /* human approved, system apply failed —
+                                     NOT a denial; safe to re-request once */
     APPROVAL_PW_EXPIRED,
 } ApprovalPostWindow;
 
 /* Deliver a late (post-block-window) approval decision as a new inbox turn.
  * Pure delivery: composes the message from the approval + outcome and inserts
  * it into the session's inbox. Does NOT mutate session/tool_call state or apply
- * grants (the caller does that). Returns the inbox row id (>0) or -1. */
-int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPostWindow outcome);
+ * grants (the caller does that). Returns the inbox row id (>0) or -1.
+ * detail (nullable): appended to APPLY_GRANTED/APPLY_FAILED messages — the
+ * apply receipt or the failing step. */
+int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a,
+                                    ApprovalPostWindow outcome,
+                                    const char *detail);
 
 /* Render a human-readable markdown summary of an approval for the approver's
  * prompt — never the raw args_json blob. Returns a heap string, caller frees. */

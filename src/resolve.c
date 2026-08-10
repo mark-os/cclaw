@@ -40,14 +40,16 @@
  * grant_expires_at: 0 for a permanent grant, else a future unix timestamp
  * (--auto-approve path — see resolve.h). */
 static void apply_grant(const Approval *a, const char *agent, int *rename_failed,
-                        int64_t grant_expires_at) {
+                        int64_t grant_expires_at, char **detail) {
     *rename_failed = 0;
+    if (detail) *detail = NULL;
     if (strcmp(a->action, "request_changes") == 0) {
         /* One savepoint applies the whole document — grants, config values,
          * provider upsert (tool_request_config.c). Failure rolls everything
-         * back and surfaces as apply-denied, never a partial grant set. */
+         * back and surfaces as apply-failed, never a partial grant set.
+         * detail carries the receipt (success) or the failing step. */
         if (request_config_changes_apply(proc_db(), agent, a->args_json,
-                                         grant_expires_at) != 0) {
+                                         grant_expires_at, detail) != 0) {
             LOG_WARN_("request_changes apply failed");
             *rename_failed = 1; /* generic apply-failed: error result, no grant */
         }
@@ -170,19 +172,22 @@ static void resolve_approval_post_window(const Approval *a, const char *agent,
     if (is_apply) {
         if (approved && decision == APPROVAL_ALWAYS) {
             int rename_failed = 0;
-            apply_grant(a, agent, &rename_failed, grant_expires_at);
+            char *detail = NULL;
+            apply_grant(a, agent, &rename_failed, grant_expires_at, &detail);
             approval_deliver_postwindow(proc_db(), a,
-                rename_failed ? APPROVAL_PW_APPLY_DENIED : APPROVAL_PW_APPLY_GRANTED);
+                rename_failed ? APPROVAL_PW_APPLY_FAILED : APPROVAL_PW_APPLY_GRANTED,
+                detail);
+            free(detail);
         } else {
             approval_deliver_postwindow(proc_db(), a,
-                expired ? APPROVAL_PW_EXPIRED : APPROVAL_PW_APPLY_DENIED);
+                expired ? APPROVAL_PW_EXPIRED : APPROVAL_PW_APPLY_DENIED, NULL);
         }
     } else {
         if (approved)
-            approval_deliver_postwindow(proc_db(), a, APPROVAL_PW_RERUN_APPROVED);
+            approval_deliver_postwindow(proc_db(), a, APPROVAL_PW_RERUN_APPROVED, NULL);
         else
             approval_deliver_postwindow(proc_db(), a,
-                expired ? APPROVAL_PW_EXPIRED : APPROVAL_PW_RERUN_DENIED);
+                expired ? APPROVAL_PW_EXPIRED : APPROVAL_PW_RERUN_DENIED, NULL);
     }
 }
 
@@ -264,21 +269,29 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
     }
 
     int rename_failed = 0;
+    char *apply_detail = NULL;
     if (decision == APPROVAL_ALWAYS)
-        apply_grant(a, agent, &rename_failed, grant_expires_at);
+        apply_grant(a, agent, &rename_failed, grant_expires_at, &apply_detail);
 
-    /* Build tool result message */
-    char result_buf[256];
+    /* Build tool result message. Receipts over intent: on apply the detail is
+     * what is now in effect (re-read from the DB); on failure it names the
+     * failing step — approved-then-failed must never read as a denial. */
+    char result_buf[768];
     if (rename_failed)
-        snprintf(result_buf, sizeof(result_buf), "error: %s failed, rolled back",
-                 a->action ? a->action : "apply");
+        snprintf(result_buf, sizeof(result_buf),
+                 "error: %s was approved but applying it failed (%s) — "
+                 "everything rolled back. System error, not a denial: "
+                 "re-request once; if it fails again, tell the operator.",
+                 a->action ? a->action : "apply",
+                 apply_detail ? apply_detail : "see daemon log");
     else if (decision == APPROVAL_ALWAYS && a->action &&
              strcmp(a->action, "extension_promote") == 0)
         snprintf(result_buf, sizeof(result_buf),
                  "approved: extension_promote — registered; its tools are "
                  "granted to you and callable immediately");
     else if (decision == APPROVAL_ALWAYS)
-        snprintf(result_buf, sizeof(result_buf), "approved: %s", a->action);
+        snprintf(result_buf, sizeof(result_buf), "approved: %s%s%s", a->action,
+                 apply_detail ? " — " : "", apply_detail ? apply_detail : "");
     else
         snprintf(result_buf, sizeof(result_buf), "denied (%s): %s",
                  decided_via, a->action);
@@ -292,6 +305,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
         db_tool_call_set_status(proc_db(), session_id, a->tool_call_id, "done", decided_via);
     }
 
+    free(apply_detail);
     session_set_state(proc_db(), session_id, "tool_running");
     free((char *)agent);
     approval_free(a);

@@ -14,6 +14,7 @@
 #include "validate.h"
 #include "tool_args.h"
 #include <errno.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -913,8 +914,22 @@ static char *handler(const char *arguments, void *user_data) {
 
 /* ── apply (shared by main.c apply_grant and admin grant-from-history) ── */
 
+/* Set *detail_out (if wanted) to a malloc'd copy of msg — first failure wins,
+ * so the reported step is the one that actually tripped the rollback. */
+static void apply_detail(char **detail_out, const char *fmt, ...) {
+    if (!detail_out || *detail_out) return;
+    va_list ap;
+    va_start(ap, fmt);
+    char buf[512];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    *detail_out = strdup(buf);
+}
+
 int request_config_changes_apply(sqlite3 *db, const char *agent,
-                                 const char *args_json, int64_t expires_at) {
+                                 const char *args_json, int64_t expires_at,
+                                 char **detail_out) {
+    if (detail_out) *detail_out = NULL;
     if (!db || !agent || !args_json) return -1;
 
     /* Collect every line first, write after — never write inside an open
@@ -973,6 +988,8 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             if (lrc != 0) {
                 LOG_WARN_("request_changes apply failed %s=%s",
                           lines[i].kind, lines[i].value);
+                apply_detail(detail_out, "failed applying %s '%s'",
+                             lines[i].kind, lines[i].value);
                 rc = -1;
             }
         }
@@ -1000,6 +1017,7 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             } else {
                 rc = -1;
             }
+            if (rc != 0) apply_detail(detail_out, "failed defining provider");
         }
         /* Seed the provider's default model into `models` (id = model@name,
          * lowest routing priority). Per-request routing joins models →
@@ -1024,6 +1042,7 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             } else {
                 rc = -1;
             }
+            if (rc != 0) apply_detail(detail_out, "failed registering model");
         }
         /* Self-scoped agent settings — whitelisted columns on the caller's
          * own agents row; absent keys keep their current values. */
@@ -1042,9 +1061,21 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                 sqlite3_bind_text(as, 2, agent, -1, SQLITE_STATIC);
                 if (sqlite3_step(as) != SQLITE_DONE) rc = -1;
                 sqlite3_finalize(as);
+                /* A 0-row UPDATE means the agents row vanished between park
+                 * and apply (rename/delete) — success would be a lie. Only
+                 * checked when the document carries an agent section. */
+                if (rc == 0 && sqlite3_changes(db) == 0 &&
+                    q1_true(db, "SELECT 1 WHERE json_type(?1,'$.changes.agent')"
+                                "='object'", args_json)) {
+                    apply_detail(detail_out,
+                                 "agent row '%s' not found (renamed or "
+                                 "deleted since the request parked)", agent);
+                    rc = -1;
+                }
             } else {
                 rc = -1;
             }
+            if (rc != 0) apply_detail(detail_out, "failed updating agent settings");
         }
         /* Routes: first-come ownership. A route captured by another agent
          * between park and apply fails the whole document (savepoint). The
@@ -1054,9 +1085,13 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             int owned = route_owned_elsewhere(db, args_json, "$.changes.routes",
                                               agent, NULL);
             if (owned != 0) {
-                if (owned > 0)
+                if (owned > 0) {
                     LOG_WARN_("request_changes apply: route already owned "
                               "by another agent (agent=%s)", agent);
+                    apply_detail(detail_out,
+                                 "a requested route is already owned by "
+                                 "another agent");
+                }
                 rc = -1;
             }
         }
@@ -1108,11 +1143,52 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                 rc = -1;
             }
         }
-        if (rc == 0)
+        if (rc == 0) {
             sqlite3_exec(db, "RELEASE req_changes", NULL, NULL, NULL);
-        else
+            /* Verify-after-write receipt: report what is NOW in effect from a
+             * re-read, never from intent — the agent should not have to trust
+             * its own request (or assert success unchecked, as observed). */
+            if (detail_out) {
+                sqlite3_stmt *rs;
+                const char *rsql =
+                    "SELECT trim(rtrim("
+                    "  CASE WHEN ?3 > 0 THEN ?3||' grant/config line'"
+                    "       ||(CASE WHEN ?3=1 THEN '' ELSE 's' END)"
+                    "       ||' applied; ' ELSE '' END"
+                    "  || CASE WHEN json_extract(?1,'$.changes.provider.provider')"
+                    "          IS NOT NULL THEN 'provider '''"
+                    "       ||json_extract(?1,'$.changes.provider.provider')"
+                    "       ||''' defined; ' ELSE '' END"
+                    "  || CASE WHEN json_extract(?1,'$.changes.provider.model')"
+                    "          IS NOT NULL THEN 'model '''"
+                    "       ||json_extract(?1,'$.changes.provider.model')||'@'"
+                    "       ||json_extract(?1,'$.changes.provider.provider')"
+                    "       ||''' registered; ' ELSE '' END"
+                    "  || CASE WHEN json_type(?1,'$.changes.agent')='object'"
+                    "       THEN (SELECT 'your settings now: primary_model='"
+                    "               ||COALESCE(NULLIF(primary_model,''),'(default)')"
+                    "               ||', max_iterations='||max_iterations"
+                    "             FROM agents WHERE name=?2)||'; ' ELSE '' END"
+                    "  || CASE WHEN json_array_length(?1,'$.changes.routes') > 0"
+                    "       THEN json_array_length(?1,'$.changes.routes')"
+                    "            ||' route(s) bound; ' ELSE '' END"
+                    ", '; '))";
+                if (sqlite3_prepare_v2(db, rsql, -1, &rs, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(rs, 1, args_json, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(rs, 2, agent, -1, SQLITE_STATIC);
+                    sqlite3_bind_int64(rs, 3, (int64_t)n);
+                    if (sqlite3_step(rs) == SQLITE_ROW) {
+                        const char *v = (const char *)sqlite3_column_text(rs, 0);
+                        if (v && v[0]) *detail_out = strdup(v);
+                    }
+                    sqlite3_finalize(rs);
+                }
+            }
+        } else {
             sqlite3_exec(db, "ROLLBACK TO req_changes; RELEASE req_changes",
                          NULL, NULL, NULL);
+            apply_detail(detail_out, "apply failed (see daemon log)");
+        }
     }
 
     for (size_t i = 0; i < n; i++) { free(lines[i].kind); free(lines[i].value); }

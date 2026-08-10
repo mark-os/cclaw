@@ -413,7 +413,9 @@ int64_t *approval_list_block_due(sqlite3 *db, int block_sec, const char *me, int
     return drain_ids(stmt, out_count);
 }
 
-int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPostWindow outcome) {
+int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a,
+                                    ApprovalPostWindow outcome,
+                                    const char *detail) {
     if (!a) return -1;
     const char *what = a->action ? a->action : (a->tool_name ? a->tool_name : "tool");
     /* Denied/expired messages carry the next-step norm — the moment the model
@@ -448,8 +450,20 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPost
                  (long long)a->id, what);
         break;
     case APPROVAL_PW_APPLY_GRANTED:
-        snprintf(buf, sizeof(buf), "Approval #%lld granted: %s applied.",
-                 (long long)a->id, what);
+        snprintf(buf, sizeof(buf), "Approval #%lld granted: %s applied.%s%s",
+                 (long long)a->id, what,
+                 detail ? " " : "", detail ? detail : "");
+        break;
+    case APPROVAL_PW_APPLY_FAILED:
+        /* The human said yes; the system failed. Conflating this with a
+         * denial ("don't re-request") teaches exactly the wrong norm. */
+        snprintf(buf, sizeof(buf),
+                 "Approval #%lld for '%s' was approved, but applying it "
+                 "failed and everything was rolled back%s%s. This is a "
+                 "system error, not a denial — re-request once; if it fails "
+                 "again, tell the operator instead of retrying.",
+                 (long long)a->id, what,
+                 detail ? ": " : "", detail ? detail : "");
         break;
     case APPROVAL_PW_APPLY_DENIED:
         snprintf(buf, sizeof(buf),

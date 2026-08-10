@@ -130,7 +130,8 @@ static int should_notify_deferred(int64_t session_id) {
         " AND NOT EXISTS(SELECT 1 FROM channel_outbox o"
         "   WHERE o.session_id=s.id AND o.created_at>=e.created_at"
         "     AND (json_extract(o.payload,'$.text') LIKE 'rate limited:%'"
-        "       OR json_extract(o.payload,'$.text') LIKE 'budget limit:%')))",
+        "       OR json_extract(o.payload,'$.text') LIKE 'budget limit:%'"
+        "       OR json_extract(o.payload,'$.text') LIKE 'disk low:%')))",
         session_id, 0);
 }
 
@@ -144,16 +145,23 @@ int dispatch_llm_req(int64_t session_id, const char *agent_name, int iteration) 
 
     if (!llm_worker_alive()) return -1;
 
-    if (iteration >= session_max_iter(session_id)) {
+    int max_iter = session_max_iter(session_id);
+    if (iteration >= max_iter) {
         /* The advance_session check normally catches this; this is a fallback.
-         * Use a simple message — the main path in advance.c builds the rich one. */
+         * Simpler than advance.c's rich message, but it still carries the
+         * norm: the limit, cut-mid-flight, and that continuing is legal. */
+        char cut[256];
+        snprintf(cut, sizeof(cut),
+                 "error: iteration limit reached (%d per turn) — work was cut"
+                 " mid-flight, not finished. Continuing where you left off"
+                 " next turn is legal and expected.", max_iter);
         Message msg = {.role = ROLE_ASSISTANT,
-                       .content = "error: max iterations reached",
+                       .content = cut,
                        .stop_reason = STOP_REASON_ERROR};
         entry_append_with_iteration(proc_db(), session_id, &msg, 0);
         session_set_state(proc_db(), session_id, "idle");
         if (!proc_is_daemon()) {
-            fprintf(stderr, "\nerror: max iterations reached\n");
+            fprintf(stderr, "\n%s\n", cut);
             proc_set_cli_turn_active(0);
         }
         return -1;
@@ -200,6 +208,11 @@ int dispatch_llm_req(int64_t session_id, const char *agent_name, int iteration) 
             LOG_WARN_("disk_low free_mb=%ld floor_mb=%d deferring llm dispatch",
                       free_mb, disk_floor_mb);
             session_set_state(proc_db(), session_id, "idle");
+            if (should_notify_deferred(session_id))
+                notify_deferred(session_id,
+                    "disk low: free space is under the safety floor — your"
+                    " message is queued and will be answered once space frees"
+                    " up; the operator may need to clear disk");
             return -1;
         }
     }
@@ -329,6 +342,25 @@ static void wire_params_interpolate(ToolWireArg *params, size_t n,
         char *ip = secret_interpolate(params[i].value, secrets, count);
         if (ip) { free(params[i].value); params[i].value = ip; }
     }
+}
+
+/* First {{SECRET:name}} placeholder in args naming no loaded secret, or NULL.
+ * Caller frees. A typo'd name used to interpolate to nothing and sail on —
+ * an auth failure attributed to everything except the actual cause. */
+static char *unknown_secret_name(const char *args,
+                                 const ShellSecret *secrets, size_t count) {
+    size_t n = 0;
+    char **names = secret_placeholder_names(args, &n);
+    if (!names) return NULL;
+    char *miss = NULL;
+    for (size_t i = 0; i < n && !miss; i++) {
+        int loaded = 0;
+        for (size_t j = 0; j < count; j++)
+            if (strcmp(names[i], secrets[j].name) == 0) { loaded = 1; break; }
+        if (!loaded) miss = strdup(names[i]);
+    }
+    secret_names_free(names, n);
+    return miss;
 }
 
 /* Per-call egress state for one network-tier dispatch (specs/trust.md):
@@ -1025,6 +1057,26 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         if (g != 0) return g;
     }
 
+    /* {{SECRET:name}} gate: every path below interpolates placeholders into
+     * this call's values (inline needs_interp tools and all sandbox tiers).
+     * A name that matches no loaded secret is a hard error naming the typo —
+     * never an enumeration of what does exist (see search_config
+     * secret_bindings for that, through the sanctioned surface). */
+    if ((tool_needs_interpolation(tc->name) ||
+         te->recipe.vehicle == EXEC_SANDBOX) &&
+        tc->arguments && strstr(tc->arguments, "{{SECRET:")) {
+        char *miss = unknown_secret_name(tc->arguments, secrets, secret_count);
+        if (miss) {
+            char err[256];
+            snprintf(err, sizeof(err),
+                     "error: {{SECRET:%s}} names no known secret — check the "
+                     "spelling; search_config's secret_bindings section lists "
+                     "the known names", miss);
+            free(miss);
+            return tool_inline_error(session_id, tc, err, "unknown_secret");
+        }
+    }
+
     if (te->recipe.vehicle == EXEC_INLINE)
         return dispatch_inline(session_id, agent_name, tc, te,
                                secrets, secret_count);
@@ -1503,6 +1555,8 @@ CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len)
 
 /* ── child_sweep_deadlines: kill timed-out children ──────────── */
 
+static char *child_output_finalize(ChildProc *c, int status, char **hosts_out);
+
 void child_sweep_deadlines(void) {
     time_t now = time(NULL);
     for (int i = 0; i < child_count(); i++) {
@@ -1511,16 +1565,34 @@ void child_sweep_deadlines(void) {
             continue;
         kill(c->pid, SIGKILL);
         if (c->type == CHILD_TOOL_EXEC) {
-            if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
-            free(c->outbuf); c->outbuf = NULL; c->outbuf_len = 0;
-            char errbuf[64];
-            snprintf(errbuf, sizeof(errbuf), "error: tool timed out (%ds)",
-                     c->timeout_sec > 0 ? c->timeout_sec : 120);
-            ToolResult tr = {.tool_call_id = c->tool_call_id, .content = errbuf};
+            /* Mirror the broker's own timeout treatment: keep whatever
+             * partial output already crossed the pipe, and name the tool —
+             * "which call died, and what had it said" is the debugging
+             * trail the model gets. child_output_finalize runs the full
+             * sanitize pipeline (drain, unicode strip, capture, secret
+             * scan) — partial output must not skip it. Status 0: the child
+             * isn't reaped yet, and we don't want a synthesized crash line. */
+            char *hosts = NULL;
+            char *partial = child_output_finalize(c, 0, &hosts);
+            size_t plen = partial ? strlen(partial) : 0;
+            char *errbuf = malloc(plen + 128);
+            if (errbuf) {
+                int hl = snprintf(errbuf, 128,
+                         "error: tool timed out (%ds; raise with the timeout"
+                         " parameter)", c->timeout_sec > 0 ? c->timeout_sec : 120);
+                if (plen > 0) {
+                    errbuf[hl] = '\n';
+                    memcpy(errbuf + hl + 1, partial, plen + 1);
+                }
+            }
+            free(partial);
+            ToolResult tr = {.tool_call_id = c->tool_call_id,
+                             .content = errbuf ? errbuf : "error: tool timed out"};
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
-                           .tool_name = "", .is_error = 1};
+                           .tool_name = c->tool_name, .is_error = 1};
             entry_append_with_iteration(proc_db(), c->session_id, &msg, c->iteration_id);
             db_tool_call_complete_with_result(proc_db(), c->entry_id, c->tool_call_id, -1);
+            free(errbuf);
         } else if (c->type == CHILD_CRON_SCRIPT) {
             if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
             free(c->outbuf); c->outbuf = NULL; c->outbuf_len = 0;

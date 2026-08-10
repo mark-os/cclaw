@@ -273,16 +273,30 @@ char *tool_check_session_handler(const char *arguments, void *user_data) {
         }
     }
 
-    size_t needed = 128 + (result ? strlen(result) : 0);
+    /* One-line gloss per raw state: the reader is a model deciding what to
+     * do next, so say whether there is anything for it to do. */
+    const char *gloss = "";
+    if (strcmp(state_buf, "idle") == 0)
+        gloss = " (finished — result below if it produced one)";
+    else if (strcmp(state_buf, "llm_running") == 0)
+        gloss = " (thinking — mid-request, just wait)";
+    else if (strcmp(state_buf, "tool_running") == 0)
+        gloss = " (running tools — working, just wait)";
+    else if (strcmp(state_buf, "awaiting_approval") == 0)
+        gloss = " (stuck on a human decision — nothing for you to do)";
+    else if (strcmp(state_buf, "rate_limited") == 0)
+        gloss = " (paused by a rate/budget limit — resumes on its own)";
+
+    size_t needed = 192 + (result ? strlen(result) : 0);
     char *out = malloc(needed);
     if (!out) { free(result); return strdup("error: OOM"); }
     if (result) {
-        snprintf(out, needed, "session_id: %lld\nstate: %s\nresult: %s",
-                 (long long)child_sid, state_buf, result);
+        snprintf(out, needed, "session_id: %lld\nstate: %s%s\nresult: %s",
+                 (long long)child_sid, state_buf, gloss, result);
         free(result);
     } else {
-        snprintf(out, needed, "session_id: %lld\nstate: %s",
-                 (long long)child_sid, state_buf);
+        snprintf(out, needed, "session_id: %lld\nstate: %s%s",
+                 (long long)child_sid, state_buf, gloss);
     }
     return out;
 }

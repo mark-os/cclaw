@@ -453,7 +453,11 @@ static void sandbox_child_main(const TierDescriptor *desc, RunToolParsed *q,
         build_sandbox_cfg(q, desc->skip_pid_ns, psock, &cfg, &extra, &n_extra);
 
         if (sandbox_child_setup(&cfg) != 0) {
-            fprintf(stderr, "error: namespace sandbox failed\n");
+            fprintf(stderr, "error: the namespace sandbox could not be "
+                    "established on this host, so the tool refused to run "
+                    "(fail-closed). This is an environment problem, not "
+                    "something you can fix — report it to the operator; "
+                    "retrying will not help\n");
             _exit(126);
         }
     }
@@ -710,7 +714,10 @@ int run_tool_main(void) {
         build_sandbox_cfg(&q, desc->skip_pid_ns, NULL, &cfg, &extra, &n_extra);
 
         if (sandbox_child_setup(&cfg) != 0)
-            die("error: namespace sandbox setup failed");
+            die("error: the namespace sandbox could not be established on "
+                "this host, so the tool refused to run (fail-closed). This "
+                "is an environment problem, not something you can fix — "
+                "report it to the operator; retrying will not help");
     }
 
     char *result = desc->run_fn(&q);

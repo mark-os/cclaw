@@ -216,8 +216,23 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
         /* ── "rerun": the frozen tool_call proceeds on approval. ── */
         if (decision == APPROVAL_DENY) {
             if (a->tool_call_id) {
-                char buf[160];
-                snprintf(buf, sizeof(buf), "error: %s denied (%s)", a->action, decided_via);
+                /* Same next-step norm as the post-window notice, and never
+                 * the raw decided_via token — "auto:expired" means nobody
+                 * decided, which is not a denial. */
+                int expired = decided_via && strcmp(decided_via, "auto:expired") == 0;
+                char buf[288];
+                if (expired)
+                    snprintf(buf, sizeof(buf),
+                             "error: approval for %s expired without a decision "
+                             "— the operator may not have seen it. Not a denial "
+                             "— re-request only if the task still needs it, and "
+                             "mention that it expired.", a->action);
+                else
+                    snprintf(buf, sizeof(buf),
+                             "error: %s denied. Don't re-request the same thing "
+                             "— adjust your approach, or explain what you were "
+                             "trying to do and let the operator decide.",
+                             a->action);
                 ToolResult tr = { .tool_call_id = a->tool_call_id, .content = buf };
                 Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                                 .tool_name = a->action, .is_error = 1 };

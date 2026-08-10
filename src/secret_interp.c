@@ -289,11 +289,16 @@ char *tool_result_postprocess(const char *result, const ShellSecret *secrets, si
         }
         memcpy(scanned, to_scan, len + 1);
         secret_scan_redact(scanned, &len, cap);
+        /* The hint is the sanctioned path out of the redaction — it must
+         * ALWAYS land, even if the redaction pass grew the text to cap. */
         size_t hlen = sizeof(SCAN_REDACT_HINT) - 1;
-        if (len + hlen < cap) {
-            memcpy(scanned + len, SCAN_REDACT_HINT, hlen + 1);
-            len += hlen;
+        if (len + hlen >= cap) {
+            char *grown = realloc(scanned, len + hlen + 1);
+            if (grown) scanned = grown;
+            else scanned[len = cap > hlen + 1 ? cap - hlen - 1 : 0] = '\0';
         }
+        memcpy(scanned + len, SCAN_REDACT_HINT, hlen + 1);
+        len += hlen;
         free(cur);
         return scanned;
     }

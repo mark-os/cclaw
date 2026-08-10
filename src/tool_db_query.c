@@ -126,7 +126,10 @@ static char *db_query_thread_run(sqlite3 *db, const char *agent_name,
 
 int tool_db_query_register(ToolRegistry *reg, sqlite3 *db) {
     int rc = tools_register(reg, "db_query",
-                          "Execute read-only SQL (SELECT only) against cclaw.db",
+                          "Execute read-only SQL (SELECT only) against cclaw.db. "
+                          "Tables you may find useful: approvals (your parked/decided "
+                          "requests), inbox (queued events), tool_calls (per-call "
+                          "status), cron_jobs, entries (session transcript).",
                           DB_QUERY_PARAMS_JSON, tool_db_query_handler, db);
     if (rc == 0)
         tools_set_recipe(reg, "db_query",

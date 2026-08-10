@@ -16,10 +16,24 @@ static AdvanceOutput make_output(AdvanceResult action, int64_t sid,
     return out;
 }
 
+/* The cutoff notice must carry the norm at the moment it matters: the limit
+ * that fired, that work was cut mid-flight (not finished, not denied), and
+ * that picking it back up next turn is legal. */
+#define MAX_ITER_NOTICE_FMT \
+    "error: iteration limit reached (%d per turn) — work was cut mid-flight," \
+    " not finished. Continuing where you left off next turn is legal and" \
+    " expected."
+
+static char *max_iter_notice(int max_iterations) {
+    char buf[256];
+    snprintf(buf, sizeof(buf), MAX_ITER_NOTICE_FMT, max_iterations);
+    return strdup(buf);
+}
+
 /* Build a richer max-iterations error message by concatenating the last few
  * substantive assistant content blocks (tool_use responses with real text)
  * before appending the error notice. Returns heap-allocated string. */
-static char *rich_max_iter_message(sqlite3 *db, int64_t session_id) {
+static char *rich_max_iter_message(sqlite3 *db, int64_t session_id, int max_iterations) {
     /* Walk recent assistant entries with content, stop_reason=tool_use (3) */
     const char *sql =
         "WITH RECURSIVE branch(id, parent_id, role, stop_reason, content, lvl) AS ("
@@ -33,7 +47,7 @@ static char *rich_max_iter_message(sqlite3 *db, int64_t session_id) {
         "  ORDER BY lvl ASC LIMIT 3;";
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK)
-        return strdup("error: max iterations reached");
+        return max_iter_notice(max_iterations);
     sqlite3_bind_int64(s, 1, session_id);
 
     /* Collect up to 3 chunks */
@@ -45,12 +59,13 @@ static char *rich_max_iter_message(sqlite3 *db, int64_t session_id) {
     }
     sqlite3_finalize(s);
 
-    if (n == 0) return strdup("error: max iterations reached");
+    if (n == 0) return max_iter_notice(max_iterations);
 
     /* Concatenate oldest→newest (the branch walk collects leaf-first, so
      * iterate chunks in reverse): chunk3\n\n---\n\nchunk2\n\n---\n\n...error */
     const char *sep = "\n\n---\n\n";
-    const char *tail = "\n\n---\n\nerror: max iterations reached";
+    char tail[280];
+    snprintf(tail, sizeof(tail), "\n\n---\n\n" MAX_ITER_NOTICE_FMT, max_iterations);
     size_t len = strlen(tail) + 1;
     for (int i = 0; i < n; i++)
         len += strlen(chunks[i]) + (i > 0 ? strlen(sep) : 0);
@@ -58,7 +73,7 @@ static char *rich_max_iter_message(sqlite3 *db, int64_t session_id) {
     char *buf = malloc(len);
     if (!buf) {
         for (int i = 0; i < n; i++) free(chunks[i]);
-        return strdup("error: max iterations reached");
+        return max_iter_notice(max_iterations);
     }
     buf[0] = '\0';
     for (int i = n - 1; i >= 0; i--) {
@@ -1132,7 +1147,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         if (new_iter >= max_iterations) {
             /* Hit iteration cap */
             LOG_INFO_("advance state=tool_running next=idle reason=max_iterations iter=%d max=%d", new_iter, max_iterations);
-            char *rich_msg = rich_max_iter_message(db, session_id);
+            char *rich_msg = rich_max_iter_message(db, session_id, max_iterations);
             Message msg = { .role = ROLE_ASSISTANT,
                             .content = rich_msg,
                             .stop_reason = STOP_REASON_ERROR };

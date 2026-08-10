@@ -5,6 +5,7 @@
 #include "log.h"
 #include "tool_args.h"
 #include "wake.h"
+#include "channel_api.h"
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -811,14 +812,22 @@ static void pause_job(sqlite3 *db, const DueJob *j, const char *detail) {
               (long long)j->id, j->name ? j->name : "", CRON_FAIL_STREAK);
     int64_t owner = recent_session(db, j->agent_name);
     if (owner == 0) return;
+    /* Two audiences, two notices: the agent gets the recipe it can actually
+     * execute (fix + re-set the job); the CLI --doctor pointer is operator
+     * advice and goes to the session's channel chat instead. */
     char text[768];
     snprintf(text, sizeof(text),
              "cron job '%s' is paused: %d consecutive fires failed. Last error: %s. "
-             "Fix it and set the job again with the same name to re-enable it; "
-             "'cclaw --doctor' lists paused jobs.",
+             "Fix it and set the job again with the same name to re-enable it.",
              j->name ? j->name : "?", CRON_FAIL_STREAK,
              (detail && detail[0]) ? detail : "(none recorded)");
     inbox_insert(db, owner, "system", NULL, text);
+    char op_text[256];
+    snprintf(op_text, sizeof(op_text),
+             "⚠ cron job '%s' auto-paused after %d consecutive failures — "
+             "'cclaw --doctor' lists paused jobs.",
+             j->name ? j->name : "?", CRON_FAIL_STREAK);
+    channel_notify_session(db, sqlite3_db_filename(db, "main"), owner, op_text);
     wake_session(owner);
 }
 

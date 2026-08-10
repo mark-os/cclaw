@@ -104,8 +104,11 @@ its tools, channels already resolve by `extension_name`, and a second config
 store is parallel state that can drift from the first. For a genuinely
 per-tool knob, the documented *convention* is a key named
 `<ext>.<toolname>.<key>` — a naming discipline inside the one table, not a
-second mechanism. (The gap today is the accessor: `getConfig` is bound on the
-channel host object only; binding it on the tool JS surface is BACKLOG.)
+second mechanism. (The accessor exists on both surfaces: `channel.getConfig`
+for channel JS, and a global `getConfig` in the tool/js_eval environment —
+bound unconditionally by `qjs_register_eval_host_functions`,
+src/qjs_host_eval.c, with the extension's non-secret config resolved
+parent-side and the `<ext>.` prefix stripped.)
 
 **A manifest may supply a bound's value, but never a value that unpins the
 bound.** Wildcards and zero-meaning-unlimited are not values of a constraint,
@@ -335,7 +338,8 @@ context (no `Promise`). Globals available to tool handlers (the
 
 | Global | Description |
 |--------|-------------|
-| `http_request(req)` | Blocking HTTP (host-allowlisted). Returns `{status, body}`. External bodies are boundary-wrapped. |
+| `http_request(url[, opts])` | Blocking HTTP (host-allowlisted). `opts`: `{method, body, headers: {Name: Value}, markdownify}`. Returns `{status, body}`; on transport failure `{status: -1, body: "", error}` (never throws; `body` is always a string). `markdownify: true` converts an HTML body to markdown — a rendering aid, not a security boundary (untrusted-content wrapping happens at storage time via the entry's `network_hosts` tag). |
+| `getConfig(key)` | The owning extension's `config[]` value (registry key `<ext>.<key>`, prefix stripped) — string or `null`, read-only. Secret keys are excluded; config values are resolved parent-side and `{{SECRET:NAME}}` tokens in them arrive interpolated. Always bound (empty object for `js_eval`). |
 | `fs.readFile/writeFile/readdir/stat/lstat/cwd` (+ `…Sync` aliases) | Workspace-scoped filesystem. |
 | `console.log/warn/error`, `print` | Buffered; emitted as the result when the handler returns `undefined`. |
 
@@ -356,7 +360,7 @@ returns a JSON object of **commands** that C validates and applies — see
 | `postAdvance` | `fn(input) → cmds\|void` | `transform_content` (rewrites the assistant entry; first original kept in `data.original_content`), `annotate` (merges into `data`) | Chained; later hooks see the transformed `input.content`. Last transform wins, annotate merges. |
 | `beforeToolCall` | `fn({name, args}) → {deny\|ask, reason}\|void` | restrict-only gate | Most-restrictive across hooks wins; a hook can veto, never authorize. |
 | `afterToolCall` | `fn({name, args, result}) → {result, annotate}\|void` | result replacement + `annotate` | Chained; each sees the previous result. Runs after the secret scanner, before the entry write. |
-| `turnStart` / `turnEnd` | `fn()` | — | Declared, not yet dispatched. |
+| `turnStart` / `turnEnd` | `fn()` | — | Design headroom only — not dispatched, and the manifest validator **rejects** manifests declaring them (`check_hook_events`, src/extension_manifest.c). |
 
 Deferred for now: `inject_next` and `notify` (postAdvance commands), and the
 `db.query`/`kv`/`console.log` hook globals — hooks act on their `input` JSON only.

@@ -35,7 +35,7 @@ stores only definitions and paths.
       "parameters": { "type": "object", "properties": { "city": {"type": "string"} } },
       "handler": "tools/weather.qjs" }
   ],
-  "hooks":   [ { "event": "session_start", "handler": "hooks/hello.qjs" } ],
+  "hooks":   [ { "event": "preAdvance", "handler": "hooks/context.qjs" } ],
   "skills":  [ "skills/my-skill" ],
   "scripts": [ { "name": "cleanup", "handler": "scripts/cleanup.qjs" } ],
   "config":  [ { "key": "api_base", "default": "https://…", "description": "…",
@@ -45,20 +45,28 @@ stores only definitions and paths.
 }
 ```
 
-All handler paths are bundle-relative; no `..`, no absolute paths. `config[]`
+All handler paths are bundle-relative; no `..`, no absolute paths. Hook events
+must be one of `preAdvance`, `postAdvance`, `beforeToolCall`, `afterToolCall` —
+the manifest validator rejects anything else (there is no `session_start` or
+`turnStart` event). `config[]`
 keys register as `<name>.<key>` in the config registry. `agents[]` entries use
 the agent-definition schema (see the cclaw-agents skill); an entry whose name
 already exists is skipped, never overwritten.
 
 ## Handler contract (QuickJS)
 
-Tool handlers are ES5-ish QuickJS scripts run in a sandboxed engine. A tool
-handler file defines `function handle(args)` and returns a string (the tool
-result). No Node APIs, no `require`; use the provided host bridges:
+Tool handlers are modern (ES2023-class) QuickJS scripts run in a sandboxed
+engine. The handler file is evaluated as a **function body** with the call's
+parsed arguments in scope as `args` — roughly `(function(args){ <file> })(args)`
+— so `return` your result string from the top level (a bare trailing expression
+evaluates to `undefined`). If nothing is returned, buffered `console.log`
+output becomes the result. No Node APIs, no `require`/`import`, no event loop;
+use the provided host bridges:
 
 - `http_request(url[, {method, body, headers:{Name:Value}, markdownify}])` —
-  synchronous HTTP, returns `{status, body, error}` (`body` is always a
-  string, `""` on transport failure). `markdownify: true` converts an HTML
+  synchronous HTTP, returns `{status, body}`; on transport failure it returns
+  `{status: -1, body: "", error}` instead of throwing (`body` is always a
+  string). `markdownify: true` converts an HTML
   body to markdown for readability — it is a rendering aid, not a security
   boundary (untrusted-content wrapping happens at storage time regardless).
 - `fs.readFile` / `fs.writeFile` / `fs.readdir` / `fs.stat` / `fs.cwd` —

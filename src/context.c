@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "context.h"
+#include "run_tool.h"
 #include "config.h"
 #include "db.h"
 #include "http.h"
@@ -13,8 +14,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define TRUNCATE_MAX_BYTES  (50 * 1024)
-#define TRUNCATE_MAX_LINES  2000
+/* Shared with the sandboxed child, which applies the same cut before its
+ * result crosses the wire — see RUNTOOL_RESULT_MAX. */
+#define TRUNCATE_MAX_BYTES  RUNTOOL_RESULT_MAX
+#define TRUNCATE_MAX_LINES  RUNTOOL_RESULT_MAX_LINES
 
 /* helpers for context_plan — integer column mapping */
 static Role plan_int_to_role(int i) {
@@ -307,6 +310,46 @@ void session_tmp_dir(sqlite3 *db, int64_t session_id, char *buf, size_t bufsz) {
     snprintf(buf, bufsz, "/tmp/cclaw-%lld", (long long)session_id);
 }
 
+/* Resolve the spill file for one tool call and make its directory. Shared by
+ * the parent (truncate_and_spill) and by the sandboxed child, which is handed
+ * the finished path over the wire — the call_id sanitising below is why: it is
+ * model-emitted, and a '/' or ".." would otherwise steer a write anywhere the
+ * agent UID reaches. Doing it here keeps that check in the trusted parent.
+ * Returns 0 on success. */
+int spill_path_build(sqlite3 *db, int64_t session_id, const char *tool_call_id,
+                     char *buf, size_t bufsz) {
+    if (!buf || bufsz == 0) return -1;
+    char dir[PATH_MAX];
+    session_tmp_dir(db, session_id, dir, sizeof(dir));
+
+    /* Create the immediate parent, then the session dir; ignore EEXIST. */
+    char parent[PATH_MAX];
+    snprintf(parent, sizeof(parent), "%s", dir);
+    char *last_slash = strrchr(parent, '/');
+    if (last_slash && last_slash != parent) {
+        *last_slash = '\0';
+        mkdir(parent, 0700);
+    }
+    mkdir(dir, 0700);
+
+    const char *safe_id = tool_call_id;
+    if (safe_id) {
+        if (strstr(safe_id, "..") || !safe_id[0]) {
+            safe_id = NULL;
+        } else {
+            for (const char *p = safe_id; *p; p++) {
+                if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                      (*p >= '0' && *p <= '9') || *p == '_' || *p == '-')) {
+                    safe_id = NULL;
+                    break;
+                }
+            }
+        }
+    }
+    int n = snprintf(buf, bufsz, "%s/%s.out", dir, safe_id ? safe_id : "unknown");
+    return (n > 0 && (size_t)n < bufsz) ? 0 : -1;
+}
+
 char *truncate_and_spill(sqlite3 *db, const char *src, int64_t session_id,
                          const char *tool_call_id) {
     if (!src) return NULL;
@@ -324,40 +367,9 @@ char *truncate_and_spill(sqlite3 *db, const char *src, int64_t session_id,
     }
     if (cut >= len) return strdup(src);
 
-    /* Write full output to a spill file. Create the immediate parent then the
-     * session dir (one extra level under the workspace's spill/), ignoring
-     * EEXIST. */
-    char dir[PATH_MAX];
-    session_tmp_dir(db, session_id, dir, sizeof(dir));
-    char parent[PATH_MAX];
-    snprintf(parent, sizeof(parent), "%s", dir);
-    char *last_slash = strrchr(parent, '/');
-    if (last_slash && last_slash != parent) {
-        *last_slash = '\0';
-        mkdir(parent, 0700);  /* ignore error if exists */
-    }
-    mkdir(dir, 0700);  /* ignore error if exists */
-
-    /* The call_id is model-emitted: reject anything that isn't a flat,
-     * filesystem-safe token before it becomes a path component. A '/' or ".."
-     * would otherwise let the (unsandboxed) parent write ≤60KB anywhere the
-     * agent UID reaches; fall back to the "unknown" sentinel inside dir. */
-    const char *safe_id = tool_call_id;
-    if (safe_id) {
-        if (strstr(safe_id, "..") || !safe_id[0]) {
-            safe_id = NULL;
-        } else {
-            for (const char *p = safe_id; *p; p++) {
-                if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
-                      (*p >= '0' && *p <= '9') || *p == '_' || *p == '-')) {
-                    safe_id = NULL;
-                    break;
-                }
-            }
-        }
-    }
     char path[PATH_MAX + 64];
-    snprintf(path, sizeof(path), "%s/%s.out", dir, safe_id ? safe_id : "unknown");
+    if (spill_path_build(db, session_id, tool_call_id, path, sizeof(path)) != 0)
+        return strdup(src);
     /* O_NOFOLLOW: never follow a symlink planted at the spill path — a
      * pre-existing symlink makes open() fail (ELOOP) and we skip the spill. */
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);

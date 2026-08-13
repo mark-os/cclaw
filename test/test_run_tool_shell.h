@@ -39,6 +39,7 @@ typedef struct {
     int env_mode;               /* 1 = clean env (default), 0 = inherit */
     int mount_cwd;
     int net_mode;               /* 1 = no network (no proxy), 0 = proxy */
+    const char *spill_path;     /* oversized output goes here (NULL = none) */
     int nproc, as_mb, cpu_sec;
     const char **host_rules;
     size_t host_count;
@@ -78,6 +79,7 @@ static inline char *run_tool_shell(const ShellToolReq *r) {
         .cpu_sec = r->cpu_sec,
         .sandbox = r->sandbox,
         .net_mode = r->net_mode,
+        .spill_path = r->spill_path,
         .workspace = r->workspace,
         .cwd_path = r->cwd_path,
         .db_path = r->db_path,

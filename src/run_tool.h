@@ -19,6 +19,16 @@
  * → should be a file). */
 #define RUNTOOL_REQUEST_MAX 32768
 
+/* Largest tool result that may cross the wire and reach the DB. Anything
+ * bigger is written to the request's spill_path by the child that already
+ * holds it in memory, and the result names that file instead.
+ *
+ * The parent applies the same two limits (context.c) for tools that never
+ * fork. A child-spilled result must land under BOTH or the parent would spill
+ * it a second time — overwriting the full output with the truncated copy. */
+#define RUNTOOL_RESULT_MAX       (64 * 1024)
+#define RUNTOOL_RESULT_MAX_LINES 2000
+
 /* The socketpair fd the request blob arrives on (and the result departs on)
  * in the re-exec'd child. */
 #define RUNTOOL_FD_REQUEST 3
@@ -81,6 +91,9 @@ typedef struct {
      * missing binding instead of suggesting a grants.hosts request that
      * wouldn't help. The child appends it verbatim; it stays dumb. */
     const char *egress_note;
+    /* Where to write output too large for the wire (parent-resolved, dir
+     * already created; NULL disables spilling for this call). */
+    const char *spill_path;
 } RunToolReq;
 
 /* Child-side parsed request (owned strings). Mirrors RunToolReq's wire order.
@@ -110,6 +123,7 @@ typedef struct {
                           char **list; size_t list_n; } *params;
     size_t param_count;
     char *egress_note;
+    char *spill_path;
 } RunToolParsed;
 
 /* Child-side param lookup (pre-extracted by the parent). *_str returns the

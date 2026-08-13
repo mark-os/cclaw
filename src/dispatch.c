@@ -947,7 +947,7 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
                                   const char *sens_host,
                                   const ShellSecret *secrets, size_t secret_count,
                                   ToolWireArg *params, size_t param_n,
-                                  size_t *out_len) {
+                                  const char *spill_path, size_t *out_len) {
     char agent_dir[PATH_MAX];
     agent_dir_resolve(jc->workspace, jc->db_path, agent_dir, sizeof(agent_dir));
 
@@ -986,6 +986,7 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
                       &jc->sb, jc->workspace, jc->cwd_path, jc->db_path);
     char scratch[PATH_MAX];
     req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
+    req.spill_path = spill_path;
     req.params = params;
     req.param_count = param_n;
     req.read_paths = read_paths;  /* transient override: + extension store */
@@ -1115,6 +1116,10 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                               fctx->db_path);
             char scratch[PATH_MAX];
             req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
+            char spill[PATH_MAX + 64];
+            if (spill_path_build(proc_db(), session_id, tc->call_id,
+                                 spill, sizeof(spill)) == 0)
+                req.spill_path = spill;
             req.params = params;
             req.param_count = param_n;
 
@@ -1225,6 +1230,10 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                               sc->db_path);
             char scratch[PATH_MAX];
             req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
+            char spill[PATH_MAX + 64];
+            if (spill_path_build(proc_db(), session_id, tc->call_id,
+                                 spill, sizeof(spill)) == 0)
+                req.spill_path = spill;
             req.agent_dir = agent_dir;
             CallEgress se;
             call_egress_build(&se, tc->name, tc->arguments,
@@ -1302,6 +1311,10 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                           wc->db_path);
         char scratch[PATH_MAX];
         req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
+        char spill[PATH_MAX + 64];
+        if (spill_path_build(proc_db(), session_id, tc->call_id,
+                             spill, sizeof(spill)) == 0)
+            req.spill_path = spill;
         req.params = params;
         req.param_count = param_n;
         req.agent_dir = agent_dir;
@@ -1394,10 +1407,13 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         wire_params_interpolate(params, param_n, secrets, secret_count);
 
         size_t blob_len = 0;
+        char spill[PATH_MAX + 64];
+        const char *spill_p = spill_path_build(proc_db(), session_id, tc->call_id,
+                                               spill, sizeof(spill)) == 0 ? spill : NULL;
         char *blob = js_request_serialize(jc, agent_name, tc->name, tc->arguments,
                                           sens_once ? sens_host : NULL,
                                           secrets, secret_count,
-                                          params, param_n, &blob_len);
+                                          params, param_n, spill_p, &blob_len);
         if (!blob)
             return tool_inline_error(session_id, tc,
                 "error: js request exceeds 32KB cap", NULL);
@@ -1533,8 +1549,10 @@ CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len)
     }
 
     size_t blob_len = 0;
+    /* Scheduled script: no tool_call_id to name a spill file after, so the
+     * parent's truncate_and_spill handles it as before. */
     char *blob = js_request_serialize(jc, f->agent_name, "js_eval", "{}",
-                                      NULL, NULL, 0, params, 1, &blob_len);
+                                      NULL, NULL, 0, params, 1, NULL, &blob_len);
     if (!blob) {
         snprintf(err, err_len, "the script request exceeds the 32KB wire cap");
         return CRON_SCRIPT_FAILED;

@@ -17,13 +17,10 @@
 /* Cap on bytes pulled per fetch. Oversized pages are truncated here (not
  * hard-errored) and the agent pages the captured text via offset/max_chars. */
 #define WEB_FETCH_MAX (2 * 1024 * 1024)
-#define WEB_FETCH_DEFAULT_MAX_CHARS 20000
 
 static const char *WEB_FETCH_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"url\":{\"type\":\"string\",\"description\":\"URL to fetch (HTTP GET)\"},"
-    "\"offset\":{\"type\":\"integer\",\"description\":\"Character offset to start from (default 0)\"},"
-    "\"max_chars\":{\"type\":\"integer\",\"description\":\"Max characters to return (default 20000)\"},"
     "\"raw\":{\"type\":\"boolean\",\"description\":\"Return raw response without HTML-to-markdown conversion (auto-skipped for JSON responses)\"},"
     "\"save_secret\":{\"type\":\"string\",\"description\":\"Capture a credential from this response: NAME (^[A-Z][A-Z0-9_]*$) stores it encrypted and masks it to {{SECRET:NAME}} — the raw value never enters context\"},"
     "\"save_secret_path\":{\"type\":\"string\",\"description\":\"With save_secret: JSON path (e.g. $.token) selecting the credential field; omit to capture the whole trimmed response\"}"
@@ -250,34 +247,6 @@ char *web_fetch_host_hint(const char *url, char **rules, size_t n, int host_mode
     return msg;
 }
 
-/* Stash the full fetched text under the agent workspace so a truncated result
- * stays reachable — the agent greps/reads the rest via its file/shell/js tools
- * (which see the same workspace mount) instead of blind-paging by offset.
- * host + hash give a deterministic name so re-fetching a URL overwrites rather
- * than piling up. Best-effort: any failure returns NULL and the fetch proceeds
- * unchanged. Returns a malloc'd absolute path on success. */
-static char *web_fetch_save_full(const char *workspace, const char *host,
-                                 uint32_t hash, const char *text, size_t len) {
-    if (!workspace || !workspace[0]) return NULL;
-
-    char dir[PATH_MAX];
-    int dn = snprintf(dir, sizeof(dir), "%s/.tool_results", workspace);
-    if (dn < 0 || (size_t)dn >= sizeof(dir)) return NULL;
-    mkdir(dir, 0700);  /* best-effort; EEXIST is expected */
-
-    char path[PATH_MAX];
-    int pn = snprintf(path, sizeof(path), "%s/%s_%08x.md", dir,
-                      host[0] ? host : "page", hash);
-    if (pn < 0 || (size_t)pn >= sizeof(path)) return NULL;
-
-    FILE *f = fopen(path, "wb");
-    if (!f) return NULL;
-    size_t wr = fwrite(text, 1, len, f);
-    if (fclose(f) != 0 || wr != len) { remove(path); return NULL; }
-
-    return strdup(path);
-}
-
 /* ── Tool handler ────────────────────────────────────────────────── */
 
 static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx) {
@@ -288,24 +257,7 @@ static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx) {
     if (!url || !url[0])
         return strdup("error: missing or empty 'url' field");
 
-    int offset = run_tool_param_int(q, "offset", 0);
-    if (offset < 0) offset = 0;
-    int max_chars = run_tool_param_int(q, "max_chars", WEB_FETCH_DEFAULT_MAX_CHARS);
-    if (max_chars <= 0) max_chars = WEB_FETCH_DEFAULT_MAX_CHARS;
     int raw = run_tool_param_bool(q, "raw", 0);
-
-    /* Capture a save key from the URL now, before ta (and url) are freed — used
-     * only if the result turns out truncated (see web_fetch_save_full). */
-    char save_host[128];
-    if (url_parse_host(url, save_host, sizeof(save_host)) != 0)
-        save_host[0] = '\0';
-    for (char *p = save_host; *p; p++)
-        if (!isalnum((unsigned char)*p) && *p != '.' && *p != '-') *p = '_';
-    uint32_t save_hash = 2166136261u;  /* FNV-1a over the full URL */
-    for (const char *p = url; *p; p++) {
-        save_hash ^= (unsigned char)*p;
-        save_hash *= 16777619u;
-    }
 
     /* Egress is decided per-hop by the broker proxy (decide()) — no pre-flight
      * http_check_policy here: a single check can't see redirects (SSRF). */
@@ -386,59 +338,35 @@ static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx) {
 
     if (!text) return strdup("error: out of memory");
 
-    /* sanitize and wrap with randomized boundaries */
-    /* Truncation with metadata */
+    /* Return the document whole. Oversized results are truncated and spilled
+     * by the broker on the way out (spill_large_result), the same path every
+     * other tool takes — web_fetch used to keep a private copy under
+     * .tool_results and page it back with offset/max_chars, which is redundant
+     * now that the agent gets a real file path it can read or grep. */
     size_t total_len = strlen(text);
-    size_t off = ((size_t)offset < total_len) ? (size_t)offset : total_len;
-    size_t remaining = total_len - off;
-    size_t slice_len = ((size_t)max_chars < remaining) ? (size_t)max_chars : remaining;
-    int truncated = (off + slice_len < total_len);
-
-    /* Truncated: stash the whole document in the workspace so the agent can
-     * grep/read the rest, and point at it. Best-effort — never fails the fetch. */
-    char *saved = NULL;
-    if (truncated && ctx && ctx->workspace)
-        saved = web_fetch_save_full(ctx->workspace, save_host, save_hash,
-                                    text, total_len);
-
-    /* Build metadata + optional save note + slice */
-    char meta[160];
-    snprintf(meta, sizeof(meta), "[offset=%zu max_chars=%d total=%zu%s%s]\n",
-             off, max_chars, total_len,
-             truncated ? " truncated" : "",
+    char meta[96];
+    snprintf(meta, sizeof(meta), "[total=%zu%s]\n", total_len,
              capped ? " capped(source exceeded fetch limit)" : "");
     size_t meta_len = strlen(meta);
 
-    char note[PATH_MAX + 96];
-    note[0] = '\0';
-    if (saved)
-        snprintf(note, sizeof(note),
-                 "[full %zu chars saved to %s — read or grep it for the rest]\n",
-                 total_len, saved);
-    size_t note_len = strlen(note);
-    free(saved);
-
     /* No storage-time wrapping: the entry is tagged with network_hosts by the
      * broker frame, sanitized in the parent, and wrapped at query time. */
-    char *slice = malloc(meta_len + note_len + slice_len + 1);
-    if (!slice) { free(text); return strdup("error: out of memory"); }
-    memcpy(slice, meta, meta_len);
-    memcpy(slice + meta_len, note, note_len);
-    memcpy(slice + meta_len + note_len, text + off, slice_len);
-    slice[meta_len + note_len + slice_len] = '\0';
+    char *out = malloc(meta_len + total_len + 1);
+    if (!out) { free(text); return strdup("error: out of memory"); }
+    memcpy(out, meta, meta_len);
+    memcpy(out + meta_len, text, total_len + 1);
     free(text);
-    return slice;
+    return out;
 }
 
 int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx) {
     int rc = tools_register(reg, "web_fetch",
                           "Fetch a URL via HTTP GET and return content as markdown. "
                           "Use raw:true to skip HTML-to-markdown (auto-skipped for JSON responses). "
-                          "Truncated pages: page via offset+max_chars, or read/grep "
-                          "the full copy saved under workspace .tool_results/ (path "
-                          "given in the result). Examples:\n"
+                          "A long page is truncated in the result and written whole to a file "
+                          "under the workspace — the path is named in the result, and you read "
+                          "or grep it with your file tools for the rest. Examples:\n"
                           "  {\"url\":\"https://api.example.com/data\"} — JSON auto-detected, returned raw\n"
-                          "  {\"url\":\"https://example.com\",\"max_chars\":5000} — first 5000 chars of markdown\n"
                           "  {\"url\":\"https://example.com\",\"raw\":true} — skip HTML-to-markdown conversion",
                           WEB_FETCH_PARAMS_JSON, tool_sandboxed_stub, ctx);
     if (rc == 0)  /* sandboxed broker; egress via per-hop proxy decide() */

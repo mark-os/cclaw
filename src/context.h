@@ -52,6 +52,13 @@ int context_compaction_keep_from(const ContextPlan *plan, int target_tokens);
 char *truncate_and_spill(sqlite3 *db, const char *src, int64_t session_id,
                          const char *tool_call_id);
 
+/* Resolve the spill file path for one tool call and create its directory.
+ * The sandboxed child receives the result of this over the wire rather than
+ * building it itself — the model-emitted call_id is sanitised here, in the
+ * trusted parent. Returns 0 on success. */
+int spill_path_build(sqlite3 *db, int64_t session_id, const char *tool_call_id,
+                     char *buf, size_t bufsz);
+
 /* Build the spill dir for a session: the advancing agent's workspace
  * .tool_results/<session_id> (sandbox-visible), CCLAW_WORKSPACE when the
  * operator pinned one, /tmp/cclaw-<session_id> only as db-less fallback. */

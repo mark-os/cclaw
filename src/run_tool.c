@@ -116,6 +116,7 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
             w_str(&b, p->value);
     }
     w_str(&b, req->egress_note);
+    w_str(&b, req->spill_path);
 
     size_t total = w_finalize(&b);
     if (total == 0) { free(blob); return NULL; }
@@ -252,6 +253,7 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
         }
     }
     q->egress_note = r_str(r);
+    q->spill_path = r_str(r);
     return r->err ? -1 : 0;
 }
 
@@ -471,12 +473,122 @@ static void sandbox_child_main(const TierDescriptor *desc, RunToolParsed *q,
     _exit(0);
 }
 
-/* Drain child output into `output` until the deadline, the pipe closes, or the
- * cap is hit; then reap. Closes fd. Returns 1 iff the deadline expired (child
- * group SIGKILLed). *status is the waitpid status when not timed out. */
+
+/* Spill an oversized result from the child that produced it.
+ *
+ * The wire cap used to truncate before the parent ever saw the output, so the
+ * "full output" file the parent then wrote held the truncated copy — the
+ * pointer we hand the model was a pointer to the same loss. The child already
+ * has the whole thing in memory, so it writes the file here and sends back
+ * only the head.
+ *
+ * The cut mirrors context.c exactly (bytes AND lines): a result still over
+ * either limit would be spilled a second time by the parent, overwriting the
+ * full file with the head. Returns a malloc'd replacement, or NULL to keep the
+ * caller's result as-is. */
+static char *spill_large_result(const char *spill_path, const char *result,
+                                int already_written) {
+    if (!spill_path || !spill_path[0] || !result) return NULL;
+    size_t len = strlen(result);
+
+    size_t cut = len;
+    int lines = 0, total_lines = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (result[i] == '\n') {
+            total_lines++;
+            if (cut == len) {
+                lines++;
+                if (lines >= RUNTOOL_RESULT_MAX_LINES) cut = i + 1;
+            }
+        }
+        if (i + 1 >= RUNTOOL_RESULT_MAX && cut == len) cut = RUNTOOL_RESULT_MAX;
+    }
+    if (cut >= len) return NULL;   /* fits — nothing to do */
+
+    /* The drain may already have streamed the full output here, in which case
+     * rewriting from `result` would replace it with the truncated copy.
+     * O_NOFOLLOW: a symlink planted at the path must fail the open, not
+     * redirect the write. Best effort — a failed spill still truncates. */
+    int wrote = already_written;
+    int fd = already_written ? -1
+           : open(spill_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    if (fd >= 0) {
+        size_t off = 0;
+        while (off < len) {
+            ssize_t w = write(fd, result + off, len - off);
+            if (w <= 0) break;
+            off += (size_t)w;
+        }
+        wrote = (off == len);
+        close(fd);
+    }
+
+    char suffix[PATH_MAX + 128];
+    if (wrote)
+        snprintf(suffix, sizeof(suffix),
+                 "\n[truncated — showing first %d lines of %d. Full output: %s]",
+                 lines < RUNTOOL_RESULT_MAX_LINES ? lines : RUNTOOL_RESULT_MAX_LINES,
+                 total_lines > 0 ? total_lines : 1, spill_path);
+    else
+        snprintf(suffix, sizeof(suffix),
+                 "\n[truncated — showing first %d lines of %d; full output could not be saved]",
+                 lines < RUNTOOL_RESULT_MAX_LINES ? lines : RUNTOOL_RESULT_MAX_LINES,
+                 total_lines > 0 ? total_lines : 1);
+
+    size_t slen = strlen(suffix);
+    char *out = malloc(cut + slen + 1);
+    if (!out) return NULL;
+    memcpy(out, result, cut);
+    memcpy(out + cut, suffix, slen + 1);
+    return out;
+}
+
+
+/* Streams overflow to the spill file so a long-running command's output is not
+ * simply dropped at the in-memory cap. The head stays in `output` for the
+ * result; once the total passes RUNTOOL_RESULT_MAX the file is opened, the
+ * retained head written first, and everything after appended. Opening lazily
+ * keeps the common small-output case free of any file I/O. */
+typedef struct {
+    const char *path;
+    int fd;
+    int failed;
+} SpillSink;
+
+static void spill_sink_feed(SpillSink *s, const char *head, size_t head_len,
+                            const char *buf, size_t n, size_t total_before) {
+    if (!s->path || !s->path[0] || s->failed) return;
+    if (s->fd < 0) {
+        if (total_before + n <= RUNTOOL_RESULT_MAX) return;   /* still fits inline */
+        s->fd = open(s->path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+        if (s->fd < 0) { s->failed = 1; return; }
+        /* everything seen so far lives in `head` */
+        size_t off = 0;
+        while (off < head_len) {
+            ssize_t w = write(s->fd, head + off, head_len - off);
+            if (w <= 0) { s->failed = 1; return; }
+            off += (size_t)w;
+        }
+    }
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(s->fd, buf + off, n - off);
+        if (w <= 0) { s->failed = 1; return; }
+        off += (size_t)w;
+    }
+}
+
+/* Drain child output until the deadline or the pipe closes, then reap. The
+ * first NET_MAX_OUTPUT bytes are retained in `output` for the result; anything
+ * beyond is streamed to `spill_path` rather than dropped, so the file the
+ * result points at really is the full output. Closes fd. Returns 1 iff the
+ * deadline expired (child group SIGKILLed). *total_len is everything seen. */
 static int drain_child(pid_t pid, int fd, int timeout, char *output,
-                       size_t *out_len, int *status) {
-    size_t len = 0;
+                       size_t *out_len, size_t *total_len,
+                       const char *spill_path, int *spilled, int *status) {
+    size_t len = 0, total = 0;
+    SpillSink sink = { .path = spill_path, .fd = -1, .failed = 0 };
+    char chunk[8192];
     int timed_out = 0;
     struct timespec deadline;
     clock_gettime(CLOCK_MONOTONIC, &deadline);
@@ -495,24 +607,37 @@ static int drain_child(pid_t pid, int fd, int timeout, char *output,
         struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
         int sel = select(fd + 1, &rfds, NULL, NULL, &tv);
         if (sel > 0) {
-            ssize_t n = read(fd, output + len, NET_MAX_OUTPUT - len);
+            ssize_t n = read(fd, chunk, sizeof(chunk));
             if (n <= 0) break;
-            len += (size_t)n;
-            if (len >= NET_MAX_OUTPUT) break;
+            spill_sink_feed(&sink, output, len, chunk, (size_t)n, total);
+            total += (size_t)n;
+            size_t room = NET_MAX_OUTPUT - len;
+            size_t keep = ((size_t)n < room) ? (size_t)n : room;
+            memcpy(output + len, chunk, keep);
+            len += keep;
         } else if (sel < 0 && errno != EINTR) break;
         int wr = waitpid(pid, status, WNOHANG);
         if (wr > 0) {
-            while (len < NET_MAX_OUTPUT) {
-                ssize_t n = read(fd, output + len, NET_MAX_OUTPUT - len);
+            for (;;) {
+                ssize_t n = read(fd, chunk, sizeof(chunk));
                 if (n <= 0) break;
-                len += (size_t)n;
+                spill_sink_feed(&sink, output, len, chunk, (size_t)n, total);
+                total += (size_t)n;
+                size_t room = NET_MAX_OUTPUT - len;
+                size_t keep = ((size_t)n < room) ? (size_t)n : room;
+                memcpy(output + len, chunk, keep);
+                len += keep;
             }
             close(fd);
+            if (sink.fd >= 0) { close(sink.fd); *spilled = 1; }
             *out_len = len;
+            *total_len = total;
             return 0;
         }
     }
     close(fd);
+    if (sink.fd >= 0) { close(sink.fd); *spilled = 1; }
+    *total_len = total;
 
     if (timed_out) {
         kill(-pid, SIGKILL);
@@ -614,7 +739,10 @@ static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
     }
     size_t out_len = 0;
     int status = 0;
-    int timed_out = drain_child(pid, pipefd[0], q->timeout, output, &out_len, &status);
+    size_t total_len = 0;
+    int drain_spilled = 0;
+    int timed_out = drain_child(pid, pipefd[0], q->timeout, output, &out_len,
+                                &total_len, q->spill_path, &drain_spilled, &status);
 
     /* Capture the contacted-hosts tag before proxy_stop frees the list. */
     char *hosts_json = proxy_active ? proxy_hosts_json(&proxy) : NULL;
@@ -636,6 +764,9 @@ static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
         }
     }
     free(denied);
+
+    { char *spilled = spill_large_result(q->spill_path, result, drain_spilled);
+      if (spilled) { free(result); result = spilled; } }
 
     write_framed(FD_REQUEST, hosts_json, result);
     free(hosts_json);
@@ -722,6 +853,8 @@ int run_tool_main(void) {
 
     char *result = desc->run_fn(&q);
     if (!result) result = strdup("");
+    { char *spilled = spill_large_result(q.spill_path, result, 0);
+      if (spilled) { free(result); result = spilled; } }
     write_framed(FD_REQUEST, NULL, result);  /* file tier: zero-length meta */
     free(result);
     _exit(0);

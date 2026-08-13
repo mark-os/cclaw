@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #endif
 #include "qjs_helpers.h"
+#include "qjs_xml.h"
 #include "js_http_fetch.h"
 #include "external_content.h"
 #include "tool_web_fetch.h"
@@ -418,6 +419,7 @@ void qjs_register_eval_host_functions(JSContext *ctx, const char *config_json) {
     JS_SetPropertyStr(ctx, global, "print", JS_NewCFunction(ctx, js_console_log, "print", 0));
 
     JS_FreeValue(ctx, global);
+    qjs_register_xml(ctx);
 }
 
 /* ── In-process eval driver (qjs_eval_run) ──────────────────────────────── */
@@ -441,7 +443,7 @@ static const char *QJS_EVAL_PRELUDE =
     "console.warn = console.log;\n"
     "console.error = console.log;\n"
     "var require = function() {\n"
-    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readdir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_request(url).');\n"
+    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readdir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_request(url), XML.parse(str).');\n"
     "};\n"
     "var process = {};\n"
     "Object.defineProperty(process, 'env', {get: function() { throw new TypeError('process.env not available.'); }});\n"

@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #endif
 #include "qjs_helpers.h"
+#include "qjs_xml.h"
 #include "channel.h"
 #include "util.h"           /* split_and_trim */
 #include "channel_api.h"
@@ -380,4 +381,5 @@ void qjs_register_channel_host_functions(JSContext *ctx) {
 
     /* Date.now() — already available via JS_AddIntrinsicDate in full context */
     JS_FreeValue(ctx, global);
+    qjs_register_xml(ctx);
 }

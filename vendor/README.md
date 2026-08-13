@@ -55,6 +55,17 @@ security fixes since the pinned version — that's the main reason to bump.
   reintroduce it on any path that has a db handle (AGENTS.md)
 - Last checked: 2026-07-17
 
+## yxml (git master, generated amalgamation)
+
+- Repo: https://g.blicky.net/yxml.git (homepage https://dev.yorhel.nl/yxml)
+- Files: `yxml/yxml.c` (generated from yxml.c.in — fetch the pre-generated
+  file from the git host's plain view, don't regenerate), `yxml/yxml.h`
+- License: MIT
+- Scope note: SAX XML parser behind the `XML.parse()` JS global
+  (`src/qjs_xml.c`) — runs only in sandboxed children (js_eval tool child,
+  channel runner), never fed untrusted input in the daemon process
+- Last checked: 2026-08-12
+
 ## Secret-scanner rule data (not code)
 
 - `gitleaks.toml` — auto-generated rule set from

@@ -1,5 +1,5 @@
 CC      ?= cc
-CFLAGS  := -std=c11 -Wall -Wextra -Werror -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn
+CFLAGS  := -std=c11 -Wall -Wextra -Werror -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn -Ivendor/yxml
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
 VERSION_COMMIT := $(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -47,12 +47,12 @@ VENDOR_SRC := vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c \
               vendor/quickjs/quickjs.c vendor/quickjs/cutils.c \
               vendor/quickjs/dtoa.c vendor/quickjs/libunicode.c \
               vendor/quickjs/libregexp.c \
-              vendor/monocypher/monocypher.c
+              vendor/monocypher/monocypher.c vendor/yxml/yxml.c
 VENDOR_OBJ := $(BUILDDIR)/sqlite3.o $(BUILDDIR)/civetweb.o \
               $(BUILDDIR)/quickjs.o $(BUILDDIR)/qjs_cutils.o \
               $(BUILDDIR)/qjs_dtoa.o $(BUILDDIR)/qjs_libunicode.o \
               $(BUILDDIR)/qjs_libregexp.o \
-              $(BUILDDIR)/monocypher.o \
+              $(BUILDDIR)/monocypher.o $(BUILDDIR)/yxml.o \
               $(BUILDDIR)/templates.o
 
 INTEG_SRC := $(wildcard test/test_integration_*.c)
@@ -72,7 +72,7 @@ SMOKE := test_db test_config test_advance_session test_streak_guard \
          test_agent_setup test_processes test_recovery_scoping test_sandbox_profile \
          test_sensitive test_secret_bind test_secret_store test_secret_capture \
          test_tool_secret_create test_tool_args \
-         test_skills \
+         test_skills test_qjs_xml \
          test_approval_block_window test_approval_postwindow test_approval_summary \
          test_channel_intent
 SMOKE_BIN := $(patsubst %,$(BUILDDIR)/%,$(SMOKE))
@@ -116,6 +116,9 @@ $(BUILDDIR)/civetweb.o: vendor/civetweb/civetweb.c | $(BUILDDIR)/
 
 $(BUILDDIR)/monocypher.o: vendor/monocypher/monocypher.c | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -c -o $@ $<
+
+$(BUILDDIR)/yxml.o: vendor/yxml/yxml.c | $(BUILDDIR)/
+	$(CC) -std=c11 -O2 -Ivendor/yxml -c -o $@ $<
 
 # QuickJS compilation flags — suppress vendor warnings
 QJS_CFLAGS := -std=gnu11 -O2 -Ivendor/quickjs -DCONFIG_VERSION=\"2026-06-04\" \

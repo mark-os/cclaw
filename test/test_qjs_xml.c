@@ -82,6 +82,54 @@ int main(void) {
     expect_eq("lowercase xml alias",
         "\"JSON.stringify(xml.parse('<a>hi</a>'))\"", "{\"a\":\"hi\"}");
 
+    /* Element names that collide with Object.prototype members: node_add's
+     * lookup would find the inherited function and treat it as a sibling
+     * already present, wrapping it into an array. Nodes are NULL-prototype. */
+    expect_eq("name collides with prototype member",
+        "\"JSON.stringify(XML.parse('<r><constructor>c</constructor><toString>t</toString></r>'))\"",
+        "{\"r\":{\"constructor\":\"c\",\"toString\":\"t\"}}");
+
+    expect_eq("__proto__ element kept as data",
+        "\"JSON.stringify(XML.parse('<r><__proto__>x</__proto__></r>'))\"",
+        "{\"r\":{\"__proto__\":\"x\"}}");
+
+    expect_eq("prototype not polluted",
+        "\"XML.parse('<r><__proto__><zz>1</zz></__proto__></r>'); String(({}).zz)\"",
+        "undefined");
+
+    /* Undeclared entities are fatal to a conforming parser; real feeds are
+     * full of them, and losing the whole document over one is the wrong
+     * trade. Known names decode, unknown ones survive as literal text. */
+    expect_eq("html entity decodes",
+        "\"XML.parse('<t>Fed&rsquo;s path&mdash;now</t>').t\"",
+        "Fed\xe2\x80\x99s path\xe2\x80\x94now");
+
+    expect_eq("unknown entity kept literal",
+        "\"XML.parse('<t>a&foo;b</t>').t\"", "a&foo;b");
+
+    expect_eq("bare ampersand kept literal",
+        "\"XML.parse('<t>AT&T news</t>').t\"", "AT&T news");
+
+    expect_eq("entity leniency reaches attributes",
+        "\"XML.parse('<r t=\\\"A&nbsp;B&foo;\\\"/>').r['@_t']\"",
+        "A\xc2\xa0" "B&foo;");
+
+    /* CDATA and comments are literal spans — & carries no meaning there and
+     * must reach yxml exactly as written, so the screening skips them. */
+    expect_eq("cdata keeps entities raw",
+        "\"XML.parse('<t><![CDATA[a&nbsp;b AT&T]]></t>').t\"", "a&nbsp;b AT&T");
+
+    expect_eq("comment with entity ignored",
+        "\"JSON.stringify(XML.parse('<r><!-- a&nbsp;b --><t>x</t></r>'))\"",
+        "{\"r\":{\"t\":\"x\"}}");
+
+    /* yxml's five failure codes carry the only clue about what to change. */
+    expect_error("error names the mismatch",
+        "\"XML.parse('<a><b></c></a>')\"", "close tag does not match");
+
+    expect_error("error names truncation",
+        "\"XML.parse('<a><b>')\"", "ended mid-element");
+
     printf("test_qjs_xml: %d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

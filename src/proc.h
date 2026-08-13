@@ -63,6 +63,8 @@ void        proc_set_tool_setup(AgentSetup *setup);
  * Prebuilt at startup — the fork child is async-signal-safe. Non-const
  * because execve's envp is char *const[]. */
 char *proc_log_level_env(void);
+char *proc_js_heap_env(void);
+void proc_set_js_heap_env(int mb);
 void  proc_set_log_level_env(const char *level_name);
 
 #endif

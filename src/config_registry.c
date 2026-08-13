@@ -30,6 +30,9 @@ static const ConfigDef s_defs[] = {
       "recurring). Default is one daemon tick — fires land within a tick of due" },
     { "cron_max_jobs_per_session", "10",
       "Max cron jobs a session may own (cron_set cap)" },
+    { "js_heap_mb",         "8",
+      "js_eval/extension QuickJS heap cap in MB, per tool child (1-512). Bounds"
+      " one parse: XML.parse costs ~3x the document, JSON.parse ~10x" },
     { "sql_slow_ms",        "100",
       "Slow-query WARN threshold in ms for the SQL trace (0 = disabled)" },
     { "token_rate_limit",   "1000000",

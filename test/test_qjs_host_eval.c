@@ -225,6 +225,36 @@ static void test_modern_collections(void) {
         "let [h, ...t] = [3,4,5]; m.get(1) + s.size + h + t.length\"", "a232");
 }
 
+/* ── Heap cap: config js_heap_mb → env → the limit the eval actually gets ── */
+
+/* Overflow the heap by a wide margin so the OOM is decisive wherever it lands
+ * (string build or parse), then read the limit back out of the hint. The hint
+ * has to quote the live cap: a stale number tells the agent to shrink input
+ * that would have fit, or to retry input that never will. */
+static void expect_heap_hint(const char *name, const char *env, const char *want) {
+    tests_run++; printf("  %s... ", name);
+    if (env) setenv("CCLAW_JS_HEAP_MB", env, 1);
+    else unsetenv("CCLAW_JS_HEAP_MB");
+    /* 1MB per iteration: overflows any cap in a few hundred steps, and stays
+     * far under both the instruction limit and QuickJS's max string length
+     * (which a doubling string hits first, raising "string too long"). */
+    char *r = test_js_eval_run_json(
+        "{\"code\":\"var a=[]; for(;;) a.push(new Array(1000000).join('x')); a.length\"}");
+    int ok = r && strstr(r, "out of memory") && strstr(r, want);
+    if (!ok) { FAIL(r ? r : "NULL"); free(r); unsetenv("CCLAW_JS_HEAP_MB"); return; }
+    free(r);
+    unsetenv("CCLAW_JS_HEAP_MB");
+    PASS();
+}
+
+/* Each case runs the heap dry to reach the hint, so the cap under test is the
+ * memory this actually allocates — keep the caps small. The 512MB upper clamp
+ * is left to review rather than spending 15s of the suite's budget filling it. */
+static void test_heap_default(void)   { expect_heap_hint("heap_default_8mb", NULL, "limit is 8MB"); }
+static void test_heap_override(void)  { expect_heap_hint("heap_env_override", "2", "limit is 2MB"); }
+static void test_heap_garbage(void)   { expect_heap_hint("heap_env_garbage", "nonsense", "limit is 8MB"); }
+static void test_heap_clamp_low(void) { expect_heap_hint("heap_env_clamp_low", "0", "limit is 8MB"); }
+
 int main(void) {
     TEST_INIT();
     printf("test_qjs_host_eval:\n");
@@ -258,6 +288,11 @@ int main(void) {
     test_prelude_module_exports_set();
     test_modern_syntax();
     test_modern_collections();
+
+    test_heap_default();
+    test_heap_override();
+    test_heap_garbage();
+    test_heap_clamp_low();
 
     cleanup();
     printf("%d/%d passed\n", tests_passed, tests_run);

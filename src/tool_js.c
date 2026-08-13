@@ -63,7 +63,9 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
                           "as '@_name', repeated siblings as arrays, text-only elements as "
                           "strings, mixed content under '#text'. "
                           "All throw on error; all accept optional callback(err, result) as last arg. "
-                          "Heap is 4MB — JSON.parse works up to ~1MB source; larger data will OOM. "
+                          "Heap is 8MB by default (config js_heap_mb) — the parsed value costs "
+                          "several times its source, so JSON.parse tops out near ~1MB of text "
+                          "and XML.parse near ~3MB; past that, fetch less or extract fields. "
                           "Only allow-listed hosts work. "
                           "Returns the last expression value (or printed output). "
                           "When using 'filename', must be a .qjs file.",

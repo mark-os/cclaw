@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "context.h"
+#include "config.h"
 #include "db.h"
 #include "http.h"
 #include "llm.h"
@@ -265,20 +266,49 @@ void context_plan_free(ContextPlan *plan) {
 
 /* ── Write-time truncation with spill to temp file ────────────────── */
 
-void session_tmp_dir(int64_t session_id, char *buf, size_t bufsz) {
+void session_tmp_dir(sqlite3 *db, int64_t session_id, char *buf, size_t bufsz) {
     /* Spill into the agent workspace (natural lifetime, no symlink-prone
      * world-writable /tmp), under the same .tool_results/ home web_fetch
      * uses for its full copies — one place to look for full tool output.
-     * Fall back to /tmp when no workspace is set (CLI without a workspace,
-     * tests). */
+     *
+     * The path is advertised to the model, so it must be one a sandboxed
+     * tool child can actually read: the workspace is bind-mounted rw at the
+     * same absolute path inside the sandbox; the host's /tmp is not (the
+     * child's /tmp is the agent's private scratch). An operator-pinned
+     * CCLAW_WORKSPACE stands for every agent (same rule as agent_setup's
+     * workspace_pinned); otherwise derive the advancing agent's own
+     * workspace from the session row, mirroring workspace_refresh. */
     const char *ws = getenv("CCLAW_WORKSPACE");
-    if (ws && ws[0])
+    if (ws && ws[0]) {
         snprintf(buf, bufsz, "%s/.tool_results/%lld", ws, (long long)session_id);
-    else
-        snprintf(buf, bufsz, "/tmp/cclaw-%lld", (long long)session_id);
+        return;
+    }
+    if (db) {
+        sqlite3_stmt *s;
+        char agent[128] = "";
+        if (sqlite3_prepare_v2(db, "SELECT agent_name FROM sessions WHERE id=?1",
+                               -1, &s, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(s, 1, session_id);
+            if (sqlite3_step(s) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(s, 0);
+                if (v) snprintf(agent, sizeof(agent), "%s", v);
+            }
+            sqlite3_finalize(s);
+        }
+        if (agent[0] && !strchr(agent, '/') && strcmp(agent, "..") != 0) {
+            char agents_dir[PATH_MAX];
+            agent_dir_resolve(NULL, sqlite3_db_filename(db, "main"),
+                              agents_dir, sizeof(agents_dir));
+            int n = snprintf(buf, bufsz, "%s/%s/workspace/.tool_results/%lld",
+                             agents_dir, agent, (long long)session_id);
+            if (n > 0 && (size_t)n < bufsz) return;
+        }
+    }
+    snprintf(buf, bufsz, "/tmp/cclaw-%lld", (long long)session_id);
 }
 
-char *truncate_and_spill(const char *src, int64_t session_id, const char *tool_call_id) {
+char *truncate_and_spill(sqlite3 *db, const char *src, int64_t session_id,
+                         const char *tool_call_id) {
     if (!src) return NULL;
     size_t len = strlen(src);
 
@@ -298,7 +328,7 @@ char *truncate_and_spill(const char *src, int64_t session_id, const char *tool_c
      * session dir (one extra level under the workspace's spill/), ignoring
      * EEXIST. */
     char dir[PATH_MAX];
-    session_tmp_dir(session_id, dir, sizeof(dir));
+    session_tmp_dir(db, session_id, dir, sizeof(dir));
     char parent[PATH_MAX];
     snprintf(parent, sizeof(parent), "%s", dir);
     char *last_slash = strrchr(parent, '/');

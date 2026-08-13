@@ -47,12 +47,15 @@ void context_plan_free(ContextPlan *plan);
 int context_compaction_keep_from(const ContextPlan *plan, int target_tokens);
 
 /* Truncate tool result at write time. If content exceeds limits, writes
- * full output to /tmp/cclaw-<session_id>/<tool_call_id>.out and returns
- * truncated content with file path reference. Returns malloc'd string (caller frees). */
-char *truncate_and_spill(const char *src, int64_t session_id, const char *tool_call_id);
+ * full output to <session tmp dir>/<tool_call_id>.out and returns truncated
+ * content with file path reference. Returns malloc'd string (caller frees). */
+char *truncate_and_spill(sqlite3 *db, const char *src, int64_t session_id,
+                         const char *tool_call_id);
 
-/* Build session temp dir path: /tmp/cclaw-<session_id> */
-void session_tmp_dir(int64_t session_id, char *buf, size_t bufsz);
+/* Build the spill dir for a session: the advancing agent's workspace
+ * .tool_results/<session_id> (sandbox-visible), CCLAW_WORKSPACE when the
+ * operator pinned one, /tmp/cclaw-<session_id> only as db-less fallback. */
+void session_tmp_dir(sqlite3 *db, int64_t session_id, char *buf, size_t bufsz);
 
 /* Auto-recall — FTS5 search across sessions for relevant context.
  * Returns heap-allocated text (caller frees) or NULL if nothing recalled. */

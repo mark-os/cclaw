@@ -903,7 +903,7 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
     { char *clean = utf8_sanitize(result, strlen(result));
       if (clean) { free(result); result = clean; } }
 
-    char *stored = truncate_and_spill(result, session_id, tc->call_id);
+    char *stored = truncate_and_spill(proc_db(), result, session_id, tc->call_id);
     ToolResult tr = {.tool_call_id = tc->call_id,
                      .content = stored ? stored : result};
     int is_err = (strncmp(result, "error:", 6) == 0);
@@ -1811,7 +1811,7 @@ void reap_children(void) {
               if (clean) { free(output); output = clean; out_len = strlen(output); } }
 
             /* Write result to DB */
-            char *stored = truncate_and_spill(output, session_id, c->tool_call_id);
+            char *stored = truncate_and_spill(proc_db(), output, session_id, c->tool_call_id);
             ToolResult tr = {.tool_call_id = c->tool_call_id,
                              .content = stored ? stored : output};
             int is_err = (strncmp(output, "error:", 6) == 0);

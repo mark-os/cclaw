@@ -71,6 +71,37 @@ use the provided host bridges:
   boundary (untrusted-content wrapping happens at storage time regardless).
 - `fs.readFile` / `fs.writeFile` / `fs.readdir` / `fs.stat` / `fs.cwd` —
   workspace-scoped file access.
+- `XML.parse(str)` (alias `xml.parse`) — parse XML/RSS/Atom/sitemaps into a
+  plain object, the JSON.parse of XML. Reach for it instead of regex.
+
+  ```js
+  var d = XML.parse(http_request(feedUrl).body);
+  var items = d.rss.channel.item;              // array when repeated, object when single
+  return items.map(function (it) { return it.title + ' — ' + it.link; }).join('\n');
+  ```
+
+  The shape follows the fast-xml-parser convention: element names become keys,
+  attributes become `@_name` keys, a text-only element collapses to a plain
+  string, and an element with both text and children keeps its text under
+  `#text`. **A repeated element is an array but a single one is not** — write
+  `[].concat(d.rss.channel.item)` when a feed might carry only one entry.
+
+  Entity handling is deliberately forgiving, because real feeds are not
+  well-formed: the five XML built-ins and numeric references decode, the common
+  HTML names (`&nbsp;` `&mdash;` `&rsquo;` …) decode, and anything else —
+  including a bare `&` in `AT&T` — survives as literal text rather than failing
+  the document. Inside CDATA and comments nothing is rewritten.
+
+  Nodes have **no prototype**, so an element named `constructor` or `toString`
+  is data like any other; use `Object.keys(node)` rather than
+  `node.hasOwnProperty(...)`.
+
+  Failures throw: a `SyntaxError` naming the defect ("close tag does not match
+  the open tag", "document ended mid-element (truncated?)") or an
+  `InternalError: out of memory` when the document is too big for the heap.
+  The tree costs roughly **3× the document**, so the 8MB default heap
+  (`js_heap_mb`) takes documents up to ~3MB; nesting is capped at 128 levels.
+  Past that, fetch a narrower feed — the OOM message quotes the live limit.
 - `getConfig(key)` — this extension's own `config[]` value (registry key
   `<name>.<key>`), string or `null`, read-only. The twin of `channel.getConfig`
   on the channel surface. Values are resolved before the sandbox is entered;

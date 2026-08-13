@@ -297,6 +297,7 @@ Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
 | Dep | Purpose | Vendored? |
 |-----|---------|-----------|
 | jsmn | JSON tokenizer (db-less corners, e.g. channel-harness scenarios) | Yes |
+| yxml | SAX XML parser (`XML.parse()` global in js_eval + channel runner) | Yes |
 | SQLite 3.53 | Persistence, FTS5, JSON functions | Yes |
 | libcurl | HTTP client (LLM API, Telegram) | System (dynamic link) |
 | civetweb | Embedded HTTP server (webhooks, dashboard) | Yes |

@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #endif
 #include "qjs_helpers.h"
+#include "qjs_xml.h"
 #include "js_http_fetch.h"
 #include "external_content.h"
 #include "tool_web_fetch.h"
@@ -418,13 +419,25 @@ void qjs_register_eval_host_functions(JSContext *ctx, const char *config_json) {
     JS_SetPropertyStr(ctx, global, "print", JS_NewCFunction(ctx, js_console_log, "print", 0));
 
     JS_FreeValue(ctx, global);
+    qjs_register_xml(ctx);
 }
 
 /* ── In-process eval driver (qjs_eval_run) ──────────────────────────────── */
 
-#define QJS_EVAL_HEAP_SIZE       (4 * 1024 * 1024)
+#define QJS_EVAL_HEAP_MB_DEFAULT 8
 #define QJS_EVAL_MAX_INSTRUCTIONS 10000000
 #define QJS_EVAL_MAX_FILE        (1024 * 1024)
+
+/* Heap cap for one eval, in MB. The broker child has no DB, so the parent
+ * resolves config `js_heap_mb` and hands it over in the env (proc.c). Bounds
+ * are re-applied here because this side is what actually allocates. */
+static int qjs_eval_heap_mb(void) {
+    const char *env = getenv("CCLAW_JS_HEAP_MB");
+    int mb = env && env[0] ? atoi(env) : QJS_EVAL_HEAP_MB_DEFAULT;
+    if (mb < 1) mb = QJS_EVAL_HEAP_MB_DEFAULT;
+    if (mb > 512) mb = 512;
+    return mb;
+}
 
 static const char *QJS_EVAL_PRELUDE =
     "var __console_buf = [];\n"
@@ -441,7 +454,7 @@ static const char *QJS_EVAL_PRELUDE =
     "console.warn = console.log;\n"
     "console.error = console.log;\n"
     "var require = function() {\n"
-    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readdir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_request(url).');\n"
+    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readdir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_request(url), XML.parse(str).');\n"
     "};\n"
     "var process = {};\n"
     "Object.defineProperty(process, 'env', {get: function() { throw new TypeError('process.env not available.'); }});\n"
@@ -472,7 +485,8 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
     if ((!code || !code[0]) && (!filename || !filename[0]))
         return strdup("error: must provide 'code' or 'filename'");
 
-    QjsRuntime *qrt = qjs_runtime_create(QJS_EVAL_HEAP_SIZE);
+    int heap_mb = qjs_eval_heap_mb();
+    QjsRuntime *qrt = qjs_runtime_create((size_t)heap_mb * 1024 * 1024);
     if (!qrt) return strdup("error: out of memory");
     qjs_set_interrupt_limit(qrt, QJS_EVAL_MAX_INSTRUCTIONS);
 
@@ -545,8 +559,16 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
     if (JS_IsException(val)) {
         char *msg = qjs_get_exception_string(ctx);
         if (msg) {
+            /* The OOM hint quotes the live cap — a hardcoded number goes
+             * stale the moment js_heap_mb is retuned, and "heap limit is 4MB"
+             * on an 8MB heap sends the agent chasing the wrong fix. */
+            char oom_hint[192];
+            snprintf(oom_hint, sizeof oom_hint,
+                     " — heap limit is %dMB; the parsed value costs several times"
+                     " the source (JSON ~10x, XML ~3x), so fetch less or extract"
+                     " fields instead of parsing the whole document", heap_mb);
             const char *hint = strstr(msg, "SyntaxError") ? qjs_syntax_hint(eval_code)
-                             : strstr(msg, "out of memory") ? " — heap limit is 4MB; avoid JSON.parse on data over ~1MB, use smaller responses or extract fields manually"
+                             : strstr(msg, "out of memory") ? oom_hint
                              : "";
             size_t len = strlen(msg) + strlen(hint) + 16;
             result = malloc(len);

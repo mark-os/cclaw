@@ -12,6 +12,7 @@ static int         g_cli_turn_active;
 static int         g_auto_approve;
 static AgentSetup *g_tool_setup;
 static char        g_log_level_env[32] = "CCLAW_LOG_LEVEL=info";
+static char        g_js_heap_env[32] = "CCLAW_JS_HEAP_MB=8";
 
 sqlite3 *proc_db(void) { return g_db; }
 void proc_set_db(sqlite3 *db) { g_db = db; }
@@ -45,6 +46,15 @@ AgentSetup *proc_tool_setup(void) { return g_tool_setup; }
 void proc_set_tool_setup(AgentSetup *setup) { g_tool_setup = setup; }
 
 char *proc_log_level_env(void) { return g_log_level_env; }
+
+/* The --run-tool broker has no DB, so the js_eval heap cap rides to it the
+ * same way the log level does: resolved from config here, passed in envp. */
+char *proc_js_heap_env(void) { return g_js_heap_env; }
+void proc_set_js_heap_env(int mb) {
+    if (mb < 1) mb = 1;
+    if (mb > 512) mb = 512;
+    snprintf(g_js_heap_env, sizeof g_js_heap_env, "CCLAW_JS_HEAP_MB=%d", mb);
+}
 void proc_set_log_level_env(const char *level_name) {
     snprintf(g_log_level_env, sizeof g_log_level_env, "CCLAW_LOG_LEVEL=%s",
              level_name ? level_name : "info");

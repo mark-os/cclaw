@@ -233,7 +233,7 @@ ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
         }
         /* execve self as --run-tool. Minimal env (inherits nothing sensitive). */
         char *const argv[] = {"cclaw", "--run-tool", NULL};
-        char *const envp[] = {proc_log_level_env(), NULL};
+        char *const envp[] = {proc_log_level_env(), proc_js_heap_env(), NULL};
         execve("/proc/self/exe", argv, envp);
         /* execve failed — write a framed static error (4-byte zero meta_len
          * header, then the message) to fd 3 and die */

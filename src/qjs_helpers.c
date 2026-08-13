@@ -120,16 +120,27 @@ char *qjs_get_global_json(JSContext *ctx, const char *name) {
     return result;
 }
 
+/* A pending exception that is null/undefined, or one that will not convert to
+ * a string, has exactly one cause in practice: the engine ran out of memory
+ * before it could build the Error object. QuickJS is explicit about the first
+ * case — JS_ThrowError2 substitutes JS_NULL when the allocation fails ("out of
+ * memory: throw JS_NULL to avoid recursing"), and the second is the same wall
+ * one step later. Saying "unknown error" here loses the one fact the agent
+ * needs: an agent told its input is too large shrinks it, an agent told
+ * "unknown" retries the same call. */
+static const char *OOM_BEFORE_ERROR_OBJ =
+    "out of memory (heap exhausted before the error object could be built)";
+
 char *qjs_get_exception_string(JSContext *ctx) {
     if (!ctx) return NULL;
     JSValue exc = JS_GetException(ctx);
     if (JS_IsNull(exc) || JS_IsUndefined(exc)) {
         JS_FreeValue(ctx, exc);
-        return strdup("unknown error");
+        return strdup(OOM_BEFORE_ERROR_OBJ);
     }
     const char *str = JS_ToCString(ctx, exc);
     JS_FreeValue(ctx, exc);
-    if (!str) return strdup("unknown error");
+    if (!str) return strdup(OOM_BEFORE_ERROR_OBJ);
     char *result = strdup(str);
     JS_FreeCString(ctx, str);
     return result;

@@ -904,6 +904,7 @@ int main(int argc, char *argv[]) {
     }
     cclaw_log_set_level(proc_cfg()->log_level);
     proc_set_log_level_env(log_level_name(proc_cfg()->log_level));
+    proc_set_js_heap_env(config_get_int(proc_db(), "js_heap_mb"));
 
     /* Enable SQLite query profiling at debug level and above */
     db_set_slow_query_ms(config_get_int(proc_db(), "sql_slow_ms"));

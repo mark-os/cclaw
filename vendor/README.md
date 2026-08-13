@@ -34,10 +34,25 @@ security fixes since the pinned version — that's the main reason to bump.
 - Built with: `-std=gnu11 -D_GNU_SOURCE -DCONFIG_VERSION`
 - License: MIT
 - Arena-based slab allocator for small blocks (16–512 bytes), ES2025 support
-- Last checked: 2026-07-17 — no CVE against the bellard tree newer than this
+- Last checked: 2026-08-13 — no CVE against the bellard tree newer than this
   snapshot; the 2026 typed-array/atomics CVEs (CVE-2026-0822/1144/1145) are
   against the quickjs-ng fork. JS also only executes in namespace-sandboxed
   children, never the daemon process.
+- **Local patch (not upstream): use-after-free in `build_backtrace`.** Same
+  backport pattern as the civetweb entry above — carried here rather than
+  waiting for a release. `build_backtrace` receives `error_obj` as a borrowed
+  alias of `rt->current_exception` (the JS_CallInternal "add the backtrace
+  later" path, which OOM errors take because they are thrown with
+  `add_backtrace=FALSE`). If an allocation inside it fails — in practice the
+  `JS_NewString` for the stack string, the largest allocation there and one
+  that grows with frame count — the nested `JS_ThrowOutOfMemory` reaches
+  `JS_Throw`, which frees `rt->current_exception`, and the following
+  `JS_DefinePropertyValue` writes through the freed object. Reproduced under
+  ASan by failing that one allocation: SEGV in `JS_DefineProperty` ←
+  `build_backtrace`, matching an organic crash seen parsing a large feed at a
+  4MB heap. Fix holds a reference across the function (`eobj`), so the value
+  is `JS_DupValue`d on entry and freed at the `done:` label. Drop this patch
+  if a release picks up an equivalent fix; re-apply on refresh otherwise.
 
 ## Monocypher 4.0.2
 
@@ -54,6 +69,17 @@ security fixes since the pinned version — that's the main reason to bump.
 - Scope note: db-less corners only (channel-harness scenario reader) — do not
   reintroduce it on any path that has a db handle (AGENTS.md)
 - Last checked: 2026-07-17
+
+## yxml (git master, generated amalgamation)
+
+- Repo: https://g.blicky.net/yxml.git (homepage https://dev.yorhel.nl/yxml)
+- Files: `yxml/yxml.c` (generated from yxml.c.in — fetch the pre-generated
+  file from the git host's plain view, don't regenerate), `yxml/yxml.h`
+- License: MIT
+- Scope note: SAX XML parser behind the `XML.parse()` JS global
+  (`src/qjs_xml.c`) — runs only in sandboxed children (js_eval tool child,
+  channel runner), never fed untrusted input in the daemon process
+- Last checked: 2026-08-12
 
 ## Secret-scanner rule data (not code)
 

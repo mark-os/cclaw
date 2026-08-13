@@ -96,6 +96,16 @@ use the provided host bridges:
   is data like any other; use `Object.keys(node)` rather than
   `node.hasOwnProperty(...)`.
 
+  Three more things worth knowing before you match on a value. **Values are
+  always strings** — `<count>3</count>` gives `"3"`, not `3` (fast-xml-parser
+  would coerce it; we do not), so compare with `Number(x)` or `===  "3"`.
+  **Namespace prefixes are kept verbatim and never resolved**, so `xmlns`
+  declarations are ignored and you match `d.rss.channel['media:content']` by
+  the literal prefix the feed used — which is what feed vocabularies
+  (`media:`, `dc:`, `content:`) expect anyway. And a **repeated attribute
+  keeps the last occurrence** (`<r a="1" a="2"/>` → `@_a: "2"`), silently;
+  that input is malformed XML, and this matches fast-xml-parser.
+
   Failures throw: a `SyntaxError` naming the defect ("close tag does not match
   the open tag", "document ended mid-element (truncated?)") or an
   `InternalError: out of memory` when the document is too big for the heap.

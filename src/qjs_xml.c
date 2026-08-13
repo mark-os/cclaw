@@ -49,6 +49,7 @@ static int node_add(JSContext *ctx, JSValue parent, const char *name, JSValue va
         return rc;
     }
     JSValue arr = JS_NewArray(ctx);
+    if (JS_IsException(arr)) { JS_FreeValue(ctx, cur); JS_FreeValue(ctx, val); return -1; }
     JS_SetPropertyUint32(ctx, arr, 0, cur);   /* takes ownership of cur */
     JS_SetPropertyUint32(ctx, arr, 1, val);
     return JS_SetPropertyStr(ctx, parent, name, arr) < 0 ? -1 : 0;
@@ -154,8 +155,15 @@ static JSValue js_xml_parse(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "xml.parse: string argument required");
     size_t len = 0;
     const char *input = JS_ToCStringLen(ctx, &len, argv[0]);
-    if (!input)
-        return JS_ThrowTypeError(ctx, "xml.parse: argument must be a string");
+    if (!input) {
+        /* A string argument that will not convert means the conversion itself
+         * could not allocate — reporting that as a type error sends the caller
+         * to fix an argument that was never wrong. */
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return JS_IsString(argv[0])
+            ? JS_ThrowInternalError(ctx, "xml.parse: out of memory")
+            : JS_ThrowTypeError(ctx, "xml.parse: argument must be a string");
+    }
 
     char *stack = malloc(XML_STACK_BUF);
     XmlFrame *frames = calloc(XML_MAX_DEPTH, sizeof(*frames));
@@ -170,6 +178,11 @@ static JSValue js_xml_parse(JSContext *ctx, JSValueConst this_val,
     /* frames[0] is the synthetic root holder; the result is its obj. */
     int depth = 0;
     frames[0].obj = new_node(ctx);
+    if (JS_IsException(frames[0].obj)) {
+        free(frames); free(stack);
+        JS_FreeCString(ctx, input);
+        return JS_ThrowOutOfMemory(ctx);
+    }
     frames[0].name = NULL;
     Buf attrval = {0};
     const char *err = NULL;
@@ -239,14 +252,24 @@ static JSValue js_xml_parse(JSContext *ctx, JSValueConst this_val,
                 /* leaf: no attrs, no children → collapse to string */
                 val = JS_NewStringLen(ctx, ts, tlen);
             } else {
-                if (tlen)
-                    JS_SetPropertyStr(ctx, f->obj, "#text", JS_NewStringLen(ctx, ts, tlen));
+                if (tlen) {
+                    JSValue t = JS_NewStringLen(ctx, ts, tlen);
+                    if (JS_IsException(t)) { err = "out of memory"; err_oom = 1; break; }
+                    JS_SetPropertyStr(ctx, f->obj, "#text", t);
+                }
                 val = f->obj;
                 f->obj = JS_UNDEFINED;
             }
+            if (JS_IsException(val)) { err = "out of memory"; err_oom = 1; break; }
             XmlFrame *parent = &frames[depth - 1];
-            if (depth > 1 && JS_IsUndefined(parent->obj))
+            if (depth > 1 && JS_IsUndefined(parent->obj)) {
                 parent->obj = new_node(ctx);
+                if (JS_IsException(parent->obj)) {
+                    JS_FreeValue(ctx, val);
+                    parent->obj = JS_UNDEFINED;
+                    err = "out of memory"; err_oom = 1; break;
+                }
+            }
             if (node_add(ctx, parent->obj, f->name, val) != 0) {
                 err = "out of memory"; err_oom = 1;
             }
@@ -263,13 +286,21 @@ static JSValue js_xml_parse(JSContext *ctx, JSValueConst this_val,
             break;
         case YXML_ATTREND: {
             XmlFrame *f = &frames[depth];
-            if (JS_IsUndefined(f->obj)) f->obj = new_node(ctx);
+            if (JS_IsUndefined(f->obj)) {
+                f->obj = new_node(ctx);
+                if (JS_IsException(f->obj)) {
+                    f->obj = JS_UNDEFINED;
+                    err = "out of memory"; err_oom = 1; break;
+                }
+            }
             char key[512] = "@_";
             size_t alen = strlen(x.attr);
             if (alen > sizeof(key) - 3) { err = "attribute name too long"; break; }
             memcpy(key + 2, x.attr, alen + 1);
-            JS_SetPropertyStr(ctx, f->obj, key,
-                JS_NewStringLen(ctx, attrval.data ? attrval.data : "", attrval.len));
+            JSValue av = JS_NewStringLen(ctx, attrval.data ? attrval.data : "",
+                                         attrval.len);
+            if (JS_IsException(av)) { err = "out of memory"; err_oom = 1; break; }
+            JS_SetPropertyStr(ctx, f->obj, key, av);
             break;
         }
         default:  /* YXML_E* */

@@ -13,5 +13,6 @@ int route_main(int argc, char *argv[]);
 int dashboard_main(void);
 int backup_main(int argc, char *argv[]);
 int resp_main(int argc, char *argv[]);
+int models_main(int argc, char *argv[]);
 
 #endif

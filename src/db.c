@@ -495,6 +495,22 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
     /* v44: model ids become canonical. No shape change — a data rewrite, in
      * C because each rewritten row is logged. */
     { 44, NULL, patch_v44_canonical_model_ids },
+
+    /* v45: the availability probe's cache (config-ax Phase 3). Lands empty —
+     * nothing probes at startup; the first search_config models query or
+     * `cclaw models` fills it. */
+    { 45,
+      "CREATE TABLE IF NOT EXISTS models_cache ("
+      "  provider_name TEXT NOT NULL,"
+      "  id TEXT NOT NULL,"
+      "  context_length INTEGER,"
+      "  prompt_price TEXT,"
+      "  completion_price TEXT,"
+      "  modality TEXT,"
+      "  synced_at INTEGER NOT NULL,"
+      "  PRIMARY KEY (provider_name, id)"
+      ");",
+      NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */

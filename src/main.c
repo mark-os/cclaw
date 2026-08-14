@@ -790,6 +790,11 @@ int main(int argc, char *argv[]) {
 
     if (argc >= 2 && strcmp(argv[1], "resp") == 0) return resp_main(argc, argv);
 
+    /* models: the provider availability probe (config-ax Phase 3). Read-only
+     * from the config's point of view — it caches what the provider serves,
+     * it never changes routing. */
+    if (argc >= 2 && strcmp(argv[1], "models") == 0) return models_main(argc, argv);
+
     /* dashboard: print the tokenized /admin URL (token minted at daemon start). */
     if (argc >= 2 && strcmp(argv[1], "dashboard") == 0) return dashboard_main();
 

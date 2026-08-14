@@ -124,6 +124,12 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->search_cfg_ctx.session_id = session_id;
     tool_search_config_register(&setup->reg, &setup->search_cfg_ctx);
 
+    /* Provider-catalog search — registered so it is discoverable under
+     * "Requestable Tools", deliberately absent from agent_default_tools: it is
+     * the one introspection tool that can reach the network. */
+    setup->search_models_ctx.db = db;
+    tool_search_models_register(&setup->reg, &setup->search_models_ctx);
+
     /* Bootstrap tools — available in both CLI and daemon (DB config only) */
     setup->bootstrap_ctx.db = db;
     setup->bootstrap_ctx.session_id = session_id;

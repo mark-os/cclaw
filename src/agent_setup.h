@@ -15,6 +15,7 @@
 #include "tool_agent.h"
 #include "tool_request_config.h"
 #include "tool_search_config.h"
+#include "tool_search_models.h"
 #include "tool_extension.h"
 #include "tool_cron.h"
 #include "tool_web_fetch.h"
@@ -61,6 +62,7 @@ typedef struct {
     AgentLaunchCtx launch_ctx;
     RequestConfigCtx req_cfg_ctx;
     SearchConfigCtx search_cfg_ctx;
+    SearchModelsCtx search_models_ctx;
     ToolExtensionCtx ext_tool_ctx;
     ToolCronCtx cron_ctx;
     ToolSecretCreateCtx secret_create_ctx;

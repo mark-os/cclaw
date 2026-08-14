@@ -15,6 +15,7 @@
 #include "dashboard.h"
 #include "db.h"
 #include "log.h"
+#include "models_cache.h"
 #include "secret.h"
 #include "validate.h"
 #include "secret_store.h"
@@ -722,4 +723,46 @@ int resp_main(int argc, char *argv[]) {
     }
     sqlite3_close(db);
     return rc;
+}
+
+/* `cclaw models [query] [--provider NAME] [--refresh]` — the availability
+ * catalog listing from the operator side: what the provider advertises, as
+ * opposed to the `models` rows routing actually uses. The secret key is loaded because
+ * a provider's api_key_env usually resolves to a stored secret, not an env
+ * var. Same output as the agent surface, a looser row cap — an operator
+ * reading a terminal can take 100 lines, a context window cannot. */
+int models_main(int argc, char *argv[]) {
+    const char *provider = NULL, *query = NULL;
+    int force = 0, page = 1;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--refresh") == 0) force = 1;
+        else if (strcmp(argv[i], "--provider") == 0) {
+            if (++i >= argc) { fprintf(stderr, "--provider requires a name\n"); return 2; }
+            provider = argv[i];
+        } else if (strcmp(argv[i], "--page") == 0) {
+            if (++i >= argc) { fprintf(stderr, "--page requires a number\n"); return 2; }
+            page = atoi(argv[i]);
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "usage: cclaw models [query] [--provider NAME] [--page N] [--refresh]\n");
+            return 2;
+        } else if (!query) {
+            query = argv[i];
+        }
+    }
+
+    char *db_path = util_resolve_db_path();
+    if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return 1; }
+    sqlite3 *db = verb_db_open();
+    if (!db) { free(db_path); return 1; }
+    { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
+    free(db_path);
+
+    char err[256] = "", *listing = NULL;
+    int rc = models_cache_query(db, provider, query, 100, page, force,
+                                &listing, err, sizeof(err));
+    if (rc != 0) fprintf(stderr, "error: %s\n", err[0] ? err : "probe failed");
+    else printf("%s", listing);
+    free(listing);
+    sqlite3_close(db);
+    return rc == 0 ? 0 : 1;
 }

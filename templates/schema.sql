@@ -52,6 +52,21 @@ CREATE TABLE IF NOT EXISTS models (
 );
 CREATE INDEX IF NOT EXISTS idx_models_routing ON models(priority, status);
 
+-- Availability probe cache: what a provider says it can serve, as opposed to
+-- what `models` registers for routing. Slim on purpose — an aggregator's
+-- catalog is hundreds of rows, and the description/provider blobs it ships
+-- must never reach a context window. synced_at drives the 12h TTL.
+CREATE TABLE IF NOT EXISTS models_cache (
+  provider_name TEXT NOT NULL,
+  id TEXT NOT NULL,
+  context_length INTEGER,
+  prompt_price TEXT,
+  completion_price TEXT,
+  modality TEXT,
+  synced_at INTEGER NOT NULL,
+  PRIMARY KEY (provider_name, id)
+);
+
 -- ═══ LLM Jobs (transient queue) ═══
 CREATE TABLE IF NOT EXISTS llm_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

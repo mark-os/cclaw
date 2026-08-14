@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` 5000ms). CLI and daemon are peers sharing one source of truth; per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped so a live peer's in-flight sessions are never stomped.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v43 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v40 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into it).
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v45 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v40 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into it).
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -108,6 +108,28 @@ Per-model routing metadata + lifetime stats. The router picks by `(priority, sta
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 Index: `idx_models_routing ON models(priority, status)`.
+
+---
+
+## models_cache
+
+Availability-probe cache (v45, config-ax Phase 3): what a provider's
+`/models` endpoint *lists*, as opposed to what `models` *registers* for
+routing. Filled lazily by `search_models` / `cclaw models` on a 12h TTL
+(`MODELS_CACHE_TTL_S`); never probed at startup or per turn. Slim columns
+on purpose — description/provider blobs from aggregator catalogs must
+never reach a context window. A listing is advisory; only registered ids
+route.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `provider_name` | TEXT NOT NULL | PK part; FK-ish to `providers.name` |
+| `id` | TEXT NOT NULL | PK part; the id as the catalog lists it |
+| `context_length` | INTEGER | |
+| `prompt_price` | TEXT | per-token price string as published |
+| `completion_price` | TEXT | |
+| `modality` | TEXT | e.g. `text->text` |
+| `synced_at` | INTEGER NOT NULL | unixepoch of the refresh; drives the TTL |
 
 ---
 

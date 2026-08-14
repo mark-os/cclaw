@@ -71,17 +71,21 @@ static inline void test_seed_agent(sqlite3 *db, const char *name) {
  * build a RunToolParsed, run the tier leaf in-process (host mode, no
  * namespace). Malformed args_json returns the dispatch-gate-equivalent
  * "error: invalid tool arguments". Result is malloc'd; caller frees. */
-static inline char *test_run_tier(int tier, const char *tool,
-                                  const char *args_json,
-                                  const FileReadCtx *fctx,
-                                  const WebFetchCtx *wctx) {
+static inline char *test_run_tier_status(int tier, const char *tool,
+                                         const char *args_json,
+                                         const FileReadCtx *fctx,
+                                         const WebFetchCtx *wctx,
+                                         int *is_error) {
+    int sink = 0;
+    if (!is_error) is_error = &sink;
+    *is_error = 0;
     sqlite3 *db = db_open(":memory:");
-    if (!db) return test_strdup_("error: test db");
+    if (!db) { *is_error = 1; return test_strdup_("error: test db"); }
     ToolWireArg *wa = NULL;
     size_t wn = 0;
     int rc = tool_args_extract(db, tool, NULL, args_json, &wa, &wn);
     sqlite3_close(db);
-    if (rc != 0) return test_strdup_("error: invalid tool arguments");
+    if (rc != 0) { *is_error = 1; return test_strdup_("error: invalid tool arguments"); }
 
     RunToolParsed q;
     memset(&q, 0, sizeof(q));
@@ -109,12 +113,21 @@ static inline char *test_run_tier(int tier, const char *tool,
     }
     char *r = NULL;
     switch (tier) {
-    case RUNTOOL_TIER_FILE: r = tool_file_tier_run(&q); break;
-    case RUNTOOL_TIER_WEB:  r = tool_web_tier_run(&q); break;
-    case RUNTOOL_TIER_JS:   r = tool_js_tier_run(&q); break;
+    case RUNTOOL_TIER_FILE: r = tool_file_tier_run(&q, is_error); break;
+    case RUNTOOL_TIER_WEB:  r = tool_web_tier_run(&q, is_error); break;
+    case RUNTOOL_TIER_JS:   r = tool_js_tier_run(&q, is_error); break;
     }
     tool_wire_args_free(wa, wn);
-    return r ? r : test_strdup_("error: no tier");
+    if (!r) { *is_error = 1; r = test_strdup_("error: no tier"); }
+    return r;
+}
+
+/* Status-agnostic form for tests that only look at the text. */
+static inline char *test_run_tier(int tier, const char *tool,
+                                  const char *args_json,
+                                  const FileReadCtx *fctx,
+                                  const WebFetchCtx *wctx) {
+    return test_run_tier_status(tier, tool, args_json, fctx, wctx, NULL);
 }
 
 static inline char *test_file_tool_run(const char *tool, const char *args_json,

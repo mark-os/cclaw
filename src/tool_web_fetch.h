@@ -1,6 +1,10 @@
 #ifndef CCLAW_TOOL_WEB_FETCH_H
 #define CCLAW_TOOL_WEB_FETCH_H
 
+/* Default web_fetch timeout, seconds; a call may raise it via the `timeout`
+ * argument up to TOOL_TIMEOUT_MAX_SEC. */
+#define WEB_FETCH_DEFAULT_TIMEOUT 60
+
 #include "tools.h"
 #include "sandbox.h"
 #include "run_tool.h"
@@ -35,6 +39,6 @@ char *web_fetch_host_hint(const char *url, char **rules, size_t n, int host_mode
 
 /* --run-tool tier leaf: run web_fetch in-process inside the broker's inner
  * fork (netns + proxy already applied). */
-char *tool_web_tier_run(const RunToolParsed *q);
+char *tool_web_tier_run(const RunToolParsed *q, int *is_error);
 
 #endif

@@ -48,11 +48,16 @@ typedef struct {
     int result_pipe;        /* read end of pipe for tool output */
     char *outbuf;           /* Accumulator for tool output (grows with realloc) */
     size_t outbuf_len;      /* Bytes currently in outbuf */
-    /* fd-3 frame parse state: [4-byte meta_len (network order)][hosts JSON]
-     * [result to EOF]. The pipe is non-blocking and poll-driven, so header
-     * and meta can arrive fragmented across drains. */
-    size_t frame_hdr_read;      /* bytes of the 4-byte header consumed */
-    unsigned char frame_hdr[4];
+    /* fd-3 frame parse state: [1-byte status][4-byte meta_len (network order)]
+     * [hosts JSON][result to EOF]. The pipe is non-blocking and poll-driven, so
+     * header and meta can arrive fragmented across drains. */
+    size_t frame_hdr_read;      /* bytes of the 5-byte header consumed */
+    unsigned char frame_hdr[5];
+    /* The child's explicit tool status (RUNTOOL_STATUS_*), read from the frame
+     * — never inferred from the result text. Defaults to success for a child
+     * that died before writing a header; child_output_finalize overrides that
+     * when the death itself is the failure. */
+    int frame_status;
     size_t frame_meta_len;      /* parsed meta length (valid once hdr_read==4) */
     size_t frame_meta_read;     /* meta bytes consumed so far */
     char *hosts_json;           /* meta payload; NULL if absent/oversized */

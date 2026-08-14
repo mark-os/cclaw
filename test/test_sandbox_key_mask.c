@@ -185,12 +185,12 @@ static char *file_read_via_broker(const char *path, const char *grant_path) {
     waitpid(pid, &status, 0);
 
     assert(len >= 4);
-    size_t meta_len = ((size_t)(unsigned char)buf[0] << 24) |
-                      ((size_t)(unsigned char)buf[1] << 16) |
-                      ((size_t)(unsigned char)buf[2] << 8) |
-                       (size_t)(unsigned char)buf[3];
-    assert(4 + meta_len <= len);
-    char *result = strdup(buf + 4 + meta_len);
+    size_t meta_len = ((size_t)(unsigned char)buf[1] << 24) |
+                      ((size_t)(unsigned char)buf[2] << 16) |
+                      ((size_t)(unsigned char)buf[3] << 8) |
+                       (size_t)(unsigned char)buf[4];
+    assert(5 + meta_len <= len);
+    char *result = strdup(buf + 5 + meta_len);
     free(buf);
     return result;
 }

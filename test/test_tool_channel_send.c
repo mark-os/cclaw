@@ -28,7 +28,7 @@ static char *call(ToolRegistry *reg, ToolChannelSendCtx *ctx,
     ctx->session_id = sid;
     ToolEntry *te = tools_lookup(reg, "channel_send");
     assert(te);
-    return te->handler(args, te->user_data);
+    return te->handler(args, te->user_data, &(int){0});
 }
 
 int main(void) {

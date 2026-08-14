@@ -25,6 +25,6 @@ int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx);
 
 /* --run-tool tier leaf: dispatch a file tool by name on the request's wire
  * params. Called by the broker after the sandbox is applied. */
-char *tool_file_tier_run(const RunToolParsed *q);
+char *tool_file_tier_run(const RunToolParsed *q, int *is_error);
 
 #endif

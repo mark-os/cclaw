@@ -1,6 +1,10 @@
 #ifndef CCLAW_TOOL_JS_H
 #define CCLAW_TOOL_JS_H
 
+/* Default js_eval timeout, seconds; a call may raise it via the `timeout`
+ * argument up to TOOL_TIMEOUT_MAX_SEC. */
+#define JSEVAL_DEFAULT_TIMEOUT 120
+
 /* The js_eval tool and the per-session persistent JS runtime — one-off JS
  * evaluation in the sandboxed engine (SBX_JS tier), sharing a context
  * across extension loads.
@@ -46,7 +50,7 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx);
 
 /* Handler: parse JSON args, eval in sandboxed QuickJS (fork+exec).
  * Returns heap-allocated result string. */
-char *tool_js_eval_handler(const char *arguments, void *user_data);
+char *tool_js_eval_handler(const char *arguments, void *user_data, int *is_error);
 
 /* Create a persistent JS runtime for extension loading. */
 JsSessionRuntime *js_runtime_create(void);
@@ -70,6 +74,6 @@ int js_tool_resolve_request(const ToolEntry *te, JsEvalCtx **out_ctx,
 
 /* --run-tool tier leaf: eval qjs in-process inside the broker's inner fork
  * (netns + proxy + mounts already applied). */
-char *tool_js_tier_run(const RunToolParsed *q);
+char *tool_js_tier_run(const RunToolParsed *q, int *is_error);
 
 #endif

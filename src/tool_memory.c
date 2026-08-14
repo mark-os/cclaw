@@ -132,32 +132,32 @@ static const char *MEMORY_DELETE_PARAMS =
 
 /* --- Handlers --- */
 
-static char *tool_memory_create_handler(const char *arguments, void *user_data) {
+static char *tool_memory_create_handler(const char *arguments, void *user_data, int *is_error) {
     ToolMemoryCtx *ctx = (ToolMemoryCtx *)user_data;
     if (!ctx || !ctx->db || !ctx->agent_name)
-        return strdup("error: memory tools unavailable (no agent context)");
+        return tool_fail(is_error, "error: memory tools unavailable (no agent context)");
 
     char *label = arg_str(ctx->db, arguments, "$.label");
     char *desc = arg_str(ctx->db, arguments, "$.description");
     char *placement = arg_str(ctx->db, arguments, "$.placement");
     if (!label || !desc) {
         free(label); free(desc); free(placement);
-        return strdup("error: 'label' and 'description' required");
+        return tool_fail(is_error, "error: 'label' and 'description' required");
     }
     if (!is_valid_name(label)) {
         free(label); free(desc); free(placement);
-        return strdup("error: label must be alphanumeric (A-Z, a-z, 0-9, _, -)");
+        return tool_fail(is_error, "error: label must be alphanumeric (A-Z, a-z, 0-9, _, -)");
     }
     if (placement && strcmp(placement, "system") != 0 && strcmp(placement, "context") != 0) {
         free(label); free(desc); free(placement);
-        return strdup("error: placement must be 'system' or 'context'");
+        return tool_fail(is_error, "error: placement must be 'system' or 'context'");
     }
 
     int64_t id = memory_block_create(ctx->db, ctx->agent_name, label, desc, 5000, placement);
     free(desc); free(placement);
     if (id < 0) {
         free(label);
-        return strdup("error: failed to create block (label may already exist)");
+        return tool_fail(is_error, "error: failed to create block (label may already exist)");
     }
 
     char buf[128];
@@ -166,48 +166,48 @@ static char *tool_memory_create_handler(const char *arguments, void *user_data) 
     return strdup(buf);
 }
 
-static char *tool_memory_add_handler(const char *arguments, void *user_data) {
+static char *tool_memory_add_handler(const char *arguments, void *user_data, int *is_error) {
     ToolMemoryCtx *ctx = (ToolMemoryCtx *)user_data;
     if (!ctx || !ctx->db || !ctx->agent_name)
-        return strdup("error: memory tools unavailable (no agent context)");
+        return tool_fail(is_error, "error: memory tools unavailable (no agent context)");
 
     char *block = arg_str(ctx->db, arguments, "$.block");
     char *text = arg_str(ctx->db, arguments, "$.text");
     if (!block || !text) {
         free(block); free(text);
-        return strdup("error: 'block' and 'text' required");
+        return tool_fail(is_error, "error: 'block' and 'text' required");
     }
 
     MemoryBlock *mb = memory_block_get(ctx->db, ctx->agent_name, block);
-    if (!mb) { free(block); free(text); return strdup("error: block not found"); }
-    if (mb->read_only) { memory_block_free(mb); free(block); free(text); return strdup("error: block is read-only"); }
+    if (!mb) { free(block); free(text); return tool_fail(is_error, "error: block not found"); }
+    if (mb->read_only) { memory_block_free(mb); free(block); free(text); return tool_fail(is_error, "error: block is read-only"); }
     memory_block_free(mb);
 
     int rc = memory_entry_add_guarded(ctx->db, ctx->agent_name, block, text);
     free(text);
-    if (rc == 0) { free(block); return strdup("error: would exceed char_limit"); }
-    if (rc < 0) { free(block); return strdup("error: failed to add entry"); }
+    if (rc == 0) { free(block); return tool_fail(is_error, "error: would exceed char_limit"); }
+    if (rc < 0) { free(block); return tool_fail(is_error, "error: failed to add entry"); }
 
     char *out = render_block(ctx->db, ctx->agent_name, block);
     free(block);
     return out;
 }
 
-static char *tool_memory_edit_handler(const char *arguments, void *user_data) {
+static char *tool_memory_edit_handler(const char *arguments, void *user_data, int *is_error) {
     ToolMemoryCtx *ctx = (ToolMemoryCtx *)user_data;
     if (!ctx || !ctx->db || !ctx->agent_name)
-        return strdup("error: memory tools unavailable (no agent context)");
+        return tool_fail(is_error, "error: memory tools unavailable (no agent context)");
 
     char *block = arg_str(ctx->db, arguments, "$.block");
-    if (!block) return strdup("error: missing or invalid 'block'");
+    if (!block) return tool_fail(is_error, "error: missing or invalid 'block'");
     if (!arg_is_array(ctx->db, arguments, "$.edits")) {
         free(block);
-        return strdup("error: missing or invalid 'edits'");
+        return tool_fail(is_error, "error: missing or invalid 'edits'");
     }
 
     MemoryBlock *mb = memory_block_get(ctx->db, ctx->agent_name, block);
-    if (!mb) { free(block); return strdup("error: block not found"); }
-    if (mb->read_only) { memory_block_free(mb); free(block); return strdup("error: block is read-only"); }
+    if (!mb) { free(block); return tool_fail(is_error, "error: block not found"); }
+    if (mb->read_only) { memory_block_free(mb); free(block); return tool_fail(is_error, "error: block is read-only"); }
     memory_block_free(mb);
 
     sqlite3_stmt *cnt;
@@ -219,7 +219,7 @@ static char *tool_memory_edit_handler(const char *arguments, void *user_data) {
         if (sqlite3_step(cnt) == SQLITE_ROW) n_edits = sqlite3_column_int(cnt, 0);
         sqlite3_finalize(cnt);
     }
-    if (n_edits > MEM_MAX_ENTRIES) { free(block); return strdup("error: too many edits"); }
+    if (n_edits > MEM_MAX_ENTRIES) { free(block); return tool_fail(is_error, "error: too many edits"); }
 
     int succeeded = 0, failed = 0;
     char failed_nums[256] = "";
@@ -270,21 +270,21 @@ static char *tool_memory_edit_handler(const char *arguments, void *user_data) {
     return out;
 }
 
-static char *tool_memory_delete_handler(const char *arguments, void *user_data) {
+static char *tool_memory_delete_handler(const char *arguments, void *user_data, int *is_error) {
     ToolMemoryCtx *ctx = (ToolMemoryCtx *)user_data;
     if (!ctx || !ctx->db || !ctx->agent_name)
-        return strdup("error: memory tools unavailable (no agent context)");
+        return tool_fail(is_error, "error: memory tools unavailable (no agent context)");
 
     char *block = arg_str(ctx->db, arguments, "$.block");
-    if (!block) return strdup("error: missing or invalid 'block'");
+    if (!block) return tool_fail(is_error, "error: missing or invalid 'block'");
     if (!arg_is_array(ctx->db, arguments, "$.numbers")) {
         free(block);
-        return strdup("error: missing or invalid 'numbers'");
+        return tool_fail(is_error, "error: missing or invalid 'numbers'");
     }
 
     MemoryBlock *mb = memory_block_get(ctx->db, ctx->agent_name, block);
-    if (!mb) { free(block); return strdup("error: block not found"); }
-    if (mb->read_only) { memory_block_free(mb); free(block); return strdup("error: block is read-only"); }
+    if (!mb) { free(block); return tool_fail(is_error, "error: block not found"); }
+    if (mb->read_only) { memory_block_free(mb); free(block); return tool_fail(is_error, "error: block is read-only"); }
     memory_block_free(mb);
 
     sqlite3_stmt *cnt;
@@ -296,7 +296,7 @@ static char *tool_memory_delete_handler(const char *arguments, void *user_data) 
         if (sqlite3_step(cnt) == SQLITE_ROW) n = sqlite3_column_int(cnt, 0);
         sqlite3_finalize(cnt);
     }
-    if (n > MEM_MAX_ENTRIES) { free(block); return strdup("error: too many numbers"); }
+    if (n > MEM_MAX_ENTRIES) { free(block); return tool_fail(is_error, "error: too many numbers"); }
 
     int nums[MEM_MAX_ENTRIES];
     int idx = 0;
@@ -329,28 +329,32 @@ static char *tool_memory_delete_handler(const char *arguments, void *user_data) 
 
 /* --- EXEC_THREAD shims: rebuild the ctx around the thread's own db handle --- */
 static char *memory_create_thread_run(sqlite3 *db, const char *agent_name,
-                                      int64_t session_id, const char *args) {
+                                      int64_t session_id, const char *args,
+                                      int *is_error) {
     (void)session_id;
     ToolMemoryCtx c = {.db = db, .agent_name = agent_name};
-    return tool_memory_create_handler(args, &c);
+    return tool_memory_create_handler(args, &c, is_error);
 }
 static char *memory_add_thread_run(sqlite3 *db, const char *agent_name,
-                                   int64_t session_id, const char *args) {
+                                   int64_t session_id, const char *args,
+                                   int *is_error) {
     (void)session_id;
     ToolMemoryCtx c = {.db = db, .agent_name = agent_name};
-    return tool_memory_add_handler(args, &c);
+    return tool_memory_add_handler(args, &c, is_error);
 }
 static char *memory_edit_thread_run(sqlite3 *db, const char *agent_name,
-                                    int64_t session_id, const char *args) {
+                                    int64_t session_id, const char *args,
+                                    int *is_error) {
     (void)session_id;
     ToolMemoryCtx c = {.db = db, .agent_name = agent_name};
-    return tool_memory_edit_handler(args, &c);
+    return tool_memory_edit_handler(args, &c, is_error);
 }
 static char *memory_delete_thread_run(sqlite3 *db, const char *agent_name,
-                                      int64_t session_id, const char *args) {
+                                      int64_t session_id, const char *args,
+                                      int *is_error) {
     (void)session_id;
     ToolMemoryCtx c = {.db = db, .agent_name = agent_name};
-    return tool_memory_delete_handler(args, &c);
+    return tool_memory_delete_handler(args, &c, is_error);
 }
 
 /* --- Registration --- */

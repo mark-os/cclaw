@@ -80,7 +80,7 @@ static void test_set_recurring(void) {
     ToolCronCtx ctx = mkctx(db, sid, "test_agent");
     char *r = tool_cron_set_handler(
         "{\"name\":\"daily\",\"cron_expr\":\"0 9 * * *\",\"prompt\":\"good morning\"}",
-        &ctx);
+        &ctx, &(int){0});
     assert(r);
     assert(strstr(r, "created cron job"));
     assert(strstr(r, "daily"));
@@ -104,7 +104,7 @@ static void test_set_auto_name(void) {
 
     ToolCronCtx ctx = mkctx(db, sid, "A");
     char *r = tool_cron_set_handler(
-        "{\"in_seconds\":600,\"prompt\":\"check the build\"}", &ctx);
+        "{\"in_seconds\":600,\"prompt\":\"check the build\"}", &ctx, &(int){0});
     assert(r && strstr(r, "created cron job"));
 
     /* The generated name is echoed — pull it back out of the result text. */
@@ -131,7 +131,7 @@ static void test_set_bare_wake(void) {
     int64_t sid = session_create(db, "test", "A", -1, 0);
     ToolCronCtx ctx = mkctx(db, sid, "A");
 
-    char *r = tool_cron_set_handler("{\"name\":\"wake\",\"in_seconds\":300}", &ctx);
+    char *r = tool_cron_set_handler("{\"name\":\"wake\",\"in_seconds\":300}", &ctx, &(int){0});
     assert(r && strstr(r, "created cron job"));
     assert(strstr(r, "bare wake"));
     free(r);
@@ -153,12 +153,12 @@ static void test_upsert_keeps_unnamed_fields(void) {
     ToolCronCtx ctx = mkctx(db, sid, "A");
 
     char *r = tool_cron_set_handler(
-        "{\"name\":\"j\",\"cron_expr\":\"0 9 * * *\",\"prompt\":\"morning\"}", &ctx);
+        "{\"name\":\"j\",\"cron_expr\":\"0 9 * * *\",\"prompt\":\"morning\"}", &ctx, &(int){0});
     assert(r && strstr(r, "created")); free(r);
     int64_t id = job_int(db, "id", "j");
 
     /* New schedule, prompt untouched. */
-    r = tool_cron_set_handler("{\"name\":\"j\",\"cron_expr\":\"0 17 * * *\"}", &ctx);
+    r = tool_cron_set_handler("{\"name\":\"j\",\"cron_expr\":\"0 17 * * *\"}", &ctx, &(int){0});
     assert(r && strstr(r, "updated cron job"));
     assert(strstr(r, "0 17 * * *"));
     free(r);
@@ -168,7 +168,7 @@ static void test_upsert_keeps_unnamed_fields(void) {
     assert(v && strcmp(v, "morning") == 0); free(v);
 
     /* New prompt, schedule untouched. */
-    r = tool_cron_set_handler("{\"name\":\"j\",\"prompt\":\"evening\"}", &ctx);
+    r = tool_cron_set_handler("{\"name\":\"j\",\"prompt\":\"evening\"}", &ctx, &(int){0});
     assert(r && strstr(r, "updated cron job")); free(r);
     v = job_text(db, "cron_expr", "j");
     assert(v && strcmp(v, "0 17 * * *") == 0); free(v);
@@ -189,10 +189,10 @@ static void test_upsert_clears_payload(void) {
     ToolCronCtx ctx = mkctx(db, sid, "A");
 
     char *r = tool_cron_set_handler(
-        "{\"name\":\"j\",\"in_seconds\":600,\"prompt\":\"noisy\"}", &ctx);
+        "{\"name\":\"j\",\"in_seconds\":600,\"prompt\":\"noisy\"}", &ctx, &(int){0});
     assert(r && strstr(r, "created")); free(r);
 
-    r = tool_cron_set_handler("{\"name\":\"j\",\"prompt\":\"\"}", &ctx);
+    r = tool_cron_set_handler("{\"name\":\"j\",\"prompt\":\"\"}", &ctx, &(int){0});
     assert(r && strstr(r, "updated"));
     assert(strstr(r, "bare wake"));
     free(r);
@@ -213,14 +213,14 @@ static void test_upsert_merged_mode_conflict(void) {
     snprintf(args, sizeof(args),
              "{\"name\":\"pinned\",\"in_seconds\":600,\"prompt\":\"p\","
              "\"session_id\":%lld}", (long long)sid);
-    char *r = tool_cron_set_handler(args, &ctx);
+    char *r = tool_cron_set_handler(args, &ctx, &(int){0});
     assert(r && strstr(r, "created"));
     free(r);
     char *v = job_text(db, "target", "pinned");
     assert(v && strcmp(v, "pin") == 0); free(v);
 
     /* The same call would be legal on a fresh name; on this job it is not. */
-    r = tool_cron_set_handler("{\"name\":\"pinned\",\"session\":\"new\"}", &ctx);
+    r = tool_cron_set_handler("{\"name\":\"pinned\",\"session\":\"new\"}", &ctx, &(int){0});
     assert(r && strstr(r, "error"));
     assert(strstr(r, "pinned to session"));
     free(r);
@@ -236,7 +236,7 @@ static void test_upsert_no_schedule(void) {
     int64_t sid = session_create(db, "test", "A", -1, 0);
     ToolCronCtx ctx = mkctx(db, sid, "A");
 
-    char *r = tool_cron_set_handler("{\"name\":\"j\",\"prompt\":\"p\"}", &ctx);
+    char *r = tool_cron_set_handler("{\"name\":\"j\",\"prompt\":\"p\"}", &ctx, &(int){0});
     assert(r && strstr(r, "error") && strstr(r, "no schedule"));
     free(r);
     assert(job_total(db) == 0);
@@ -251,7 +251,7 @@ static void expect_error(sqlite3 *db, int64_t sid, const char *agent,
                          const char *args, const char *needle,
                          const char *label) {
     ToolCronCtx ctx = mkctx(db, sid, agent);
-    char *r = tool_cron_set_handler(args, &ctx);
+    char *r = tool_cron_set_handler(args, &ctx, &(int){0});
     assert(r);
     if (!strstr(r, "error") || !strstr(r, needle)) {
         fprintf(stderr, "  %s: unexpected result: %s\n", label, r);
@@ -318,7 +318,7 @@ static void test_floor_message_teaches(void) {
     ToolCronCtx ctx = mkctx(db, sid, "A");
 
     char *r = tool_cron_set_handler(
-        "{\"name\":\"poke\",\"in_seconds\":20,\"prompt\":\"any news?\"}", &ctx);
+        "{\"name\":\"poke\",\"in_seconds\":20,\"prompt\":\"any news?\"}", &ctx, &(int){0});
     assert(r && strstr(r, "error"));
     assert(strstr(r, "in_seconds=20"));                 /* the offending value */
     assert(strstr(r, "floor=30s"));                     /* the configured floor */
@@ -329,13 +329,13 @@ static void test_floor_message_teaches(void) {
     /* A raised floor is echoed as configured, not as a constant. */
     assert(config_set(db, "cron_min_interval_seconds", "300") == 0);
     r = tool_cron_set_handler(
-        "{\"name\":\"poke\",\"in_seconds\":60,\"prompt\":\"p\"}", &ctx);
+        "{\"name\":\"poke\",\"in_seconds\":60,\"prompt\":\"p\"}", &ctx, &(int){0});
     assert(r && strstr(r, "in_seconds=60") && strstr(r, "floor=300s"));
     free(r);
 
     /* Recurring: the message names the expression and its real cadence. */
     r = tool_cron_set_handler(
-        "{\"name\":\"poke\",\"cron_expr\":\"* * * * *\",\"prompt\":\"p\"}", &ctx);
+        "{\"name\":\"poke\",\"cron_expr\":\"* * * * *\",\"prompt\":\"p\"}", &ctx, &(int){0});
     assert(r && strstr(r, "below the floor"));
     assert(strstr(r, "* * * * *") && strstr(r, "every 60s"));
     assert(strstr(r, "do not schedule checks"));
@@ -352,7 +352,7 @@ static void test_bad_expr_message_is_distinct(void) {
     ToolCronCtx ctx = mkctx(db, sid, "A");
 
     char *r = tool_cron_set_handler(
-        "{\"name\":\"bad\",\"cron_expr\":\"every day\",\"prompt\":\"p\"}", &ctx);
+        "{\"name\":\"bad\",\"cron_expr\":\"every day\",\"prompt\":\"p\"}", &ctx, &(int){0});
     assert(r && strstr(r, "error"));
     assert(strstr(r, "not a 5-field cron expression"));
     assert(strstr(r, "every day"));
@@ -396,7 +396,7 @@ static void test_script_paths(void) {
     assert(job_total(db) == 0);
 
     char *r = tool_cron_set_handler(
-        "{\"name\":\"s\",\"in_seconds\":600,\"script\":\"report.qjs\"}", &ctx);
+        "{\"name\":\"s\",\"in_seconds\":600,\"script\":\"report.qjs\"}", &ctx, &(int){0});
     assert(r && strstr(r, "created"));
     assert(strstr(r, "payload: script"));
     free(r);
@@ -405,7 +405,7 @@ static void test_script_paths(void) {
     free(v);
 
     /* prompt + script compose. */
-    r = tool_cron_set_handler("{\"name\":\"s\",\"prompt\":\"summarize it\"}", &ctx);
+    r = tool_cron_set_handler("{\"name\":\"s\",\"prompt\":\"summarize it\"}", &ctx, &(int){0});
     assert(r && strstr(r, "payload: prompt + script"));
     free(r);
 
@@ -435,7 +435,7 @@ static void test_default_target_stamps_chat(void) {
 
     ToolCronCtx ctx = mkctx(db, bound, "A");
     char *r = tool_cron_set_handler(
-        "{\"name\":\"bound\",\"in_seconds\":600,\"prompt\":\"p\"}", &ctx);
+        "{\"name\":\"bound\",\"in_seconds\":600,\"prompt\":\"p\"}", &ctx, &(int){0});
     assert(r && strstr(r, "created"));
     assert(strstr(r, "this conversation (discord:chat-42)"));
     free(r);
@@ -449,7 +449,7 @@ static void test_default_target_stamps_chat(void) {
      * the fallback anchor. */
     ToolCronCtx ctx2 = mkctx(db, plain, "A");
     r = tool_cron_set_handler(
-        "{\"name\":\"plain\",\"in_seconds\":600,\"prompt\":\"p\"}", &ctx2);
+        "{\"name\":\"plain\",\"in_seconds\":600,\"prompt\":\"p\"}", &ctx2, &(int){0});
     assert(r && strstr(r, "created")); free(r);
     assert(job_text(db, "channel_name", "plain") == NULL);
     assert(job_text(db, "chat_id", "plain") == NULL);
@@ -457,7 +457,7 @@ static void test_default_target_stamps_chat(void) {
 
     /* ...and an unbound caller updating a chat-bound job keeps its stamp
      * rather than silently stripping where the job reports. */
-    r = tool_cron_set_handler("{\"name\":\"bound\",\"prompt\":\"q\"}", &ctx2);
+    r = tool_cron_set_handler("{\"name\":\"bound\",\"prompt\":\"q\"}", &ctx2, &(int){0});
     assert(r && strstr(r, "updated")); free(r);
     v = job_text(db, "channel_name", "bound");
     assert(v && strcmp(v, "discord") == 0); free(v);
@@ -474,7 +474,7 @@ static void test_new_session_same_agent(void) {
     /* Naming yourself is not an escalation — nothing parks. */
     char *r = tool_cron_set_handler(
         "{\"name\":\"fresh\",\"in_seconds\":600,\"prompt\":\"p\","
-        "\"session\":\"new\",\"agent\":\"A\"}", &ctx);
+        "\"session\":\"new\",\"agent\":\"A\"}", &ctx, &(int){0});
     assert(r && strstr(r, "created"));
     assert(strstr(r, "a fresh session"));
     free(r);
@@ -512,7 +512,7 @@ static void test_channel_authority(void) {
     char *r = tool_cron_set_handler(
         "{\"name\":\"rep\",\"in_seconds\":600,\"prompt\":\"p\","
         "\"session\":\"new\",\"channel_name\":\"discord\",\"chat_id\":\"chat-9\"}",
-        &ctx);
+        &ctx, &(int){0});
     assert(r && strstr(r, "created"));
     assert(strstr(r, "reporting to discord:chat-9"));
     free(r);
@@ -530,7 +530,7 @@ static void test_cross_agent_parks(void) {
 
     char *r = tool_cron_set_handler(
         "{\"name\":\"borrow\",\"in_seconds\":600,\"prompt\":\"do it\","
-        "\"session\":\"new\",\"agent\":\"agent_b\"}", &ctx);
+        "\"session\":\"new\",\"agent\":\"agent_b\"}", &ctx, &(int){0});
     assert(r == NULL);                    /* parked: NULL_PARK contract */
     assert(job_total(db) == 0);           /* nothing written yet */
 
@@ -546,7 +546,7 @@ static void test_cross_agent_parks(void) {
     /* Re-requesting the same job while it is pending is refused, not doubled. */
     char *dup = tool_cron_set_handler(
         "{\"name\":\"borrow\",\"in_seconds\":600,\"prompt\":\"do it\","
-        "\"session\":\"new\",\"agent\":\"agent_b\"}", &ctx);
+        "\"session\":\"new\",\"agent\":\"agent_b\"}", &ctx, &(int){0});
     assert(dup && strstr(dup, "already"));
     free(dup);
 
@@ -572,7 +572,7 @@ static void test_cross_agent_session_pin_parks(void) {
     snprintf(args, sizeof(args),
              "{\"name\":\"into-b\",\"in_seconds\":600,\"prompt\":\"p\","
              "\"session_id\":%lld}", (long long)theirs);
-    char *r = tool_cron_set_handler(args, &ctx);
+    char *r = tool_cron_set_handler(args, &ctx, &(int){0});
     assert(r == NULL);
     assert(job_total(db) == 0);
     Approval *a = approval_get_pending(db, mine);
@@ -583,7 +583,7 @@ static void test_cross_agent_session_pin_parks(void) {
     snprintf(args, sizeof(args),
              "{\"name\":\"into-mine\",\"in_seconds\":600,\"prompt\":\"p\","
              "\"session_id\":%lld}", (long long)mine);
-    r = tool_cron_set_handler(args, &ctx);
+    r = tool_cron_set_handler(args, &ctx, &(int){0});
     assert(r && strstr(r, "created"));
     assert(strstr(r, "fires in session"));
     free(r);
@@ -601,18 +601,18 @@ static void test_per_session_cap(void) {
 
     ToolCronCtx ctx = mkctx(db, sid, "A");
     char *r1 = tool_cron_set_handler(
-        "{\"name\":\"a\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"t\"}", &ctx);
+        "{\"name\":\"a\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"t\"}", &ctx, &(int){0});
     assert(r1 && strstr(r1, "created"));
     free(r1);
 
     char *r2 = tool_cron_set_handler(
-        "{\"name\":\"b\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"t\"}", &ctx);
+        "{\"name\":\"b\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"t\"}", &ctx, &(int){0});
     assert(r2 && strstr(r2, "limit reached"));
     free(r2);
 
     /* Replacing a job the session already owns is not a new job. */
     char *r3 = tool_cron_set_handler(
-        "{\"name\":\"a\",\"cron_expr\":\"30 * * * *\"}", &ctx);
+        "{\"name\":\"a\",\"cron_expr\":\"30 * * * *\"}", &ctx, &(int){0});
     assert(r3 && strstr(r3, "updated"));
     free(r3);
 
@@ -625,7 +625,7 @@ static void test_cron_list_empty(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     ToolCronCtx ctx = mkctx(db, sid, "test_agent");
-    char *result = tool_cron_list_handler("{}", &ctx);
+    char *result = tool_cron_list_handler("{}", &ctx, &(int){0});
     assert(result);
     assert(strcmp(result, "no cron jobs") == 0);
     free(result);
@@ -639,13 +639,13 @@ static void test_cron_list_with_jobs(void) {
     ToolCronCtx ctx = mkctx(db, sid, "test_agent");
 
     char *r = tool_cron_set_handler(
-        "{\"name\":\"j1\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"task1\"}", &ctx);
+        "{\"name\":\"j1\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"task1\"}", &ctx, &(int){0});
     assert(r); free(r);
     r = tool_cron_set_handler(
-        "{\"name\":\"j2\",\"cron_expr\":\"30 2 * * *\",\"prompt\":\"task2\"}", &ctx);
+        "{\"name\":\"j2\",\"cron_expr\":\"30 2 * * *\",\"prompt\":\"task2\"}", &ctx, &(int){0});
     assert(r); free(r);
 
-    char *result = tool_cron_list_handler("{}", &ctx);
+    char *result = tool_cron_list_handler("{}", &ctx, &(int){0});
     assert(result);
     assert(strstr(result, "j1"));
     assert(strstr(result, "j2"));
@@ -661,14 +661,14 @@ static void test_cron_remove_valid(void) {
     ToolCronCtx ctx = mkctx(db, sid, "test_agent");
 
     char *r = tool_cron_set_handler(
-        "{\"name\":\"rm_me\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"bye\"}", &ctx);
+        "{\"name\":\"rm_me\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"bye\"}", &ctx, &(int){0});
     assert(r); free(r);
     int64_t jid = job_int(db, "id", "rm_me");
     assert(jid > 0);
 
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"id\":%lld}", (long long)jid);
-    char *result = tool_cron_remove_handler(buf, &ctx);
+    char *result = tool_cron_remove_handler(buf, &ctx, &(int){0});
     assert(result);
     assert(strstr(result, "removed cron job"));
     free(result);
@@ -686,7 +686,7 @@ static void test_cron_remove_nonexistent(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     ToolCronCtx ctx = mkctx(db, sid, "test_agent");
-    char *result = tool_cron_remove_handler("{\"id\":999}", &ctx);
+    char *result = tool_cron_remove_handler("{\"id\":999}", &ctx, &(int){0});
     assert(result);
     assert(strstr(result, "error"));
     free(result);
@@ -701,7 +701,7 @@ static void test_cron_remove_cross_agent(void) {
     ToolCronCtx ctx_a = mkctx(db, sid, "agent_a");
 
     char *r = tool_cron_set_handler(
-        "{\"name\":\"a_job\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"hi\"}", &ctx_a);
+        "{\"name\":\"a_job\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"hi\"}", &ctx_a, &(int){0});
     assert(r); free(r);
     int64_t jid = job_int(db, "id", "a_job");
     assert(jid > 0);
@@ -709,7 +709,7 @@ static void test_cron_remove_cross_agent(void) {
     ToolCronCtx ctx_b = mkctx(db, sid, "agent_b");
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"id\":%lld}", (long long)jid);
-    char *result = tool_cron_remove_handler(buf, &ctx_b);
+    char *result = tool_cron_remove_handler(buf, &ctx_b, &(int){0});
     assert(result && strstr(result, "error"));
     free(result);
 
@@ -718,7 +718,7 @@ static void test_cron_remove_cross_agent(void) {
     assert(count == 1);
     cron_list_free(jobs, count);
 
-    result = tool_cron_remove_handler(buf, &ctx_a);
+    result = tool_cron_remove_handler(buf, &ctx_a, &(int){0});
     assert(result && strstr(result, "removed cron job"));
     free(result);
 

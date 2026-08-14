@@ -69,8 +69,11 @@ void qjs_register_eval_host_functions(JSContext *ctx, const char *config_json);
  * be NULL) backs getConfig(). Returns a malloc'd result string (never NULL):
  * the last expression value, console output, or an "error: ..." message.
  * Egress (http_request) is via HTTP_PROXY, not a pre-flight. */
+/* *is_error (may be NULL) carries the explicit outcome: a JS exception, a
+ * bad request, or a runtime failure sets it — the "error:" wording in the
+ * returned text is for the reader, not for a parser. */
 char *qjs_eval_run(const char *code, const char *filename, const char *args_json,
-                   const char *config_json);
+                   const char *config_json, int *is_error);
 
 /* Register channel-profile host functions (cclaw.*, admin.*). */
 void qjs_register_channel_host_functions(JSContext *ctx);

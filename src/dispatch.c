@@ -81,7 +81,8 @@ void stalled_add(int64_t session_id) {
 }
 
 /* Forward declarations */
-static void cron_script_post(ChildProc *c, const char *output, const char *hosts);
+static void cron_script_post(ChildProc *c, const char *output, const char *hosts,
+                             int is_err);
 
 /* ── dispatch_llm_req ────────────────────────────────────────────── */
 
@@ -296,6 +297,12 @@ static const ToolTraits *tool_traits_lookup(const char *name) {
 static int tool_is_parallel_safe(const char *name) {
     const ToolTraits *t = tool_traits_lookup(name);
     return t ? t->parallel_safe : 0;
+}
+
+/* A caller-supplied `timeout`, clamped to what we're willing to hold a turn
+ * open for. Absent/garbage falls back to the tool's default. */
+static int tool_call_timeout(const char *args, int def) {
+    return tool_timeout_clamp(tool_args_int(proc_db(), args, "timeout", def), def);
 }
 
 static int tool_needs_interpolation(const char *name) {
@@ -840,7 +847,12 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
         snprintf(cctx->agent_name, sizeof(cctx->agent_name), "%s",
                  agent_name ? agent_name : "");
     }
-    char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
+    /* Explicit failure status: preset to success, set by the handler at its
+     * failure site, written straight through to entries.is_error below. The
+     * result text is never parsed to decide this. */
+    int is_err = 0;
+    char *result = te->handler(interp_args ? interp_args : tc->arguments,
+                               te->user_data, &is_err);
     if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
     /* A NULL result means the tool dispatched async work and left this
      * tool_call without an inline result. Shape depends on the tool's
@@ -867,12 +879,13 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
             return 2; /* parked, don't advance */
         }
         result = strdup("error: tool returned null");
+        is_err = 1;
     }
 
     /* Explicit capture first (needs the RAW result), then postprocess:
      * deinterpolate + secret scan/redact (scan runs even with no secrets
      * loaded — inline js_eval output can carry leaked credentials). */
-    { char *cap = secret_capture_apply(proc_db(), tc->arguments, result);
+    { char *cap = secret_capture_apply(proc_db(), tc->arguments, result, is_err);
       if (cap) { free(result); result = cap; } }
     { char *pp = tool_result_postprocess(result, secrets, secret_count);
       if (pp) { free(result); result = pp; } }
@@ -906,7 +919,6 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
     char *stored = truncate_and_spill(proc_db(), result, session_id, tc->call_id);
     ToolResult tr = {.tool_call_id = tc->call_id,
                      .content = stored ? stored : result};
-    int is_err = (strncmp(result, "error:", 6) == 0);
     Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                    .tool_name = tc->name, .is_error = is_err};
     int64_t rid = entry_append_with_iteration(proc_db(), session_id, &msg, tc->iteration_id);
@@ -947,7 +959,8 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
                                   const char *sens_host,
                                   const ShellSecret *secrets, size_t secret_count,
                                   ToolWireArg *params, size_t param_n,
-                                  const char *spill_path, size_t *out_len) {
+                                  const char *spill_path, int timeout,
+                                  size_t *out_len) {
     char agent_dir[PATH_MAX];
     agent_dir_resolve(jc->workspace, jc->db_path, agent_dir, sizeof(agent_dir));
 
@@ -1001,7 +1014,7 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
     req.deny_rules = (const char **)se.deny;
     req.deny_count = se.deny_n;
     req.egress_note = se.note;
-    req.timeout = 120;
+    req.timeout = timeout;
     char *blob = run_tool_serialize_request(&req, out_len);
     call_egress_free(&se);
     free(read_paths);
@@ -1205,8 +1218,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             if (!command)
                 return tool_inline_error(session_id, tc,
                     "error: shell_exec requires a 'command' string argument", NULL);
-            int cmd_timeout = tool_args_int(proc_db(), tc->arguments, "timeout", sc->timeout);
-            if (cmd_timeout <= 0) cmd_timeout = sc->timeout;
+            int cmd_timeout = tool_call_timeout(tc->arguments, sc->timeout);
 
             /* Parent-side secret interpolation (daemon holds the key) */
             char *interp_cmd = NULL;
@@ -1287,6 +1299,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
     if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_WEB &&
         te->user_data) {
         WebFetchCtx *wc = (WebFetchCtx *)te->user_data;
+        /* Caller-settable, like shell_exec's — the advice to "raise it with
+         * the timeout parameter" is only true if the parameter exists. */
+        int web_timeout = tool_call_timeout(tc->arguments, WEB_FETCH_DEFAULT_TIMEOUT);
         if (!proc_is_daemon())
             cli_print_tool_call(tc->name, tc->arguments);
         session_set_state(proc_db(), session_id, "tool_running");
@@ -1328,7 +1343,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         req.deny_rules = (const char **)se.deny;
         req.deny_count = se.deny_n;
         req.egress_note = se.note;
-        req.timeout = 60;
+        req.timeout = web_timeout;
         char *blob = run_tool_serialize_request(&req, &blob_len);
         call_egress_free(&se);
         tool_wire_args_wipe_free(params, param_n);
@@ -1337,7 +1352,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 "error: web request exceeds 32KB cap", NULL);
         int rc = spawn_run_tool_child(session_id, agent_name,
                      tc->call_id, tc->name, tc->arguments,
-                     tc->iteration_id, tc->entry_id, blob, blob_len, 90);
+                     tc->iteration_id, tc->entry_id, blob, blob_len,
+                     web_timeout + 30);
         explicit_bzero(blob, blob_len);
         free(blob);
         if (rc != 0)
@@ -1360,6 +1376,11 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         if (js_tool_resolve_request(te, &jc, &handler_path) != 0 || !jc)
             return tool_inline_error(session_id, tc,
                 "error: js tool request resolution failed", NULL);
+
+        /* Same caller-settable timeout as shell_exec and web_fetch. An
+         * extension tool's own args have no `timeout` key, so it simply keeps
+         * the default. */
+        int js_timeout = tool_call_timeout(tc->arguments, JSEVAL_DEFAULT_TIMEOUT);
 
         if (!proc_is_daemon())
             cli_print_tool_call(tc->name, tc->arguments);
@@ -1413,13 +1434,15 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         char *blob = js_request_serialize(jc, agent_name, tc->name, tc->arguments,
                                           sens_once ? sens_host : NULL,
                                           secrets, secret_count,
-                                          params, param_n, spill_p, &blob_len);
+                                          params, param_n, spill_p, js_timeout,
+                                          &blob_len);
         if (!blob)
             return tool_inline_error(session_id, tc,
                 "error: js request exceeds 32KB cap", NULL);
         int rc = spawn_run_tool_child(session_id, agent_name,
                      tc->call_id, tc->name, tc->arguments,
-                     tc->iteration_id, tc->entry_id, blob, blob_len, 150);
+                     tc->iteration_id, tc->entry_id, blob, blob_len,
+                     js_timeout + 30);
         explicit_bzero(blob, blob_len);
         free(blob);
         if (rc != 0)
@@ -1552,7 +1575,8 @@ CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len)
     /* Scheduled script: no tool_call_id to name a spill file after, so the
      * parent's truncate_and_spill handles it as before. */
     char *blob = js_request_serialize(jc, f->agent_name, "js_eval", "{}",
-                                      NULL, NULL, 0, params, 1, NULL, &blob_len);
+                                      NULL, NULL, 0, params, 1, NULL,
+                                      JSEVAL_DEFAULT_TIMEOUT, &blob_len);
     if (!blob) {
         snprintf(err, err_len, "the script request exceeds the 32KB wire cap");
         return CRON_SCRIPT_FAILED;
@@ -1573,7 +1597,8 @@ CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len)
 
 /* ── child_sweep_deadlines: kill timed-out children ──────────── */
 
-static char *child_output_finalize(ChildProc *c, int status, char **hosts_out);
+static char *child_output_finalize(ChildProc *c, int status, char **hosts_out,
+                                   int *is_error);
 
 void child_sweep_deadlines(void) {
     time_t now = time(NULL);
@@ -1591,7 +1616,8 @@ void child_sweep_deadlines(void) {
              * scan) — partial output must not skip it. Status 0: the child
              * isn't reaped yet, and we don't want a synthesized crash line. */
             char *hosts = NULL;
-            char *partial = child_output_finalize(c, 0, &hosts);
+            int part_err = 0;
+            char *partial = child_output_finalize(c, 0, &hosts, &part_err);
             size_t plen = partial ? strlen(partial) : 0;
             char *errbuf = malloc(plen + 128);
             if (errbuf) {
@@ -1619,7 +1645,7 @@ void child_sweep_deadlines(void) {
                      c->timeout_sec > 0 ? c->timeout_sec : 120);
             /* is_error=1 keeps the failure visible in-session and countable by
              * the job's auto-pause streak. */
-            cron_script_post(c, errbuf, NULL);
+            cron_script_post(c, errbuf, NULL, 1);
         }
         c->deadline = -1; /* mark consumed so reap doesn't double-advance */
     }
@@ -1631,8 +1657,12 @@ void child_sweep_deadlines(void) {
  * that touched the network, then explicit capture + the secret scan. Shared by
  * the tool-result path and the cron script path — the security steps must not
  * fork into two versions. *hosts_out borrows the child's meta (NULL when the
- * run had no network exposure). Returns heap output the caller frees. */
-static char *child_output_finalize(ChildProc *c, int status, char **hosts_out) {
+ * run had no network exposure). *is_error is the call's explicit status: the
+ * status byte the child framed with its result, or — when the child died
+ * before/instead of answering — the death itself. Returns heap output the
+ * caller frees. */
+static char *child_output_finalize(ChildProc *c, int status, char **hosts_out,
+                                   int *is_error) {
     /* Crash detection: signal or nonzero exit → synthesize error */
     int crashed = WIFSIGNALED(status) ||
                   (WIFEXITED(status) && WEXITSTATUS(status) != 0);
@@ -1640,14 +1670,24 @@ static char *child_output_finalize(ChildProc *c, int status, char **hosts_out) {
     child_drain_pipe(c);
     if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
 
+    /* The child framed its own verdict; a crash with nothing said is a
+     * failure regardless of what the (never-written) frame would have held. */
+    *is_error = c->frame_status ? 1 : 0;
+
     char *output;
     if (crashed && (!c->outbuf || c->outbuf_len == 0)) {
-        char err[128];
+        char err[192];
         if (WIFSIGNALED(status))
-            snprintf(err, sizeof(err), "error: tool killed by signal %d", WTERMSIG(status));
+            snprintf(err, sizeof(err), "error: tool killed by signal %d%s",
+                     WTERMSIG(status),
+                     WTERMSIG(status) == SIGKILL
+                         ? " — likely resource limit (memory/CPU/time);"
+                           " reduce usage, don't just retry"
+                         : "");
         else
             snprintf(err, sizeof(err), "error: tool exited %d", WEXITSTATUS(status));
         output = strdup(err);
+        *is_error = 1;
     } else if (c->outbuf) {
         output = c->outbuf;
         c->outbuf = NULL;          /* ownership moves to the caller */
@@ -1685,7 +1725,7 @@ static char *child_output_finalize(ChildProc *c, int status, char **hosts_out) {
      * rationale as dispatch_tool) — a secret born mid-session must
      * be maskable in a reaped sandboxed child's output too. */
     if (c->tool_args) {
-        char *cap = secret_capture_apply(proc_db(), c->tool_args, output);
+        char *cap = secret_capture_apply(proc_db(), c->tool_args, output, *is_error);
         if (cap) { free(output); output = cap; }
     }
     { size_t snap_n = 0;
@@ -1717,9 +1757,9 @@ static char *cron_inbox_payload(const char *prompt, const char *out) {
  * drains as an annotated user entry at the next boundary. A 'both' payload
  * always takes the inbox door — prompt and script output must arrive as one
  * user entry, which is what starts the turn that reads them. */
-static void cron_script_post(ChildProc *c, const char *output, const char *hosts) {
+static void cron_script_post(ChildProc *c, const char *output, const char *hosts,
+                             int is_err) {
     int64_t sid = c->session_id;
-    int is_err = (strncmp(output, "error:", 6) == 0);
     char *clean = utf8_sanitize(output, strlen(output));
     const char *text = clean ? clean : output;
 
@@ -1778,8 +1818,9 @@ void reap_children(void) {
             int64_t session_id = c->session_id;
             if (c->deadline == -1) { child_remove(c); continue; }  /* swept */
             char *hosts = NULL;
-            char *output = child_output_finalize(c, status, &hosts);
-            cron_script_post(c, output, hosts);
+            int is_err = 0;
+            char *output = child_output_finalize(c, status, &hosts, &is_err);
+            cron_script_post(c, output, hosts, is_err);
             free(output);
             child_remove(c);
             run_advance(session_id);
@@ -1797,7 +1838,8 @@ void reap_children(void) {
             }
 
             char *hosts = NULL;
-            char *output = child_output_finalize(c, status, &hosts);
+            int is_err = 0;
+            char *output = child_output_finalize(c, status, &hosts, &is_err);
             size_t out_len = strlen(output);
 
             /* afterToolCall hooks: chained result replacement, post-scanner,
@@ -1832,7 +1874,6 @@ void reap_children(void) {
             char *stored = truncate_and_spill(proc_db(), output, session_id, c->tool_call_id);
             ToolResult tr = {.tool_call_id = c->tool_call_id,
                              .content = stored ? stored : output};
-            int is_err = (strncmp(output, "error:", 6) == 0);
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                            .tool_name = "", .is_error = is_err};
             int64_t rid = entry_append_with_iteration(proc_db(), session_id, &msg, c->iteration_id);

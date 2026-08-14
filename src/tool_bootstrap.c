@@ -31,32 +31,33 @@ static const char *CREATE_AGENT_PARAMS =
     "\"clone_from\":{\"type\":\"string\",\"description\":\"Copy an existing agent's config/grants/extensions first, then overlay\"}"
     "},\"required\":[\"name\"]}";
 
-static char *tool_create_agent_handler(const char *arguments, void *user_data) {
+static char *tool_create_agent_handler(const char *arguments, void *user_data, int *is_error) {
     ToolBootstrapCtx *ctx = (ToolBootstrapCtx *)user_data;
     if (!ctx || !ctx->db)
-        return strdup("error: create_agent unavailable");
+        return tool_fail(is_error, "error: create_agent unavailable");
 
     /* Eager validation with creator caps — a definition that can't apply
      * never parks. */
     char *err = NULL;
     if (agent_definition_validate(ctx->db, arguments, ctx->agent_name, &err) != 0) {
         char *msg;
+        *is_error = 1;
         if (err) {
             size_t n = strlen(err) + 8;
             msg = malloc(n);
             if (msg) snprintf(msg, n, "error: %s", err);
             free(err);
         } else {
-            msg = strdup("error: invalid agent definition");
+            msg = tool_fail(is_error, "error: invalid agent definition");
         }
-        return msg ? msg : strdup("error: invalid agent definition");
+        return msg ? msg : tool_fail(is_error, "error: invalid agent definition");
     }
 
     int64_t aid = approval_create(ctx->db, ctx->session_id,
         ctx->current_tool_call_id, "create_agent", "create_agent",
         arguments, "apply");
     if (aid < 0)
-        return strdup("error: failed to create approval");
+        return tool_fail(is_error, "error: failed to create approval");
     session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
     return NULL; /* park */
 }
@@ -82,31 +83,32 @@ static const char *UPDATE_AGENT_PARAMS =
     "\"reason\":{\"type\":\"string\",\"description\":\"Shown to the human approver\"}"
     "},\"required\":[\"name\"]}";
 
-static char *tool_update_agent_handler(const char *arguments, void *user_data) {
+static char *tool_update_agent_handler(const char *arguments, void *user_data, int *is_error) {
     ToolBootstrapCtx *ctx = (ToolBootstrapCtx *)user_data;
     if (!ctx || !ctx->db)
-        return strdup("error: update_agent unavailable");
+        return tool_fail(is_error, "error: update_agent unavailable");
 
     char *err = NULL;
     if (agent_definition_update_validate(ctx->db, arguments,
                                          ctx->agent_name, &err) != 0) {
         char *msg;
+        *is_error = 1;
         if (err) {
             size_t n = strlen(err) + 8;
             msg = malloc(n);
             if (msg) snprintf(msg, n, "error: %s", err);
             free(err);
         } else {
-            msg = strdup("error: invalid agent update");
+            msg = tool_fail(is_error, "error: invalid agent update");
         }
-        return msg ? msg : strdup("error: invalid agent update");
+        return msg ? msg : tool_fail(is_error, "error: invalid agent update");
     }
 
     int64_t aid = approval_create(ctx->db, ctx->session_id,
         ctx->current_tool_call_id, "update_agent", "update_agent",
         arguments, "apply");
     if (aid < 0)
-        return strdup("error: failed to create approval");
+        return tool_fail(is_error, "error: failed to create approval");
     session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
     return NULL; /* park */
 }

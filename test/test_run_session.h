@@ -36,15 +36,16 @@ static inline int test_run_session(sqlite3 *db, int64_t session_id, AgentSetup *
             PendingToolCall *tc = &tcs[i];
             ToolEntry *te = tools_lookup(&setup->reg, tc->name);
             char *result = NULL;
+            int is_err = 0;
             if (te) {
-                result = te->handler(tc->arguments, te->user_data);
+                result = te->handler(tc->arguments, te->user_data, &is_err);
             } else {
                 result = strdup("error: tool not found");
+                is_err = 1;
             }
-            if (!result) result = strdup("error: null result");
+            if (!result) { result = strdup("error: null result"); is_err = 1; }
 
             ToolResult tr = {.tool_call_id = tc->call_id, .content = result};
-            int is_err = (strncmp(result, "error:", 6) == 0);
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                            .tool_name = tc->name, .is_error = is_err};
             int64_t rid = entry_append_with_iteration(db, session_id, &msg, tc->iteration_id);

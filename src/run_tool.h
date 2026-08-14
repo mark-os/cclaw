@@ -33,6 +33,14 @@
  * in the re-exec'd child. */
 #define RUNTOOL_FD_REQUEST 3
 
+/* Response framing: [1-byte status][4-byte meta_len][hosts JSON][result].
+ * The status byte is the tool's explicit outcome, written by the child that
+ * produced the body and read by the parent's drain loop — no reader ever
+ * infers failure from the result text. Distinct from the child's exit code,
+ * which keeps its process-lifecycle meaning (sandbox refusal, crash, signal). */
+#define RUNTOOL_STATUS_OK    0
+#define RUNTOOL_STATUS_ERROR 1
+
 /* Wire format: a flat little-endian binary frame, NOT JSON — both ends are
  * the same binary, so there is no escaping and no key/value scan. A 4-byte LE
  * body-length prefix is followed by a tier byte and the fields in ONE fixed

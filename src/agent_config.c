@@ -325,15 +325,20 @@ int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
         value = canon;
     /* An expired row is authority-dead but still occupies the PK, so a plain
      * INSERT OR IGNORE would make re-granting a once-expired value impossible
-     * (observed: prod db_query, 2026-08-10). Revive expired rows; never touch
-     * a live one (a re-grant must not shorten an existing grant's life). */
+     * (observed: prod db_query, 2026-08-10). Revive expired rows — and extend
+     * a still-live temporary grant when the operator re-approves it, which is
+     * plainly what "grant this again" means. A re-grant never *shortens* a
+     * grant's life: the update only fires when it moves expires_at later, and
+     * a permanent row (expires_at IS NULL) is left alone. */
     const char *sql =
         "INSERT INTO grants (agent_name, kind, value, expires_at)"
         " VALUES (?1, ?2, ?3, ?4)"
         " ON CONFLICT(agent_name, kind, value) DO UPDATE SET"
         "   expires_at=excluded.expires_at"
         " WHERE grants.expires_at IS NOT NULL"
-        "   AND grants.expires_at <= unixepoch();";
+        "   AND (grants.expires_at <= unixepoch()"
+        "        OR excluded.expires_at IS NULL"
+        "        OR excluded.expires_at > grants.expires_at);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);

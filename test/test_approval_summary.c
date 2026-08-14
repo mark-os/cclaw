@@ -182,22 +182,40 @@ static void test_create_agent_discloses_scalars(void) {
     printf("  create_agent scalars: OK\n");
 }
 
-/* A provider swap changes which model answers; the DM must say which. */
+/* A provider swap changes which model answers; the DM must say which — and
+ * for an EXISTING provider it must show the field-level diff, not a canonical
+ * doc that reads as change even where nothing moved. */
 static void test_provider_swap_names_model(void) {
     sqlite3 *db = fresh_db();
     char *s = summarize(db, "request_config", "request_changes",
         "{\"changes\":{\"provider\":{\"provider\":\"acme\","
-        "\"base_url\":\"https://api.acme.test/v1\",\"api_key_env\":\"ACME_KEY\","
-        "\"model\":\"acme/m1\"}}}");
-    assert(strstr(s, "provider acme -> https://api.acme.test/v1, "
-                    "model acme/m1 (key from secret ACME_KEY)"));
+        "\"base_url\":\"https://api.acme.test/v1\",\"api_key_env\":\"ACME_KEY\"},"
+        "\"models\":[{\"id\":\"m1@acme\",\"context_window\":32000}]}}");
+    assert(strstr(s, "provider acme (new) -> https://api.acme.test/v1 "
+                    "(key from secret ACME_KEY)"));
+    assert(strstr(s, "model m1@acme (register), context 32000"));
     free(s);
 
-    /* Model omitted: say so rather than leaving the reader to assume. */
+    /* Existing row: only the fields that actually move are rendered. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO providers(name, base_url, api_key_env)"
+        " VALUES('acme','https://api.acme.test/v1','')",
+        NULL, NULL, NULL) == SQLITE_OK);
     s = summarize(db, "request_config", "request_changes",
         "{\"changes\":{\"provider\":{\"provider\":\"acme\","
-        "\"base_url\":\"https://api.acme.test/v1\",\"api_key_env\":\"ACME_KEY\"}}}");
-    assert(strstr(s, "model (provider default)"));
+        "\"base_url\":\"https://api.acme.test/v2\",\"api_key_env\":\"\"}}}");
+    assert(strstr(s, "provider acme base_url: https://api.acme.test/v1 -> "
+                    "https://api.acme.test/v2"));
+    assert(!strstr(s, "api key secret"));   /* unchanged — not rendered */
+    free(s);
+
+    /* Disabling a model is the other headline a reader must not miss. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO models(id, provider_name, model) VALUES('m1@acme','acme','m1')",
+        NULL, NULL, NULL) == SQLITE_OK);
+    s = summarize(db, "request_config", "request_changes",
+        "{\"changes\":{\"models\":[{\"id\":\"m1@acme\",\"status\":\"disabled\"}]}}");
+    assert(strstr(s, "model m1@acme (update), status disabled"));
     free(s);
     db_close(db);
     printf("  provider swap names model: OK\n");

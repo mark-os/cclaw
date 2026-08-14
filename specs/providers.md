@@ -3,7 +3,8 @@
 ## Provider Config in cclaw.db
 
 All provider configuration lives in `cclaw.db`:
-- `providers` table: name, base_url, model, context_window
+- `providers` table: name, base_url, endpoint_type, api_key_env — **transport only**
+- `models` table: canonical id (`model@provider`), context_window, max_output_tokens, capabilities, routing priority/status
 - `secrets` table (scope `system`): encrypted API keys, named by the provider's `api_key_env` (e.g. `OPENROUTER_API_KEY`)
 
 Agents ⊥ store provider keys. Keys decrypted at runtime, injected to worker threads and tool children via env vars.
@@ -18,7 +19,9 @@ Agents ⊥ store provider keys. Keys decrypted at runtime, injected to worker th
 | OpenAI | `OPENAI_API_KEY` | Direct. |
 | Anthropic | `ANTHROPIC_API_KEY` | Direct. Different wire format (content blocks). |
 
-Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows themselves change only via the approval-gated `request_config` action `request_changes` (the `provider` section of the changes document) or operator SQL. Applying a provider section also seeds its default model into `models` (id `model@provider`, lowest routing priority) — per-request routing joins `models → providers`, so a provider row without a models row would otherwise be unreachable outside the empty-table fallback. An agent adopts the new provider by co-batching `agent.primary_model: "model@provider"` in the same document.
+Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows themselves change only via the approval-gated `request_config` action `request_changes` (the `provider` section of the changes document) or operator SQL. A provider document is **transport only**; models are registered separately through the `models` section by canonical `model@provider` id, and the provider must already exist. Per-request routing joins `models → providers`, so a provider row without a models row is unreachable outside the empty-table fallback — one document can define the provider, register a model on it, and adopt it via `agent.primary_model: "model@provider"`. `providers.default_model` is fresh-install seed sugar only (`templates/seed.sql`), never a registration path.
+
+A provider whose `api_key_env` resolves to no key (neither env var nor system-scope secret) has **all of its models skipped at request time** — `request_changes` therefore refuses such a document up front, and a canonicalized provider document preserves an existing row's `api_key_env` verbatim, empty string included (a deliberately keyless local gateway must survive a provider edit).
 
 ## Provider Fallback Chain
 

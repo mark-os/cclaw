@@ -321,6 +321,85 @@ int db_ensure_schema(sqlite3 *db) {
  * multiple statements separated by semicolons. Run in order, one transaction
  * per patch. A patch may instead be a C function (fn) for shapes SQL can't
  * express idempotently — exactly one of sql/fn is set. */
+/* v44: bare model names in agents.primary_model/secondary_model become
+ * canonical models.id, once.
+ *
+ * A bare name was ambiguous by construction — 'm.id=?1 OR m.model=?1' picked
+ * whichever row the scan reached first, so two providers carrying the same
+ * model made an agent's declared model a coin flip. Afterwards the config
+ * surface accepts canonical ids only (a bare name gets a did-you-mean), so
+ * this is the one and only rewrite; no fallback parser is kept.
+ *
+ * Per row: exactly one match → rewrite. Zero → leave as-is (that agent was
+ * already unroutable; the degrade path surfaces it, and inventing an id here
+ * would silently move it to a model nobody chose). Several → the row routing
+ * would have preferred (lowest models.priority, then the provider's own
+ * priority), preserving the observed choice rather than reshuffling live
+ * agents. Every rewrite is logged: this edits operator-visible config. */
+static int patch_v44_canonical_model_ids(sqlite3 *db) {
+    static const char *COLS[] = { "primary_model", "secondary_model" };
+    for (size_t c = 0; c < sizeof(COLS) / sizeof(*COLS); c++) {
+        char sel[512];
+        snprintf(sel, sizeof(sel),
+            "SELECT a.name, a.%s,"
+            "       (SELECT COUNT(*) FROM models m WHERE m.model = a.%s),"
+            "       (SELECT m.id FROM models m"
+            "          LEFT JOIN providers p ON p.name = m.provider_name"
+            "         WHERE m.model = a.%s"
+            "         ORDER BY m.priority, COALESCE(p.priority, 1000000), m.id"
+            "         LIMIT 1)"
+            "  FROM agents a"
+            " WHERE a.%s IS NOT NULL AND a.%s != ''"
+            "   AND NOT EXISTS(SELECT 1 FROM models m WHERE m.id = a.%s)",
+            COLS[c], COLS[c], COLS[c], COLS[c], COLS[c], COLS[c]);
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db, sel, -1, &st, NULL) != SQLITE_OK) return -1;
+        /* Collect before writing — never write inside an open SELECT. */
+        char **names = NULL, **olds = NULL, **news = NULL;
+        size_t n = 0;
+        int rc = 0;
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            if (sqlite3_column_int(st, 2) == 0) continue;   /* zero matches */
+            const char *nm = (const char *)sqlite3_column_text(st, 0);
+            const char *ov = (const char *)sqlite3_column_text(st, 1);
+            const char *nv = (const char *)sqlite3_column_text(st, 3);
+            if (!nm || !ov || !nv) continue;
+            char **t1 = realloc(names, (n + 1) * sizeof(*names));
+            char **t2 = realloc(olds, (n + 1) * sizeof(*olds));
+            char **t3 = realloc(news, (n + 1) * sizeof(*news));
+            if (!t1 || !t2 || !t3) { rc = -1; break; }
+            names = t1; olds = t2; news = t3;
+            names[n] = strdup(nm); olds[n] = strdup(ov); news[n] = strdup(nv);
+            if (!names[n] || !olds[n] || !news[n]) { rc = -1; n++; break; }
+            n++;
+        }
+        sqlite3_finalize(st);
+        char upd[128];
+        snprintf(upd, sizeof(upd), "UPDATE agents SET %s=?1 WHERE name=?2",
+                 COLS[c]);
+        for (size_t i = 0; rc == 0 && i < n; i++) {
+            sqlite3_stmt *us;
+            if (sqlite3_prepare_v2(db, upd, -1, &us, NULL) != SQLITE_OK) {
+                rc = -1;
+                break;
+            }
+            sqlite3_bind_text(us, 1, news[i], -1, SQLITE_STATIC);
+            sqlite3_bind_text(us, 2, names[i], -1, SQLITE_STATIC);
+            if (sqlite3_step(us) != SQLITE_DONE) rc = -1;
+            sqlite3_finalize(us);
+            if (rc == 0)
+                LOG_INFO_("schema v44: agent '%s' %s '%s' -> '%s'",
+                          names[i], COLS[c], olds[i], news[i]);
+        }
+        for (size_t i = 0; i < n; i++) {
+            free(names[i]); free(olds[i]); free(news[i]);
+        }
+        free(names); free(olds); free(news);
+        if (rc != 0) return rc;
+    }
+    return 0;
+}
+
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
     /* Frozen at v40 (2026-07-31, D16): entries.turn_id/llm_responses.turn_id
      * were renamed to iteration_id (they always identified one LLM request) and
@@ -412,6 +491,10 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "ALTER TABLE sessions ADD COLUMN compaction_fail_count INTEGER NOT NULL"
       " DEFAULT 0;",
       NULL },
+
+    /* v44: model ids become canonical. No shape change — a data rewrite, in
+     * C because each rewritten row is logged. */
+    { 44, NULL, patch_v44_canonical_model_ids },
 };
 
 #define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */

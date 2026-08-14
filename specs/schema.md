@@ -75,7 +75,7 @@ LLM API endpoints. Multiple providers enable fallback routing.
 | `base_url` | TEXT NOT NULL | |
 | `endpoint_type` | TEXT NOT NULL DEFAULT 'openai' | openai / gemini |
 | `api_key_env` | TEXT NOT NULL DEFAULT '' | env var name holding the key |
-| `default_model` | TEXT | |
+| `default_model` | TEXT | fresh-install seed sugar only — models are registered in `models` |
 | `priority` | INTEGER NOT NULL DEFAULT 0 | lower = preferred |
 | `status` | TEXT NOT NULL DEFAULT 'healthy' | healthy / degraded / down |
 
@@ -87,7 +87,7 @@ Per-model routing metadata + lifetime stats. The router picks by `(priority, sta
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | TEXT PRIMARY KEY | routing key (e.g. `openrouter/deepseek-v4-flash`) |
+| `id` | TEXT PRIMARY KEY | canonical routing key; new registrations are `model@provider` |
 | `provider_name` | TEXT NOT NULL | FK-ish to `providers.name` |
 | `model` | TEXT NOT NULL | wire model id sent to the provider |
 | `context_window` | INTEGER | |
@@ -180,8 +180,8 @@ Agent identity and per-agent config. Name is the primary key — no integer id.
 | Column | Type | Notes |
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
-| `primary_model` | TEXT | model override; NULL uses config `default_model` |
-| `secondary_model` | TEXT | fallback model; NULL uses config `default_secondary_model` |
+| `primary_model` | TEXT | canonical `models.id` (bare names rewritten at v44); NULL uses config `default_model` |
+| `secondary_model` | TEXT | canonical `models.id`; NULL uses config `default_secondary_model` |
 | `system_prompt` | TEXT | inline prompt override |
 | `description` | TEXT | |
 | `max_iterations` | INTEGER DEFAULT 25 | tool loop cap per turn |

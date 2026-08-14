@@ -29,7 +29,8 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
 /* Builds the full <RELEVANT_CONTEXT> block: the local wall clock with its
  * timezone, recall_text (computed by the caller via context_auto_recall —
  * the one piece not natively SQL), plus context-placement memory blocks,
- * running sub-agents, and pending approvals, each queried live. Pass
+ * running sub-agents, and open approvals (pending + approved-but-unconsumed),
+ * each queried live. Pass
  * recall_text (or NULL) in; the result is ready to pass straight through as
  * llm_build_payload's context_text. Always non-NULL (the clock is
  * unconditional); NULL only on a query failure. Caller frees. */

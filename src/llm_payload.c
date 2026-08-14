@@ -431,9 +431,15 @@ static const char SQL_SESSION_CONTEXT[] =
     "    char(10)) AS txt"
     "  FROM sessions s WHERE s.parent_session_id=?1 AND s.state != 'idle'"
     "), appr AS ("
+    /* Both open states: 'pending' (waiting on a human) and 'approved' (granted
+     * but never consumed — the ticket is only spent when the tool call is
+     * re-issued). Consumed/rejected/expired rows are closed and absent. */
     "  SELECT group_concat("
-    "    '#' || a.id || ': ' || COALESCE(a.tool_name, a.action, '?'), char(10)) AS txt"
-    "  FROM approvals a WHERE a.session_id=?1 AND a.state='pending'"
+    "    '#' || a.id || ' ' || COALESCE(a.tool_name, a.action, '?') || ' — ' ||"
+    "    CASE a.state"
+    "      WHEN 'approved' THEN 'approved, unused: re-issue the tool call to consume'"
+    "      ELSE 'pending: waiting on a human decision' END, char(10)) AS txt"
+    "  FROM approvals a WHERE a.session_id=?1 AND a.state IN ('pending','approved')"
     ")"
     "SELECT '<RELEVANT_CONTEXT>' || char(10) ||"
     "    '<current_time>' || ?3 || '</current_time>' || char(10) ||"
@@ -441,8 +447,8 @@ static const char SQL_SESSION_CONTEXT[] =
     "    COALESCE('<memory_blocks>' || mb.txt || '</memory_blocks>' || char(10), '') ||"
     "    COALESCE('<running_sub_agents>' || char(10) || sub.txt || char(10) ||"
     "      '</running_sub_agents>' || char(10), '') ||"
-    "    COALESCE('<pending_approvals>' || char(10) || appr.txt || char(10) ||"
-    "      '</pending_approvals>' || char(10), '') ||"
+    "    COALESCE('<open_approvals>' || char(10) || appr.txt || char(10) ||"
+    "      '</open_approvals>' || char(10), '') ||"
     "    '</RELEVANT_CONTEXT>'"
     " FROM mb, sub, appr;";
 

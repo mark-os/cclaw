@@ -94,6 +94,11 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
 int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
                              int include_channel);
 
+/* Child outcome tag input (F2): 1 when the session's newest assistant entry
+ * stopped at the model's output cap. Delivered results are tagged
+ * completed | failed | truncated from state alone — never from prose. */
+int session_final_truncated(sqlite3 *db, int64_t session_id);
+
 /* Mid-turn hook for 'iteration' edges: ship content-bearing assistant entries
  * that landed since each edge's cursor. Called after an LLM completion whose
  * turn continues (pending tool calls); the boundary evaluation covers the

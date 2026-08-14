@@ -336,6 +336,31 @@ static void test_turn_policy_truthful_labels(void) {
     printf("  PASS test_turn_policy_truthful_labels\n");
 }
 
+/* ── F2: the tag comes from the child's stop_reason, not its prose ─────── */
+
+static void test_child_outcome_truncated(void) {
+    sqlite3 *db = open_seeded();
+    int64_t parent = session_create(db, "parent", "default", -1, 0);
+    int64_t child = launch(db, parent, "{\"task\":\"t\",\"background\":true}", NULL);
+
+    /* The child claims success in prose but stopped at the output cap. */
+    AdvanceOutput out = advance_session(db, child, 25);
+    assert(out.action == ADVANCE_DISPATCH_LLM);
+    Message m = { .role = ROLE_ASSISTANT, .content = "all done, task complete",
+                  .stop_reason = STOP_REASON_LENGTH };
+    entry_append_with_iteration(db, child, &m, db_next_iteration_id(db, child));
+    assert(advance_session(db, child, 25).action == ADVANCE_DONE);
+
+    assert(session_final_truncated(db, child) == 1);
+    assert(scalar(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
+                      " AND payload LIKE 'Sub-agent truncated: %';", parent) == 1);
+    assert(scalar(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
+                      " AND payload LIKE 'Sub-agent completed: %';", parent) == 0);
+
+    db_close(db);
+    printf("  PASS test_child_outcome_truncated\n");
+}
+
 /* ── The sweep delivers a quiescent hold that settled silently ─────────── */
 
 static void test_sweep_delivers_silent_settle(void) {
@@ -481,6 +506,7 @@ int main(void) {
     test_policy_inheritance();
     test_digest_window();
     test_turn_policy_truthful_labels();
+    test_child_outcome_truncated();
     test_sweep_delivers_silent_settle();
     test_streak_pause_fail_notify();
     test_channel_edge_semantics();

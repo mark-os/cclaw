@@ -404,6 +404,14 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "    AND tc.status IN ('pending','running');"
       "ALTER TABLE sessions DROP COLUMN parent_notified_at;",
       NULL },
+
+    /* v43: consecutive-compaction-failure counter (C4). Zeroed on every
+     * success; on the transition to 3 the operator — not the agent — is told
+     * once that the session is running on the read-time window. */
+    { 43,
+      "ALTER TABLE sessions ADD COLUMN compaction_fail_count INTEGER NOT NULL"
+      " DEFAULT 0;",
+      NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */

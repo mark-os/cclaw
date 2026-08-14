@@ -17,7 +17,7 @@
 static char *call_handler(ToolRegistry *reg, const char *args) {
     ToolEntry *e = tools_lookup(reg, "request_config");
     assert(e != NULL);
-    return e->handler(args, e->user_data);
+    return e->handler(args, e->user_data, &(int){0});
 }
 
 /* Seed a registered config key so the handler allows it. */

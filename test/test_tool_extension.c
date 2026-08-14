@@ -30,7 +30,7 @@ static ToolExtensionCtx g_ctx;
 static char *call(const char *tool, const char *args) {
     ToolEntry *e = tools_lookup(&g_reg, tool);
     assert(e && e->handler);
-    return e->handler(args, e->user_data);
+    return e->handler(args, e->user_data, &(int){0});
 }
 
 static void write_file(const char *path, const char *content) {

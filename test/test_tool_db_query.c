@@ -10,7 +10,7 @@ static void test_select_returns_results(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
-    char *r = tool_db_query_handler("{\"sql\":\"SELECT 1 AS val, 'hello' AS msg\"}", db);
+    char *r = tool_db_query_handler("{\"sql\":\"SELECT 1 AS val, 'hello' AS msg\"}", db, &(int){0});
     assert(r);
     /* Pipe-separated: header then data */
     assert(strstr(r, "val|msg\n"));
@@ -24,7 +24,7 @@ static void test_reject_insert(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
-    char *r = tool_db_query_handler("{\"sql\":\"INSERT INTO sessions VALUES(1,'x',0,NULL,NULL,NULL,NULL,0,'','')\"}", db);
+    char *r = tool_db_query_handler("{\"sql\":\"INSERT INTO sessions VALUES(1,'x',0,NULL,NULL,NULL,NULL,0,'','')\"}", db, &(int){0});
     assert(r);
     assert(strstr(r, "error: only SELECT"));
     free(r);
@@ -36,7 +36,7 @@ static void test_reject_update(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
-    char *r = tool_db_query_handler("{\"sql\":\"UPDATE sessions SET name='x'\"}", db);
+    char *r = tool_db_query_handler("{\"sql\":\"UPDATE sessions SET name='x'\"}", db, &(int){0});
     assert(r);
     assert(strstr(r, "error: only SELECT"));
     free(r);
@@ -48,7 +48,7 @@ static void test_reject_delete(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
-    char *r = tool_db_query_handler("{\"sql\":\"DELETE FROM sessions\"}", db);
+    char *r = tool_db_query_handler("{\"sql\":\"DELETE FROM sessions\"}", db, &(int){0});
     assert(r);
     assert(strstr(r, "error: only SELECT"));
     free(r);
@@ -60,7 +60,7 @@ static void test_reject_drop(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
-    char *r = tool_db_query_handler("{\"sql\":\"DROP TABLE sessions\"}", db);
+    char *r = tool_db_query_handler("{\"sql\":\"DROP TABLE sessions\"}", db, &(int){0});
     assert(r);
     assert(strstr(r, "error: only SELECT"));
     free(r);
@@ -72,7 +72,7 @@ static void test_invalid_sql(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
-    char *r = tool_db_query_handler("{\"sql\":\"SELECT * FROM nonexistent_table\"}", db);
+    char *r = tool_db_query_handler("{\"sql\":\"SELECT * FROM nonexistent_table\"}", db, &(int){0});
     assert(r);
     assert(strstr(r, "error:"));
     free(r);
@@ -84,7 +84,7 @@ static void test_missing_sql_field(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
-    char *r = tool_db_query_handler("{\"query\":\"SELECT 1\"}", db);
+    char *r = tool_db_query_handler("{\"query\":\"SELECT 1\"}", db, &(int){0});
     assert(r);
     assert(strstr(r, "error: missing"));
     free(r);
@@ -98,7 +98,7 @@ static void test_query_sessions_table(void) {
 
     session_create(db, "test-session", NULL, -1, 0);
 
-    char *r = tool_db_query_handler("{\"sql\":\"SELECT id, name FROM sessions\"}", db);
+    char *r = tool_db_query_handler("{\"sql\":\"SELECT id, name FROM sessions\"}", db, &(int){0});
     assert(r);
     assert(strstr(r, "id|name\n"));
     assert(strstr(r, "test-session"));
@@ -114,7 +114,7 @@ static void test_secret_filtering(void) {
     sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES('test.plain','visible')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES('test.secret','enc:abcdef1234567890')", NULL, NULL, NULL);
 
-    char *r = tool_db_query_handler("{\"sql\":\"SELECT key, value FROM config WHERE key LIKE 'test.%'\"}", db);
+    char *r = tool_db_query_handler("{\"sql\":\"SELECT key, value FROM config WHERE key LIKE 'test.%'\"}", db, &(int){0});
     assert(r);
     assert(strstr(r, "test.plain"));
     assert(strstr(r, "visible"));

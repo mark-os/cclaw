@@ -2,7 +2,7 @@
  * js_eval: fs.readFile/writeFile/readdir/stat/lstat/cwd, console.log
  * capture, and the prelude traps (require/process/module/Map/Set) that
  * turn missing Node globals into helpful TypeErrors instead of silent
- * undefined-is-not-a-function failures. Calls tool_js_eval_handler()
+ * undefined-is-not-a-function failures. Calls tool_js_eval_handler(, &(int){0})
  * directly (host mode, no fork) — same entry point test_tool_js.c uses. */
 #define _GNU_SOURCE
 #include <stdio.h>

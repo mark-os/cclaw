@@ -7,9 +7,10 @@
 #include <string.h>
 #include <unistd.h>
 
-static char *dummy_handler(const char *arguments, void *user_data) {
+static char *dummy_handler(const char *arguments, void *user_data, int *is_error) {
     (void)arguments;
     (void)user_data;
+    (void)is_error;
     char *r = malloc(8);
     if (r) strcpy(r, "ok");
     return r;
@@ -80,7 +81,7 @@ static void test_handler_dispatch(void) {
     ToolEntry *e = tools_lookup(&reg, "test_tool");
     assert(e != NULL);
 
-    char *result = e->handler("{}", e->user_data);
+    char *result = e->handler("{}", e->user_data, &(int){0});
     assert(result != NULL);
     assert(strcmp(result, "ok") == 0);
     free(result);

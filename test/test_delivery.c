@@ -38,7 +38,7 @@ static int64_t launch(sqlite3 *db, int64_t launcher, const char *args,
                       const char *call_id) {
     AgentLaunchCtx ctx = { .db = db, .session_id = launcher,
                            .current_tool_call_id = (char *)call_id };
-    char *r = tool_launch_agent_handler(args, &ctx);
+    char *r = tool_launch_agent_handler(args, &ctx, &(int){0});
     if (call_id) assert(r == NULL);          /* blocking parks */
     else { assert(r && strncmp(r, "error:", 6) != 0); free(r); }
     return scalar(db, "SELECT MAX(id) FROM sessions WHERE parent_session_id=?;",
@@ -222,13 +222,13 @@ static void test_blocking_policy_refusal(void) {
     for (int i = 0; i < 2; i++) {
         AgentLaunchCtx ctx = { .db = db, .session_id = parent,
                                .current_tool_call_id = "call_x" };
-        char *r = tool_launch_agent_handler(bad[i], &ctx);
+        char *r = tool_launch_agent_handler(bad[i], &ctx, &(int){0});
         assert(r && strstr(r, "single-report delivery policy"));
         free(r);
     }
     AgentLaunchCtx ctx = { .db = db, .session_id = parent };
     char *r = tool_launch_agent_handler("{\"task\":\"t\",\"delivery\":\"chatty\"}",
-                                        &ctx);
+                                        &ctx, &(int){0});
     assert(r && strstr(r, "unknown delivery policy"));
     free(r);
     assert(scalar(db, "SELECT COUNT(*) FROM sessions WHERE parent_session_id=?;",

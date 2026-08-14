@@ -102,7 +102,7 @@ static void test_config_json_resolution(void) {
 
 static void expect_eval(const char *code, const char *config_json,
                         const char *want, const char **err) {
-    char *r = qjs_eval_run(code, NULL, NULL, config_json);
+    char *r = qjs_eval_run(code, NULL, NULL, config_json, NULL);
     if (!r) { *err = "qjs_eval_run returned NULL"; return; }
     if (strcmp(r, want) != 0) {
         fprintf(stderr, "\n    code=%s\n    got=%s want=%s\n", code, r, want);

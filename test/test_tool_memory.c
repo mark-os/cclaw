@@ -26,13 +26,13 @@ static void test_create_and_add(void) {
 
     ToolEntry *e = tools_lookup(&reg, "memory_create");
     assert(e);
-    char *r = e->handler("{\"label\":\"facts\",\"description\":\"user facts\"}", e->user_data);
+    char *r = e->handler("{\"label\":\"facts\",\"description\":\"user facts\"}", e->user_data, &(int){0});
     assert(strstr(r, "ok"));
     free(r);
 
     e = tools_lookup(&reg, "memory_add");
     assert(e);
-    r = e->handler("{\"block\":\"facts\",\"text\":\"likes coffee\"}", e->user_data);
+    r = e->handler("{\"block\":\"facts\",\"text\":\"likes coffee\"}", e->user_data, &(int){0});
     /* result echoes the rendered block including the new entry */
     assert(strstr(r, "likes coffee"));
     free(r);
@@ -57,18 +57,18 @@ static void test_edit_batch(void) {
     tool_memory_register(&reg, &ctx);
 
     ToolEntry *create = tools_lookup(&reg, "memory_create");
-    char *r = create->handler("{\"label\":\"bio\",\"description\":\"about\"}", create->user_data);
+    char *r = create->handler("{\"label\":\"bio\",\"description\":\"about\"}", create->user_data, &(int){0});
     assert(strstr(r, "ok")); free(r);
 
     ToolEntry *add = tools_lookup(&reg, "memory_add");
-    r = add->handler("{\"block\":\"bio\",\"text\":\"age 30\"}", add->user_data); free(r);
-    r = add->handler("{\"block\":\"bio\",\"text\":\"city NYC\"}", add->user_data); free(r);
+    r = add->handler("{\"block\":\"bio\",\"text\":\"age 30\"}", add->user_data, &(int){0}); free(r);
+    r = add->handler("{\"block\":\"bio\",\"text\":\"city NYC\"}", add->user_data, &(int){0}); free(r);
 
     /* Batch edit both entries by number */
     ToolEntry *edit = tools_lookup(&reg, "memory_edit");
     r = edit->handler(
         "{\"block\":\"bio\",\"edits\":[{\"number\":1,\"text\":\"age 31\"},"
-        "{\"number\":2,\"text\":\"city LA\"}]}", edit->user_data);
+        "{\"number\":2,\"text\":\"city LA\"}]}", edit->user_data, &(int){0});
     assert(strstr(r, "edited 2"));
     free(r);
 
@@ -92,17 +92,17 @@ static void test_delete_renumber(void) {
     tool_memory_register(&reg, &ctx);
 
     ToolEntry *create = tools_lookup(&reg, "memory_create");
-    char *r = create->handler("{\"label\":\"log\",\"description\":\"events\"}", create->user_data);
+    char *r = create->handler("{\"label\":\"log\",\"description\":\"events\"}", create->user_data, &(int){0});
     assert(strstr(r, "ok")); free(r);
 
     ToolEntry *add = tools_lookup(&reg, "memory_add");
-    r = add->handler("{\"block\":\"log\",\"text\":\"one\"}", add->user_data); free(r);
-    r = add->handler("{\"block\":\"log\",\"text\":\"two\"}", add->user_data); free(r);
-    r = add->handler("{\"block\":\"log\",\"text\":\"three\"}", add->user_data); free(r);
+    r = add->handler("{\"block\":\"log\",\"text\":\"one\"}", add->user_data, &(int){0}); free(r);
+    r = add->handler("{\"block\":\"log\",\"text\":\"two\"}", add->user_data, &(int){0}); free(r);
+    r = add->handler("{\"block\":\"log\",\"text\":\"three\"}", add->user_data, &(int){0}); free(r);
 
     /* Delete the middle entry; survivors must renumber to 1,2 */
     ToolEntry *del = tools_lookup(&reg, "memory_delete");
-    r = del->handler("{\"block\":\"log\",\"numbers\":[2]}", del->user_data);
+    r = del->handler("{\"block\":\"log\",\"numbers\":[2]}", del->user_data, &(int){0});
     assert(strstr(r, "deleted 1"));
     free(r);
 
@@ -126,17 +126,17 @@ static void test_missing_fields(void) {
     tool_memory_register(&reg, &ctx);
 
     ToolEntry *e = tools_lookup(&reg, "memory_create");
-    char *r = e->handler("{}", e->user_data);
+    char *r = e->handler("{}", e->user_data, &(int){0});
     assert(strstr(r, "error"));
     free(r);
 
     e = tools_lookup(&reg, "memory_add");
-    r = e->handler("{\"block\":\"x\"}", e->user_data);
+    r = e->handler("{\"block\":\"x\"}", e->user_data, &(int){0});
     assert(strstr(r, "error"));
     free(r);
 
     /* add to nonexistent block */
-    r = e->handler("{\"block\":\"nope\",\"text\":\"y\"}", e->user_data);
+    r = e->handler("{\"block\":\"nope\",\"text\":\"y\"}", e->user_data, &(int){0});
     assert(strstr(r, "error"));
     free(r);
 
@@ -155,7 +155,7 @@ static void test_memory_create(void) {
     ToolEntry *e = tools_lookup(&reg, "memory_create");
     assert(e);
 
-    char *r = e->handler("{\"label\":\"notes\",\"description\":\"scratch pad\"}", e->user_data);
+    char *r = e->handler("{\"label\":\"notes\",\"description\":\"scratch pad\"}", e->user_data, &(int){0});
     assert(strstr(r, "ok"));
     free(r);
 
@@ -170,7 +170,7 @@ static void test_memory_create(void) {
     assert(n == 0 && entries == NULL);
 
     /* Duplicate label fails */
-    r = e->handler("{\"label\":\"notes\",\"description\":\"dup\"}", e->user_data);
+    r = e->handler("{\"label\":\"notes\",\"description\":\"dup\"}", e->user_data, &(int){0});
     assert(strstr(r, "error"));
     free(r);
 
@@ -187,7 +187,7 @@ static void test_memory_read_only(void) {
     tool_memory_register(&reg, &ctx);
 
     ToolEntry *create = tools_lookup(&reg, "memory_create");
-    char *r = create->handler("{\"label\":\"locked\",\"description\":\"immutable\"}", create->user_data);
+    char *r = create->handler("{\"label\":\"locked\",\"description\":\"immutable\"}", create->user_data, &(int){0});
     assert(strstr(r, "ok"));
     free(r);
 
@@ -197,17 +197,17 @@ static void test_memory_read_only(void) {
 
     /* add / edit / delete all rejected */
     ToolEntry *add = tools_lookup(&reg, "memory_add");
-    r = add->handler("{\"block\":\"locked\",\"text\":\"more\"}", add->user_data);
+    r = add->handler("{\"block\":\"locked\",\"text\":\"more\"}", add->user_data, &(int){0});
     assert(strstr(r, "read-only"));
     free(r);
 
     ToolEntry *edit = tools_lookup(&reg, "memory_edit");
-    r = edit->handler("{\"block\":\"locked\",\"edits\":[{\"number\":1,\"text\":\"changed\"}]}", edit->user_data);
+    r = edit->handler("{\"block\":\"locked\",\"edits\":[{\"number\":1,\"text\":\"changed\"}]}", edit->user_data, &(int){0});
     assert(strstr(r, "read-only"));
     free(r);
 
     ToolEntry *del = tools_lookup(&reg, "memory_delete");
-    r = del->handler("{\"block\":\"locked\",\"numbers\":[1]}", del->user_data);
+    r = del->handler("{\"block\":\"locked\",\"numbers\":[1]}", del->user_data, &(int){0});
     assert(strstr(r, "read-only"));
     free(r);
 
@@ -235,7 +235,7 @@ static void test_memory_char_limit(void) {
 
     /* Adding 4 more chars (total 6 > 5) must be rejected */
     ToolEntry *add = tools_lookup(&reg, "memory_add");
-    char *r = add->handler("{\"block\":\"tiny\",\"text\":\"1234\"}", add->user_data);
+    char *r = add->handler("{\"block\":\"tiny\",\"text\":\"1234\"}", add->user_data, &(int){0});
     assert(strstr(r, "exceed"));
     free(r);
 

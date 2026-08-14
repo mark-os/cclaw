@@ -41,9 +41,9 @@ static char *loaded_value(sqlite3 *db, const char *name) {
 
 static void test_no_save_secret(void) {
     sqlite3 *db = fresh_db();
-    assert(secret_capture_apply(db, "{\"url\":\"https://x\"}", "hello") == NULL);
-    assert(secret_capture_apply(db, NULL, "hello") == NULL);
-    assert(secret_capture_apply(db, "{\"url\":\"https://x\"}", NULL) == NULL);
+    assert(secret_capture_apply(db, "{\"url\":\"https://x\"}", "hello", 0) == NULL);
+    assert(secret_capture_apply(db, NULL, "hello", 0) == NULL);
+    assert(secret_capture_apply(db, "{\"url\":\"https://x\"}", NULL, 0) == NULL);
     db_wipe_secret_key();
     sqlite3_close(db);
     printf("  PASS: no_save_secret\n");
@@ -52,7 +52,7 @@ static void test_no_save_secret(void) {
 static void test_whole_result_capture(void) {
     sqlite3 *db = fresh_db();
     const char *args = "{\"command\":\"gh auth token\",\"save_secret\":\"GH_TOKEN\"}";
-    char *out = secret_capture_apply(db, args, "  ghp_tok9K2mX4pL7qR1w  \n");
+    char *out = secret_capture_apply(db, args, "  ghp_tok9K2mX4pL7qR1w  \n", 0);
     assert(out != NULL);
     assert(strstr(out, "ghp_tok9K2mX4pL7qR1w") == NULL);   /* masked */
     assert(strstr(out, "{{SECRET:GH_TOKEN}}") != NULL);
@@ -71,7 +71,7 @@ static void test_json_path_capture(void) {
         "{\"url\":\"https://api.github.com/x\",\"save_secret\":\"API_KEY\","
         "\"save_secret_path\":\"$.token\"}";
     const char *result = "{\"id\":42,\"token\":\"tok4Xq9Lm2Rp8Vw1\",\"ok\":true}";
-    char *out = secret_capture_apply(db, args, result);
+    char *out = secret_capture_apply(db, args, result, 0);
     assert(out != NULL);
     assert(strstr(out, "tok4Xq9Lm2Rp8Vw1") == NULL);
     assert(strstr(out, "{{SECRET:API_KEY}}") != NULL);
@@ -89,21 +89,24 @@ static void test_capture_errors(void) {
 
     /* invalid name: nothing stored, note appended, result preserved */
     char *out = secret_capture_apply(db,
-        "{\"save_secret\":\"bad-name\"}", "some output");
+        "{\"save_secret\":\"bad-name\"}", "some output", 0);
     assert(out && strstr(out, "some output") && strstr(out, "invalid name"));
     assert(!db_secret_exists(db, "bad-name"));
     free(out);
 
     /* existing name: refused */
     assert(db_secret_set(db, "TAKEN", "v", "operator", "agent") == 0);
-    out = secret_capture_apply(db, "{\"save_secret\":\"TAKEN\"}", "newvalue");
+    out = secret_capture_apply(db, "{\"save_secret\":\"TAKEN\"}", "newvalue", 0);
     assert(out && strstr(out, "already exists"));
     char *v = loaded_value(db, "TAKEN");
     assert(v && strcmp(v, "v") == 0);   /* not clobbered */
     free(v); free(out);
 
     /* error result: skipped */
-    out = secret_capture_apply(db, "{\"save_secret\":\"E_KEY\"}", "error: 403");
+    /* Failure status, not the prose, is what skips capture: the message here
+     * carries no "error:" prefix at all. */
+    out = secret_capture_apply(db, "{\"save_secret\":\"E_KEY\"}",
+                               "HTTP 403 Forbidden", 1);
     assert(out && strstr(out, "skipped"));
     assert(!db_secret_exists(db, "E_KEY"));
     free(out);
@@ -111,7 +114,7 @@ static void test_capture_errors(void) {
     /* path into non-JSON: failure note */
     out = secret_capture_apply(db,
         "{\"save_secret\":\"P_KEY\",\"save_secret_path\":\"$.token\"}",
-        "<html>not json</html>");
+        "<html>not json</html>", 0);
     assert(out && strstr(out, "save_secret failed"));
     assert(!db_secret_exists(db, "P_KEY"));
     free(out);

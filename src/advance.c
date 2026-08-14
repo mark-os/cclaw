@@ -353,6 +353,15 @@ static void channel_edge_ensure(sqlite3 *db, int64_t sid, const EdgeSessionRow *
     free(tmpl);
 }
 
+/* Did this session's final assistant entry stop at the model's output cap?
+ * (stop_reason 2 = STOP_REASON_LENGTH, db.c stop_reason_to_int.) Mechanical:
+ * one column, no prose reading. */
+int session_final_truncated(sqlite3 *db, int64_t session_id) {
+    return (int)db_scalar_i64(db,
+        "SELECT stop_reason=2 FROM entries WHERE session_id=?1 AND role=2"
+        " ORDER BY id DESC LIMIT 1;", session_id, 0);
+}
+
 /* Push the content-bearing assistant entries in (cursor, ∞) one by one on an
  * iteration edge. At a boundary the last push carries the boundary label;
  * mid-turn every push is an update. Returns the count pushed and leaves
@@ -440,6 +449,11 @@ int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
      * decision for 'quiescent' and the truthful label for every push. */
     int q = session_subtree_quiescent(db, session_id);
     const char *label = is_error ? "failed" : (q ? "completed" : "update");
+    /* F2: the outcome tag is derived from the child's final state, never from
+     * its prose — a model that says "done" after hitting the output cap must
+     * still reach the parent as truncated. */
+    if (!is_error && session_final_truncated(db, session_id))
+        label = "truncated";
 
     int shipped = 0;
     int64_t wake_parent = 0;

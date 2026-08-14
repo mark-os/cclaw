@@ -1,6 +1,10 @@
 #ifndef CCLAW_TOOL_JS_H
 #define CCLAW_TOOL_JS_H
 
+/* Default js_eval timeout, seconds; a call may raise it via the `timeout`
+ * argument up to TOOL_TIMEOUT_MAX_SEC. */
+#define JSEVAL_DEFAULT_TIMEOUT 120
+
 /* The js_eval tool and the per-session persistent JS runtime — one-off JS
  * evaluation in the sandboxed engine (SBX_JS tier), sharing a context
  * across extension loads.

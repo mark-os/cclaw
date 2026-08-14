@@ -1,6 +1,10 @@
 #ifndef CCLAW_TOOL_WEB_FETCH_H
 #define CCLAW_TOOL_WEB_FETCH_H
 
+/* Default web_fetch timeout, seconds; a call may raise it via the `timeout`
+ * argument up to TOOL_TIMEOUT_MAX_SEC. */
+#define WEB_FETCH_DEFAULT_TIMEOUT 60
+
 #include "tools.h"
 #include "sandbox.h"
 #include "run_tool.h"

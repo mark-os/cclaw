@@ -22,6 +22,7 @@ static const char *WEB_FETCH_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"url\":{\"type\":\"string\",\"description\":\"URL to fetch (HTTP GET)\"},"
     "\"raw\":{\"type\":\"boolean\",\"description\":\"Return raw response without HTML-to-markdown conversion (auto-skipped for JSON responses)\"},"
+    "\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds (default 60, max 600)\"},"
     "\"save_secret\":{\"type\":\"string\",\"description\":\"Capture a credential from this response: NAME (^[A-Z][A-Z0-9_]*$) stores it encrypted and masks it to {{SECRET:NAME}} — the raw value never enters context\"},"
     "\"save_secret_path\":{\"type\":\"string\",\"description\":\"With save_secret: JSON path (e.g. $.token) selecting the credential field; omit to capture the whole trimmed response\"}"
     "},\"required\":[\"url\"]}";
@@ -271,11 +272,15 @@ static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx, int *is_err
         "Accept-Language: en-US,en;q=0.9",
         NULL
     };
+    /* The call's own budget (broker-clamped, wire field) minus a small margin
+     * so curl gives up — and we say why — before the broker kills us. */
+    int http_timeout = q->timeout > 5 ? q->timeout - 5 : q->timeout;
+    if (http_timeout <= 0) http_timeout = 30;
     HttpRequestOpts opts = {
         .url = url,
         .method = "GET",
         .headers = hdrs,
-        .timeout = 30,
+        .timeout = http_timeout,
         .follow_redirects = 1,
         .max_redirects = 3,
         .max_response_bytes = WEB_FETCH_MAX,

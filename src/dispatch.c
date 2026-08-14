@@ -299,6 +299,15 @@ static int tool_is_parallel_safe(const char *name) {
     return t ? t->parallel_safe : 0;
 }
 
+/* A caller-supplied `timeout`, clamped to what we're willing to hold a turn
+ * open for. Absent/garbage falls back to the tool's default. */
+static int tool_call_timeout(const char *args, int def) {
+    int t = tool_args_int(proc_db(), args, "timeout", def);
+    if (t <= 0) t = def;
+    if (t > TOOL_TIMEOUT_MAX_SEC) t = TOOL_TIMEOUT_MAX_SEC;
+    return t;
+}
+
 static int tool_needs_interpolation(const char *name) {
     const ToolTraits *t = tool_traits_lookup(name);
     return t ? t->needs_interp : 0;
@@ -953,7 +962,8 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
                                   const char *sens_host,
                                   const ShellSecret *secrets, size_t secret_count,
                                   ToolWireArg *params, size_t param_n,
-                                  const char *spill_path, size_t *out_len) {
+                                  const char *spill_path, int timeout,
+                                  size_t *out_len) {
     char agent_dir[PATH_MAX];
     agent_dir_resolve(jc->workspace, jc->db_path, agent_dir, sizeof(agent_dir));
 
@@ -1007,7 +1017,7 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
     req.deny_rules = (const char **)se.deny;
     req.deny_count = se.deny_n;
     req.egress_note = se.note;
-    req.timeout = 120;
+    req.timeout = timeout;
     char *blob = run_tool_serialize_request(&req, out_len);
     call_egress_free(&se);
     free(read_paths);
@@ -1211,8 +1221,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             if (!command)
                 return tool_inline_error(session_id, tc,
                     "error: shell_exec requires a 'command' string argument", NULL);
-            int cmd_timeout = tool_args_int(proc_db(), tc->arguments, "timeout", sc->timeout);
-            if (cmd_timeout <= 0) cmd_timeout = sc->timeout;
+            int cmd_timeout = tool_call_timeout(tc->arguments, sc->timeout);
 
             /* Parent-side secret interpolation (daemon holds the key) */
             char *interp_cmd = NULL;
@@ -1293,6 +1302,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
     if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_WEB &&
         te->user_data) {
         WebFetchCtx *wc = (WebFetchCtx *)te->user_data;
+        /* Caller-settable, like shell_exec's — the advice to "raise it with
+         * the timeout parameter" is only true if the parameter exists. */
+        int web_timeout = tool_call_timeout(tc->arguments, WEB_FETCH_DEFAULT_TIMEOUT);
         if (!proc_is_daemon())
             cli_print_tool_call(tc->name, tc->arguments);
         session_set_state(proc_db(), session_id, "tool_running");
@@ -1334,7 +1346,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         req.deny_rules = (const char **)se.deny;
         req.deny_count = se.deny_n;
         req.egress_note = se.note;
-        req.timeout = 60;
+        req.timeout = web_timeout;
         char *blob = run_tool_serialize_request(&req, &blob_len);
         call_egress_free(&se);
         tool_wire_args_wipe_free(params, param_n);
@@ -1343,7 +1355,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 "error: web request exceeds 32KB cap", NULL);
         int rc = spawn_run_tool_child(session_id, agent_name,
                      tc->call_id, tc->name, tc->arguments,
-                     tc->iteration_id, tc->entry_id, blob, blob_len, 90);
+                     tc->iteration_id, tc->entry_id, blob, blob_len,
+                     web_timeout + 30);
         explicit_bzero(blob, blob_len);
         free(blob);
         if (rc != 0)
@@ -1366,6 +1379,11 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         if (js_tool_resolve_request(te, &jc, &handler_path) != 0 || !jc)
             return tool_inline_error(session_id, tc,
                 "error: js tool request resolution failed", NULL);
+
+        /* Same caller-settable timeout as shell_exec and web_fetch. An
+         * extension tool's own args have no `timeout` key, so it simply keeps
+         * the default. */
+        int js_timeout = tool_call_timeout(tc->arguments, JSEVAL_DEFAULT_TIMEOUT);
 
         if (!proc_is_daemon())
             cli_print_tool_call(tc->name, tc->arguments);
@@ -1419,13 +1437,15 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         char *blob = js_request_serialize(jc, agent_name, tc->name, tc->arguments,
                                           sens_once ? sens_host : NULL,
                                           secrets, secret_count,
-                                          params, param_n, spill_p, &blob_len);
+                                          params, param_n, spill_p, js_timeout,
+                                          &blob_len);
         if (!blob)
             return tool_inline_error(session_id, tc,
                 "error: js request exceeds 32KB cap", NULL);
         int rc = spawn_run_tool_child(session_id, agent_name,
                      tc->call_id, tc->name, tc->arguments,
-                     tc->iteration_id, tc->entry_id, blob, blob_len, 150);
+                     tc->iteration_id, tc->entry_id, blob, blob_len,
+                     js_timeout + 30);
         explicit_bzero(blob, blob_len);
         free(blob);
         if (rc != 0)
@@ -1558,7 +1578,8 @@ CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len)
     /* Scheduled script: no tool_call_id to name a spill file after, so the
      * parent's truncate_and_spill handles it as before. */
     char *blob = js_request_serialize(jc, f->agent_name, "js_eval", "{}",
-                                      NULL, NULL, 0, params, 1, NULL, &blob_len);
+                                      NULL, NULL, 0, params, 1, NULL,
+                                      JSEVAL_DEFAULT_TIMEOUT, &blob_len);
     if (!blob) {
         snprintf(err, err_len, "the script request exceeds the 32KB wire cap");
         return CRON_SCRIPT_FAILED;

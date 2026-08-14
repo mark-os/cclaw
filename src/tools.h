@@ -12,6 +12,13 @@
 
 #define TOOLS_MAX 48
 
+/* Ceiling on a caller-supplied `timeout` argument, shared by every tool that
+ * takes one (shell_exec, web_fetch, js_eval). A tool call is one step of a
+ * turn, not a background job: past ten minutes the right answer is a
+ * detached script, not a longer wait. Requests above the cap are clamped, not
+ * refused — the model asked for "long", and it gets the longest we do. */
+#define TOOL_TIMEOUT_MAX_SEC 600
+
 /* Tool handler function. Returns heap-allocated result string (never NULL).
  *
  * Failure is signalled EXPLICITLY through *is_error, set at the failure site

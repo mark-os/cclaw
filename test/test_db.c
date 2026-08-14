@@ -456,9 +456,40 @@ static void test_schema_patch_application(void) {
         "INSERT INTO tool_calls(session_id, entry_id, call_id, name, status)"
         " VALUES(100, 1, 'call_m', 'launch_agent', 'running');",
         NULL, NULL, NULL) == SQLITE_OK);
+    /* v44 model-id migration inputs: one unambiguous bare name, one that
+     * matches nothing, and one carried by two providers. */
+    assert(sqlite3_exec(old_db,
+        "INSERT INTO providers(name, base_url, priority) VALUES"
+        " ('p1','http://p1',0), ('lo','http://lo',5), ('hi','http://hi',1);"
+        "INSERT INTO models(id, provider_name, model, priority) VALUES"
+        " ('solo@p1','p1','solo',0),"
+        " ('dup@lo','lo','dup',5),"
+        " ('dup@hi','hi','dup',1);"
+        "INSERT INTO agents(name, primary_model, secondary_model) VALUES"
+        " ('Uniq','solo','dup'), ('Zero','nowhere',NULL),"
+        " ('Canon','solo@p1',NULL);",
+        NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(old_db, 40);
 
     assert(db_schema_compat(old_db) == 1);   /* runs every pending patch */
+
+    /* Unambiguous → rewritten; ambiguous → the row routing prefers (lowest
+     * models.priority); no match → left alone (already broken, and inventing
+     * an id would move it somewhere nobody chose); already canonical → byte
+     * identical. */
+    sqlite3_stmt *mm;
+    assert(sqlite3_prepare_v2(old_db,
+        "SELECT name, COALESCE(primary_model,''), COALESCE(secondary_model,'')"
+        " FROM agents WHERE name IN ('Uniq','Zero','Canon') ORDER BY name",
+        -1, &mm, NULL) == SQLITE_OK);
+    assert(sqlite3_step(mm) == SQLITE_ROW);           /* Canon */
+    assert(strcmp((const char *)sqlite3_column_text(mm, 1), "solo@p1") == 0);
+    assert(sqlite3_step(mm) == SQLITE_ROW);           /* Uniq */
+    assert(strcmp((const char *)sqlite3_column_text(mm, 1), "solo@p1") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(mm, 2), "dup@hi") == 0);
+    assert(sqlite3_step(mm) == SQLITE_ROW);           /* Zero */
+    assert(strcmp((const char *)sqlite3_column_text(mm, 1), "nowhere") == 0);
+    sqlite3_finalize(mm);
     int uv = 0;
     assert(db_schema_state(old_db, &uv) == DB_SCHEMA_CURRENT);
     assert(uv == CCLAW_SCHEMA_VERSION);

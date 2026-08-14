@@ -382,12 +382,14 @@ static char *validate_agent(sqlite3 *db, const char *changes,
      * carries no models section. */
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "SELECT atom FROM json_each(?1,'$.agent')"
-            " WHERE key IN ('primary_model','secondary_model')"
-            " AND (type!='text' OR atom=''"
-            "      OR (NOT EXISTS(SELECT 1 FROM models m WHERE m.id=atom)"
+            /* The outer row must be aliased: an unqualified 'atom' inside the
+             * json_each(?2) subquery would bind to that table's own column. */
+            "SELECT a.atom FROM json_each(?1,'$.agent') a"
+            " WHERE a.key IN ('primary_model','secondary_model')"
+            " AND (a.type!='text' OR a.atom=''"
+            "      OR (NOT EXISTS(SELECT 1 FROM models m WHERE m.id=a.atom)"
             "          AND NOT EXISTS(SELECT 1 FROM json_each(?2) j"
-            "                         WHERE json_extract(j.value,'$.id')=atom)))"
+            "                         WHERE json_extract(j.value,'$.id')=a.atom)))"
             " LIMIT 1", -1, &st, NULL) != SQLITE_OK)
         return strdup("error: agent validation failed");
     sqlite3_bind_text(st, 1, changes, -1, SQLITE_STATIC);
@@ -761,7 +763,11 @@ static char *validate_provider(sqlite3 *db, const char *changes, char **canon_ou
     }
     /* api_key_env is a secret NAME, never key material. Default derives
      * <PROVIDER>_API_KEY so config_load's env → kv fallback resolves it. */
-    if (key_env && key_env[0]) {
+    if (key_env && !key_env[0]) {
+        /* Explicit "" is the way to say "this endpoint needs no credential" —
+         * distinct from absent, which means "leave it as it is". */
+        env_val = "";
+    } else if (key_env && key_env[0]) {
         int ok = (key_env[0] >= 'A' && key_env[0] <= 'Z');
         for (const char *c = key_env; ok && *c; c++)
             ok = (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_';

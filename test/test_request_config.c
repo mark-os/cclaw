@@ -20,6 +20,30 @@ static char *call_handler(ToolRegistry *reg, const char *args) {
     return e->handler(args, e->user_data, &(int){0});
 }
 
+/* Make a credential name resolve, so the config-time key check passes. The
+ * value is never read here — validation tests existence only. */
+static void seed_key(sqlite3 *db, const char *name) {
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+        "INSERT OR IGNORE INTO secrets(name, value, scope)"
+        " VALUES('%s','x','system')", name);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+}
+
+/* Approve-and-apply the newest parked document for this session. */
+static void apply_latest(sqlite3 *db, int64_t sid, char **receipt_out) {
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT args_json FROM approvals WHERE session_id=?1"
+        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    char *args = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    assert(request_config_changes_apply(db, "test", args, 0, receipt_out) == 0);
+    free(args);
+}
+
 /* Seed a registered config key so the handler allows it. */
 static void seed_config_key(sqlite3 *db, const char *key) {
     char sql[256];
@@ -273,6 +297,35 @@ static void test_error_provider(void) {
     assert(err != NULL && strstr(err, "api_key_env") != NULL);
     free(err);
 
+    /* A model belongs in the models section — the provider doc is transport.
+     * (Registering a model by re-submitting a provider doc is the trap that
+     * took prod's gateway down.) */
+    ctx.current_tool_call_id = "pv5";
+    err = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"provider\":"
+        "{\"provider\":\"openrouter\",\"model\":\"some/model\"}}}");
+    assert(err != NULL && strstr(err, "models") != NULL);
+    free(err);
+
+    /* Config-time key check: the credential this provider would use exists
+     * neither in env nor as a system secret. Refuse now, while the agent can
+     * still fix it — not silently at request time (A8). */
+    ctx.current_tool_call_id = "pv6";
+    err = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"provider\":"
+        "{\"provider\":\"nokey\",\"base_url\":\"https://n.example/v1\"}}}");
+    assert(err != NULL && strstr(err, "NOKEY_API_KEY") != NULL
+                       && strstr(err, "save_secret") != NULL);
+    free(err);
+
+    /* Keyless is legal, but it has to be said out loud. */
+    ctx.current_tool_call_id = "pv7";
+    char *ok = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"provider\":"
+        "{\"provider\":\"nokey\",\"base_url\":\"https://n.example/v1\","
+        "\"api_key_env\":\"\"}}}");
+    assert(ok == NULL);
+
     tools_free(&reg);
     db_close(db);
     printf("  PASS test_error_provider\n");
@@ -333,6 +386,7 @@ static void test_provider_defaults(void) {
     ToolRegistry reg;
     tools_init(&reg);
     tool_request_config_register(&reg, &ctx);
+    seed_key(db, "OPENROUTER_API_KEY");
 
     char *result = call_handler(&reg,
         "{\"action\":\"request_changes\",\"changes\":{\"provider\":{\"provider\":\"openrouter\"}}}");
@@ -341,7 +395,6 @@ static void test_provider_defaults(void) {
     sqlite3_stmt *s;
     int rc = sqlite3_prepare_v2(db,
         "SELECT json_extract(args_json,'$.changes.provider.base_url'),"
-        "       json_extract(args_json,'$.changes.provider.model'),"
         "       json_extract(args_json,'$.changes.provider.api_key_env')"
         " FROM approvals WHERE session_id=?1 AND action='request_changes'"
         " ORDER BY id DESC LIMIT 1", -1, &s, NULL);
@@ -351,14 +404,208 @@ static void test_provider_defaults(void) {
     assert(strcmp((const char *)sqlite3_column_text(s, 0),
                  "https://openrouter.ai/api/v1") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1),
-                 "deepseek/deepseek-v4-flash") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 2),
                  "OPENROUTER_API_KEY") == 0);
+    sqlite3_finalize(s);
+
+    /* A7 regression: a deliberately keyless provider survives a provider
+     * document. The old canonicalizer re-derived <PROVIDER>_API_KEY whenever
+     * api_key_env was absent, and the phantom name made routing drop every
+     * one of that provider's models without a word. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO providers(name, base_url, api_key_env)"
+        " VALUES('gateway','http://127.0.0.1:8080/v1','')",
+        NULL, NULL, NULL) == SQLITE_OK);
+    ctx.current_tool_call_id = "pd2";
+    result = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"provider\":"
+        "{\"provider\":\"gateway\",\"base_url\":\"http://127.0.0.1:9090/v1\"}}}");
+    assert(result == NULL);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT json_extract(args_json,'$.changes.provider.api_key_env')"
+        " FROM approvals WHERE session_id=?1 ORDER BY id DESC LIMIT 1",
+        -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "") == 0);
+    sqlite3_finalize(s);
+
+    /* …and it stays empty through the apply, too. */
+    assert(sqlite3_prepare_v2(db,
+        "SELECT args_json FROM approvals WHERE session_id=?1"
+        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    char *args = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    char *receipt = NULL;
+    assert(request_config_changes_apply(db, "test", args, 0, &receipt) == 0);
+    free(args);
+    /* The receipt is a re-read: it names the endpoint now stored. */
+    assert(receipt && strstr(receipt, "provider gateway -> "
+                                      "http://127.0.0.1:9090/v1 (key: none)"));
+    free(receipt);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT api_key_env FROM providers WHERE name='gateway'",
+        -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "") == 0);
     sqlite3_finalize(s);
 
     tools_free(&reg);
     db_close(db);
     printf("  PASS test_provider_defaults\n");
+}
+
+/* The models section: register on an existing provider, update in place,
+ * disable — and refuse a model whose provider does not exist. */
+static void test_models_section(void) {
+    sqlite3 *db = test_db_open_seeded(":memory:");
+    assert(db);
+    config_registry_sync(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+    seed_key(db, "OPENROUTER_API_KEY");
+
+    RequestConfigCtx ctx = {
+        .db = db, .agent_name = "test", .session_id = sid,
+        .agents_dir = NULL, .current_tool_call_id = "ms1"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+
+    /* The inverted dependency: a model needs its provider to exist first. */
+    char *r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "[{\"id\":\"m1@ghostprov\"}]}}");
+    assert(r && strstr(r, "provider 'ghostprov' is not registered"));
+    free(r);
+
+    /* A bare id is refused with the canonical form spelled out. */
+    ctx.current_tool_call_id = "ms2";
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "[{\"id\":\"just-a-name\"}]}}");
+    assert(r && strstr(r, "model@provider"));
+    free(r);
+
+    /* Register with metadata onto the seeded provider, then apply. */
+    ctx.current_tool_call_id = "ms3";
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "[{\"id\":\"newmodel@openrouter\",\"context_window\":200000,"
+        "\"max_output_tokens\":8192,\"capabilities\":[\"text\",\"image\"],"
+        "\"priority\":3}]}}");
+    assert(r == NULL);
+    char *receipt = NULL;
+    apply_latest(db, sid, &receipt);
+    assert(receipt && strstr(receipt, "model newmodel@openrouter (healthy, "
+                                      "context 200000)"));
+    free(receipt);
+
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT provider_name, model, context_window, max_output_tokens,"
+        "       capabilities, priority, status FROM models"
+        " WHERE id='newmodel@openrouter'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "openrouter") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "newmodel") == 0);
+    assert(sqlite3_column_int(s, 2) == 200000);
+    assert(sqlite3_column_int(s, 3) == 8192);
+    assert(strstr((const char *)sqlite3_column_text(s, 4), "image") != NULL);
+    assert(sqlite3_column_int(s, 5) == 3);
+    assert(strcmp((const char *)sqlite3_column_text(s, 6), "healthy") == 0);
+    sqlite3_finalize(s);
+
+    /* Update: only the fields present move; the rest keep their values. */
+    ctx.current_tool_call_id = "ms4";
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "[{\"id\":\"newmodel@openrouter\",\"context_window\":64000}]}}");
+    assert(r == NULL);
+    apply_latest(db, sid, NULL);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT context_window, max_output_tokens, priority, status"
+        " FROM models WHERE id='newmodel@openrouter'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 64000);
+    assert(sqlite3_column_int(s, 1) == 8192);      /* untouched */
+    assert(sqlite3_column_int(s, 2) == 3);         /* untouched */
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "healthy") == 0);
+    sqlite3_finalize(s);
+
+    /* Disable — a first-class verb now, not a DELETE nobody could request. */
+    ctx.current_tool_call_id = "ms5";
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "[{\"id\":\"newmodel@openrouter\",\"status\":\"disabled\"}]}}");
+    assert(r == NULL);
+    apply_latest(db, sid, NULL);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT status, context_window FROM models"
+        " WHERE id='newmodel@openrouter'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "disabled") == 0);
+    assert(sqlite3_column_int(s, 1) == 64000);
+    sqlite3_finalize(s);
+
+    /* Typo-hostile like every other section. */
+    ctx.current_tool_call_id = "ms6";
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "[{\"id\":\"newmodel@openrouter\",\"ctx\":1}]}}");
+    assert(r && strstr(r, "unknown models key 'ctx'"));
+    free(r);
+    ctx.current_tool_call_id = "ms7";
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "[{\"id\":\"newmodel@openrouter\",\"status\":\"retired\"}]}}");
+    assert(r && strstr(r, "'healthy' or 'disabled'"));
+    free(r);
+
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_models_section\n");
+}
+
+/* A bare model name in the agent section gets a did-you-mean, not a shrug —
+ * the canonical-id rule is only teachable if the error names the id. */
+static void test_bare_model_name_teaching(void) {
+    sqlite3 *db = test_db_open_seeded(":memory:");
+    assert(db);
+    config_registry_sync(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+
+    RequestConfigCtx ctx = {
+        .db = db, .agent_name = "test", .session_id = sid,
+        .agents_dir = NULL, .current_tool_call_id = "bn1"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+
+    /* 'deepseek/deepseek-v4-flash' is seeded, under a canonical id. */
+    char *r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"agent\":"
+        "{\"primary_model\":\"deepseek/deepseek-v4-flash\"}}}");
+    assert(r && strstr(r, "bare model name"));
+    assert(r && strstr(r, "openrouter/deepseek/deepseek-v4-flash"));
+    free(r);
+
+    /* Nothing like it registered → no invented suggestion. */
+    ctx.current_tool_call_id = "bn2";
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"agent\":"
+        "{\"primary_model\":\"ghost\"}}}");
+    assert(r && strstr(r, "unknown model 'ghost'"));
+    assert(r && !strstr(r, "Did you mean"));
+    free(r);
+
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_bare_model_name_teaching\n");
 }
 
 
@@ -439,6 +686,7 @@ static void test_batch_apply(void) {
     tools_init(&reg);
     tool_request_config_register(&reg, &ctx);
 
+    seed_key(db, "OPENROUTER_API_KEY");
     char *r = call_handler(&reg,
         "{\"action\":\"request_changes\",\"changes\":{"
         "\"grants\":{\"tools\":[\"shell_exec\"],\"hosts\":[\"api.example.com\"],"
@@ -473,10 +721,15 @@ static void test_batch_apply(void) {
     char *receipt = NULL;
     rc = request_config_changes_apply(db, "test", args_copy, 0, &receipt);
     assert(rc == 0);
-    /* Success receipt reports applied lines and the defined provider. */
+    /* The receipt is a re-read of every section: the grants that are live,
+     * the config value as stored, the provider row as it now stands. */
     assert(receipt != NULL);
-    assert(strstr(receipt, "applied") != NULL);
-    assert(strstr(receipt, "provider 'openrouter'") != NULL);
+    assert(strstr(receipt, "grants now: ") != NULL);
+    assert(strstr(receipt, "tool shell_exec") != NULL);
+    assert(strstr(receipt, "config now: myext.knob=42") != NULL);
+    assert(strstr(receipt, "provider openrouter -> "
+                           "https://openrouter.ai/api/v1 "
+                           "(key: OPENROUTER_API_KEY)") != NULL);
     free(receipt);
     free(args_copy);
 
@@ -503,15 +756,13 @@ static void test_batch_apply(void) {
 
     /* Verify providers row exists with filled defaults. */
     rc = sqlite3_prepare_v2(db,
-        "SELECT base_url, default_model, api_key_env"
+        "SELECT base_url, api_key_env"
         " FROM providers WHERE name='openrouter'", -1, &s, NULL);
     assert(rc == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0),
                  "https://openrouter.ai/api/v1") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1),
-                 "deepseek/deepseek-v4-flash") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 2),
                  "OPENROUTER_API_KEY") == 0);
     sqlite3_finalize(s);
 
@@ -583,11 +834,14 @@ static void test_agent_routes_sections(void) {
     assert(r && strstr(r, "already owned"));
     free(r);
 
-    /* One document: define a provider, adopt its model as the agent's own
-     * primary (the 'model@provider' id the apply seeds), request a route. */
+    /* One document, the whole chain: define the transport, register a model
+     * on it, adopt that model, take a route. */
+    seed_key(db, "GEMINI_API_KEY");
     r = call_handler(&reg,
         "{\"action\":\"request_changes\",\"changes\":{"
         "\"provider\":{\"provider\":\"gemini\"},"
+        "\"models\":[{\"id\":\"gemini-3.5-flash-lite@gemini\","
+        "\"context_window\":1000000}],"
         "\"agent\":{\"primary_model\":\"gemini-3.5-flash-lite@gemini\","
         "\"max_iterations\":40},"
         "\"routes\":[\"tg:777\"]}}");
@@ -1070,6 +1324,8 @@ int main(void) {
     test_error_provider();
     test_reason_propagates();
     test_provider_defaults();
+    test_models_section();
+    test_bare_model_name_teaching();
     test_dedup();
     test_batch_apply();
     test_agent_routes_sections();

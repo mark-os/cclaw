@@ -251,7 +251,7 @@ static void test_update_agent(void) {
     err = NULL;
     assert(agent_definition_update_validate(g_db,
         "{\"name\":\"Pupil\",\"primary_model\":\"made-up-model\"}", "Mentor", &err) != 0);
-    assert(err && strstr(err, "does not resolve"));
+    assert(err && strstr(err, "not a registered model id"));
     free(err);
     sqlite3_exec(g_db,
         "INSERT INTO providers(name, base_url) VALUES('prov','http://x');"

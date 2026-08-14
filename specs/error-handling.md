@@ -37,6 +37,20 @@ outcomes exist:
 | E13 | other 4xx | remaining non-2xx | no | yes | no | "provider rejected the request" |
 | E14 | DB error during ingest | SQLITE_BUSY on our side | no | **no — turn aborts** | no | "DB contention during response ingest (SQLITE_BUSY) — check logs" |
 
+Two failures never reach this table because they happen *before* a request
+exists, and both are recorded anyway:
+
+- **Candidate dropped for a missing key** — the model's provider names an
+  `api_key_env` that resolves to neither an env var nor a system secret. WARN,
+  plus `status='degraded'` with a NULL `degraded_until` (degraded by
+  configuration, one operator notice on the transition, restored to `healthy`
+  when the key resolves). See [providers.md](providers.md).
+- **Apply-time probe failure** — a config change that moves routing is proved
+  against the real request path before it stands; a non-2xx, transport error or
+  15s timeout reverts the change and says so. Archived as `probe_*` in
+  `llm_responses`, and never counted as model degradation (a probe is a config
+  event, not traffic). See [self-configuration.md](self-configuration.md).
+
 Every failed attempt is archived to `llm_responses` (response body + the request
 we sent). The final error entry cites the last archived row as `[resp #N]`;
 read it with `cclaw resp <N>` (or `cclaw resp <N> req` for the request). With a

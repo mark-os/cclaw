@@ -66,8 +66,9 @@ int config_probe_needed(sqlite3 *db, const char *agent, const char *args_json) {
      * document just wrote: the agent's own model choice moved, a model row the
      * agent routes to was touched, or the provider behind it changed
      * transport. A grants/config-value document matches none of these.
-     * An agent with no explicit model rides whatever routing picks, so any
-     * model/provider edit can move it. */
+     * An agent with no explicit model rides whatever routing picks, so for it
+     * "in use" means the top-priority routable row — registering an unrelated
+     * provider or model moves nothing and is not probed. */
     char *v = q_json(db,
         "SELECT 1 FROM agents a WHERE a.name=?2 AND ("
         "   json_extract(?1,'$.changes.agent.primary_model') IS NOT NULL"
@@ -79,9 +80,14 @@ int config_probe_needed(sqlite3 *db, const char *agent, const char *args_json) {
         "              WHERE m.id IN (a.primary_model, a.secondary_model)"
         "                AND m.provider_name ="
         "                    json_extract(?1,'$.changes.provider.provider'))"
-        "   OR (COALESCE(a.primary_model,'')='' AND"
-        "       (json_type(?1,'$.changes.models')='array'"
-        "        OR json_extract(?1,'$.changes.provider.provider') IS NOT NULL)))",
+        "   OR (COALESCE(a.primary_model,'')='' AND ("
+        "        (SELECT m2.id FROM models m2 WHERE m2.status!='disabled'"
+        "          ORDER BY m2.priority LIMIT 1)"
+        "          IN (SELECT json_extract(value,'$.id')"
+        "                FROM json_each(?1,'$.changes.models'))"
+        "        OR (SELECT m2.provider_name FROM models m2 WHERE m2.status!='disabled'"
+        "             ORDER BY m2.priority LIMIT 1)"
+        "           = json_extract(?1,'$.changes.provider.provider'))))",
         args_json, agent);
     int needed = v != NULL;
     free(v);

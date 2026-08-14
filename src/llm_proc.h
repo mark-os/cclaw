@@ -55,6 +55,16 @@ int llm_probe_agent(sqlite3 *db, const char *agent_name, int64_t session_id,
  * On LLM failure, returns -1 without compacting (safe fallback). */
 int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agent_name);
 
+/* Delimiter between the compaction model's prose and the mechanical state
+ * coda, so a later reader (human or model) can tell the two apart. */
+#define COMPACTION_CODA_MARKER "--- carried state ---"
+
+/* E2: live commitments (open approvals incl. unconsumed tickets, running
+ * sub-agent sessions, armed cron one-shots) rendered as the coda appended to
+ * the compaction entry. Malloc'd, or NULL when nothing is open — never sent
+ * to the compaction model. Exposed for tests. */
+char *compaction_state_coda(sqlite3 *db, int64_t session_id);
+
 /* Consecutive compaction failures before the operator is told (C4). */
 #define COMPACTION_FAIL_NOTIFY 3
 

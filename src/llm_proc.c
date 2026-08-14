@@ -940,6 +940,58 @@ static char *extract_content(sqlite3 *db, EndpointType ep, const char *body) {
     return r;
 }
 
+/* The mechanical carry-over (E2): the commitments a prose summary is most
+ * likely to drop, read straight from the DB in one pass. Same three live-state
+ * sources (and wording) the turn-fresh <RELEVANT_CONTEXT> block uses
+ * (llm_payload.c), plus this agent's armed one-shots. Every section
+ * COALESCE'd away when empty; all-empty yields '' and no coda at all. */
+static const char SQL_STATE_CODA[] =
+    "WITH appr AS ("
+    /* Both open states: 'pending' (waiting on a human) and 'approved' (granted
+     * but never consumed — the ticket is spent only when the call is re-issued). */
+    "  SELECT group_concat("
+    "    '  #' || a.id || ' ' || COALESCE(a.tool_name, a.action, '?') || ' — ' ||"
+    "    CASE a.state"
+    "      WHEN 'approved' THEN 'approved, unused: re-issue the tool call to consume'"
+    "      ELSE 'pending: waiting on a human decision' END, char(10)) AS txt"
+    "  FROM approvals a WHERE a.session_id=?1 AND a.state IN ('pending','approved')"
+    "), sub AS ("
+    "  SELECT group_concat("
+    "    '  session #' || s.id || ' (' || COALESCE(s.agent_name,'?') || ') — ' || s.state,"
+    "    char(10)) AS txt"
+    "  FROM sessions s WHERE s.parent_session_id=?1 AND s.state != 'idle'"
+    "), one AS ("
+    /* One-shots only (run_at set): a recurring job re-announces itself every
+     * fire, but a one-shot fires once and is gone — losing it loses the plan. */
+    "  SELECT group_concat("
+    "    '  ' || c.name || ' — fires ' || datetime(c.next_run_at,'unixepoch') || 'Z: ' || c.task,"
+    "    char(10)) AS txt"
+    "  FROM cron_jobs c"
+    "  WHERE c.agent_name=(SELECT agent_name FROM sessions WHERE id=?1)"
+    "    AND c.enabled=1 AND c.run_at IS NOT NULL AND c.next_run_at > unixepoch()"
+    ")"
+    "SELECT COALESCE('open approvals:' || char(10) || appr.txt || char(10), '') ||"
+    "       COALESCE('running sub-agents:' || char(10) || sub.txt || char(10), '') ||"
+    "       COALESCE('scheduled one-shots:' || char(10) || one.txt || char(10), '')"
+    " FROM appr, sub, one;";
+
+char *compaction_state_coda(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, SQL_STATE_CODA, -1, &s, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_int64(s, 1, session_id);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t && t[0]) {
+            size_t n = strlen(t) + sizeof(COMPACTION_CODA_MARKER) + 2;
+            r = malloc(n);
+            if (r) snprintf(r, n, "%s\n%s", COMPACTION_CODA_MARKER, t);
+        }
+    }
+    sqlite3_finalize(s);
+    return r;
+}
+
 /* One compaction attempt. *budget_out gets the target token budget as soon as
  * it is known (0 if we failed before that) — the wrapper quotes it in the
  * operator notice. */
@@ -1124,8 +1176,25 @@ static int compaction_attempt(sqlite3 *db, CURL *curl, int64_t session_id,
         return -1;
     }
 
+    /* E2: the model summarizes prose; live commitments are carried
+     * mechanically. Queried AFTER the call returns and appended here, so the
+     * compaction model never handles them — it cannot drop or paraphrase what
+     * it never saw. Still exactly one role-4 entry. */
+    char *coda = compaction_state_coda(db, session_id);
+    char *content = summary;
+    if (coda) {
+        size_t n = strlen(summary) + strlen(coda) + 8;
+        char *joined = malloc(n);
+        if (joined) {
+            snprintf(joined, n, "%s\n\n%s", summary, coda);
+            content = joined;
+        }
+        free(coda);
+    }
+
     /* Call entry_compact to insert summary and reparent */
-    int64_t compact_id = entry_compact(db, session_id, last_kept_id, first_after_id, summary);
+    int64_t compact_id = entry_compact(db, session_id, last_kept_id, first_after_id, content);
+    if (content != summary) free(content);
     free(summary);
 
     context_plan_free(&plan);

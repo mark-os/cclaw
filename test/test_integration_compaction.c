@@ -216,11 +216,87 @@ static void test_llm_compaction_summary(int port) {
         if (branch[i].message.role == ROLE_COMPACTION) {
             found = 1;
             assert(strstr(branch[i].message.content, "Goal: Build a widget"));
+            /* Nothing open in this session — no coda section at all. */
+            assert(!strstr(branch[i].message.content, COMPACTION_CODA_MARKER));
         }
     assert(found);
     entry_branch_free(branch, count);
     teardown(db);
     printf("  PASS test_llm_compaction_summary\n");
+}
+
+/* E2: the compaction entry carries the model's prose AND a mechanical coda of
+ * live commitments — and the coda is built after the call, so it never appears
+ * in the request the compaction model saw. */
+static void test_llm_compaction_coda(int port) {
+    mock_server_reset();
+    assert(mock_server_load("test/fixtures/compaction_summary.json") == 1);
+
+    sqlite3 *db = setup();
+    int64_t sid = session_create(db, "coda_test", "default", -1, 0);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
+    setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
+    setenv("OPENROUTER_API_KEY", "test-key", 1);
+    setenv("CCLAW_MODEL", "test-model", 1);
+    setenv("CCLAW_CONTEXT_WINDOW", "500", 1);
+    setenv("CCLAW_CONTEXT_THRESHOLD", "0.1", 1);
+    setenv("CCLAW_COMPACTION_TARGET", "0.05", 1);
+    setenv("CCLAW_COMPACTION", "1", 1);
+    setenv("CCLAW_STREAM", "0", 1);
+
+    /* One pending approval, one approved-unconsumed ticket, one running child. */
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "INSERT INTO approvals (session_id, tool_name, state) VALUES"
+        " (?1,'shell_exec','pending'), (?1,'web_fetch','approved');",
+        -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_DONE);
+    sqlite3_finalize(s);
+    int64_t kid = session_create(db, "coda_child", "default", sid, 1);
+    assert(session_set_state(db, kid, "llm_running") == 0);
+
+    char buf[64];
+    for (int i = 0; i < 20; i++) {
+        snprintf(buf, sizeof(buf), "message number %02d padding text here", i);
+        Message m = {.role = (i % 2 == 0) ? ROLE_USER : ROLE_ASSISTANT,
+                     .content = buf,
+                     .stop_reason = (i % 2 == 1) ? STOP_REASON_STOP : STOP_REASON_NONE};
+        entry_append_with_iteration(db, sid, &m, 1);
+    }
+
+    CURL *curl = curl_easy_init();
+    assert(llm_compaction(db, curl, sid, "default") == 0);
+    curl_easy_cleanup(curl);
+
+    /* The compaction model never handled the coda. */
+    const char *req = mock_server_last_request_body();
+    assert(req);
+    assert(!strstr(req, COMPACTION_CODA_MARKER));
+    assert(!strstr(req, "shell_exec"));
+    assert(!strstr(req, "coda_child"));
+
+    /* Exactly one role-4 entry, holding prose then coda. */
+    int count = 0, found = 0;
+    Entry *branch = session_get_branch(db, sid, &count);
+    assert(branch);
+    for (int i = 0; i < count; i++)
+        if (branch[i].message.role == ROLE_COMPACTION) {
+            const char *c = branch[i].message.content;
+            found++;
+            const char *prose = strstr(c, "Goal: Build a widget");
+            const char *coda = strstr(c, COMPACTION_CODA_MARKER);
+            assert(prose && coda && prose < coda);
+            assert(strstr(coda, "shell_exec"));
+            assert(strstr(coda, "web_fetch") && strstr(coda, "approved, unused"));
+            assert(strstr(coda, "llm_running"));
+        }
+    assert(found == 1);
+    entry_branch_free(branch, count);
+    teardown(db);
+    printf("  PASS test_llm_compaction_coda\n");
 }
 
 /* Under-threshold branch: no HTTP request at all (regression: compaction
@@ -246,13 +322,22 @@ static void test_llm_compaction_under_threshold(int port) {
     printf("  PASS test_llm_compaction_under_threshold\n");
 }
 
-/* LLM failure: no compaction entry, branch untouched */
+/* LLM failure: no compaction entry, branch untouched — and open state does NOT
+ * buy a coda-only entry (E2 rides the summary or not at all). */
 static void test_llm_compaction_failure_skips(int port) {
     mock_server_reset();
     mock_server_enqueue(500, "{\"error\":\"internal server error\"}");
 
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "fallback_test", "default", -1, 0);
+
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "INSERT INTO approvals (session_id, tool_name, state)"
+        " VALUES (?1,'shell_exec','pending');", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_DONE);
+    sqlite3_finalize(s);
 
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
@@ -277,8 +362,10 @@ static void test_llm_compaction_failure_skips(int port) {
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
     assert(branch);
-    for (int i = 0; i < count; i++)
+    for (int i = 0; i < count; i++) {
         assert(branch[i].message.role != ROLE_COMPACTION);
+        assert(!strstr(branch[i].message.content, COMPACTION_CODA_MARKER));
+    }
     entry_branch_free(branch, count);
     teardown(db);
     printf("  PASS test_llm_compaction_failure_skips\n");
@@ -367,6 +454,7 @@ int main(void) {
     test_entry_compact_basic();
     test_llm_compaction_under_threshold(port);
     test_llm_compaction_summary(port);
+    test_llm_compaction_coda(port);
     test_llm_compaction_gemini_shape(port);
     test_llm_compaction_failure_skips(port);
     mock_server_stop();

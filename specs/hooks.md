@@ -125,7 +125,7 @@ additive — they compose across chained hooks.
 |---------|--------|
 | `inject` | Insert transient entries before the LLM call. `ephemeral: true` means not persisted after this turn (excluded from future context). Role must be `system` or `user`. |
 | `suppress` | Entry IDs to exclude from this request's context window (not deleted — just hidden for this call). |
-| `pin` | Entry IDs that must appear in context even under token pressure (override compaction). |
+| `pin` | Entry IDs that must appear in context even under token pressure. Protects the read-time cut only — compaction's keep boundary ignores pin, so a pinned entry old enough to compact is summarized like any other (see [memory.md](memory.md#context-window-management)). |
 | `set_data` | Patch the `data` JSON column on entries by ID. Merged via `json_patch`. |
 
 **Constraints:**

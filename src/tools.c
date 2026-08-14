@@ -22,6 +22,11 @@ char *tool_errf(const char *fmt, ...) {
     return strdup(buf);
 }
 
+int tool_timeout_clamp(int requested, int def) {
+    int t = requested > 0 ? requested : def;
+    return t > TOOL_TIMEOUT_MAX_SEC ? TOOL_TIMEOUT_MAX_SEC : t;
+}
+
 char *tool_fail(int *is_error, const char *fmt, ...) {
     if (is_error) *is_error = 1;
     char buf[512];

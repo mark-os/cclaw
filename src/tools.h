@@ -19,6 +19,10 @@
  * refused — the model asked for "long", and it gets the longest we do. */
 #define TOOL_TIMEOUT_MAX_SEC 600
 
+/* Resolve a caller-supplied timeout: absent or nonsensical falls back to the
+ * tool's default, anything above the ceiling is clamped to it. */
+int tool_timeout_clamp(int requested, int def);
+
 /* Tool handler function. Returns heap-allocated result string (never NULL).
  *
  * Failure is signalled EXPLICITLY through *is_error, set at the failure site

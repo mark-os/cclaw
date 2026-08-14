@@ -190,7 +190,11 @@ field order. Fields by tier (additive over file):
   mount; see [security.md](security.md). Dropping it silently disables the
   mask, which is why `test/test_sandbox_key_mask.c` guards it.)
 - web/shell: `host_rules[]` (exact/suffix), `agent_dir` (for proxy socket; the broker partitions grants into host/CIDR rules at `proxy_bind`)
-- shell: `command` (with secrets already interpolated by the daemon parent), `timeout`, `secrets[]` (minimal name/value set for env injection)
+- shell: `command` (with secrets already interpolated by the daemon parent), `secrets[]` (minimal name/value set for env injection)
+- shell/web/js: `timeout` — the call's budget in seconds. Each tool takes a
+  `timeout` argument (defaults 60 shell / 60 web / 120 js), clamped by the
+  parent to `TOOL_TIMEOUT_MAX_SEC` (600); the daemon's own backstop deadline is
+  set margin-seconds past it so the broker's teardown wins in the normal case
 - file/web/js: `params[]` — the tool's arguments, pre-extracted by the parent
   (`tool_args_extract`, SQLite JSON1 over the tool's schema) as
   `(key, kind, value)` where kind is text, opaque-JSON (js_eval's `args`,
@@ -208,6 +212,18 @@ the same SQLite parse — an unparseable policy blocks the call
 sterile `--run-tool`/broker holds no key and never interpolates. This replaces
 shell's current `explicit_bzero`-after-fork dance: parent interpolates → blob
 carries resolved values → child consumes → no other process retains them.
+
+### Response frame (fd 3, child → parent)
+
+`[1-byte status][4-byte meta_len (network order)][hosts JSON][result to EOF]`.
+
+`status` is `RUNTOOL_STATUS_OK`/`_ERROR` — the child's own verdict on the call,
+travelling with the body so the parent never reads the result text to decide
+whether the tool failed (see
+[error-handling.md](error-handling.md#tool-failure-is-an-explicit-status)). It
+is *not* the exit code: exit status stays lifecycle-only. `meta_len` is 0 for
+non-network tiers and every error path — an unframed write would be misparsed
+by the parent's drain loop, which reassembles this header across reads.
 
 ---
 

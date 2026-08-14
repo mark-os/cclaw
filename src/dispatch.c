@@ -302,10 +302,7 @@ static int tool_is_parallel_safe(const char *name) {
 /* A caller-supplied `timeout`, clamped to what we're willing to hold a turn
  * open for. Absent/garbage falls back to the tool's default. */
 static int tool_call_timeout(const char *args, int def) {
-    int t = tool_args_int(proc_db(), args, "timeout", def);
-    if (t <= 0) t = def;
-    if (t > TOOL_TIMEOUT_MAX_SEC) t = TOOL_TIMEOUT_MAX_SEC;
-    return t;
+    return tool_timeout_clamp(tool_args_int(proc_db(), args, "timeout", def), def);
 }
 
 static int tool_needs_interpolation(const char *name) {

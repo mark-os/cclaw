@@ -74,6 +74,24 @@ Not yet implemented:
 - Compaction: summarize old entries, reparent tree. Its keep boundary
   (`context_compaction_keep_from`) snaps the same way, so a summary never lands
   inside a turn; a branch that is one giant turn compacts to nothing.
+- **Pin asymmetry**: a pinned entry (`entries.data $.pin=1`, hook `pin`) is
+  re-included past the *read-time cut* — it is invisible for one request, not
+  gone. Compaction's `keep_from` walk ignores pin entirely: a pinned entry old
+  enough to be compacted is summarized like any other, and only the summary
+  survives. Pin protects the cut, not the tree. Known and accepted (a pin that
+  vetoed compaction would let one entry pin an unbounded branch); the durable
+  way to carry something past compaction is the mechanical state coda below.
+- **Mechanical state coda** (E2): the compaction entry is the model's prose
+  plus a `--- carried state ---` section built parent-side *after* the
+  compaction call returns (`compaction_state_coda`, `llm_proc.c`) — open
+  approvals (pending and approved-but-unconsumed tickets), running sub-agent
+  sessions, armed cron one-shots, queried live in one SQL pass. It is never
+  sent to the compaction model, so the summary cannot drop or paraphrase it.
+  Still exactly one role-4 entry; empty state appends nothing. A failed
+  compaction writes no entry at all (no coda-only rows) — the failure counter
+  in `compaction_record_outcome` records it. The read-time sliding window gets
+  no coda: that state is already live in the `<RELEVANT_CONTEXT>` block and
+  `check_session`.
 
 ## Letta Patterns NOT Adopted
 

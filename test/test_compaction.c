@@ -2,6 +2,7 @@
 #include "llm_proc.h"
 #include "test_util.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
@@ -217,9 +218,68 @@ static void test_compaction_fail_notice(void) {
     printf("  PASS test_compaction_fail_notice\n");
 }
 
+/* E2: the mechanical coda names every open commitment, and says nothing at
+ * all when there is none. */
+static void test_state_coda(void) {
+    sqlite3 *db = setup();
+    test_seed_agent(db, "default");
+    int64_t sid = session_create(db, "coda", "default", -1, 0);
+
+    /* Empty state → no coda, not an empty marker. */
+    assert(compaction_state_coda(db, sid) == NULL);
+
+    /* A pending approval, an approved-but-unconsumed ticket, a decided one
+     * (must NOT appear), a running child, an idle child (must not appear),
+     * an armed one-shot and a recurring job (recurring must not appear). */
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "INSERT INTO approvals (session_id, tool_name, state) VALUES"
+        " (?1,'shell_exec','pending'), (?1,'web_fetch','approved'),"
+        " (?1,'js_eval','consumed'), (?1,'file_write','rejected');",
+        -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_DONE);
+    sqlite3_finalize(s);
+
+    int64_t kid = session_create(db, "child", "default", sid, 1);
+    int64_t idle_kid = session_create(db, "idle_child", "default", sid, 1);
+    assert(session_set_state(db, kid, "llm_running") == 0);
+    (void)idle_kid;   /* stays 'idle' */
+
+    assert(sqlite3_prepare_v2(db,
+        "INSERT INTO cron_jobs (agent_name,name,cron_expr,run_at,session_id,task,"
+        " next_run_at) VALUES"
+        " ('default','ship-it','',unixepoch()+3600,?1,'post the release note',"
+        "  unixepoch()+3600);",
+        -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_DONE);
+    sqlite3_finalize(s);
+    assert(sqlite3_exec(db,
+        "INSERT INTO cron_jobs (agent_name,name,cron_expr,interval_s,session_id,task,"
+        " next_run_at) VALUES ('default','hourly','0 * * * *',3600,1,'poll',"
+        " unixepoch()+60);", NULL, NULL, NULL) == SQLITE_OK);
+
+    char *coda = compaction_state_coda(db, sid);
+    assert(coda);
+    assert(strstr(coda, COMPACTION_CODA_MARKER));
+    assert(strstr(coda, "shell_exec") && strstr(coda, "waiting on a human"));
+    assert(strstr(coda, "web_fetch") && strstr(coda, "approved, unused"));
+    assert(!strstr(coda, "js_eval") && !strstr(coda, "file_write"));
+    assert(strstr(coda, "llm_running"));
+    assert(!strstr(coda, "idle"));
+    assert(strstr(coda, "ship-it") && strstr(coda, "post the release note"));
+    assert(!strstr(coda, "hourly"));
+    free(coda);
+
+    teardown(db);
+    printf("  PASS test_state_coda\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_compaction:\n");
+    test_state_coda();
     test_compaction_fail_notice();
     test_compaction_cte_stops();
     test_compaction_forward_walk();

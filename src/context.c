@@ -234,7 +234,13 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
     /* Include = past the cut, or pinned (entries.data $.pin=1 — hook `pin`
      * command). Pinned entries survive the cut but still count nothing toward
      * it; only the cut boundary honors pin — compaction's keep_from walk
-     * ignores it (known gap, accepted). */
+     * ignores it (known gap, accepted).
+     *
+     * The asymmetry is deliberate: the cut hides an entry for one request, so
+     * re-including a pinned one is free, while a pin that vetoed compaction
+     * would let a single entry hold an unbounded branch in the tree forever.
+     * State that must survive compaction rides the mechanical coda instead
+     * (compaction_state_coda, llm_proc.c) — see specs/memory.md. */
     for (int i = 0; i < fcount; i++)
         filtered[i].include = (i >= cut);
     if (cut > 0) {

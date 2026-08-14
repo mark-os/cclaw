@@ -12,8 +12,16 @@
 
 #define TOOLS_MAX 48
 
-/* Tool handler function. Returns heap-allocated result string (never NULL). */
-typedef char *(*ToolHandlerFn)(const char *arguments, void *user_data);
+/* Tool handler function. Returns heap-allocated result string (never NULL).
+ *
+ * Failure is signalled EXPLICITLY through *is_error, set at the failure site
+ * (tool_fail below does both in one expression). The dispatcher presets it to
+ * 0 and writes it straight through to entries.is_error. Result TEXT is
+ * free-form: the "error: ..." wording survives only for readability — nothing
+ * anywhere parses it (the old strncmp("error:") sniff is gone, and a failure
+ * message that doesn't happen to start with that word is still a failure).
+ * `is_error` may be NULL for callers outside the dispatcher (tests). */
+typedef char *(*ToolHandlerFn)(const char *arguments, void *user_data, int *is_error);
 
 /* Optional destructor for user_data */
 typedef void (*ToolFreeFn)(void *user_data);
@@ -37,7 +45,8 @@ typedef struct {
      * agent_name (+ session_id for the few tools that need it) and runs the
      * handler. */
     char *(*thread_run)(sqlite3 *db, const char *agent_name,
-                        int64_t session_id, const char *args);
+                        int64_t session_id, const char *args,
+                        int *is_error);
 } ToolRecipe;
 
 /* Single tool entry in the registry */
@@ -101,10 +110,17 @@ void tools_free(ToolRegistry *reg);
  * runs those in-process (EXEC_SANDBOX goes through the --run-tool broker,
  * which consumes pre-extracted wire params), so any call here is a wiring
  * bug — fail loudly rather than parse arguments. */
-char *tool_sandboxed_stub(const char *arguments, void *user_data);
+char *tool_sandboxed_stub(const char *arguments, void *user_data, int *is_error);
 
 /* Formatted message for tool-handler returns (heap; caller frees). Truncates
  * at 512 bytes — handler messages are short human-readable lines. */
 char *tool_errf(const char *fmt, ...);
+
+/* The failure return: marks the call failed (*is_error = 1, NULL-tolerant) and
+ * returns the formatted message. Every handler failure site goes through this
+ * or sets *is_error itself — status and text leave together, so no reader ever
+ * has to guess from the prose. */
+char *tool_fail(int *is_error, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
 
 #endif

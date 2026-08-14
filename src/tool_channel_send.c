@@ -27,7 +27,7 @@ static int send_target_allowed(sqlite3 *db, const char *agent,
 }
 
 /* action=list: reachable targets, straight from channel_routes. */
-static char *list_targets(sqlite3 *db, const char *agent) {
+static char *list_targets(sqlite3 *db, const char *agent, int *is_error) {
     const char *sql =
         "SELECT COALESCE(json_group_array(json_object("
         "  'channel', r.channel_name, 'chat_id', r.chat_id,"
@@ -41,7 +41,7 @@ static char *list_targets(sqlite3 *db, const char *agent) {
         " WHERE s.agent_name=?1;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
-        return strdup("error: list failed (db)");
+        return tool_fail(is_error, "error: list failed (db)");
     sqlite3_bind_text(st, 1, agent, -1, SQLITE_STATIC);
     char *out = NULL;
     if (sqlite3_step(st) == SQLITE_ROW) {
@@ -52,19 +52,19 @@ static char *list_targets(sqlite3 *db, const char *agent) {
     return out ? out : strdup("[]");
 }
 
-static char *tool_channel_send_handler(const char *arguments, void *user_data) {
+static char *tool_channel_send_handler(const char *arguments, void *user_data, int *is_error) {
     ToolChannelSendCtx *ctx = (ToolChannelSendCtx *)user_data;
-    if (!ctx || !ctx->db) return strdup("error: channel_send unavailable");
+    if (!ctx || !ctx->db) return tool_fail(is_error, "error: channel_send unavailable");
 
     char *action = tool_args_str(ctx->db, arguments, "action");
 
     if (action && strcmp(action, "list") == 0) {
         free(action);
-        return list_targets(ctx->db, ctx->agent_name);
+        return list_targets(ctx->db, ctx->agent_name, is_error);
     }
     if (action && strcmp(action, "send") != 0) {
         free(action);
-        return strdup("error: action must be 'send' or 'list'");
+        return tool_fail(is_error, "error: action must be 'send' or 'list'");
     }
     free(action);
 
@@ -97,7 +97,7 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
     }
     if (!channel || !chat_id || !message || !message[0]) {
         free(channel); free(chat_id); free(message);
-        return strdup("error: message is required; channel+chat_id only "
+        return tool_fail(is_error, "error: message is required; channel+chat_id only "
                       "default to your own chat when the session is bound "
                       "to one (use action='list' for other targets)");
     }
@@ -105,7 +105,7 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
     /* Routes are the allowlist — default-deny. Reaching a new target is a
      * privileged act: an operator `cclaw route add`, never implicit. */
     if (!send_target_allowed(ctx->db, ctx->agent_name, channel, chat_id)) {
-        char *m = tool_errf("error: no route for (%s, %s) resolves to you — "
+        char *m = tool_fail(is_error, "error: no route for (%s, %s) resolves to you — "
                        "channel_send targets need an operator route "
                        "(cclaw route add). Use action='list' to see yours.",
                        channel, chat_id);
@@ -154,11 +154,11 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
     }
     if (oid < 0) {
         free(channel); free(chat_id); free(message);
-        return strdup("error: send failed (db)");
+        return tool_fail(is_error, "error: send failed (db)");
     }
     if (ctx->db_path) channel_outbox_wake(ctx->db_path, channel);
     free(channel); free(chat_id); free(message);
-    return tool_errf("queued, outbox id %lld", (long long)oid);
+    return tool_fail(is_error, "queued, outbox id %lld", (long long)oid);
 }
 
 static const char *CHANNEL_SEND_PARAMS =

@@ -319,20 +319,30 @@ static int write_all(int fd, const void *buf, size_t n) {
 }
 
 /* ── fd-3 response framing ──────────────────────────────────────────────
- * [4-byte meta_len (network order)][hosts JSON][result bytes to EOF].
+ * [1-byte status][4-byte meta_len (network order)][hosts JSON][result to EOF].
+ *
+ * status is the tool's EXPLICIT outcome (RUNTOOL_STATUS_OK / _ERROR) — the
+ * child's own answer to "did this call fail", travelling atomically with the
+ * body it describes so the parent never has to read the prose to find out.
+ * It is not the process's exit code: exit status keeps its lifecycle meaning
+ * (sandbox refusal, crash, signal) and says nothing about tool success.
+ *
  * meta_len=0 (NULL hosts) for non-network tiers and every error path — an
  * unframed write would be misparsed by the parent's drain loop. */
-static int write_framed(int fd, const char *hosts_json, const char *result) {
+static int write_framed(int fd, int status, const char *hosts_json,
+                        const char *result) {
     size_t mlen = hosts_json ? strlen(hosts_json) : 0;
-    unsigned char hdr[4] = { (unsigned char)(mlen >> 24), (unsigned char)(mlen >> 16),
+    unsigned char hdr[5] = { (unsigned char)(status ? RUNTOOL_STATUS_ERROR
+                                                    : RUNTOOL_STATUS_OK),
+                             (unsigned char)(mlen >> 24), (unsigned char)(mlen >> 16),
                              (unsigned char)(mlen >> 8),  (unsigned char)mlen };
-    if (write_all(fd, hdr, 4) != 0) return -1;
+    if (write_all(fd, hdr, 5) != 0) return -1;
     if (mlen && write_all(fd, hosts_json, mlen) != 0) return -1;
     return write_all(fd, result, strlen(result));
 }
 
 static void die(const char *msg) {
-    write_framed(FD_REQUEST, NULL, msg);
+    write_framed(FD_REQUEST, RUNTOOL_STATUS_ERROR, NULL, msg);
     _exit(1);
 }
 
@@ -386,7 +396,7 @@ static void build_sandbox_cfg(const RunToolParsed *q, int skip_pid_ns,
  * tool_js.c) — the broker holds only these pointers and zero per-tool
  * knowledge. In-process tiers compute a result string. Shell is inner_exec
  * (run_fn == NULL) — the sandbox child calls tool_shell_tier_exec directly. */
-typedef char *(*RunFn)(const RunToolParsed *q);
+typedef char *(*RunFn)(const RunToolParsed *q, int *is_error);
 
 /* ── Tier descriptor (single source of truth) ────────────────────────────
  * Decode the tier byte ONCE into this; pass it down. "What makes web differ
@@ -467,10 +477,17 @@ static void sandbox_child_main(const TierDescriptor *desc, RunToolParsed *q,
     if (desc->inner_exec)
         tool_shell_tier_exec(q);  /* execs /bin/sh, or _exit(127); never returns */
 
-    /* In-process tier (web/js): compute result, write to stdout (the pipe). */
-    char *result = desc->run_fn(q);
+    /* In-process tier (web/js): compute result, write to stdout (the pipe).
+     * The tool's status rides back to the BROKER (our immediate parent, still
+     * inside the sandbox boundary) as this inner child's exit code — the only
+     * channel that stays out of the byte stream stdout and stderr share. The
+     * broker translates it into the response frame's status byte; the exit
+     * code the daemon eventually reaps is the broker's, not this one's, and
+     * keeps its lifecycle-only meaning. */
+    int is_error = 0;
+    char *result = desc->run_fn(q, &is_error);
     if (result) { write_all(STDOUT_FILENO, result, strlen(result)); free(result); }
-    _exit(0);
+    _exit(is_error ? 1 : 0);
 }
 
 
@@ -649,37 +666,78 @@ static int drain_child(pid_t pid, int fd, int timeout, char *output,
     return timed_out;
 }
 
+/* One cheap attribution attempt for a workload killed by a signal, made from
+ * data already in hand at reap: the signal number, and the rlimits this call
+ * actually ran under. SIGKILL with a limit configured is overwhelmingly the
+ * kernel (or our own CPU cap) enforcing it, and "retry unchanged" is the wrong
+ * next move — say so. Anything else gets the bare signal line. No dmesg, no
+ * probing, no second run. Returns a static string, or NULL if not signalled. */
+static const char *signal_attribution(const RunToolParsed *q, int status) {
+    if (!WIFSIGNALED(status)) return NULL;
+    int sig = WTERMSIG(status);
+    int limited = q && (q->as_mb > 0 || q->cpu_sec > 0 || q->nproc > 0);
+    if (sig == SIGKILL && limited)
+        return "\n[killed by SIGKILL — likely resource limit "
+               "(memory/CPU/processes); reduce usage, don't just retry]";
+    if (sig == SIGKILL) return "\n[killed by SIGKILL]";
+    if (sig == SIGXCPU)
+        return "\n[killed by SIGXCPU — CPU limit reached; "
+               "reduce usage, don't just retry]";
+    return NULL;
+}
+
 /* Wrap the drained output for the fd-3 frame. Takes ownership of `output`
- * (NUL-terminated at out_len); returns the malloc'd result. */
+ * (NUL-terminated at out_len); returns the malloc'd result. *is_error carries
+ * the tool's explicit outcome out to the response frame. */
 static char *format_tier_result(const TierDescriptor *desc, char *output,
                                 size_t out_len, int timed_out, int status,
-                                int timeout) {
+                                int timeout, const RunToolParsed *q,
+                                int *is_error) {
+    const char *attrib = signal_attribution(q, status);
     char *result;
     if (desc->inner_exec) {
-        /* Shell: prefix the captured stdout/stderr with the exit status. */
-        size_t needed = out_len + 128;
+        /* Shell: prefix the captured stdout/stderr with the exit status. A
+         * nonzero exit is the command's own answer, not a tool failure — only
+         * a timeout is. */
+        size_t needed = out_len + 256;
         result = malloc(needed);
         if (!result) return output;   /* OOM: hand back the raw capture */
-        if (timed_out)
+        if (timed_out) {
             snprintf(result, needed,
                      "[timeout after %ds — raise with the timeout parameter]\n%s",
                      timeout, output);
-        else
+            *is_error = 1;
+        } else {
             snprintf(result, needed, "[exit %d]\n%s",
                      WIFEXITED(status) ? WEXITSTATUS(status) : -1, output);
+        }
         free(output);
     } else {
-        /* In-process tier: the child already produced the final result. */
+        /* In-process tier: the child already produced the final result, and
+         * signalled its own status through its exit code (sandbox_child_main).
+         * A signalled death is a failure too — nobody asked for it. */
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) *is_error = 1;
+        if (WIFSIGNALED(status)) *is_error = 1;
         if (timed_out) {
-            size_t needed = out_len + 96;
+            size_t needed = out_len + 128;
             result = malloc(needed);
             if (!result) return output;   /* OOM: hand back the raw capture */
             snprintf(result, needed,
                      "error: tool timed out (%ds; raise with the timeout parameter)\n%s",
                      timeout, output);
             free(output);
+            *is_error = 1;
         } else {
             result = output;  /* hand off ownership */
+        }
+    }
+    /* Signal attribution rides on the end of whatever we produced. */
+    if (attrib && result) {
+        size_t rlen = strlen(result), alen = strlen(attrib);
+        char *joined = realloc(result, rlen + alen + 1);
+        if (joined) {
+            memcpy(joined + rlen, attrib, alen + 1);
+            result = joined;
         }
     }
     return result;
@@ -751,7 +809,9 @@ static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
     if (proxy_active) proxy_stop(&proxy);
     output[out_len] = '\0';
 
-    char *result = format_tier_result(desc, output, out_len, timed_out, status, q->timeout);
+    int is_error = 0;
+    char *result = format_tier_result(desc, output, out_len, timed_out, status,
+                                      q->timeout, q, &is_error);
 
     /* Append proxy-deny summary so the model knows which hosts were blocked. */
     if (denied && result) {
@@ -768,7 +828,7 @@ static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
     { char *spilled = spill_large_result(q->spill_path, result, drain_spilled);
       if (spilled) { free(result); result = spilled; } }
 
-    write_framed(FD_REQUEST, hosts_json, result);
+    write_framed(FD_REQUEST, is_error, hosts_json, result);
     free(hosts_json);
     free(result);
     _exit(0);
@@ -851,11 +911,12 @@ int run_tool_main(void) {
                 "report it to the operator; retrying will not help");
     }
 
-    char *result = desc->run_fn(&q);
+    int is_error = 0;
+    char *result = desc->run_fn(&q, &is_error);
     if (!result) result = strdup("");
     { char *spilled = spill_large_result(q.spill_path, result, 0);
       if (spilled) { free(result); result = spilled; } }
-    write_framed(FD_REQUEST, NULL, result);  /* file tier: zero-length meta */
+    write_framed(FD_REQUEST, is_error, NULL, result);  /* file tier: zero-length meta */
     free(result);
     _exit(0);
 }

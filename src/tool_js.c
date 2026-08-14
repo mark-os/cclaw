@@ -40,8 +40,8 @@ static const char *JSEVAL_PARAMS_JSON =
  * and the --run-tool broker evals in-process via qjs_eval_run inside the
  * sandbox. This function is never executed — it exists as the identity
  * marker js_tool_resolve_request keys on (js_eval vs extension tool). */
-char *tool_js_eval_handler(const char *arguments, void *user_data) {
-    return tool_sandboxed_stub(arguments, user_data);
+char *tool_js_eval_handler(const char *arguments, void *user_data, int *is_error) {
+    return tool_sandboxed_stub(arguments, user_data, is_error);
 }
 
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
@@ -87,8 +87,8 @@ typedef struct {
  * file-eval path. The handler file evaluates with `args` in scope; its last
  * expression (or printed output) is the result. */
 /* Identity marker for extension tools (never executed — see above). */
-static char *js_defined_tool_handler(const char *arguments, void *user_data) {
-    return tool_sandboxed_stub(arguments, user_data);
+static char *js_defined_tool_handler(const char *arguments, void *user_data, int *is_error) {
+    return tool_sandboxed_stub(arguments, user_data, is_error);
 }
 
 static void js_tool_data_free(void *user_data) {
@@ -174,7 +174,7 @@ void js_runtime_destroy(JsSessionRuntime *rt) {
     free(rt);
 }
 
-char *tool_js_tier_run(const RunToolParsed *q) {
+char *tool_js_tier_run(const RunToolParsed *q, int *is_error) {
     /* qjs runs in-process in the inner fork (web's twin): netns + proxy +
      * mounts are already applied. code/filename/args arrive as pre-extracted
      * wire params; args is an opaque JSON blob QuickJS itself parses.
@@ -183,16 +183,16 @@ char *tool_js_tier_run(const RunToolParsed *q) {
     const char *code = run_tool_param_str(q, "code");
     const char *filename = run_tool_param_str(q, "filename");
     if ((!code || !code[0]) && (!filename || !filename[0]))
-        return strdup("error: must provide 'code' or 'filename'");
+        return tool_fail(is_error, "error: must provide 'code' or 'filename'");
     if (filename && filename[0]) {
         size_t flen = strlen(filename);
         if (flen < 5 || strcmp(filename + flen - 4, ".qjs") != 0)
-            return strdup("error: filename must end in .qjs");
+            return tool_fail(is_error, "error: filename must end in .qjs");
     }
     const char *args = filename ? run_tool_param_json(q, "args") : NULL;
     /* The owning extension's config, resolved parent-side (this child has no
      * DB) — absent for a plain js_eval call, which then sees an empty one. */
     const char *ext_config = run_tool_param_json(q, "config");
-    char *r = qjs_eval_run(code, filename, args, ext_config);
-    return r ? r : strdup("error: js_eval returned null");
+    char *r = qjs_eval_run(code, filename, args, ext_config, is_error);
+    return r ? r : tool_fail(is_error, "error: js_eval returned null");
 }

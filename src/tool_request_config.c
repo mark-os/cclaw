@@ -850,13 +850,13 @@ static char *park_rename(RequestConfigCtx *ctx, const char *name,
     return NULL; /* park */
 }
 
-static char *handler(const char *arguments, void *user_data) {
+static char *handler(const char *arguments, void *user_data, int *is_error) {
     RequestConfigCtx *ctx = (RequestConfigCtx *)user_data;
     if (!ctx || !ctx->db || !ctx->agent_name)
-        return strdup("error: request_config unavailable");
+        return tool_fail(is_error, "error: request_config unavailable");
 
     char *act = tool_args_str(ctx->db, arguments, "action");
-    if (!act) return strdup("error: 'action' required (request_changes or rename_agent)");
+    if (!act) return tool_fail(is_error, "error: 'action' required (request_changes or rename_agent)");
 
     /* Optional reason — treat empty string as absent. */
     char *reason = tool_args_str(ctx->db, arguments, "reason");
@@ -867,24 +867,29 @@ static char *handler(const char *arguments, void *user_data) {
     if (strcmp(act, "request_changes") == 0) {
         char *changes = tool_args_json(ctx->db, arguments, "changes");
         if (!changes) {
-            result = strdup("error: 'changes' object required for "
+            result = tool_fail(is_error, "error: 'changes' object required for "
                             "request_changes (see the tool schema)");
         } else {
             char *canon = NULL;
+            /* validate_changes and the park paths return a string ONLY to
+             * refuse — one explicit flag where every refusal converges. */
             result = validate_changes(ctx->db, changes, ctx->agent_name, &canon);
+            if (result) *is_error = 1;
             if (!result) {
                 int fully = 0;
                 char *kept = filter_satisfied(ctx->db, ctx->agent_name,
                                               canon, &fully);
                 if (!kept)
-                    result = strdup("error: failed to check existing grants");
+                    result = tool_fail(is_error, "error: failed to check existing grants");
                 else if (fully)
                     result = strdup("already in effect: every grant/route/"
                                     "binding in this request is one you "
                                     "already have — no approval needed, "
                                     "proceed and use it");
-                else
+                else {
                     result = park_changes(ctx, kept, reason);
+                    if (result) *is_error = 1;
+                }
                 free(kept);
             }
             free(canon);
@@ -895,17 +900,18 @@ static char *handler(const char *arguments, void *user_data) {
         char *new_name = tool_args_str(ctx->db, arguments, "name");
         char *preamble = tool_args_str(ctx->db, arguments, "preamble");
         if (!new_name || !new_name[0]) {
-            result = strdup("error: 'name' required");
+            result = tool_fail(is_error, "error: 'name' required");
         } else if (!is_valid_agent_name(new_name)) {
-            result = strdup("error: agent name must be PascalCase: start with "
+            result = tool_fail(is_error, "error: agent name must be PascalCase: start with "
                             "an uppercase letter, letters and digits only, max 63 chars");
         } else {
             result = park_rename(ctx, new_name, preamble, reason);
+            if (result) *is_error = 1;
         }
         free(new_name); free(preamble);
 
     } else {
-        result = strdup("error: action must be request_changes or rename_agent");
+        result = tool_fail(is_error, "error: action must be request_changes or rename_agent");
     }
 
     free(act); free(reason);

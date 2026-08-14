@@ -480,18 +480,31 @@ static const char *qjs_syntax_hint(const char *code) {
     return "";
 }
 
+/* Local failure returns: mark the call failed, hand back the message. The
+ * two-string form prefers an already-built detailed message. */
+static char *tool_fail_js(int *is_error, const char *msg) {
+    if (is_error) *is_error = 1;
+    return strdup(msg);
+}
+static char *tool_fail_js2(int *is_error, char *built, const char *fallback) {
+    if (is_error) *is_error = 1;
+    return built ? built : strdup(fallback);
+}
+
 char *qjs_eval_run(const char *code, const char *filename, const char *args_json,
-                   const char *config_json) {
+                   const char *config_json, int *is_error) {
+    int err_sink = 0;
+    if (!is_error) is_error = &err_sink;   /* callers outside dispatch */
     if ((!code || !code[0]) && (!filename || !filename[0]))
-        return strdup("error: must provide 'code' or 'filename'");
+        return tool_fail_js(is_error, "error: must provide 'code' or 'filename'");
 
     int heap_mb = qjs_eval_heap_mb();
     QjsRuntime *qrt = qjs_runtime_create((size_t)heap_mb * 1024 * 1024);
-    if (!qrt) return strdup("error: out of memory");
+    if (!qrt) return tool_fail_js(is_error, "error: out of memory");
     qjs_set_interrupt_limit(qrt, QJS_EVAL_MAX_INSTRUCTIONS);
 
     JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
-    if (!ctx) { qjs_runtime_destroy(qrt); return strdup("error: JS context creation failed"); }
+    if (!ctx) { qjs_runtime_destroy(qrt); return tool_fail_js(is_error, "error: JS context creation failed"); }
 
     JsHostCtx hctx = { .instruction_count = 0,
                        .instruction_limit = QJS_EVAL_MAX_INSTRUCTIONS,
@@ -508,7 +521,7 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
         if (r) snprintf(r, len, "error: prelude failed: %s", msg ? msg : "unknown");
         free(msg);
         JS_FreeContext(ctx); qjs_runtime_destroy(qrt);
-        return r ? r : strdup("error: prelude failed");
+        return tool_fail_js2(is_error, r, "error: prelude failed");
     }
     JS_FreeValue(ctx, pv);
 
@@ -524,24 +537,24 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
             char *r = malloc(len);
             if (r) snprintf(r, len, "error: cannot open %s", filename);
             JS_FreeContext(ctx); qjs_runtime_destroy(qrt);
-            return r ? r : strdup("error: cannot open file");
+            return tool_fail_js2(is_error, r, "error: cannot open file");
         }
         fseek(f, 0, SEEK_END);
         long sz = ftell(f);
         if (sz < 0 || sz > QJS_EVAL_MAX_FILE) {
             fclose(f); JS_FreeContext(ctx); qjs_runtime_destroy(qrt);
-            return strdup("error: file too large or unreadable");
+            return tool_fail_js(is_error, "error: file too large or unreadable");
         }
         fseek(f, 0, SEEK_SET);
         char *fbuf = malloc((size_t)sz + 1);
-        if (!fbuf) { fclose(f); JS_FreeContext(ctx); qjs_runtime_destroy(qrt); return strdup("error: out of memory"); }
+        if (!fbuf) { fclose(f); JS_FreeContext(ctx); qjs_runtime_destroy(qrt); return tool_fail_js(is_error, "error: out of memory"); }
         size_t rd = fread(fbuf, 1, (size_t)sz, f);
         fclose(f);
         fbuf[rd] = '\0';
         if (args_json && args_json[0]) {
             size_t wlen = 20 + rd + 4 + strlen(args_json) + 2;
             eval_code = malloc(wlen);
-            if (!eval_code) { free(fbuf); JS_FreeContext(ctx); qjs_runtime_destroy(qrt); return strdup("error: out of memory"); }
+            if (!eval_code) { free(fbuf); JS_FreeContext(ctx); qjs_runtime_destroy(qrt); return tool_fail_js(is_error, "error: out of memory"); }
             snprintf(eval_code, wlen, "(function(args){\n%s\n})(%s)", fbuf, args_json);
             free(fbuf);
         } else {
@@ -573,6 +586,7 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
             size_t len = strlen(msg) + strlen(hint) + 16;
             result = malloc(len);
             if (result) snprintf(result, len, "error: %s%s", msg, hint);
+            *is_error = 1;
             free(msg);
         }
         if (!result) result = strdup("error: exception (no message)");

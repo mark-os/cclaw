@@ -23,15 +23,15 @@ int agent_max_depth(sqlite3 *db) {
     int d = config_get_int(db, "agent_max_depth");
     return (d > 0) ? d : config_default_int("agent_max_depth");
 }
-char *tool_launch_agent_handler(const char *arguments, void *user_data) {
+char *tool_launch_agent_handler(const char *arguments, void *user_data, int *is_error) {
     AgentLaunchCtx *ctx = (AgentLaunchCtx *)user_data;
     if (!ctx || !ctx->db)
-        return strdup("error: launch_agent not configured");
+        return tool_fail(is_error, "error: launch_agent not configured");
 
     char *task = tool_args_str(ctx->db, arguments, "task");
     if (!task || !task[0]) {
         free(task);
-        return strdup("error: missing or empty 'task' field");
+        return tool_fail(is_error, "error: missing or empty 'task' field");
     }
 
     /* The launch gate: depth + system-wide existence cap.
@@ -39,7 +39,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
      * hear it — and each error names its knob so the model can report it. */
     int depth = session_get_depth(ctx->db, ctx->session_id);
     if (depth >= agent_max_depth(ctx->db)) {
-        free(task); return strdup("error: max agent depth reached");
+        free(task); return tool_fail(is_error, "error: max agent depth reached");
     }
     /* Capacity refusals are per-call, in call order (specs/scheduling.md):
      * the counter sees this batch's own earlier launches (queued children
@@ -55,7 +55,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
                  " flight or queued system-wide (session_max_active=%d) — not"
                  " launched; wait for capacity to free before launching more",
                  total, max_active);
-        return strdup(err);
+        return tool_fail(is_error, "%s", err);
     }
 
     /* Create child session. Omitted name = self-spawn: a worker running as
@@ -75,13 +75,13 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     if (delivery && !delivery[0]) { free(delivery); delivery = NULL; }
     if (delivery && !delivery_policy_valid(delivery)) {
         free(task); free(agent); free(delivery);
-        return strdup("error: unknown delivery policy — use one of"
+        return tool_fail(is_error, "error: unknown delivery policy — use one of"
                       " iteration|digest|turn|quiescent|explicit");
     }
     if (delivery && !background && (strcmp(delivery, "explicit") == 0 ||
                                     strcmp(delivery, "iteration") == 0)) {
         free(task); free(agent); free(delivery);
-        return strdup("error: blocking launch requires a single-report delivery"
+        return tool_fail(is_error, "error: blocking launch requires a single-report delivery"
                       " policy — use quiescent, turn, or digest, or launch in"
                       " background");
     }
@@ -90,11 +90,11 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     if (tools_json) {
         if (!self_spawn) {
             free(task); free(agent); free(tools_json); free(delivery);
-            return strdup("error: 'tools' filter is only valid for self-spawn (omit 'name')");
+            return tool_fail(is_error, "error: 'tools' filter is only valid for self-spawn (omit 'name')");
         }
         if (tools_json[0] != '[') {
             free(task); free(agent); free(tools_json); free(delivery);
-            return strdup("error: 'tools' must be a JSON array of tool names");
+            return tool_fail(is_error, "error: 'tools' must be a JSON array of tool names");
         }
     }
 
@@ -103,7 +103,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         self_name = session_get_agent_name(ctx->db, ctx->session_id);
         if (!self_name) {
             free(task); free(agent); free(tools_json); free(delivery);
-            return strdup("error: cannot self-spawn — calling session has no agent");
+            return tool_fail(is_error, "error: cannot self-spawn — calling session has no agent");
         }
         free(agent);
         agent = self_name;
@@ -115,7 +115,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         char err[128];
         snprintf(err, sizeof(err), "error: unknown agent '%.64s'", agent);
         free(task); free(agent); free(tools_json); free(delivery);
-        return strdup(err);
+        return tool_fail(is_error, "%s", err);
     }
     agent_row_free(row);
 
@@ -137,7 +137,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     free(filter);
     if (child_sid < 0) {
         free(task); free(agent); free(delivery);
-        return strdup("error: failed to create child session");
+        return tool_fail(is_error, "error: failed to create child session");
     }
 
     /* The create inherited the launcher's policy onto the child's standing
@@ -229,25 +229,25 @@ static const char *CHECK_PARAMS_JSON =
     "\"session_id\":{\"type\":\"integer\",\"description\":\"Session ID of the sub-agent to check\"}"
     "},\"required\":[\"session_id\"]}";
 
-char *tool_check_session_handler(const char *arguments, void *user_data) {
+char *tool_check_session_handler(const char *arguments, void *user_data, int *is_error) {
     AgentLaunchCtx *ctx = (AgentLaunchCtx *)user_data;
     if (!ctx || !ctx->db)
-        return strdup("error: check_session not configured");
+        return tool_fail(is_error, "error: check_session not configured");
 
     int sid_val = tool_args_int(ctx->db, arguments, "session_id", -1);
-    if (sid_val < 0) return strdup("error: missing session_id");
+    if (sid_val < 0) return tool_fail(is_error, "error: missing session_id");
     int64_t child_sid = (int64_t)sid_val;
 
     /* Verify it's our child */
     const char *sql = "SELECT state FROM sessions WHERE id=? AND parent_session_id=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return strdup("error: db query failed");
+        return tool_fail(is_error, "error: db query failed");
     sqlite3_bind_int64(stmt, 1, child_sid);
     sqlite3_bind_int64(stmt, 2, ctx->session_id);
     if (sqlite3_step(stmt) != SQLITE_ROW) {
         sqlite3_finalize(stmt);
-        return strdup("error: session not found or not a child");
+        return tool_fail(is_error, "error: session not found or not a child");
     }
     const char *state = (const char *)sqlite3_column_text(stmt, 0);
     char state_buf[32];
@@ -289,7 +289,7 @@ char *tool_check_session_handler(const char *arguments, void *user_data) {
 
     size_t needed = 192 + (result ? strlen(result) : 0);
     char *out = malloc(needed);
-    if (!out) { free(result); return strdup("error: OOM"); }
+    if (!out) { free(result); return tool_fail(is_error, "error: OOM"); }
     if (result) {
         snprintf(out, needed, "session_id: %lld\nstate: %s%s\nresult: %s",
                  (long long)child_sid, state_buf, gloss, result);

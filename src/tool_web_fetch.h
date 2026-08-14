@@ -35,6 +35,6 @@ char *web_fetch_host_hint(const char *url, char **rules, size_t n, int host_mode
 
 /* --run-tool tier leaf: run web_fetch in-process inside the broker's inner
  * fork (netns + proxy already applied). */
-char *tool_web_tier_run(const RunToolParsed *q);
+char *tool_web_tier_run(const RunToolParsed *q, int *is_error);
 
 #endif

@@ -46,7 +46,7 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx);
 
 /* Handler: parse JSON args, eval in sandboxed QuickJS (fork+exec).
  * Returns heap-allocated result string. */
-char *tool_js_eval_handler(const char *arguments, void *user_data);
+char *tool_js_eval_handler(const char *arguments, void *user_data, int *is_error);
 
 /* Create a persistent JS runtime for extension loading. */
 JsSessionRuntime *js_runtime_create(void);
@@ -70,6 +70,6 @@ int js_tool_resolve_request(const ToolEntry *te, JsEvalCtx **out_ctx,
 
 /* --run-tool tier leaf: eval qjs in-process inside the broker's inner fork
  * (netns + proxy + mounts already applied). */
-char *tool_js_tier_run(const RunToolParsed *q);
+char *tool_js_tier_run(const RunToolParsed *q, int *is_error);
 
 #endif

@@ -22,28 +22,29 @@ static int is_select_only(const char *sql) {
             (sql[6] == '\0' || isspace((unsigned char)sql[6])));
 }
 
-char *tool_db_query_handler(const char *arguments, void *user_data) {
+char *tool_db_query_handler(const char *arguments, void *user_data, int *is_error) {
     sqlite3 *db = (sqlite3 *)user_data;
-    if (!db) return strdup("error: no database connection");
+    if (!db) return tool_fail(is_error, "error: no database connection");
 
     char *sql = tool_args_str(db, arguments, "sql");
     if (!sql || !sql[0]) {
         free(sql);
-        return strdup("error: missing or empty 'sql' field");
+        return tool_fail(is_error, "error: missing or empty 'sql' field");
     }
 
     if (!is_select_only(sql)) {
         free(sql);
-        return strdup("error: only SELECT queries allowed");
+        return tool_fail(is_error, "error: only SELECT queries allowed");
     }
 
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         char *err = malloc(256);
+        *is_error = 1;
         if (err) snprintf(err, 256, "error: %s", sqlite3_errmsg(db));
         free(sql);
-        return err ? err : strdup("error: prepare failed");
+        return err ? err : tool_fail(is_error, "error: prepare failed");
     }
     free(sql);
 
@@ -113,15 +114,16 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
     }
 
     char *out = buf_take(&b);
-    if (!out) return strdup("error: OOM");
+    if (!out) return tool_fail(is_error, "error: OOM");
     return out;
 }
 
 /* EXEC_THREAD shim: db_query's "ctx" is just a db handle — use the thread's. */
 static char *db_query_thread_run(sqlite3 *db, const char *agent_name,
-                                 int64_t session_id, const char *args) {
+                                 int64_t session_id, const char *args,
+                                 int *is_error) {
     (void)agent_name; (void)session_id;
-    return tool_db_query_handler(args, db);
+    return tool_db_query_handler(args, db, is_error);
 }
 
 int tool_db_query_register(ToolRegistry *reg, sqlite3 *db) {

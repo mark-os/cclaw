@@ -114,8 +114,8 @@ void child_sigchld_teardown(void) {
  * discarded (hosts_json stays NULL) so a misbehaving child can't balloon us. */
 #define FRAME_META_MAX (64 * 1024)
 
-/* Drain a tool child's result pipe (nonblocking): parse the frame header +
- * hosts meta, then accumulate the result body into c->outbuf, kept
+/* Drain a tool child's result pipe (nonblocking): parse the frame header
+ * (status byte + meta length) + hosts meta, then accumulate the result body into c->outbuf, kept
  * NUL-terminated. Body bytes beyond TOOL_MAX_OUTPUT are read and discarded so
  * the child never blocks on a full pipe. Closes the fd on EOF or error;
  * leaves it open on EAGAIN (more data may come). */
@@ -127,19 +127,22 @@ void child_drain_pipe(ChildProc *c) {
     while ((n = read(c->result_pipe, buf, sizeof(buf))) > 0) {
         size_t off = 0;
 
-        /* Frame header: 4-byte network-order meta length, may arrive split. */
-        while (c->frame_hdr_read < 4 && off < (size_t)n)
+        /* Frame header: status byte + 4-byte network-order meta length; may
+         * arrive split across reads. The status is the child's own verdict on
+         * the call and rides the same frame as the body it describes. */
+        while (c->frame_hdr_read < 5 && off < (size_t)n)
             c->frame_hdr[c->frame_hdr_read++] = (unsigned char)buf[off++];
-        if (c->frame_hdr_read == 4 && c->frame_meta_read == 0 && !c->hosts_json) {
-            c->frame_meta_len = ((size_t)c->frame_hdr[0] << 24) |
-                                ((size_t)c->frame_hdr[1] << 16) |
-                                ((size_t)c->frame_hdr[2] << 8)  |
-                                 (size_t)c->frame_hdr[3];
+        if (c->frame_hdr_read == 5 && c->frame_meta_read == 0 && !c->hosts_json) {
+            c->frame_status = (c->frame_hdr[0] == RUNTOOL_STATUS_ERROR);
+            c->frame_meta_len = ((size_t)c->frame_hdr[1] << 24) |
+                                ((size_t)c->frame_hdr[2] << 16) |
+                                ((size_t)c->frame_hdr[3] << 8)  |
+                                 (size_t)c->frame_hdr[4];
             if (c->frame_meta_len > 0 && c->frame_meta_len <= FRAME_META_MAX &&
                 !c->hosts_json)
                 c->hosts_json = calloc(1, c->frame_meta_len + 1);
         }
-        if (c->frame_hdr_read < 4) continue;
+        if (c->frame_hdr_read < 5) continue;
 
         /* Meta bytes (hosts JSON); oversized meta is consumed but dropped. */
         while (c->frame_meta_read < c->frame_meta_len && off < (size_t)n) {

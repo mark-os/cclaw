@@ -62,11 +62,17 @@ static void *tool_thread_fn(void *arg) {
     sqlite3 *db = db_open(g_db_path);
     if (db) db_set_child_pragmas(db);
 
+    /* Explicit failure status: the thread's handler sets it at its failure
+     * site (tools.h), and it is what lands in entries.is_error — the result
+     * text is never parsed to decide. */
+    int is_err = 0;
     char *result = NULL;
     if (db && job->run)
-        result = job->run(db, job->agent_name, job->session_id, job->args);
-    if (!result)
+        result = job->run(db, job->agent_name, job->session_id, job->args, &is_err);
+    if (!result) {
         result = strdup(db ? "error: tool returned null" : "error: tool thread db_open failed");
+        is_err = 1;
+    }
 
     /* Postprocess: deinterpolate {{SECRET}} + secret scan/redact (scan
      * runs even with no secrets — tool output can carry leaked credentials).
@@ -75,7 +81,7 @@ static void *tool_thread_fn(void *arg) {
      * maskable here too (never share the dispatch-scoped snapshot — it
      * wouldn't outlive the async thread). */
     if (result && db) {
-        char *cap = secret_capture_apply(db, job->args, result);
+        char *cap = secret_capture_apply(db, job->args, result, is_err);
         if (cap) { free(result); result = cap; }
     }
     if (result) {
@@ -87,7 +93,7 @@ static void *tool_thread_fn(void *arg) {
         if (snap) secrets_snapshot_free(snap, snap_n);
         if (pp) { free(result); result = pp; }
     }
-    if (!result) result = strdup("error: OOM");
+    if (!result) { result = strdup("error: OOM"); is_err = 1; }
 
     if (g_cli_mode) {
         size_t rlen = strlen(result);
@@ -104,7 +110,6 @@ static void *tool_thread_fn(void *arg) {
         char *stored = truncate_and_spill(db, result, job->session_id, job->tool_call_id);
         ToolResult tr = {.tool_call_id = job->tool_call_id,
                          .content = stored ? stored : result};
-        int is_err = (strncmp(result, "error:", 6) == 0);
         Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                        .tool_name = job->tool_name, .is_error = is_err};
         int64_t rid = entry_append_with_iteration(db, job->session_id, &msg, job->iteration_id);

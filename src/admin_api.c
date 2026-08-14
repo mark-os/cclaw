@@ -829,7 +829,7 @@ int admin_grant_from_history(sqlite3 *db, int64_t approval_id) {
         /* Same all-or-nothing apply as apply_grant (main.c) — one code path
          * for the document, no drift between the two grant routes. */
         if (strcmp(action, "request_changes") == 0)
-            rc = request_config_changes_apply(db, agent, args_json, 0, NULL);
+            rc = request_config_changes_apply(db, agent, args_json, 0, 0, NULL);
         free(agent);
     }
 

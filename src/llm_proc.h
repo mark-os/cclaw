@@ -37,6 +37,19 @@ typedef struct {
  * Returns 0 on success (entry written), -1 on error. */
 int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall);
 
+/* Probe the model that would serve this agent's NEXT request, with one
+ * minimal real completion (max_tokens=1) over the normal transport: same
+ * candidate loader, same URL/auth builders, 15s hard timeout, no retries and
+ * no fallback ladder. Used at approval-apply time to prove a model/provider
+ * change actually works before it is allowed to stand (config-ax Phase 2A).
+ *
+ * Writes NOTHING but an llm_responses archive row (label probe_*) — no
+ * entries, no turn state, no model stats/degradation: a probe is a config
+ * event, not traffic. Returns 0 with `served` = the model id that answered
+ * (the provider's $.model when it reports one), or -1 with `reason` set. */
+int llm_probe_agent(sqlite3 *db, const char *agent_name, int64_t session_id,
+                    char *served, size_t served_sz, char *reason, size_t reason_sz);
+
 /* Compact session branch: estimate tokens, decide cut point, call LLM for summary.
  * Returns 0 on success (compaction entry inserted), -1 on error (no compaction).
  * On LLM failure, returns -1 without compacting (safe fallback). */

@@ -24,6 +24,6 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx);
  * step failed. Caller frees. */
 int request_config_changes_apply(sqlite3 *db, const char *agent,
                                  const char *args_json, int64_t expires_at,
-                                 char **detail_out);
+                                 int64_t session_id, char **detail_out);
 
 #endif

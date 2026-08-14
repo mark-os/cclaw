@@ -8,6 +8,7 @@
 #include "tool_request_config.h"
 #include "agent_config.h"
 #include "approval.h"
+#include "config_probe.h"
 #include "config_registry.h"
 #include "db.h"
 #include "log.h"
@@ -1296,9 +1297,13 @@ static const char *RECEIPT_SQL =
 
 int request_config_changes_apply(sqlite3 *db, const char *agent,
                                  const char *args_json, int64_t expires_at,
-                                 char **detail_out) {
+                                 int64_t session_id, char **detail_out) {
     if (detail_out) *detail_out = NULL;
     if (!db || !agent || !args_json) return -1;
+
+    /* Last-known-good, taken before the first write: if the apply-time probe
+     * says the new routing doesn't serve, these are the rows we put back. */
+    char *snapshot = config_probe_snapshot(db, agent, args_json);
 
     /* Collect every line first, write after — never write inside an open
      * SELECT (read→write upgrade = instant BUSY under WAL). */
@@ -1316,8 +1321,10 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             " UNION ALL SELECT 'config:'||key, atom FROM json_each(?1,'$.changes.config')"
             " UNION ALL SELECT 'secret_bind:'||s.key, h.atom"
             "   FROM json_each(?1,'$.changes.secret_bindings') s, json_each(s.value) h",
-            -1, &st, NULL) != SQLITE_OK)
+            -1, &st, NULL) != SQLITE_OK) {
+        free(snapshot);
         return -1;
+    }
     sqlite3_bind_text(st, 1, args_json, -1, SQLITE_STATIC);
     int step;
     while ((step = sqlite3_step(st)) == SQLITE_ROW) {
@@ -1565,6 +1572,30 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                     apply_detail(detail_out, "applied (no effective state to "
                                              "report)");
             }
+            /* Written and re-read — but a re-read only proves what the rows
+             * say, not that a request now reaches a model (the 2026-08-10
+             * incident's whole gap). Documents that move routing get probed
+             * for real; a failure reverts to `snapshot` right here, so the
+             * agent is never told a broken switch succeeded. */
+            char *verdict = NULL;
+            if (config_probe_verify(db, agent, args_json, snapshot,
+                                    session_id, &verdict) != 0) {
+                if (detail_out) {
+                    free(*detail_out);
+                    *detail_out = verdict;   /* the failure IS the receipt */
+                    verdict = NULL;
+                }
+                rc = -1;
+            } else if (verdict && detail_out && *detail_out) {
+                size_t need = strlen(*detail_out) + strlen(verdict) + 3;
+                char *joined = malloc(need);
+                if (joined) {
+                    snprintf(joined, need, "%s; %s", *detail_out, verdict);
+                    free(*detail_out);
+                    *detail_out = joined;
+                }
+            }
+            free(verdict);
         } else {
             sqlite3_exec(db, "ROLLBACK TO req_changes; RELEASE req_changes",
                          NULL, NULL, NULL);
@@ -1574,6 +1605,7 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
 
     for (size_t i = 0; i < n; i++) { free(lines[i].kind); free(lines[i].value); }
     free(lines);
+    free(snapshot);
     return rc;
 }
 

@@ -28,6 +28,10 @@
  * MB at most; this only bounds daemon OOM from a malicious/buggy provider
  * (web_fetch/js_http already cap their own). */
 #define LLM_RESP_MAX (32u * 1024 * 1024)
+/* Hard ceiling on the apply-time probe. It runs synchronously in the approval
+ * path, so this is also the worst-case event-loop stall — deliberately short,
+ * and a timeout counts as a failed probe (config-ax Phase 2A). */
+#define LLM_PROBE_TIMEOUT_SEC 15
 
 
 
@@ -63,9 +67,17 @@ static int provider_key_available(sqlite3 *db, const char *api_key_env) {
     return have;
 }
 
-static int load_candidates(sqlite3 *db, const char *agent_name, ModelCandidate *out, int max) {
+/* Defined below with the rest of the degradation machinery; load_candidates is
+ * the one caller that runs *before* a request exists. */
+static void model_degrade_config(sqlite3 *db, const char *db_path, int64_t session_id,
+                                 const char *model_id, const char *api_key_env);
+static void model_config_recover(sqlite3 *db, const char *model_id);
+
+static int load_candidates(sqlite3 *db, const char *agent_name, int64_t session_id,
+                           ModelCandidate *out, int max) {
     if (max <= 0) return 0;
     int n = 0;
+    const char *db_path = sqlite3_db_filename(db, "main");
 
     /* Helper: load a single candidate by model id/name if healthy.
      * Returns 1 if loaded, 0 otherwise. */
@@ -79,7 +91,7 @@ static int load_candidates(sqlite3 *db, const char *agent_name, ModelCandidate *
                 const char *lsql = \
                     "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type, m.context_window" \
                     " FROM models m JOIN providers p ON m.provider_name = p.name" \
-                    " WHERE (m.id = ?1 OR m.model = ?1)" \
+                    " WHERE m.id = ?1" \
                     " AND m.status != 'disabled'" \
                     " AND (m.degraded_until IS NULL OR m.degraded_until < unixepoch())" \
                     " LIMIT 1;"; \
@@ -98,7 +110,20 @@ static int load_candidates(sqlite3 *db, const char *agent_name, ModelCandidate *
                         c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI; \
                         c->context_window = sqlite3_column_int(ls, 5); \
                         if (c->context_window <= 0) c->context_window = 128000; \
-                        if (provider_key_available(db, c->api_key_env)) n++; \
+                        /* A named candidate dropped for a missing key is the \
+                         * 2026-08-10 silent-reroute: it never reached the \
+                         * request, so nothing recorded it. Record it through \
+                         * the degrade machinery instead (A8). */ \
+                        if (provider_key_available(db, c->api_key_env)) { \
+                            model_config_recover(db, c->id); \
+                            n++; \
+                        } else { \
+                            LOG_WARN_("llm: candidate %s dropped — api_key_env %s " \
+                                      "resolves to nothing (agent=%s)", c->id, \
+                                      c->api_key_env, agent_name ? agent_name : "?"); \
+                            model_degrade_config(db, db_path, session_id, c->id, \
+                                                 c->api_key_env); \
+                        } \
                     } \
                     sqlite3_finalize(ls); \
                 } \
@@ -219,6 +244,7 @@ static void notify_degraded(sqlite3 *db, const char *db_path, int64_t session_id
                             const char *model_id, int status, const char *why) {
     char detail[24];
     if (status > 0) snprintf(detail, sizeof(detail), "http %d", status);
+    else if (status == 0) snprintf(detail, sizeof(detail), "not routable");
     else snprintf(detail, sizeof(detail), "no response");
     char text[256];
     snprintf(text, sizeof(text),
@@ -298,6 +324,54 @@ static void model_degrade_unavailable(sqlite3 *db, const char *db_path,
     }
 }
 
+/* Config-shaped degradation: the model can't be routed to at all because its
+ * provider's api_key_env resolves to neither an env var nor a system secret.
+ * Not an error count — the request never happened — so the state is set
+ * directly on the healthy→degraded transition, which is what makes
+ * notify_degraded fire exactly once (as with the error paths).
+ *
+ * degraded_until stays NULL, and that is the marker: every error-driven
+ * degradation sets a cooldown, so "degraded with no cooldown" means "degraded
+ * by configuration", which model_config_recover is allowed to clear the moment
+ * the key resolves again. Routing is unaffected either way — the candidate is
+ * dropped by the key check itself. */
+static void model_degrade_config(sqlite3 *db, const char *db_path, int64_t session_id,
+                                 const char *model_id, const char *api_key_env) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE models SET status='degraded', degraded_until=NULL"
+            " WHERE id=?1 AND status='healthy'", -1, &s, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(s, 1, model_id, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    int changed = sqlite3_changes(db);
+    sqlite3_finalize(s);
+    if (changed <= 0) return;
+    LOG_INFO_("model degraded model=%s reason=config key=%s", model_id, api_key_env);
+    char why[128];
+    snprintf(why, sizeof(why), "no key: %s is set neither in the environment "
+                               "nor as a system secret", api_key_env);
+    notify_degraded(db, db_path, session_id, model_id, 0, why);
+}
+
+/* The recovery half of model_degrade_config: the key resolves again, so undo
+ * the config degradation — and only that one (see the degraded_until marker).
+ * Mirrors model_stat_success's "success is recovery" semantics for a candidate
+ * that never gets as far as a request. */
+static void model_config_recover(sqlite3 *db, const char *model_id) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE models SET status='healthy'"
+            " WHERE id=?1 AND status='degraded' AND degraded_until IS NULL",
+            -1, &s, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(s, 1, model_id, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    if (sqlite3_changes(db) > 0)
+        LOG_INFO_("model recovered model=%s reason=config", model_id);
+    sqlite3_finalize(s);
+}
+
 static void model_stat_success(sqlite3 *db, const char *model_id,
                                int tokens_in, int tokens_out, int64_t cost_nano) {
     /* Success is recovery: restore 'healthy' so the degradation guard in
@@ -315,6 +389,130 @@ static void model_stat_success(sqlite3 *db, const char *model_id,
     sqlite3_bind_int64(s, 3, cost_nano);
     sqlite3_bind_text(s, 4, model_id, -1, SQLITE_STATIC);
     sqlite3_step(s); sqlite3_finalize(s);
+}
+
+/* ── llm_probe_agent: does the new config actually serve? ─────── */
+
+/* Smallest legal completion request for this endpoint. Built by SQLite so the
+ * model name is escaped by the JSON writer, like transcribe_build_body. */
+static char *probe_build_body(sqlite3 *db, EndpointType ep, const char *model) {
+    const char *sql = (ep == ENDPOINT_GEMINI)
+        ? "SELECT json_object('contents', json_array(json_object("
+          "  'role','user','parts', json_array(json_object('text','ping')))),"
+          " 'generationConfig', json_object('maxOutputTokens', 1))"
+        : "SELECT json_object('model', ?1, 'messages',"
+          " json_array(json_object('role','user','content','ping')),"
+          " 'max_tokens', 1)";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
+    if (ep != ENDPOINT_GEMINI)
+        sqlite3_bind_text(s, 1, model ? model : "", -1, SQLITE_STATIC);
+    char *body = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t) body = strdup(t);
+    }
+    sqlite3_finalize(s);
+    return body;
+}
+
+/* The model id the provider says answered ($.model), falling back to the id we
+ * asked for — intent and effect are exactly what the probe exists to separate. */
+static void probe_served_model(sqlite3 *db, const char *body, const char *asked,
+                               char *out, size_t out_sz) {
+    snprintf(out, out_sz, "%s", asked ? asked : "");
+    if (!body) return;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_extract(?1,'$.model') WHERE json_valid(?1)",
+            -1, &s, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(s, 1, body, -1, SQLITE_STATIC);
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(s, 0);
+        if (v && v[0]) snprintf(out, out_sz, "%s", v);
+    }
+    sqlite3_finalize(s);
+}
+
+int llm_probe_agent(sqlite3 *db, const char *agent_name, int64_t session_id,
+                    char *served, size_t served_sz, char *reason, size_t reason_sz) {
+    if (served && served_sz) served[0] = '\0';
+    if (reason && reason_sz) reason[0] = '\0';
+
+    /* Whoever would serve the very next request — same loader, same order. */
+    ModelCandidate m;
+    if (load_candidates(db, agent_name, session_id, &m, 1) != 1) {
+        snprintf(reason, reason_sz, "no routable model for this agent");
+        return -1;
+    }
+
+    const char *key = m.api_key_env[0] ? getenv(m.api_key_env) : NULL;
+    char *key_buf = (key && key[0]) ? strdup(key)
+                  : m.api_key_env[0] ? db_secret_get_system(db, m.api_key_env)
+                  : NULL;
+    if (!key_buf) key_buf = strdup("");
+
+    Config pcfg = {0};
+    pcfg.provider.base_url = m.base_url;
+    pcfg.provider.model = m.model;
+    pcfg.provider.endpoint_type = (EndpointType)m.endpoint_type;
+    pcfg.provider.api_key = key_buf;
+
+    char *body = probe_build_body(db, (EndpointType)m.endpoint_type, m.model);
+    char *url = llm_build_url(&pcfg);
+    char *auth = llm_build_auth_header(&pcfg);
+    int rc = -1;
+    if (!body || !url || !auth) {
+        snprintf(reason, reason_sz, "could not build the request");
+        goto done;
+    }
+
+    const char *headers[] = { "Content-Type: application/json", auth, NULL };
+    HttpResponse resp = {0};
+    HttpRequestOpts opts = {
+        .url = url, .method = "POST", .headers = headers, .body = body,
+        .timeout = LLM_PROBE_TIMEOUT_SEC,
+        .max_response_bytes = LLM_RESP_MAX,
+    };
+    int status = http_do(&opts, &resp);
+
+    /* One request, one verdict — no retry ladder, no next candidate: a probe
+     * that needs a second chance has already answered the question. The
+     * archive is the only DB write, so `cclaw resp` can show what came back;
+     * no entries, no turn state, no model stats (this is a config event, not
+     * traffic the routing health model should learn from). */
+    char label[32];
+    if (status == -2)       snprintf(label, sizeof(label), "probe_timeout");
+    else if (status < 0)    snprintf(label, sizeof(label), "probe_network_error");
+    else if (status < 200 || status >= 300)
+                            snprintf(label, sizeof(label), "probe_http_%d", status);
+    else if (!resp.data || !resp.data[0])
+                            snprintf(label, sizeof(label), "probe_empty");
+    else                    snprintf(label, sizeof(label), "probe_ok");
+
+    db_archive_response(db, session_id, db_next_iteration_id(db, session_id),
+                        m.id, label, resp.data ? resp.data : resp.err_detail, body);
+
+    if (status == -2)
+        snprintf(reason, reason_sz, "timed out after %ds", LLM_PROBE_TIMEOUT_SEC);
+    else if (status < 0)
+        snprintf(reason, reason_sz, "transport error reaching %s", m.base_url);
+    else if (status < 200 || status >= 300)
+        snprintf(reason, reason_sz, "http %d from %s", status, m.base_url);
+    else if (!resp.data || !resp.data[0])
+        snprintf(reason, reason_sz, "empty response from %s", m.base_url);
+    else {
+        probe_served_model(db, resp.data, m.id, served, served_sz);
+        rc = 0;
+    }
+    LOG_INFO_("probe %s model=%s agent=%s status=%d",
+              rc == 0 ? "ok" : "failed", m.id, agent_name ? agent_name : "?", status);
+    http_response_free(&resp);
+
+done:
+    free(body); free(url); free(auth); free(key_buf);
+    return rc;
 }
 
 /* ── llm_req: single LLM call with DB-driven routing ──────────── */
@@ -425,7 +623,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
     /* ── Routing state machine ─────────────────────────────────── */
     ModelCandidate models[MAX_MODELS];
-    int nmodels = load_candidates(db, agent_name, models, MAX_MODELS);
+    int nmodels = load_candidates(db, agent_name, session_id, models, MAX_MODELS);
 
     /* Fallback: if no models in DB, use config provider directly */
     if (nmodels == 0) {

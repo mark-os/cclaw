@@ -65,6 +65,31 @@ Note: OpenClaw concatenates ALL non-empty assistant texts from turn as fallback;
 | shutdown signal | yes | aborted | "error: agent terminated by shutdown signal" |
 | content filter | yes | error | filter message |
 
+## Tool failure is an explicit status
+
+A tool result's failure is carried by `entries.is_error`, and that flag comes
+from the tool itself — never from reading the message. Handlers (and the
+EXEC_THREAD and sandbox-tier leaves) take an `int *is_error` out-param and set
+it at the failure site, usually via `tool_fail()`; sandboxed `--run-tool`
+children frame the same verdict as a status byte ahead of the result body
+(`[status][meta_len][meta][body]`), so it crosses the sandbox boundary
+atomically with the bytes it describes. A child's exit code keeps its
+process-lifecycle meaning (sandbox refusal, crash, signal) and never encodes
+tool failure; a child that dies without answering is a failure by virtue of the
+death.
+
+Result TEXT is free-form. Most failures still read `error: ...` because that
+is a clear thing to say to a model, but **nothing parses it** — a refusal
+phrased any other way is just as much a failure, and a successful result that
+happens to quote the word is not one. (This replaced a `strncmp(result,
+"error:", 6)` sniff in three readers, which silently mis-recorded both.)
+
+**Signal attribution.** When a sandboxed workload dies by signal, the broker
+makes one attribution attempt from what it already holds — the signal number
+plus the rlimits that call ran under. SIGKILL with limits configured appends
+"likely resource limit … reduce usage, don't just retry"; SIGXCPU names the CPU
+cap. No dmesg parsing, no probe run.
+
 ## Async Considerations
 
 Agent turn lifecycle:

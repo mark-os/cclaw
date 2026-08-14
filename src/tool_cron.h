@@ -26,8 +26,8 @@ int tool_cron_register(ToolRegistry *reg, ToolCronCtx *ctx);
 
 /* Individual handlers (exposed for testing). cron_set returns NULL when it
  * parked an approval (cross-agent targeting) — the NULL_PARK contract. */
-char *tool_cron_set_handler(const char *arguments, void *user_data);
-char *tool_cron_list_handler(const char *arguments, void *user_data);
-char *tool_cron_remove_handler(const char *arguments, void *user_data);
+char *tool_cron_set_handler(const char *arguments, void *user_data, int *is_error);
+char *tool_cron_list_handler(const char *arguments, void *user_data, int *is_error);
+char *tool_cron_remove_handler(const char *arguments, void *user_data, int *is_error);
 
 #endif

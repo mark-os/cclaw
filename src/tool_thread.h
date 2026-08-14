@@ -29,7 +29,8 @@ typedef struct {
     /* Rebuilds the tool's ctx around the thread's db + agent_name (+ session_id)
      * and runs the handler. Returns a heap result string (caller frees). */
     char  *(*run)(sqlite3 *db, const char *agent_name,
-                  int64_t session_id, const char *args);
+                  int64_t session_id, const char *args,
+                  int *is_error);
     const ShellSecret *secrets;   /* borrowed (immutable post-setup); for postprocess */
     size_t  secret_count;
 } ToolThreadJob;

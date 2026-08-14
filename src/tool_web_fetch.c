@@ -22,6 +22,7 @@ static const char *WEB_FETCH_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"url\":{\"type\":\"string\",\"description\":\"URL to fetch (HTTP GET)\"},"
     "\"raw\":{\"type\":\"boolean\",\"description\":\"Return raw response without HTML-to-markdown conversion (auto-skipped for JSON responses)\"},"
+    "\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds (default 60, max 600)\"},"
     "\"save_secret\":{\"type\":\"string\",\"description\":\"Capture a credential from this response: NAME (^[A-Z][A-Z0-9_]*$) stores it encrypted and masks it to {{SECRET:NAME}} — the raw value never enters context\"},"
     "\"save_secret_path\":{\"type\":\"string\",\"description\":\"With save_secret: JSON path (e.g. $.token) selecting the credential field; omit to capture the whole trimmed response\"}"
     "},\"required\":[\"url\"]}";
@@ -249,13 +250,13 @@ char *web_fetch_host_hint(const char *url, char **rules, size_t n, int host_mode
 
 /* ── Tool handler ────────────────────────────────────────────────── */
 
-static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx) {
+static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx, int *is_error) {
     /* Egress is enforced by the per-hop proxy, not a preflight; ctx (may be
      * NULL) is consulted only to phrase denials. Params are pre-extracted by
      * the parent — no JSON is parsed in this process. */
     const char *url = run_tool_param_str(q, "url");
     if (!url || !url[0])
-        return strdup("error: missing or empty 'url' field");
+        return tool_fail(is_error, "error: missing or empty 'url' field");
 
     int raw = run_tool_param_bool(q, "raw", 0);
 
@@ -263,7 +264,7 @@ static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx) {
      * http_check_policy here: a single check can't see redirects (SSRF). */
 
     if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)
-        return strdup("error: url must start with http:// or https://");
+        return tool_fail(is_error, "error: url must start with http:// or https://");
 
     /* Browser-like request with markdown preference */
     const char *hdrs[] = {
@@ -271,11 +272,15 @@ static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx) {
         "Accept-Language: en-US,en;q=0.9",
         NULL
     };
+    /* The call's own budget (broker-clamped, wire field) minus a small margin
+     * so curl gives up — and we say why — before the broker kills us. */
+    int http_timeout = q->timeout > 5 ? q->timeout - 5 : q->timeout;
+    if (http_timeout <= 0) http_timeout = 30;
     HttpRequestOpts opts = {
         .url = url,
         .method = "GET",
         .headers = hdrs,
-        .timeout = 30,
+        .timeout = http_timeout,
         .follow_redirects = 1,
         .max_redirects = 3,
         .max_response_bytes = WEB_FETCH_MAX,
@@ -312,14 +317,16 @@ static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx) {
                 snprintf(msg, 512, "error: HTTP request failed");
         }
         http_response_free(&resp);
-        return msg ? msg : strdup("error: HTTP request failed");
+        *is_error = 1;
+        return msg ? msg : tool_fail(is_error, "error: HTTP request failed");
     }
 
     if (status >= 400) {
         char *msg = malloc(64);
         if (msg) snprintf(msg, 64, "error: HTTP %d", status);
         http_response_free(&resp);
-        return msg ? msg : strdup("error: HTTP error");
+        *is_error = 1;
+        return msg ? msg : tool_fail(is_error, "error: HTTP error");
     }
 
     /* If server returned markdown or JSON, or raw requested, use body as-is */
@@ -336,7 +343,7 @@ static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx) {
     int capped = resp.truncated;  /* source larger than WEB_FETCH_MAX; tail dropped */
     http_response_free(&resp);
 
-    if (!text) return strdup("error: out of memory");
+    if (!text) return tool_fail(is_error, "error: out of memory");
 
     /* Return the document whole. Oversized results are truncated and spilled
      * by the broker on the way out (spill_large_result), the same path every
@@ -352,7 +359,7 @@ static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx) {
     /* No storage-time wrapping: the entry is tagged with network_hosts by the
      * broker frame, sanitized in the parent, and wrapped at query time. */
     char *out = malloc(meta_len + total_len + 1);
-    if (!out) { free(text); return strdup("error: out of memory"); }
+    if (!out) { free(text); return tool_fail(is_error, "error: out of memory"); }
     memcpy(out, meta, meta_len);
     memcpy(out + meta_len, text, total_len + 1);
     free(text);
@@ -374,7 +381,7 @@ int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx) {
     return rc;
 }
 
-char *tool_web_tier_run(const RunToolParsed *q) {
+char *tool_web_tier_run(const RunToolParsed *q, int *is_error) {
     /* Runs in the inner fork, inside the netns + proxy. Our libcurl honors the
      * HTTP_PROXY set by sandbox_child_setup → net_shim → broker → decide() on
      * every hop. The rebuilt ctx only phrases denials (host grant hint) —
@@ -385,6 +392,6 @@ char *tool_web_tier_run(const RunToolParsed *q) {
     ctx.allowed_hosts = q->host_rules;
     ctx.allowed_host_count = q->host_count;
     ctx.host_mode = q->sandbox ? 0 : 1;
-    char *r = web_fetch_run(q, &ctx);
-    return r ? r : strdup("error: web_fetch returned null");
+    char *r = web_fetch_run(q, &ctx, is_error);
+    return r ? r : tool_fail(is_error, "error: web_fetch returned null");
 }

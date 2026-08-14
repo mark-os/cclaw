@@ -26,13 +26,13 @@ typedef struct {
 int tool_launch_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx);
 
 /* Handler: parse JSON args, launch agent process */
-char *tool_launch_agent_handler(const char *arguments, void *user_data);
+char *tool_launch_agent_handler(const char *arguments, void *user_data, int *is_error);
 
 /* Register check_session tool. Returns 0 on success. */
 int tool_check_session_register(ToolRegistry *reg, AgentLaunchCtx *ctx);
 
 /* Handler: check session state + result */
-char *tool_check_session_handler(const char *arguments, void *user_data);
+char *tool_check_session_handler(const char *arguments, void *user_data, int *is_error);
 
 
 

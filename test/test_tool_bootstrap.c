@@ -47,7 +47,7 @@ static int test_create_agent_parks(void) {
     char *result = e->handler(
         "{\"name\":\"Helper\",\"description\":\"helps\","
         "\"system_prompt\":\"You are a helpful assistant.\"}",
-        e->user_data);
+        e->user_data, &(int){0});
     assert(result == NULL); /* parked */
 
     sqlite3_stmt *s;
@@ -82,19 +82,19 @@ static int test_create_agent_invalid_name(void) {
     tool_create_agent_register(&reg, &ctx);
 
     ToolEntry *e = tools_lookup(&reg, "create_agent");
-    char *result = e->handler("{\"name\":\"../evil\"}", e->user_data);
+    char *result = e->handler("{\"name\":\"../evil\"}", e->user_data, &(int){0});
     assert(result != NULL);
     assert(strstr(result, "error") != NULL);
     assert(strstr(result, "agent name must be PascalCase") != NULL);
     free(result);
 
-    result = e->handler("{\"name\":\"a/b\"}", e->user_data);
+    result = e->handler("{\"name\":\"a/b\"}", e->user_data, &(int){0});
     assert(result != NULL);
     assert(strstr(result, "error") != NULL);
     assert(strstr(result, "agent name must be PascalCase") != NULL);
     free(result);
 
-    result = e->handler("{\"name\":\"lowercase\"}", e->user_data);
+    result = e->handler("{\"name\":\"lowercase\"}", e->user_data, &(int){0});
     assert(result != NULL);
     assert(strstr(result, "error") != NULL);
     assert(strstr(result, "agent name must be PascalCase") != NULL);
@@ -116,7 +116,7 @@ static int test_create_agent_missing_name(void) {
     tool_create_agent_register(&reg, &ctx);
 
     ToolEntry *e = tools_lookup(&reg, "create_agent");
-    char *result = e->handler("{\"model\":\"gpt-4\"}", e->user_data);
+    char *result = e->handler("{\"model\":\"gpt-4\"}", e->user_data, &(int){0});
     assert(result != NULL);
     assert(strstr(result, "error") != NULL);
     assert(strstr(result, "name") != NULL);

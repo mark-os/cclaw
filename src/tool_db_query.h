@@ -12,6 +12,6 @@
 int tool_db_query_register(ToolRegistry *reg, sqlite3 *db);
 
 /* Handler: parse JSON args {"sql":"..."}, reject non-SELECT, return results as JSON. */
-char *tool_db_query_handler(const char *arguments, void *user_data);
+char *tool_db_query_handler(const char *arguments, void *user_data, int *is_error);
 
 #endif

@@ -86,7 +86,7 @@ static char *check_keys(sqlite3 *db, const char *args) {
             " ('name','cron_expr','in_seconds','prompt','script',"
             "  'session_id','session','agent','channel_name','chat_id')"
             " LIMIT 1", -1, &st, NULL) != SQLITE_OK)
-        return strdup("error: could not read the arguments");
+        return errf("error: could not read the arguments");
     sqlite3_bind_text(st, 1, args, -1, SQLITE_STATIC);
     char *bad = NULL;
     if (sqlite3_step(st) == SQLITE_ROW) {
@@ -102,7 +102,7 @@ static char *check_keys(sqlite3 *db, const char *args) {
 /* Rules that need only this one call's fields. */
 static char *check_call(const CronDoc *d) {
     if (d->has_expr && d->has_seconds)
-        return strdup("error: give at most one of cron_expr (recurring) or "
+        return errf("error: give at most one of cron_expr (recurring) or "
                       "in_seconds (one-shot), not both");
     if (d->has_seconds && d->in_seconds <= 0)
         return errf("error: in_seconds=%lld — it must be a positive delay in "
@@ -111,13 +111,13 @@ static char *check_call(const CronDoc *d) {
         return errf("error: session accepts only \"new\" (a fresh session per "
                     "fire); to target an existing session use session_id");
     if (d->has_session && d->has_session_id)
-        return strdup("error: give at most one of session:\"new\" (fresh "
+        return errf("error: give at most one of session:\"new\" (fresh "
                       "session per fire) or session_id (pin one session)");
     if (d->has_channel != d->has_chat)
-        return strdup("error: channel_name and chat_id go together — give both "
+        return errf("error: channel_name and chat_id go together — give both "
                       "or neither");
     if (d->name && strlen(d->name) > 64)
-        return strdup("error: name must be 64 characters or fewer");
+        return errf("error: name must be 64 characters or fewer");
     return NULL;
 }
 
@@ -160,7 +160,7 @@ static char *check_session_pin(const ToolCronCtx *ctx, const CronDoc *d) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(ctx->db, "SELECT 1 FROM sessions WHERE id=?1",
                            -1, &st, NULL) != SQLITE_OK)
-        return strdup("error: could not check the session");
+        return errf("error: could not check the session");
     sqlite3_bind_int64(st, 1, d->session_id);
     int found = (sqlite3_step(st) == SQLITE_ROW);
     sqlite3_finalize(st);
@@ -185,12 +185,12 @@ static char *check_script(const ToolCronCtx *ctx, const CronDoc *d) {
         return errf("error: script '%s' must end in .qjs — the JS tier refuses "
                     "anything else at fire time", d->script);
     if (!ctx->workspace || !ctx->workspace[0])
-        return strdup("error: no workspace configured — script jobs need one");
+        return errf("error: no workspace configured — script jobs need one");
 
     char full[PATH_MAX];
     int n = snprintf(full, sizeof(full), "%s/%s", ctx->workspace, d->script);
     if (n <= 0 || (size_t)n >= sizeof(full))
-        return strdup("error: script path is too long");
+        return errf("error: script path is too long");
     struct stat sb;
     if (stat(full, &sb) != 0 || !S_ISREG(sb.st_mode))
         return errf("error: script file '%s' does not exist — write it first, "
@@ -210,7 +210,7 @@ static char *check_channel(const ToolCronCtx *ctx, const CronDoc *d) {
             "SELECT 1 FROM channel_routes r JOIN sessions s ON s.id=r.session_id"
             " WHERE r.channel_name=?1 AND r.chat_id=?2 AND s.agent_name=?3",
             -1, &st, NULL) != SQLITE_OK)
-        return strdup("error: could not check channel routes");
+        return errf("error: could not check channel routes");
     sqlite3_bind_text(st, 1, d->channel_name, -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 2, d->chat_id, -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 3, target, -1, SQLITE_STATIC);
@@ -382,7 +382,7 @@ static char *park_cross_agent(ToolCronCtx *ctx, const char *doc,
         int dup = (sqlite3_step(chk) == SQLITE_ROW);
         sqlite3_finalize(chk);
         if (dup)
-            return strdup("error: this job was already sent for approval and is "
+            return errf("error: this job was already sent for approval and is "
                           "still awaiting the user's yes/no reply — do not "
                           "re-request; wait");
     }
@@ -390,25 +390,25 @@ static char *park_cross_agent(ToolCronCtx *ctx, const char *doc,
     int64_t aid = approval_create(ctx->db, ctx->session_id,
                                   ctx->current_tool_call_id, "cron_set",
                                   "cron_set", doc, "apply");
-    if (aid < 0) return strdup("error: failed to create approval");
+    if (aid < 0) return errf("error: failed to create approval");
     session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
     return NULL; /* park */
 }
 
 /* ── handlers ────────────────────────────────────────────────────────── */
 
-char *tool_cron_set_handler(const char *arguments, void *user_data) {
+char *tool_cron_set_handler(const char *arguments, void *user_data, int *is_error) {
     ToolCronCtx *ctx = (ToolCronCtx *)user_data;
-    if (!ctx || !ctx->db) return strdup("error: cron_set unavailable");
+    if (!ctx || !ctx->db) return tool_fail(is_error, "error: cron_set unavailable");
     if (!tool_args_valid_object(ctx->db, arguments))
-        return strdup("error: arguments must be a JSON object");
+        return tool_fail(is_error, "error: arguments must be a JSON object");
 
     char *err = check_keys(ctx->db, arguments);
-    if (err) return err;
+    if (err) { *is_error = 1; return err; }
 
     CronDoc d;
     if (cron_doc_parse(ctx->db, arguments, &d) != 0)
-        return strdup("error: could not read the arguments");
+        return tool_fail(is_error, "error: could not read the arguments");
 
     char *name = NULL, *doc = NULL, *result = NULL, *cross = NULL;
     if ((err = check_call(&d)) ||
@@ -419,12 +419,12 @@ char *tool_cron_set_handler(const char *arguments, void *user_data) {
 
     name = (d.name && d.name[0]) ? strdup(d.name)
                                  : generate_name(ctx->db, ctx->agent_name);
-    if (!name) { err = strdup("error: could not name the job"); goto done; }
+    if (!name) { err = tool_fail(is_error, "error: could not name the job"); goto done; }
 
     if ((err = check_cap(ctx, name))) goto done;
 
     doc = doc_with_name(ctx->db, arguments, name);
-    if (!doc) { err = strdup("error: could not build the job"); goto done; }
+    if (!doc) { err = tool_fail(is_error, "error: could not build the job"); goto done; }
 
     /* Merged-row rules (a partial upsert must still land on a valid job)
      * before the route check: "channel fields need session:new" is the more
@@ -445,13 +445,15 @@ char *tool_cron_set_handler(const char *arguments, void *user_data) {
     if (id > 0) result = describe_job(ctx->db, id, updated);
 
 done:
-    if (err) { free(result); result = err; }
+    /* Every `err` path above is a validation refusal — one explicit flag at
+     * the single place they converge, so no failure depends on its wording. */
+    if (err) { free(result); result = err; *is_error = 1; }
     free(cross); free(doc); free(name);
     cron_doc_free(&d);
     return result;
 }
 
-char *tool_cron_list_handler(const char *arguments, void *user_data) {
+char *tool_cron_list_handler(const char *arguments, void *user_data, int *is_error) {
     (void)arguments;
     ToolCronCtx *ctx = (ToolCronCtx *)user_data;
 
@@ -461,7 +463,7 @@ char *tool_cron_list_handler(const char *arguments, void *user_data) {
 
     size_t cap = 128 * (size_t)count + 64;
     char *buf = malloc(cap);
-    if (!buf) { cron_list_free(jobs, count); return strdup("error: OOM"); }
+    if (!buf) { cron_list_free(jobs, count); return tool_fail(is_error, "error: OOM"); }
     size_t pos = 0;
 
     /* Header. A blank cron_expr with a future next_run_at reads as a one-shot;
@@ -484,19 +486,19 @@ char *tool_cron_list_handler(const char *arguments, void *user_data) {
     return buf;
 }
 
-char *tool_cron_remove_handler(const char *arguments, void *user_data) {
+char *tool_cron_remove_handler(const char *arguments, void *user_data, int *is_error) {
     ToolCronCtx *ctx = (ToolCronCtx *)user_data;
 
     int id = tool_args_int(ctx->db, arguments, "id", -1);
 
     if (id < 0)
-        return strdup("error: missing required field 'id'");
+        return tool_fail(is_error, "error: missing required field 'id'");
 
     if (cron_remove(ctx->db, (int64_t)id, ctx->agent_name) != 0)
-        return strdup("error: job not found or DB error");
+        return tool_fail(is_error, "error: job not found or DB error");
 
     char *result = malloc(64);
-    if (!result) return strdup("error: OOM");
+    if (!result) return tool_fail(is_error, "error: OOM");
     snprintf(result, 64, "removed cron job id=%d", id);
     return result;
 }
@@ -504,16 +506,18 @@ char *tool_cron_remove_handler(const char *arguments, void *user_data) {
 /* EXEC_THREAD shims: rebuild ToolCronCtx around the thread's own db. cron_set
  * is not among them — it runs inline, because it can park an approval. */
 static char *cron_list_thread_run(sqlite3 *db, const char *agent_name,
-                                  int64_t session_id, const char *args) {
+                                  int64_t session_id, const char *args,
+                                  int *is_error) {
     ToolCronCtx c = {.db = db, .session_id = session_id};
     snprintf(c.agent_name, sizeof(c.agent_name), "%s", agent_name ? agent_name : "");
-    return tool_cron_list_handler(args, &c);
+    return tool_cron_list_handler(args, &c, is_error);
 }
 static char *cron_remove_thread_run(sqlite3 *db, const char *agent_name,
-                                    int64_t session_id, const char *args) {
+                                    int64_t session_id, const char *args,
+                                    int *is_error) {
     ToolCronCtx c = {.db = db, .session_id = session_id};
     snprintf(c.agent_name, sizeof(c.agent_name), "%s", agent_name ? agent_name : "");
-    return tool_cron_remove_handler(args, &c);
+    return tool_cron_remove_handler(args, &c, is_error);
 }
 
 int tool_cron_register(ToolRegistry *reg, ToolCronCtx *ctx) {

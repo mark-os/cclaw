@@ -21,15 +21,15 @@
  * test can assert it's NOT the poll thread's handle. */
 static sqlite3 *g_seen_db;
 static char *ok_run(sqlite3 *db, const char *agent_name,
-                    int64_t session_id, const char *args) {
-    (void)agent_name; (void)session_id; (void)args;
+                    int64_t session_id, const char *args, int *is_error) {
+    (void)agent_name; (void)session_id; (void)args; (void)is_error;
     g_seen_db = db;
     return strdup("thread says hi");
 }
 
 static char *null_run(sqlite3 *db, const char *agent_name,
-                      int64_t session_id, const char *args) {
-    (void)db; (void)agent_name; (void)session_id; (void)args;
+                      int64_t session_id, const char *args, int *is_error) {
+    (void)db; (void)agent_name; (void)session_id; (void)args; (void)is_error;
     return NULL;   /* must surface as an error result, not a lost turn */
 }
 
@@ -66,7 +66,7 @@ static int64_t wait_notify(void) {
 
 static void job_init(ToolThreadJob *job, int64_t sid, int64_t eid,
                      const char *call_id,
-                     char *(*run)(sqlite3 *, const char *, int64_t, const char *)) {
+                     char *(*run)(sqlite3 *, const char *, int64_t, const char *, int *)) {
     memset(job, 0, sizeof(*job));
     job->session_id = sid;
     job->entry_id = eid;

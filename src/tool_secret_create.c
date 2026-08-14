@@ -61,7 +61,7 @@ static const char *SECRET_CREATE_PARAMS_JSON =
     "\"charset\":{\"type\":\"string\",\"description\":\"'alnum' (default), 'hex', or 'full'\"}"
     "},\"required\":[\"name\"]}";
 
-static char *tool_secret_create_handler(const char *arguments, void *user_data) {
+static char *tool_secret_create_handler(const char *arguments, void *user_data, int *is_error) {
     ToolSecretCreateCtx *ctx = (ToolSecretCreateCtx *)user_data;
 
     char *name = tool_args_str(ctx->db, arguments, "name");
@@ -73,25 +73,25 @@ static char *tool_secret_create_handler(const char *arguments, void *user_data) 
 
     if (!name || !is_valid_secret_name(name)) {
         free(name); free(charset_name);
-        return strdup("error: invalid secret name (expected ^[A-Z][A-Z0-9_]*$)");
+        return tool_fail(is_error, "error: invalid secret name (expected ^[A-Z][A-Z0-9_]*$)");
     }
     if (db_secret_exists(ctx->db, name)) {
         char err[128];
         snprintf(err, sizeof(err), "error: secret %s already exists", name);
         free(name); free(charset_name);
-        return strdup(err);
+        return tool_fail(is_error, "%s", err);
     }
     size_t clen = 0;
     const char *charset = charset_for(charset_name, &clen);
     if (!charset) {
         free(name); free(charset_name);
-        return strdup("error: charset must be 'alnum', 'hex', or 'full'");
+        return tool_fail(is_error, "error: charset must be 'alnum', 'hex', or 'full'");
     }
 
     char value[129];
     if (random_from_charset(value, (size_t)length, charset, clen) != 0) {
         free(name); free(charset_name);
-        return strdup("error: failed to generate random value");
+        return tool_fail(is_error, "error: failed to generate random value");
     }
 
     int rc = db_secret_set(ctx->db, name, value, "generated", "agent");
@@ -104,10 +104,10 @@ static char *tool_secret_create_handler(const char *arguments, void *user_data) 
     free(name); free(charset_name);
 
     if (rc != 0)
-        return strdup("error: failed to store secret");
+        return tool_fail(is_error, "error: failed to store secret");
 
     char *result = malloc(256);
-    if (!result) return strdup("error: out of memory");
+    if (!result) return tool_fail(is_error, "error: out of memory");
     snprintf(result, 256,
              "stored as {{SECRET:%s}} (%d chars, %s). No host bindings yet — "
              "first use will require approval; ALWAYS-approve a url-bearing "

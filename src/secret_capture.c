@@ -52,7 +52,8 @@ static char *with_note(const char *result, const char *fmt, const char *arg) {
     return out ? out : strdup(result);
 }
 
-char *secret_capture_apply(sqlite3 *db, const char *tool_args, const char *raw_result) {
+char *secret_capture_apply(sqlite3 *db, const char *tool_args,
+                           const char *raw_result, int is_error) {
     if (!db || !tool_args || !raw_result) return NULL;
     if (!strstr(tool_args, "save_secret")) return NULL;  /* cheap pre-check */
 
@@ -74,8 +75,9 @@ char *secret_capture_apply(sqlite3 *db, const char *tool_args, const char *raw_r
             "or have the operator `cclaw secret rm` the old one", name);
         goto done;
     }
-    /* An error result carries no credential — don't capture the error text. */
-    if (strncmp(raw_result, "error:", 6) == 0) {
+    /* An error result carries no credential — don't capture the error text.
+     * The status is the caller's explicit flag, never a guess at the prose. */
+    if (is_error) {
         out = with_note(raw_result, "save_secret skipped: tool returned an error%s", "");
         goto done;
     }

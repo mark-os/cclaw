@@ -24,14 +24,22 @@
  * child, on pre-extracted wire params (run_tool_param_*) — no JSON is parsed
  * in this process. The registry entries carry tool_sandboxed_stub. */
 
-static char *file_read_run(const RunToolParsed *q, FileReadCtx *ctx);
-static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx);
-static char *file_list_run(const RunToolParsed *q, FileReadCtx *ctx);
-static char *file_find_run(const RunToolParsed *q, FileReadCtx *ctx);
-static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx);
-static char *file_grep_run(const RunToolParsed *q, FileReadCtx *ctx);
+static char *file_read_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error);
+static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error);
+static char *file_list_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error);
+static char *file_find_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error);
+static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error);
+static char *file_grep_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error);
 
 /* ── Actionable denials ───────────────────────────────────────────────── */
+
+/* Failure return where a grant hint may already explain the denial: the hint
+ * wins over the generic line, and either way the call is marked failed. */
+static char *tool_fail_hint(int *is_error, char *hint, const char *msg) {
+    if (is_error) *is_error = 1;
+    return hint ? hint : strdup(msg);
+}
+
 
 /* Component-boundary prefix test: path equals base or lies under it. */
 static int path_under(const char *base, const char *path) {
@@ -126,12 +134,12 @@ static const char *FILE_READ_PARAMS_JSON =
     "\"path\":{\"type\":\"string\",\"description\":\"File path to read (relative or absolute)\"}"
     "},\"required\":[\"path\"]}";
 
-static char *file_read_run(const RunToolParsed *q, FileReadCtx *ctx) {
+static char *file_read_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error) {
     const char *workspace = ctx->workspace;
 
     const char *req_path = run_tool_param_str(q, "path");
     if (!req_path || !req_path[0])
-        return strdup("error: missing or empty 'path' field");
+        return tool_fail(is_error, "error: missing or empty 'path' field");
 
     char fullpath[PATH_MAX];
     if (req_path[0] == '/')
@@ -142,11 +150,11 @@ static char *file_read_run(const RunToolParsed *q, FileReadCtx *ctx) {
     FILE *f = fopen(fullpath, "rb");
     if (!f) {
         char *hint = path_grant_hint(ctx, fullpath, 0, 0);
-        return hint ? hint : strdup("error: cannot open file");
+        return tool_fail_hint(is_error, hint, "error: cannot open file");
     }
 
     char *buf = malloc(FILE_READ_MAX + 1);
-    if (!buf) { fclose(f); return strdup("error: out of memory"); }
+    if (!buf) { fclose(f); return tool_fail(is_error, "error: out of memory"); }
 
     size_t n = fread(buf, 1, FILE_READ_MAX, f);
     fclose(f);
@@ -172,22 +180,22 @@ static const char *FILE_WRITE_PARAMS_JSON =
     "\"content\":{\"type\":\"string\",\"description\":\"Content to write\"}"
     "},\"required\":[\"path\",\"content\"]}";
 
-static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx) {
+static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error) {
     const char *workspace = ctx->workspace;
 
     const char *req_path = run_tool_param_str(q, "path");
     if (!req_path || !req_path[0])
-        return strdup("error: missing or empty 'path' field");
+        return tool_fail(is_error, "error: missing or empty 'path' field");
 
     /* Reject memory-file names */
     const char *bn = strrchr(req_path, '/');
     bn = bn ? bn + 1 : req_path;
     if (strcasecmp(bn, "MEMORY.md") == 0 || strcasecmp(bn, "SOUL.md") == 0)
-        return strdup("error: memories are not files — use the memory tools (memory_add/memory_edit) instead of writing MEMORY.md");
+        return tool_fail(is_error, "error: memories are not files — use the memory tools (memory_add/memory_edit) instead of writing MEMORY.md");
 
     const char *content = run_tool_param_str(q, "content");
     if (!content)
-        return strdup("error: missing 'content' field");
+        return tool_fail(is_error, "error: missing 'content' field");
 
     char fullpath[PATH_MAX];
     if (req_path[0] == '/')
@@ -198,7 +206,7 @@ static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx) {
     FILE *f = fopen(fullpath, "wb");
     if (!f) {
         char *hint = path_grant_hint(ctx, fullpath, 1, 1);
-        return hint ? hint : strdup("error: cannot open file for writing");
+        return tool_fail_hint(is_error, hint, "error: cannot open file for writing");
     }
 
     size_t content_len = strlen(content);
@@ -206,7 +214,7 @@ static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx) {
     fclose(f);
 
     if (written != content_len)
-        return strdup("error: incomplete write");
+        return tool_fail(is_error, "error: incomplete write");
 
     char *result = malloc(64);
     if (!result) return strdup("ok");
@@ -243,7 +251,7 @@ static int ls_entry_cmp(const void *a, const void *b) {
     return strcasecmp(((const LsEntry *)a)->name, ((const LsEntry *)b)->name);
 }
 
-static char *file_list_run(const RunToolParsed *q, FileReadCtx *ctx) {
+static char *file_list_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error) {
     const char *workspace = ctx->workspace;
 
     const char *req_path = run_tool_param_str(q, "path");
@@ -260,7 +268,7 @@ static char *file_list_run(const RunToolParsed *q, FileReadCtx *ctx) {
     DIR *d = opendir(resolved);
     if (!d) {
         char *hint = path_grant_hint(ctx, resolved, 0, 0);
-        return hint ? hint : strdup("error: not a directory or cannot open");
+        return tool_fail_hint(is_error, hint, "error: not a directory or cannot open");
     }
 
     LsEntry *entries = NULL;
@@ -306,7 +314,7 @@ static char *file_list_run(const RunToolParsed *q, FileReadCtx *ctx) {
         buf_appendf(&b, "\n\n[%d entries limit reached]", limit);
 
     char *out = buf_take(&b);
-    return out ? out : strdup("error: OOM");
+    return out ? out : tool_fail(is_error, "error: OOM");
 }
 
 int tool_file_list_register(ToolRegistry *reg, FileReadCtx *ctx) {
@@ -398,12 +406,12 @@ static void find_walk(const char *absdir, const char *reldir, int depth, FindAcc
     closedir(d);
 }
 
-static char *file_find_run(const RunToolParsed *q, FileReadCtx *ctx) {
+static char *file_find_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error) {
     const char *workspace = ctx->workspace;
 
     const char *pattern = run_tool_param_str(q, "pattern");
     if (!pattern || !pattern[0])
-        return strdup("error: missing or empty 'pattern' field");
+        return tool_fail(is_error, "error: missing or empty 'pattern' field");
     const char *req_path = run_tool_param_str(q, "path");
     if (!req_path || !req_path[0]) req_path = ".";
     int limit = run_tool_param_int(q, "limit", FIND_DEFAULT_LIMIT);
@@ -435,7 +443,7 @@ static char *file_find_run(const RunToolParsed *q, FileReadCtx *ctx) {
         buf_appendf(&a.b, "\n\n[%d results limit reached]", limit);
 
     char *out = buf_take(&a.b);
-    return out ? out : strdup("error: OOM");
+    return out ? out : tool_fail(is_error, "error: OOM");
 }
 
 int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx) {
@@ -496,18 +504,18 @@ static void edits_free(EditOp *e, int n) {
     for (int i = 0; i < n; i++) { free(e[i].old_text); free(e[i].new_text); }
 }
 
-static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx) {
+static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error) {
     const char *req_path = run_tool_param_str(q, "path");
     if (!req_path || !req_path[0])
-        return strdup("error: missing or invalid 'path'");
+        return tool_fail(is_error, "error: missing or invalid 'path'");
     /* edits arrive flattened by the parent (tool_args_extract) as
      * [old1,new1,old2,new2,...] — no JSON in this process. */
     size_t pn = 0;
     char **pairs = run_tool_param_list(q, "edits", &pn);
     if (!pairs || pn < 2 || (pn % 2) != 0)
-        return strdup("error: missing or invalid 'edits' array");
+        return tool_fail(is_error, "error: missing or invalid 'edits' array");
     size_t nreq = pn / 2;
-    if (nreq > FILE_EDIT_MAX_EDITS) return strdup("error: too many edits");
+    if (nreq > FILE_EDIT_MAX_EDITS) return tool_fail(is_error, "error: too many edits");
 
     char fullpath[PATH_MAX * 2];
     if (req_path[0] == '/') snprintf(fullpath, sizeof(fullpath), "%s", req_path);
@@ -516,14 +524,14 @@ static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx) {
     FILE *f = fopen(fullpath, "rb");
     if (!f) {
         char *hint = path_grant_hint(ctx, fullpath, 1, 0);
-        return hint ? hint : strdup("error: cannot open file");
+        return tool_fail_hint(is_error, hint, "error: cannot open file");
     }
     fseek(f, 0, SEEK_END);
     long fsz = ftell(f);
-    if (fsz < 0 || fsz > FILE_EDIT_MAX_FILE) { fclose(f); return strdup("error: file too large"); }
+    if (fsz < 0 || fsz > FILE_EDIT_MAX_FILE) { fclose(f); return tool_fail(is_error, "error: file too large"); }
     fseek(f, 0, SEEK_SET);
     char *orig = malloc((size_t)fsz + 1);
-    if (!orig) { fclose(f); return strdup("error: OOM"); }
+    if (!orig) { fclose(f); return tool_fail(is_error, "error: OOM"); }
     size_t olen = fread(orig, 1, (size_t)fsz, f);
     fclose(f);
     orig[olen] = '\0';
@@ -550,20 +558,20 @@ static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx) {
         o->off = (size_t)mem_offset(orig, olen, o->old_text, o->old_len);
         nedits++;
     }
-    if (errmsg) { edits_free(ops, nedits); free(orig); return strdup(errmsg); }
+    if (errmsg) { edits_free(ops, nedits); free(orig); return tool_fail(is_error, "%s", errmsg); }
 
     qsort(ops, (size_t)nedits, sizeof(EditOp), edit_off_cmp);
     for (int i = 1; i < nedits; i++) {
         if (ops[i].off < ops[i - 1].off + ops[i - 1].old_len) {
             edits_free(ops, nedits); free(orig);
-            return strdup("error: overlapping edits");
+            return tool_fail(is_error, "error: overlapping edits");
         }
     }
 
     size_t new_total = olen;
     for (int i = 0; i < nedits; i++) new_total = new_total - ops[i].old_len + ops[i].new_len;
     char *out = malloc(new_total + 1);
-    if (!out) { edits_free(ops, nedits); free(orig); return strdup("error: OOM"); }
+    if (!out) { edits_free(ops, nedits); free(orig); return tool_fail(is_error, "error: OOM"); }
     size_t cursor = 0, w = 0;
     for (int i = 0; i < nedits; i++) {
         size_t chunk = ops[i].off - cursor;
@@ -581,12 +589,12 @@ static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx) {
     if (!f) {
         free(out);
         char *hint = path_grant_hint(ctx, fullpath, 1, 0);
-        return hint ? hint : strdup("error: cannot open file for writing");
+        return tool_fail_hint(is_error, hint, "error: cannot open file for writing");
     }
     size_t written = fwrite(out, 1, w, f);
     fclose(f);
     free(out);
-    if (written != w) return strdup("error: incomplete write");
+    if (written != w) return tool_fail(is_error, "error: incomplete write");
 
     char *res = malloc(48);
     if (!res) return strdup("ok");
@@ -693,12 +701,12 @@ static void grep_walk(const char *absdir, const char *reldir, int depth, GrepAcc
     closedir(d);
 }
 
-static char *file_grep_run(const RunToolParsed *q, FileReadCtx *ctx) {
+static char *file_grep_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error) {
     const char *workspace = ctx->workspace;
 
     const char *pattern = run_tool_param_str(q, "pattern");
     if (!pattern || !pattern[0])
-        return strdup("error: missing or empty 'pattern' field");
+        return tool_fail(is_error, "error: missing or empty 'pattern' field");
     const char *req_path = run_tool_param_str(q, "path");
     if (!req_path || !req_path[0]) req_path = ".";
     const char *glob_arg = run_tool_param_str(q, "glob");
@@ -712,7 +720,7 @@ static char *file_grep_run(const RunToolParsed *q, FileReadCtx *ctx) {
 
     regex_t re;
     if (regcomp(&re, pattern, REG_EXTENDED | REG_NEWLINE) != 0)
-        return strdup("error: invalid regex");
+        return tool_fail(is_error, "error: invalid regex");
 
     char resolved[PATH_MAX];
     if (req_path[0] == '/')
@@ -733,7 +741,7 @@ static char *file_grep_run(const RunToolParsed *q, FileReadCtx *ctx) {
         buf_appendf(&a.b, "\n\n[%d results limit reached]", limit);
 
     char *out = buf_take(&a.b);
-    return out ? out : strdup("error: OOM");
+    return out ? out : tool_fail(is_error, "error: OOM");
 }
 
 int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx) {
@@ -748,8 +756,8 @@ int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx) {
 }
 
 /* Dispatch file tool by name on pre-extracted wire params. */
-static char *dispatch_file(const RunToolParsed *q, FileReadCtx *ctx) {
-    typedef char *(*run_fn)(const RunToolParsed *, FileReadCtx *);
+static char *dispatch_file(const RunToolParsed *q, FileReadCtx *ctx, int *is_error) {
+    typedef char *(*run_fn)(const RunToolParsed *, FileReadCtx *, int *);
     struct { const char *name; run_fn fn; } tools[] = {
         {"file_read",  file_read_run},
         {"file_write", file_write_run},
@@ -760,11 +768,11 @@ static char *dispatch_file(const RunToolParsed *q, FileReadCtx *ctx) {
     };
     for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++)
         if (strcmp(q->tool_name, tools[i].name) == 0)
-            return tools[i].fn(q, ctx);
-    return strdup("error: unknown file tool");
+            return tools[i].fn(q, ctx, is_error);
+    return tool_fail(is_error, "error: unknown file tool");
 }
 
-char *tool_file_tier_run(const RunToolParsed *q) {
+char *tool_file_tier_run(const RunToolParsed *q, int *is_error) {
     /* Sandbox is already applied on this process; the run fns never set one
      * up themselves. sb.sandbox carries "mount enforcement is active" so
      * open failures outside the granted mounts produce a grant hint. */
@@ -777,7 +785,7 @@ char *tool_file_tier_run(const RunToolParsed *q) {
     fctx.sb.read_path_count = q->read_count;
     fctx.sb.write_paths  = q->write_paths;
     fctx.sb.write_path_count = q->write_count;
-    if (!fctx.workspace) return strdup("error: no workspace configured");
-    char *r = dispatch_file(q, &fctx);
+    if (!fctx.workspace) return tool_fail(is_error, "error: no workspace configured");
+    char *r = dispatch_file(q, &fctx, is_error);
     return r ? r : strdup("");
 }

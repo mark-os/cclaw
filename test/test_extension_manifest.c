@@ -487,7 +487,7 @@ static void test_extension_fork_roundtrip(void) {
     ToolEntry *t = tools_lookup(&reg, "extension_fork");
     assert(t);
 
-    char *r = t->handler("{\"name\":\"tg\",\"as\":\"tg-ng\"}", t->user_data);
+    char *r = t->handler("{\"name\":\"tg\",\"as\":\"tg-ng\"}", t->user_data, &(int){0});
     assert(r && strstr(r, "forked extension 'tg'"));
     free(r);
 
@@ -514,15 +514,15 @@ static void test_extension_fork_roundtrip(void) {
     sqlite3_finalize(s);
 
     /* Refusals: existing draft, unknown source, invisible source */
-    r = t->handler("{\"name\":\"tg\",\"as\":\"tg-ng\"}", t->user_data);
+    r = t->handler("{\"name\":\"tg\",\"as\":\"tg-ng\"}", t->user_data, &(int){0});
     assert(r && strstr(r, "already exists")); free(r);
-    r = t->handler("{\"name\":\"nope\"}", t->user_data);
+    r = t->handler("{\"name\":\"nope\"}", t->user_data, &(int){0});
     assert(r && strstr(r, "not registered")); free(r);
     assert(sqlite3_exec(db,
         "INSERT INTO extensions(name, path, published, owner_agent)"
         " VALUES('private','/tmp/test_fork_src',0,'someone-else');",
         NULL, NULL, NULL) == SQLITE_OK);
-    r = t->handler("{\"name\":\"private\"}", t->user_data);
+    r = t->handler("{\"name\":\"private\"}", t->user_data, &(int){0});
     assert(r && strstr(r, "not visible")); free(r);
 
     tools_free(&reg);

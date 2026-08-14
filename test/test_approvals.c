@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DB_PATH "/tmp/test_approvals.db"
@@ -455,8 +456,9 @@ static void test_pending_order_matches_subtree(void) {
 
 static const char *ARGS_ASK_A =
     "{\"code\":\"fetch('https://x/1', 'token')\"}";
-/* Mutated code — must NOT dedupe: capability match is byte-identical args
- * (the placeholder-set special case died with the secret_bind park, D17). */
+/* Mutated code — must NOT dedupe: capability match is semantic JSON equality,
+ * and a differing value is differing authority (the placeholder-set special
+ * case died with the secret_bind park, D17). */
 static const char *ARGS_ASK_B =
     "{\"code\":\"var r = go('token'); use(r)\"}";
 
@@ -609,6 +611,101 @@ static void test_block_window_ambient(void) {
     printf("  PASS: test_block_window_ambient\n");
 }
 
+/* B1: canonicalization. The same request re-serialized (key order, whitespace)
+ * is one capability — matching it is what kills the double-prompt. Differing
+ * values, and differing array order, are still different requests. */
+static void test_capability_match_canonical(void) {
+    sqlite3 *db = fresh_db();
+    db_agent_upsert(db, "bot", NULL, NULL);
+    int64_t sid = session_create(db, "test", "bot", -1, 0);
+
+    const char *doc = "{\"host\":\"api.example.com\",\"ports\":[80,443]}";
+    int64_t id = approval_create(db, sid, "call_c1", "request_config",
+                                 "request_changes", doc, "rerun");
+    assert(id > 0);
+
+    /* Key order differs → same capability. */
+    assert(approval_find_pending_match(db, sid, "request_changes", "request_config",
+               "{\"ports\":[80,443],\"host\":\"api.example.com\"}") == id);
+    /* Whitespace/indentation differs → same capability. */
+    assert(approval_find_pending_match(db, sid, "request_changes", "request_config",
+               "{ \"host\" : \"api.example.com\" ,\n  \"ports\" : [ 80, 443 ] }") == id);
+    /* A changed value parks a new approval. */
+    assert(approval_find_pending_match(db, sid, "request_changes", "request_config",
+               "{\"host\":\"evil.example.com\",\"ports\":[80,443]}") == 0);
+    /* Array ORDER matters — fullkey carries the index. */
+    assert(approval_find_pending_match(db, sid, "request_changes", "request_config",
+               "{\"host\":\"api.example.com\",\"ports\":[443,80]}") == 0);
+    /* An extra key is a different request. */
+    assert(approval_find_pending_match(db, sid, "request_changes", "request_config",
+               "{\"host\":\"api.example.com\",\"ports\":[80,443],\"tls\":false}") == 0);
+
+    /* The stored row keeps exactly what the model sent — audit trail intact. */
+    Approval *a = approval_get_pending(db, sid);
+    assert(a != NULL && strcmp(a->args_json, doc) == 0);
+    approval_free(a);
+
+    /* Empty containers are represented: {"a":{}} must not match {"a":1},
+     * nor {"a":[]}, nor a populated object at the same key. */
+    int64_t e = approval_create(db, sid, "call_c2", "js_eval", "js_eval",
+                                "{\"a\":{}}", "rerun");
+    assert(e > 0);
+    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval", "{\"a\": {}}") == e);
+    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval", "{\"a\":1}") == 0);
+    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval", "{\"a\":[]}") == 0);
+    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval", "{\"a\":{\"b\":1}}") == 0);
+    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval", "{}") == 0);
+
+    db_close(db);
+    clean_db();
+    printf("  PASS: test_capability_match_canonical\n");
+}
+
+/* expires_at of a grant row; 0 for permanent (NULL), -1 when absent. */
+static int64_t grant_expiry(sqlite3 *db, const char *agent, const char *kind,
+                            const char *value) {
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT ifnull(expires_at, 0) FROM grants"
+        " WHERE agent_name=?1 AND kind=?2 AND value=?3", -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, agent, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, kind, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, value, -1, SQLITE_STATIC);
+    int64_t v = (sqlite3_step(st) == SQLITE_ROW) ? sqlite3_column_int64(st, 0) : -1;
+    sqlite3_finalize(st);
+    return v;
+}
+
+/* M6: re-approving a still-live temporary grant extends expires_at; it never
+ * shortens one. */
+static void test_grant_expiry_extends(void) {
+    sqlite3 *db = fresh_db();
+    db_agent_upsert(db, "bot", NULL, NULL);
+
+    int64_t now = (int64_t)time(NULL);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 60) == 0);
+    assert(grant_expiry(db, "bot", "host", "api.example.com") == now + 60);
+
+    /* Re-approval with a later deadline extends the live grant. */
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 3600) == 0);
+    assert(grant_expiry(db, "bot", "host", "api.example.com") == now + 3600);
+
+    /* A shorter re-grant leaves the longer life alone. */
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 120) == 0);
+    assert(grant_expiry(db, "bot", "host", "api.example.com") == now + 3600);
+
+    /* Permanent (no expiry) is the ultimate extension... */
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", 0) == 0);
+    assert(grant_expiry(db, "bot", "host", "api.example.com") == 0);
+    /* ...and a later temporary re-grant must not claw it back. */
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 60) == 0);
+    assert(grant_expiry(db, "bot", "host", "api.example.com") == 0);
+
+    db_close(db);
+    clean_db();
+    printf("  PASS: test_grant_expiry_extends\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_approvals:\n");
@@ -626,6 +723,8 @@ int main(void) {
     test_pending_subtree();
     test_pending_order_matches_subtree();
     test_pending_match_dedupe();
+    test_capability_match_canonical();
+    test_grant_expiry_extends();
     test_take_ticket();
     test_pending_ids();
     test_block_window_ambient();

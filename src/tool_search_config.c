@@ -12,10 +12,10 @@ static const char *PARAMS_JSON =
     "\"query\":{\"type\":\"string\",\"description\":\"Optional substring to filter tools by name/description\"}"
     "}}";
 
-static char *handler(const char *arguments, void *user_data) {
+static char *handler(const char *arguments, void *user_data, int *is_error) {
     SearchConfigCtx *ctx = (SearchConfigCtx *)user_data;
     if (!ctx || !ctx->db || !ctx->agent_name)
-        return strdup("error: search_config unavailable");
+        return tool_fail(is_error, "error: search_config unavailable");
 
     char *query = tool_args_str(ctx->db, arguments, "query");
     /* Treat empty string as no filter */
@@ -325,15 +325,16 @@ static char *handler(const char *arguments, void *user_data) {
 
     free(query);
     char *result = buf_take(&out);
-    return result ? result : strdup("error: out of memory");
+    return result ? result : tool_fail(is_error, "error: out of memory");
 }
 
 /* EXEC_THREAD shim: rebuild SearchConfigCtx around the thread's own db. */
 static char *search_config_thread_run(sqlite3 *db, const char *agent_name,
-                                      int64_t session_id, const char *args) {
+                                      int64_t session_id, const char *args,
+                                      int *is_error) {
     SearchConfigCtx c = {.db = db, .agent_name = agent_name,
                          .session_id = session_id};
-    return handler(args, &c);
+    return handler(args, &c, is_error);
 }
 
 int tool_search_config_register(ToolRegistry *reg, SearchConfigCtx *ctx) {

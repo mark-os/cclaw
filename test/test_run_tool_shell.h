@@ -64,12 +64,15 @@ typedef struct {
     .secrets = NULL, .secret_count = 0, \
 }
 
-/* Send a shell-tier request via the real re-exec path.
- * Returns the tool result string (malloc'd) — "[exit N]\noutput" or
- * "[timeout after Ns]\noutput" or "error: ...".
- * Also strips the fd-3 frame header. Caller frees. */
-static inline char *run_tool_shell(const ShellToolReq *r) {
-    /* Build RunToolReq */
+/* Send a shell-tier request via the real re-exec path and unpack the whole
+ * fd-3 frame: [status][4-byte BE meta_len][meta][result].
+ * *out_hosts (optional) gets the hosts JSON, *out_status (optional) the
+ * child's explicit tool status (0 ok, 1 error). Caller frees. */
+static inline char *run_tool_shell_full(const ShellToolReq *r, char **out_hosts,
+                                        int *out_status) {
+    if (out_hosts) *out_hosts = NULL;
+    if (out_status) *out_status = 0;
+
     RunToolReq req = {
         .tier = RUNTOOL_TIER_SHELL,
         .tool_name = "shell_exec",
@@ -116,7 +119,6 @@ static inline char *run_tool_shell(const ShellToolReq *r) {
         return strdup("error: fork failed");
     }
     if (pid == 0) {
-        /* CHILD */
         close(sp[0]);
         if (sp[1] != 3) { dup2(sp[1], 3); close(sp[1]); }
         char *const argv[] = {"cclaw", "--run-tool", NULL};
@@ -125,7 +127,6 @@ static inline char *run_tool_shell(const ShellToolReq *r) {
         _exit(127);
     }
 
-    /* PARENT: write request, shutdown write end, read result */
     close(sp[1]);
     size_t written = 0;
     while (written < blob_len) {
@@ -136,7 +137,6 @@ static inline char *run_tool_shell(const ShellToolReq *r) {
     free(blob);
     shutdown(sp[0], SHUT_WR);
 
-    /* Read full result */
     size_t cap = 4096, len = 0;
     char *buf = malloc(cap);
     assert(buf);
@@ -152,112 +152,28 @@ static inline char *run_tool_shell(const ShellToolReq *r) {
     int status;
     waitpid(pid, &status, 0);
 
-    /* Strip the fd-3 frame: [4-byte BE meta_len][meta][result] */
-    if (len < 4) { free(buf); return strdup("error: short frame"); }
-    size_t meta_len = ((size_t)(unsigned char)buf[0] << 24) |
-                      ((size_t)(unsigned char)buf[1] << 16) |
-                      ((size_t)(unsigned char)buf[2] << 8) |
-                       (size_t)(unsigned char)buf[3];
-    if (4 + meta_len > len) { free(buf); return strdup("error: bad frame"); }
-    char *result = strdup(buf + 4 + meta_len);
+    if (len < 5) { free(buf); return strdup("error: short frame"); }
+    if (out_status) *out_status = (buf[0] == RUNTOOL_STATUS_ERROR);
+    size_t meta_len = ((size_t)(unsigned char)buf[1] << 24) |
+                      ((size_t)(unsigned char)buf[2] << 16) |
+                      ((size_t)(unsigned char)buf[3] << 8) |
+                       (size_t)(unsigned char)buf[4];
+    if (5 + meta_len > len) { free(buf); return strdup("error: bad frame"); }
+    if (out_hosts && meta_len > 0)
+        *out_hosts = strndup(buf + 5, meta_len);
+    char *result = strdup(buf + 5 + meta_len);
     free(buf);
     return result;
 }
 
-/* Same as run_tool_shell but also extracts the hosts JSON metadata.
- * *out_hosts is set to malloc'd string (or NULL if meta_len==0). */
+/* Result text only. */
+static inline char *run_tool_shell(const ShellToolReq *r) {
+    return run_tool_shell_full(r, NULL, NULL);
+}
+
+/* Result text + hosts JSON metadata. */
 static inline char *run_tool_shell_with_hosts(const ShellToolReq *r, char **out_hosts) {
-    *out_hosts = NULL;
-
-    RunToolReq req = {
-        .tier = RUNTOOL_TIER_SHELL,
-        .tool_name = "shell_exec",
-        .env_mode = r->env_mode,
-        .nproc = r->nproc,
-        .as_mb = r->as_mb,
-        .cpu_sec = r->cpu_sec,
-        .sandbox = r->sandbox,
-        .net_mode = r->net_mode,
-        .workspace = r->workspace,
-        .cwd_path = r->cwd_path,
-        .db_path = r->db_path,
-        .tmp_dir = r->tmp_dir,
-        .mount_cwd = r->mount_cwd,
-        .read_paths = r->read_paths,
-        .read_count = r->read_count,
-        .write_paths = r->write_paths,
-        .write_count = r->write_count,
-        .agent_dir = r->agent_dir ? r->agent_dir : r->workspace,
-        .host_rules = r->host_rules,
-        .host_count = r->host_count,
-        .command = r->command,
-        .shell_path = r->shell_path,
-        .timeout = r->timeout,
-        .secrets = r->secrets,
-        .secret_count = r->secret_count,
-        .egress_note = r->egress_note,
-    };
-
-    size_t blob_len = 0;
-    char *blob = run_tool_serialize_request(&req, &blob_len);
-    if (!blob) return strdup("error: serialize failed");
-
-    int sp[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) != 0) {
-        free(blob);
-        return strdup("error: socketpair failed");
-    }
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        free(blob); close(sp[0]); close(sp[1]);
-        return strdup("error: fork failed");
-    }
-    if (pid == 0) {
-        close(sp[0]);
-        if (sp[1] != 3) { dup2(sp[1], 3); close(sp[1]); }
-        char *const argv[] = {"cclaw", "--run-tool", NULL};
-        char *const envp[] = {NULL};
-        execve(SHELL_BINARY, argv, envp);
-        _exit(127);
-    }
-
-    close(sp[1]);
-    size_t written = 0;
-    while (written < blob_len) {
-        ssize_t w = write(sp[0], blob + written, blob_len - written);
-        if (w <= 0) break;
-        written += (size_t)w;
-    }
-    free(blob);
-    shutdown(sp[0], SHUT_WR);
-
-    size_t cap = 4096, len = 0;
-    char *buf = malloc(cap);
-    assert(buf);
-    for (;;) {
-        if (len + 1024 > cap) { cap *= 2; buf = realloc(buf, cap); assert(buf); }
-        ssize_t n = read(sp[0], buf + len, cap - len);
-        if (n <= 0) break;
-        len += (size_t)n;
-    }
-    close(sp[0]);
-    buf[len] = '\0';
-
-    int status;
-    waitpid(pid, &status, 0);
-
-    if (len < 4) { free(buf); return strdup("error: short frame"); }
-    size_t meta_len = ((size_t)(unsigned char)buf[0] << 24) |
-                      ((size_t)(unsigned char)buf[1] << 16) |
-                      ((size_t)(unsigned char)buf[2] << 8) |
-                       (size_t)(unsigned char)buf[3];
-    if (4 + meta_len > len) { free(buf); return strdup("error: bad frame"); }
-    if (meta_len > 0)
-        *out_hosts = strndup(buf + 4, meta_len);
-    char *result = strdup(buf + 4 + meta_len);
-    free(buf);
-    return result;
+    return run_tool_shell_full(r, out_hosts, NULL);
 }
 
 /* Convenience: detect namespace availability */

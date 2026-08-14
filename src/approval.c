@@ -235,13 +235,39 @@ int approval_consume(sqlite3 *db, int64_t id) {
 
 /* ── capability matching: dedupe + ticket transfer ─────────────────
  * Two calls ask for the same capability when one human decision honestly
- * covers both: byte-identical args. A 'sensitive' park is per-call by
+ * covers both: semantically identical args. A 'sensitive' park is per-call by
  * trust.md rule 1, so only an exact re-issue of the frozen call may dedupe
  * against it, and it never transfers (the gate excludes it from tickets). */
-static int capability_match(const char *action, const char *args_a, const char *args_b) {
+static int capability_match(sqlite3 *db, const char *action,
+                            const char *args_a, const char *args_b) {
     (void)action;
     if (!args_a || !args_b) return 0;
-    return strcmp(args_a, args_b) == 0;
+    if (strcmp(args_a, args_b) == 0) return 1;  /* also covers non-JSON args */
+
+    /* Semantic equality, in SQL: two docs are the same request when their
+     * json_tree node sets are equal both ways. fullkey carries array indices,
+     * so array order still matters ($[0] vs $[1] are different keys); object
+     * key order and whitespace do not. Container rows are included with a NULL
+     * atom so an empty object/array is represented — {"a":{}} must not match
+     * {"a":1}. Differing values still park a new approval: different args are
+     * different authority. The stored args_json is never rewritten — the audit
+     * trail keeps exactly what the model sent; only the comparison is smarter. */
+    const char *sql =
+        "SELECT NOT EXISTS ("
+        "  SELECT fullkey, type, atom FROM json_tree(?1)"
+        "  EXCEPT SELECT fullkey, type, atom FROM json_tree(?2))"
+        " AND NOT EXISTS ("
+        "  SELECT fullkey, type, atom FROM json_tree(?2)"
+        "  EXCEPT SELECT fullkey, type, atom FROM json_tree(?1))";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_text(stmt, 1, args_a, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, args_b, -1, SQLITE_STATIC);
+    /* Malformed JSON raises here (json_tree errors); no match is the safe answer. */
+    int match = (sqlite3_step(stmt) == SQLITE_ROW) && sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return match;
 }
 
 /* Scan this session's rerun approvals in `state` for a capability match.
@@ -268,7 +294,7 @@ static int64_t approval_match_state(sqlite3 *db, int64_t session_id,
     int64_t id = 0;
     while (id == 0 && sqlite3_step(stmt) == SQLITE_ROW) {
         const char *row_args = (const char *)sqlite3_column_text(stmt, 1);
-        if (capability_match(action, row_args, args_json))
+        if (capability_match(db, action, row_args, args_json))
             id = sqlite3_column_int64(stmt, 0);
     }
     sqlite3_finalize(stmt);

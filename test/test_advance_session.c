@@ -288,7 +288,7 @@ static void test_parallel_subagents_never_reconciled(void) {
         assert(db_tool_call_claim(db, parent, ids[i]) == 1);
         AgentLaunchCtx ctx = { .db = db, .session_id = parent,
                                .current_tool_call_id = ids[i] };
-        assert(tool_launch_agent_handler("{\"task\":\"work\"}", &ctx) == NULL);
+        assert(tool_launch_agent_handler("{\"task\":\"work\"}", &ctx, &(int){0}) == NULL);
     }
     assert(count(db, "SELECT COUNT(*) FROM tool_calls WHERE session_id=?"
                      " AND status='running';", parent) == 2);

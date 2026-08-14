@@ -53,7 +53,7 @@ static void test_creates_encrypted_row_and_hides_value(void) {
     tool_secret_create_register(&reg, &ctx);
     ToolEntry *e = tools_lookup(&reg, "secret_create");
 
-    char *r = e->handler("{\"name\":\"TRELLO_PW\"}", e->user_data);
+    char *r = e->handler("{\"name\":\"TRELLO_PW\"}", e->user_data, &(int){0});
     assert(r);
     assert(strstr(r, "{{SECRET:TRELLO_PW}}"));
     assert(db_secret_exists(db, "TRELLO_PW"));
@@ -88,10 +88,10 @@ static void test_duplicate_name_errors(void) {
     tool_secret_create_register(&reg, &ctx);
     ToolEntry *e = tools_lookup(&reg, "secret_create");
 
-    char *r1 = e->handler("{\"name\":\"DUP\"}", e->user_data);
+    char *r1 = e->handler("{\"name\":\"DUP\"}", e->user_data, &(int){0});
     assert(r1 && !strstr(r1, "error"));
     free(r1);
-    char *r2 = e->handler("{\"name\":\"DUP\"}", e->user_data);
+    char *r2 = e->handler("{\"name\":\"DUP\"}", e->user_data, &(int){0});
     assert(r2 && strstr(r2, "error") && strstr(r2, "already exists"));
     free(r2);
 
@@ -109,7 +109,7 @@ static void test_bad_name_errors(void) {
     tool_secret_create_register(&reg, &ctx);
     ToolEntry *e = tools_lookup(&reg, "secret_create");
 
-    char *r = e->handler("{\"name\":\"lowercase\"}", e->user_data);
+    char *r = e->handler("{\"name\":\"lowercase\"}", e->user_data, &(int){0});
     assert(r && strstr(r, "error"));
     free(r);
 
@@ -127,7 +127,7 @@ static void test_charset_and_length(void) {
     tool_secret_create_register(&reg, &ctx);
     ToolEntry *e = tools_lookup(&reg, "secret_create");
 
-    char *r = e->handler("{\"name\":\"HEXY\",\"length\":16,\"charset\":\"hex\"}", e->user_data);
+    char *r = e->handler("{\"name\":\"HEXY\",\"length\":16,\"charset\":\"hex\"}", e->user_data, &(int){0});
     assert(r && strstr(r, "16 chars") && strstr(r, "hex"));
     free(r);
     size_t n = 0;
@@ -138,11 +138,11 @@ static void test_charset_and_length(void) {
     shell_secrets_free(loaded, n);
 
     /* length clamps to [8,128] */
-    char *r2 = e->handler("{\"name\":\"CLAMPED\",\"length\":4}", e->user_data);
+    char *r2 = e->handler("{\"name\":\"CLAMPED\",\"length\":4}", e->user_data, &(int){0});
     assert(r2 && strstr(r2, "8 chars"));
     free(r2);
 
-    char *r3 = e->handler("{\"name\":\"BADCHARSET\",\"charset\":\"weird\"}", e->user_data);
+    char *r3 = e->handler("{\"name\":\"BADCHARSET\",\"charset\":\"weird\"}", e->user_data, &(int){0});
     assert(r3 && strstr(r3, "error"));
     free(r3);
 

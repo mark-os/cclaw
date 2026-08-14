@@ -42,6 +42,16 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall);
  * On LLM failure, returns -1 without compacting (safe fallback). */
 int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agent_name);
 
+/* Consecutive compaction failures before the operator is told (C4). */
+#define COMPACTION_FAIL_NOTIFY 3
+
+/* Record one compaction outcome on sessions.compaction_fail_count: reset on
+ * success, bump on failure, and on the transition to COMPACTION_FAIL_NOTIFY
+ * send ONE operator notice to the session's channel (never an entry — the
+ * agent is not told). Called by llm_compaction; exposed for tests. */
+void compaction_record_outcome(sqlite3 *db, const char *db_path,
+                               int64_t session_id, int ok, int budget_tokens);
+
 /* Healthy, non-degraded models whose capabilities JSON array contains cap
  * (e.g. "audio"), ordered by priority. Fills out (max slots), returns count. */
 int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, int max);

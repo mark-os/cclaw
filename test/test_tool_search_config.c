@@ -20,7 +20,7 @@ static const char *DB_PATH = "/tmp/test_cclaw_search_config.db";
 static char *call_handler(ToolRegistry *reg, const char *args) {
     ToolEntry *e = tools_lookup(reg, "search_config");
     assert(e != NULL);
-    return e->handler(args, e->user_data);
+    return e->handler(args, e->user_data, &(int){0});
 }
 
 /* Fresh db + one agent holding two tool grants. */

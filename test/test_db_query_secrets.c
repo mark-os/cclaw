@@ -52,7 +52,7 @@ static void test_select_star_filters_secrets(void) {
     db_secret_set(db, "GEMINI_API_KEY", "AIzaSy-secret456", "operator", "system");
 
     /* Run db_query tool: SELECT * FROM secrets */
-    char *result = tool_db_query_handler("{\"sql\":\"SELECT * FROM secrets\"}", db);
+    char *result = tool_db_query_handler("{\"sql\":\"SELECT * FROM secrets\"}", db, &(int){0});
     if (!result) { db_close(db); FAIL("handler returned NULL"); }
 
     /* Encrypted values filtered — neither enc: value nor plaintext appears */
@@ -72,7 +72,7 @@ static void test_where_clause_secret_key(void) {
     if (!db) FAIL("db_open");
 
     char *result = tool_db_query_handler(
-        "{\"sql\":\"SELECT name, value FROM secrets WHERE name = 'PROVIDER_API_KEY'\"}", db);
+        "{\"sql\":\"SELECT name, value FROM secrets WHERE name = 'PROVIDER_API_KEY'\"}", db, &(int){0});
     if (!result) { db_close(db); FAIL("handler returned NULL"); }
 
     /* Should be empty or masked — row filtered */
@@ -94,7 +94,7 @@ static void test_non_kv_table_unaffected(void) {
     /* sessions table should work normally */
     session_create(db, "test-session", NULL, -1, 0);
     char *result = tool_db_query_handler(
-        "{\"sql\":\"SELECT id, name FROM sessions\"}", db);
+        "{\"sql\":\"SELECT id, name FROM sessions\"}", db, &(int){0});
     if (!result) { db_close(db); FAIL("handler returned NULL"); }
     if (!strstr(result, "test-session")) { free(result); db_close(db); FAIL("missing session"); }
 
@@ -115,7 +115,7 @@ static void test_count_excludes_secrets(void) {
      * The filter only skips rows with enc: in a TEXT column value.
      * A COUNT result is an integer, so it passes through. */
     char *result = tool_db_query_handler(
-        "{\"sql\":\"SELECT COUNT(*) AS cnt FROM secrets\"}", db);
+        "{\"sql\":\"SELECT COUNT(*) AS cnt FROM secrets\"}", db, &(int){0});
     if (!result) { db_close(db); FAIL("handler returned NULL"); }
 
     if (!strstr(result, "cnt")) { free(result); db_close(db); FAIL("missing cnt"); }

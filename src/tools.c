@@ -22,6 +22,21 @@ char *tool_errf(const char *fmt, ...) {
     return strdup(buf);
 }
 
+int tool_timeout_clamp(int requested, int def) {
+    int t = requested > 0 ? requested : def;
+    return t > TOOL_TIMEOUT_MAX_SEC ? TOOL_TIMEOUT_MAX_SEC : t;
+}
+
+char *tool_fail(int *is_error, const char *fmt, ...) {
+    if (is_error) *is_error = 1;
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    return strdup(buf);
+}
+
 int tools_register(ToolRegistry *reg, const char *name, const char *description,
                    const char *parameters_json, ToolHandlerFn handler, void *user_data) {
     if (!reg || !name || reg->count >= TOOLS_MAX) return -1;
@@ -37,9 +52,9 @@ int tools_register(ToolRegistry *reg, const char *name, const char *description,
     return 0;
 }
 
-char *tool_sandboxed_stub(const char *arguments, void *user_data) {
+char *tool_sandboxed_stub(const char *arguments, void *user_data, int *is_error) {
     (void)arguments; (void)user_data;
-    return strdup("error: sandboxed tool dispatched in-process (wiring bug)");
+    return tool_fail(is_error, "error: sandboxed tool dispatched in-process (wiring bug)");
 }
 
 void tools_set_recipe(ToolRegistry *reg, const char *name, ToolRecipe recipe) {

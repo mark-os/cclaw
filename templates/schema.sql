@@ -206,6 +206,9 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- tool-loop iteration so the request prefix stays
                                             -- byte-stable for prompt caching. NULL = no block.
   leaf_id INTEGER DEFAULT -1,
+  compaction_fail_count INTEGER NOT NULL DEFAULT 0,  -- consecutive failed compaction attempts;
+                                            -- zeroed on success. At 3 the operator channel gets
+                                            -- one notice (llm_proc.c) — the agent is never told.
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );

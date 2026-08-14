@@ -22,7 +22,7 @@ static sqlite3 *setup_db(void) {
 
 static void test_invalid_json(void) {
     AgentLaunchCtx ctx = {.db = NULL, .session_id = 1};
-    char *r = tool_launch_agent_handler("not json", &ctx);
+    char *r = tool_launch_agent_handler("not json", &ctx, &(int){0});
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -32,7 +32,7 @@ static void test_invalid_json(void) {
 static void test_missing_task(void) {
     sqlite3 *db = setup_db();
     AgentLaunchCtx ctx = {.db = db, .session_id = 1};
-    char *r = tool_launch_agent_handler("{\"foo\":\"bar\"}", &ctx);
+    char *r = tool_launch_agent_handler("{\"foo\":\"bar\"}", &ctx, &(int){0});
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -46,7 +46,7 @@ static void test_depth_limit(void) {
     int64_t sid = session_create(db, "deep", NULL, 1, config_default_int("agent_max_depth"));
     assert(sid > 0);
     AgentLaunchCtx ctx = {.db = db, .session_id = sid};
-    char *r = tool_launch_agent_handler("{\"task\":\"hello\"}", &ctx);
+    char *r = tool_launch_agent_handler("{\"task\":\"hello\"}", &ctx, &(int){0});
     assert(r != NULL);
     assert(strstr(r, "max agent depth") != NULL);
     free(r);
@@ -68,7 +68,7 @@ static void test_system_wide_limit_batch_aware(void) {
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     for (int i = 0; i < max_active + 3; i++) {
         char *r = tool_launch_agent_handler(
-            "{\"task\":\"burst\",\"background\":true}", &ctx);
+            "{\"task\":\"burst\",\"background\":true}", &ctx, &(int){0});
         assert(r != NULL);
         if (i < max_active)
             assert(strncmp(r, "error:", 6) != 0);   /* admitted */
@@ -100,7 +100,7 @@ static void test_system_wide_limit(void) {
 
     int64_t my_sid = session_create(db, "me", "default", -1, 0);
     AgentLaunchCtx ctx = {.db = db, .session_id = my_sid};
-    char *r = tool_launch_agent_handler("{\"task\":\"overflow\"}", &ctx);
+    char *r = tool_launch_agent_handler("{\"task\":\"overflow\"}", &ctx, &(int){0});
     assert(r != NULL);
     assert(strstr(r, "in flight or queued system-wide") != NULL);
     assert(strstr(r, "session_max_active") != NULL);   /* names its knob */
@@ -115,7 +115,7 @@ static void test_spawn_background(void) {
     assert(parent_sid > 0);
 
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    char *r = tool_launch_agent_handler("{\"task\":\"test task\",\"background\":true}", &ctx);
+    char *r = tool_launch_agent_handler("{\"task\":\"test task\",\"background\":true}", &ctx, &(int){0});
     assert(r != NULL);
     assert(strstr(r, "agent delegated") != NULL);
 
@@ -138,7 +138,7 @@ static void test_spawn_blocking(void) {
                           .current_tool_call_id = "call_123"};
     session_set_state(db, parent_sid, "llm_running");
     session_set_state(db, parent_sid, "tool_running");
-    char *r = tool_launch_agent_handler("{\"task\":\"blocking task\"}", &ctx);
+    char *r = tool_launch_agent_handler("{\"task\":\"blocking task\"}", &ctx, &(int){0});
     assert(r == NULL); /* NULL = async, real result comes on child completion */
 
     /* Parent state is unchanged by the handler (still tool_running) */
@@ -187,7 +187,7 @@ static void test_unknown_agent_rejected(void) {
     /* Trust policy comes from the agents row; an unregistered name must be
      * refused, not spawned (it would run with no row to derive policy from) */
     char *r = tool_launch_agent_handler(
-        "{\"task\":\"x\",\"name\":\"x-nonexistent\"}", &ctx);
+        "{\"task\":\"x\",\"name\":\"x-nonexistent\"}", &ctx, &(int){0});
     assert(r != NULL);
     assert(strstr(r, "unknown agent") != NULL);
     free(r);
@@ -199,7 +199,7 @@ static void test_check_agent_not_found(void) {
     sqlite3 *db = setup_db();
     int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    char *r = tool_check_session_handler("{\"session_id\":9999}", &ctx);
+    char *r = tool_check_session_handler("{\"session_id\":9999}", &ctx, &(int){0});
     assert(strstr(r, "not found") != NULL);
     free(r);
     db_close(db);
@@ -219,7 +219,7 @@ static void test_check_agent_idle_with_result(void) {
     snprintf(args, sizeof(args), "{\"session_id\":%lld}", (long long)child_sid);
 
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    char *r = tool_check_session_handler(args, &ctx);
+    char *r = tool_check_session_handler(args, &ctx, &(int){0});
     assert(strstr(r, "state: idle") != NULL);
     assert(strstr(r, "result: the answer is 42") != NULL);
     free(r);
@@ -245,7 +245,7 @@ static void test_check_session_stamps_poll_delivery(void) {
     char args[64];
     snprintf(args, sizeof(args), "{\"session_id\":%lld}", (long long)child_sid);
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    char *r = tool_check_session_handler(args, &ctx);
+    char *r = tool_check_session_handler(args, &ctx, &(int){0});
     assert(strstr(r, "state: idle") != NULL);
     free(r);
 
@@ -312,7 +312,7 @@ static void test_filter_explicit_tools(void) {
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     /* Self-spawn (no "name") with explicit "tools" */
     char *r = tool_launch_agent_handler(
-        "{\"task\":\"work\",\"background\":true,\"tools\":[\"file_read\"]}", &ctx);
+        "{\"task\":\"work\",\"background\":true,\"tools\":[\"file_read\"]}", &ctx, &(int){0});
     assert(r != NULL);
     assert(strstr(r, "agent delegated") != NULL);
     free(r);
@@ -338,7 +338,7 @@ static void test_filter_kv_worker_tools(void) {
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     /* Self-spawn without "tools" — should pick up kv worker_tools */
     char *r = tool_launch_agent_handler(
-        "{\"task\":\"work\",\"background\":true}", &ctx);
+        "{\"task\":\"work\",\"background\":true}", &ctx, &(int){0});
     assert(r != NULL);
     assert(strstr(r, "agent delegated") != NULL);
     free(r);
@@ -361,7 +361,7 @@ static void test_filter_neither(void) {
     /* Self-spawn with no explicit tools and no worker_tools override → the
      * registry default applies (a worker is never unrestricted). */
     char *r = tool_launch_agent_handler(
-        "{\"task\":\"work\",\"background\":true}", &ctx);
+        "{\"task\":\"work\",\"background\":true}", &ctx, &(int){0});
     assert(r != NULL);
     assert(strstr(r, "agent delegated") != NULL);
     free(r);
@@ -408,7 +408,7 @@ static void test_default_worker_may_nest(void) {
     assert(parent_sid > 0);
 
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    char *r = tool_launch_agent_handler("{\"task\":\"work\",\"background\":true}", &ctx);
+    char *r = tool_launch_agent_handler("{\"task\":\"work\",\"background\":true}", &ctx, &(int){0});
     assert(r != NULL && strstr(r, "agent delegated") != NULL);
     free(r);
 
@@ -428,7 +428,7 @@ static void test_default_worker_may_nest(void) {
 
     /* And the nested spawn actually succeeds (depth 1 < agent_max_depth 2). */
     AgentLaunchCtx wctx = {.db = db, .session_id = worker_sid};
-    r = tool_launch_agent_handler("{\"task\":\"deeper\",\"background\":true}", &wctx);
+    r = tool_launch_agent_handler("{\"task\":\"deeper\",\"background\":true}", &wctx, &(int){0});
     assert(r != NULL && strstr(r, "agent delegated") != NULL);
     free(r);
 
@@ -446,7 +446,7 @@ static void test_tools_with_name_rejected(void) {
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     /* Passing "tools" with an explicit "name" → error */
     char *r = tool_launch_agent_handler(
-        "{\"task\":\"x\",\"name\":\"default\",\"tools\":[\"file_read\"],\"background\":true}", &ctx);
+        "{\"task\":\"x\",\"name\":\"default\",\"tools\":[\"file_read\"],\"background\":true}", &ctx, &(int){0});
     assert(r != NULL);
     assert(strstr(r, "only valid for self-spawn") != NULL);
     free(r);
@@ -467,7 +467,7 @@ static void test_self_spawn_inherits_agent_name(void) {
 
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     char *r = tool_launch_agent_handler(
-        "{\"task\":\"selfwork\",\"background\":true}", &ctx);
+        "{\"task\":\"selfwork\",\"background\":true}", &ctx, &(int){0});
     assert(r != NULL);
     assert(strstr(r, "agent delegated") != NULL);
     free(r);

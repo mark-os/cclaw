@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` 5000ms). CLI and daemon are peers sharing one source of truth; per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped so a live peer's in-flight sessions are never stomped.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v41 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v40 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into it).
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v43 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v40 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into it).
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -370,6 +370,7 @@ channel-wide default lives on `channels.default_agent`.
 | `turn_iteration` | INTEGER NOT NULL DEFAULT 0 | iteration within current turn |
 | `turn_context` | TEXT | `<RELEVANT_CONTEXT>` block, materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; always present (it carries `<current_time>` even when nothing else is live) |
 | `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
+| `compaction_fail_count` | INTEGER NOT NULL DEFAULT 0 | consecutive failed compaction attempts; zeroed on success. At 3 (`COMPACTION_FAIL_NOTIFY`, `llm_proc.c`) the session's channel gets one operator notice per streak — the agent is never told; the session keeps running on the read-time context window (`plan_find_cut`), nothing is deleted |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 

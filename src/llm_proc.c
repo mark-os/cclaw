@@ -742,7 +742,11 @@ static char *extract_content(sqlite3 *db, EndpointType ep, const char *body) {
     return r;
 }
 
-int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agent_name) {
+/* One compaction attempt. *budget_out gets the target token budget as soon as
+ * it is known (0 if we failed before that) — the wrapper quotes it in the
+ * operator notice. */
+static int compaction_attempt(sqlite3 *db, CURL *curl, int64_t session_id,
+                              const char *agent_name, int *budget_out) {
     Config *cfg = config_load(db);
     if (!cfg || !cfg->compaction) return -1;
 
@@ -760,6 +764,7 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
     float target_ratio = cfg->compaction_target > 0 ? cfg->compaction_target : 0.3f;
     int target_tokens = (int)(target_ratio * (float)effective_window);
     if (target_tokens <= 0) target_tokens = 4000;
+    *budget_out = target_tokens;
 
     /* Plan branch — use resolved window */
     Config plan_cfg = *cfg;
@@ -929,6 +934,50 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
     config_free(cfg);
 
     return (compact_id > 0) ? 0 : -1;
+}
+
+/* One session-id-bound statement, stepped and finalized. */
+static void session_exec1(sqlite3 *db, const char *sql, int64_t session_id) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(s, 1, session_id);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+}
+
+/* C4: a session whose compaction keeps failing is silently running on the
+ * read-time window (plan_find_cut drops old turns from the request; nothing is
+ * deleted). The agent is deliberately not told — it cannot fix it, and telling
+ * it invites coping behavior — so the notice goes to the operator's channel,
+ * once per failure streak (the transition to COMPACTION_FAIL_NOTIFY, the
+ * status='healthy' guard's pattern). Channel-less sessions no-op. */
+void compaction_record_outcome(sqlite3 *db, const char *db_path,
+                               int64_t session_id, int ok, int budget_tokens) {
+    session_exec1(db, ok ? "UPDATE sessions SET compaction_fail_count=0"
+                           " WHERE id=?1;"
+                         : "UPDATE sessions"
+                           " SET compaction_fail_count=compaction_fail_count+1"
+                           " WHERE id=?1;", session_id);
+    if (ok) return;
+    if (db_scalar_i64(db, "SELECT compaction_fail_count FROM sessions WHERE id=?1;",
+                      session_id, 0) != COMPACTION_FAIL_NOTIFY)
+        return;                                  /* fire on the transition only */
+
+    char text[256];
+    snprintf(text, sizeof(text),
+             "⚠ session #%lld compaction failing — context is sliding-window "
+             "around %d tokens; older turns invisible to the model until "
+             "compaction recovers.",
+             (long long)session_id, budget_tokens);
+    channel_notify_session(db, db_path, session_id, text);
+}
+
+int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agent_name) {
+    int budget = 0;
+    int rc = compaction_attempt(db, curl, session_id, agent_name, &budget);
+    compaction_record_outcome(db, sqlite3_db_filename(db, "main"), session_id,
+                              rc == 0, budget);
+    return rc;
 }
 
 

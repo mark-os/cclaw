@@ -1,4 +1,5 @@
 #include "db.h"
+#include "llm_proc.h"
 #include "test_util.h"
 #include <stdio.h>
 #include <string.h>
@@ -172,9 +173,54 @@ static void test_compaction_fts_indexes_old(void) {
     printf("  PASS test_compaction_fts_indexes_old\n");
 }
 
+/* C4: the counter bumps on failure, resets on success, and the operator
+ * notice fires exactly once per streak — never as a session entry. */
+static void test_compaction_fail_notice(void) {
+    sqlite3 *db = setup();
+    test_seed_agent(db, "default");
+    int64_t sid = session_create(db, "fail_test", "default", -1, 0);
+    sqlite3_exec(db, "UPDATE sessions SET channel_name='opsch', chat_id='7';",
+                 NULL, NULL, NULL);
+
+    int64_t before = db_scalar_i64(db, "SELECT COUNT(*) FROM entries"
+                                       " WHERE session_id=?;", sid, -1);
+
+    compaction_record_outcome(db, NULL, sid, 0, 4000);
+    compaction_record_outcome(db, NULL, sid, 0, 4000);
+    assert(db_scalar_i64(db, "SELECT compaction_fail_count FROM sessions"
+                             " WHERE id=?;", sid, -1) == 2);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
+                         sid, -1) == 0);
+
+    /* Transition to 3 → one notice; further failures stay quiet. */
+    compaction_record_outcome(db, NULL, sid, 0, 4000);
+    compaction_record_outcome(db, NULL, sid, 0, 4000);
+    assert(db_scalar_i64(db, "SELECT compaction_fail_count FROM sessions"
+                             " WHERE id=?;", sid, -1) == 4);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?"
+                             " AND payload LIKE '%compaction failing%'"
+                             " AND payload LIKE '%4000 tokens%';", sid, -1) == 1);
+
+    /* The agent is never told. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM entries WHERE session_id=?;",
+                         sid, -1) == before);
+
+    /* Success zeroes it; the next streak can notify again. */
+    compaction_record_outcome(db, NULL, sid, 1, 4000);
+    assert(db_scalar_i64(db, "SELECT compaction_fail_count FROM sessions"
+                             " WHERE id=?;", sid, -1) == 0);
+    for (int i = 0; i < 3; i++) compaction_record_outcome(db, NULL, sid, 0, 4000);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
+                         sid, -1) == 2);
+
+    teardown(db);
+    printf("  PASS test_compaction_fail_notice\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_compaction:\n");
+    test_compaction_fail_notice();
     test_compaction_cte_stops();
     test_compaction_forward_walk();
     test_compaction_original_parent();

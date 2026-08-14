@@ -169,6 +169,106 @@ static void test_llm_req_skips_keyless_provider(void) {
     PASS();
 }
 
+/* A8: a dropped candidate leaves a trace, through the machinery that already
+ * exists for models that fail at request time.
+ *
+ * The 2026-08-10 incident's silent half — a phantom api_key_env dropped both
+ * gateway models pre-request, so nothing recorded errors, the rows stayed
+ * 'healthy', and every request quietly served from a different provider.
+ * Dropping now marks the row degraded on the healthy→degraded transition
+ * (exactly one operator notice, like the error paths), and un-marks it when
+ * the key resolves again. */
+static void test_dropped_candidate_degrades_and_recovers(void) {
+    TEST(dropped_candidate_degrades_and_recovers);
+
+    const char *db_path = "/tmp/cclaw_llm_req_a8.db";
+    test_db_clean(db_path);
+
+    mock_server_reset();
+    mock_server_enqueue(200, STOP_RESPONSE);
+    mock_server_enqueue(200, STOP_RESPONSE);
+    mock_server_enqueue(200, STOP_RESPONSE);
+
+    sqlite3 *db = test_db_open(db_path);
+    assert(db);
+    test_seed_agent(db, "Router");
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", s_port);
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db,
+        "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, priority)"
+        " VALUES ('nokey-prov', ?1, 'openai', 'CCLAW_TEST_ABSENT_KEY', 0),"
+        "        ('keyed-prov', ?1, 'openai', '', 10)",
+        -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, url, -1, SQLITE_STATIC);
+    assert(sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_finalize(st);
+    assert(sqlite3_exec(db,
+        "INSERT INTO models(id, provider_name, model, priority) VALUES"
+        " ('model-a@nokey-prov','nokey-prov','model-a',0),"
+        " ('model-b@keyed-prov','keyed-prov','model-b',10);"
+        "UPDATE agents SET primary_model='model-a@nokey-prov',"
+        " secondary_model='model-b@keyed-prov' WHERE name='Router';",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    int64_t sid = session_create(db, "a8", "Router", -1, 0);
+    /* A channel-bound session is what makes the operator notice observable. */
+    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='testch',"
+                            " chat_id='c1' WHERE id=(SELECT MAX(id) FROM sessions)",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
+    entry_append_with_iteration(db, sid, &sys, 1);
+    Message user = {.role = ROLE_USER, .content = "Hello"};
+    entry_append_with_iteration(db, sid, &user, 1);
+
+    set_test_env(db_path);
+    unsetenv("CCLAW_TEST_ABSENT_KEY");
+
+    assert(llm_req(db, NULL, sid, 0) == 0);
+    /* Degraded by configuration: marked, but with no cooldown — that is what
+     * separates it from an error-driven degradation. */
+    int degraded = 0, notices = 0;
+    sqlite3_stmt *q;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT (SELECT COUNT(*) FROM models WHERE id='model-a@nokey-prov'"
+        "         AND status='degraded' AND degraded_until IS NULL),"
+        "       (SELECT COUNT(*) FROM channel_outbox)", -1, &q, NULL) == SQLITE_OK);
+    assert(sqlite3_step(q) == SQLITE_ROW);
+    degraded = sqlite3_column_int(q, 0);
+    notices = sqlite3_column_int(q, 1);
+    sqlite3_finalize(q);
+    if (!degraded) { db_close(db); test_db_clean(db_path); FAIL("candidate not degraded"); }
+    if (notices != 1) { db_close(db); test_db_clean(db_path); FAIL("expected exactly 1 notice"); }
+
+    /* Second turn, same missing key: no second notice (transition-guarded). */
+    Message u2 = {.role = ROLE_USER, .content = "Again"};
+    entry_append_with_iteration(db, sid, &u2, 1);
+    assert(llm_req(db, NULL, sid, 0) == 0);
+    assert(sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM channel_outbox",
+                              -1, &q, NULL) == SQLITE_OK);
+    assert(sqlite3_step(q) == SQLITE_ROW);
+    notices = sqlite3_column_int(q, 0);
+    sqlite3_finalize(q);
+    if (notices != 1) { db_close(db); test_db_clean(db_path); FAIL("notice repeated"); }
+
+    /* The key comes back — recovery, mirroring model_stat_success. */
+    setenv("CCLAW_TEST_ABSENT_KEY", "sk-present", 1);
+    Message u3 = {.role = ROLE_USER, .content = "Once more"};
+    entry_append_with_iteration(db, sid, &u3, 1);
+    assert(llm_req(db, NULL, sid, 0) == 0);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM models WHERE id='model-a@nokey-prov'"
+        " AND status='healthy'", -1, &q, NULL) == SQLITE_OK);
+    assert(sqlite3_step(q) == SQLITE_ROW);
+    int healthy = sqlite3_column_int(q, 0);
+    sqlite3_finalize(q);
+    unsetenv("CCLAW_TEST_ABSENT_KEY");
+    db_close(db); test_db_clean(db_path);
+    if (!healthy) FAIL("candidate did not recover");
+    PASS();
+}
+
 /* Test: llm_req returns 0 and writes tool_calls on tool_calls response */
 static void test_llm_req_tool_calls(void) {
     TEST(llm_req_tool_calls);
@@ -253,6 +353,7 @@ int main(void) {
     printf("test_integration_llm_proc:\n");
     test_llm_req_stop();
     test_llm_req_skips_keyless_provider();
+    test_dropped_candidate_degrades_and_recovers();
     test_llm_req_tool_calls();
     test_llm_req_error();
 

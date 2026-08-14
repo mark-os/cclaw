@@ -51,7 +51,7 @@ static const char *RESP_TOOL_CALL2 =
     "\"{\\\"action\\\":\\\"request_changes\\\","
     "\\\"changes\\\":{\\\"provider\\\":{\\\"provider\\\":\\\"myllm\\\","
     "\\\"base_url\\\":\\\"https://myllm.example.com/v1\\\","
-    "\\\"model\\\":\\\"m7b\\\",\\\"api_key_env\\\":\\\"MYLLM_API_KEY\\\"}},"
+    "\\\"api_key_env\\\":\\\"MYLLM_API_KEY\\\"}},"
     "\\\"reason\\\":\\\"pty provider test\\\"}\"}}]},"
     "\"finish_reason\":\"tool_calls\"}],"
     "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
@@ -177,6 +177,9 @@ int main(void) {
         setenv("CCLAW_DB_PATH", DB_PATH, 1);
         setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
         setenv("OPENROUTER_API_KEY", "test-key", 1);
+        /* The provider document names this credential; config-time
+         * validation refuses a document whose key resolves nowhere. */
+        setenv("MYLLM_API_KEY", "test-myllm-key", 1);
         setenv("CCLAW_MODEL", "test-model", 1);
         setenv("CCLAW_STREAM", "0", 1);
         unsetenv("CCLAW_SANDBOX_PROFILE");
@@ -245,7 +248,7 @@ int main(void) {
         if (sqlite3_prepare_v2(db,
                 "SELECT 1 FROM providers WHERE name='myllm'"
                 " AND base_url='https://myllm.example.com/v1'"
-                " AND default_model='m7b' AND api_key_env='MYLLM_API_KEY'",
+                " AND api_key_env='MYLLM_API_KEY'",
                 -1, &s, NULL) == SQLITE_OK) {
             ok = (sqlite3_step(s) == SQLITE_ROW);
             sqlite3_finalize(s);

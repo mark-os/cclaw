@@ -91,6 +91,30 @@ Sections by scope — the approval prompt groups them the same way:
   values, the provider row, each model row, the agent's own settings, bound
   routes) — never by echoing the request. Intent and effect diverged silently
   in the 2026-08-10 incident, and the agent has no other way to tell.
+- **Probe at apply (routing changes only)**: a re-read proves what the rows
+  *say*, not that a request now reaches a model — the 2026-08-10 incident wrote
+  a perfectly valid provider row and knocked prod off its gateway for 2.5h. So
+  a document that changes **which model would serve the next request** (the
+  agent's own `primary_model`/`secondary_model`, a `models` entry the agent
+  routes to, or the provider behind it) is verified for real before it stands:
+  the rows it is about to move are snapshotted, the write commits, and then the
+  new top candidate gets **one minimal completion** (`max_tokens` 1) over the
+  normal transport — same candidate loader, same URL/auth builders, **15s hard
+  timeout, no retries, no fallback ladder**; a timeout is a failed probe. The
+  call is synchronous in the approval path, and the resulting rare ~15s stall
+  is accepted deliberately (the alternative was a pending-probe approval
+  state). Success appends `probed OK — <id> served the test request`, naming
+  the id the *provider* reported. Any failure restores the snapshot (rows the
+  document created are deleted, rows it changed are put back) and the tool
+  result is exactly `probe failed: <reason> — reverted to <previous>`. Routing
+  is never silently rerouted. The probe writes nothing but an `llm_responses`
+  archive row (`probe_ok`, `probe_http_<code>`, `probe_timeout`,
+  `probe_network_error`) so `cclaw resp` can show it — no entries, no turn
+  state, no model stats or degradation bookkeeping. Grants/config-value-only
+  documents are not probed, and neither are the operator paths (dashboard, CLI
+  grant-from-history): they have no session and no tool result to read the
+  verdict, and pre-request candidate drops already surface there (see
+  [error-handling.md](error-handling.md)).
 - **Approval summary**: enumerates every requested line (hosts, paths, tools,
   routes, agent k=v, config k=v, models, provider) in fenced blocks grouped
   **agent-scoped vs system-wide** so the approver sees the blast radius at a

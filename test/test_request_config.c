@@ -40,7 +40,7 @@ static void apply_latest(sqlite3 *db, int64_t sid, char **receipt_out) {
     assert(sqlite3_step(s) == SQLITE_ROW);
     char *args = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
-    assert(request_config_changes_apply(db, "test", args, 0, receipt_out) == 0);
+    assert(request_config_changes_apply(db, "test", args, 0, 0, receipt_out) == 0);
     free(args);
 }
 
@@ -438,7 +438,7 @@ static void test_provider_defaults(void) {
     char *args = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
     char *receipt = NULL;
-    assert(request_config_changes_apply(db, "test", args, 0, &receipt) == 0);
+    assert(request_config_changes_apply(db, "test", args, 0, 0, &receipt) == 0);
     free(args);
     /* The receipt is a re-read: it names the endpoint now stored. */
     assert(receipt && strstr(receipt, "provider gateway -> "
@@ -719,7 +719,7 @@ static void test_batch_apply(void) {
     sqlite3_finalize(s);
 
     char *receipt = NULL;
-    rc = request_config_changes_apply(db, "test", args_copy, 0, &receipt);
+    rc = request_config_changes_apply(db, "test", args_copy, 0, 0, &receipt);
     assert(rc == 0);
     /* The receipt is a re-read of every section: the grants that are live,
      * the config value as stored, the provider row as it now stands. */
@@ -856,7 +856,7 @@ static void test_agent_routes_sections(void) {
     char *args_copy = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
 
-    assert(request_config_changes_apply(db, "test", args_copy, 0, NULL) == 0);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, NULL) == 0);
     free(args_copy);
 
     /* models row seeded → the adopted id resolves. */
@@ -910,7 +910,7 @@ static void test_agent_routes_sections(void) {
     assert(sqlite3_step(s) == SQLITE_ROW);
     args_copy = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
-    assert(request_config_changes_apply(db, "test", args_copy, 0, NULL) == -1);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, NULL) == -1);
     free(args_copy);
     assert(sqlite3_prepare_v2(db,
         "SELECT max_iterations FROM agents WHERE name='test'",
@@ -941,7 +941,7 @@ static void test_apply_rollback(void) {
         "\"grants\":{\"tools\":[\"web_fetch\"]},"
         "\"config\":{\"nonexistent_key_xyz\":\"boom\"}}}";
 
-    int rc = request_config_changes_apply(db, "test", bad_args, 0, NULL);
+    int rc = request_config_changes_apply(db, "test", bad_args, 0, 0, NULL);
     assert(rc == -1); /* config_set fails for unregistered key */
 
     /* Verify the tool grant did NOT land (rollback). */
@@ -1272,7 +1272,7 @@ static void test_secret_bindings_section(void) {
     sqlite3_finalize(s);
 
     /* Apply mints both pairs, durably. */
-    assert(request_config_changes_apply(db, "test", args_copy, 0, NULL) == 0);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, NULL) == 0);
     free(args_copy);
     assert(sqlite3_prepare_v2(db,
         "SELECT COUNT(*) FROM secret_hosts WHERE secret_name='ALPACA_KEY'"

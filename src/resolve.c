@@ -49,7 +49,8 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
          * back and surfaces as apply-failed, never a partial grant set.
          * detail carries the receipt (success) or the failing step. */
         if (request_config_changes_apply(proc_db(), agent, a->args_json,
-                                         grant_expires_at, detail) != 0) {
+                                         grant_expires_at, a->session_id,
+                                         detail) != 0) {
             LOG_WARN_("request_changes apply failed");
             *rename_failed = 1; /* generic apply-failed: error result, no grant */
         }

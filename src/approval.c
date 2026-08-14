@@ -568,17 +568,53 @@ static const char *SQL_CHANGES_SYSTEM_WIDE =
      * approval this credential may be submitted to that host, durably. */
     " UNION ALL SELECT format('secret %s -> %s', s.key, h.atom)"
     "   FROM json_each(?1,'$.changes.secret_bindings') s, json_each(s.value) h"
-    /* All four keys validate_provider accepts, model included: the model is
-     * what actually answers after the swap, and it is upserted from this
-     * document — a prompt naming only the endpoint and the paying secret
-     * describes the plumbing and omits the substance. */
-    " UNION ALL SELECT format('provider %s -> %s, model %s (key from secret %s)',"
+    /* A provider document is transport: endpoint plus the secret that pays
+     * for it. For a NEW provider the whole doc is the news; for an existing
+     * one the news is the DIFF — "provider X -> <same url it already had>"
+     * reads like a change and hides the one field that moved (the api_key_env
+     * rewrite that took prod's gateway down was invisible exactly this way). */
+    " UNION ALL SELECT format('provider %s (new) -> %s (key from secret %s)',"
     "   json_extract(?1,'$.changes.provider.provider'),"
     "   json_extract(?1,'$.changes.provider.base_url'),"
-    "   COALESCE(json_extract(?1,'$.changes.provider.model'),"
-    "            '(provider default)'),"
-    "   json_extract(?1,'$.changes.provider.api_key_env'))"
-    " WHERE json_extract(?1,'$.changes.provider.provider') IS NOT NULL";
+    "   CASE WHEN json_extract(?1,'$.changes.provider.api_key_env')=''"
+    "        THEN '(none — keyless)'"
+    "        ELSE json_extract(?1,'$.changes.provider.api_key_env') END)"
+    " WHERE json_extract(?1,'$.changes.provider.provider') IS NOT NULL"
+    "   AND NOT EXISTS(SELECT 1 FROM providers"
+    "     WHERE name=json_extract(?1,'$.changes.provider.provider'))"
+    " UNION ALL SELECT format('provider %s %s: %s -> %s',"
+    "     json_extract(?1,'$.changes.provider.provider'), d.field, d.oldv, d.newv)"
+    "   FROM (SELECT 'base_url' AS field,"
+    "           (SELECT base_url FROM providers"
+    "             WHERE name=json_extract(?1,'$.changes.provider.provider')) AS oldv,"
+    "           json_extract(?1,'$.changes.provider.base_url') AS newv"
+    "         UNION ALL SELECT 'api key secret',"
+    "           (SELECT CASE WHEN api_key_env='' THEN '(none)' ELSE api_key_env END"
+    "             FROM providers"
+    "             WHERE name=json_extract(?1,'$.changes.provider.provider')),"
+    "           CASE WHEN json_extract(?1,'$.changes.provider.api_key_env')=''"
+    "                THEN '(none)'"
+    "                ELSE json_extract(?1,'$.changes.provider.api_key_env') END) d"
+    "  WHERE d.oldv IS NOT NULL AND d.newv IS NOT NULL AND d.oldv != d.newv"
+    " UNION ALL SELECT format('provider %s: no transport change',"
+    "     json_extract(?1,'$.changes.provider.provider'))"
+    "   WHERE EXISTS(SELECT 1 FROM providers p"
+    "     WHERE p.name=json_extract(?1,'$.changes.provider.provider')"
+    "       AND p.base_url=json_extract(?1,'$.changes.provider.base_url')"
+    "       AND p.api_key_env=json_extract(?1,'$.changes.provider.api_key_env'))"
+    /* Models are the substance of a model switch — what actually answers
+     * after the approval, at what context size, healthy or retired. */
+    " UNION ALL SELECT format('model %s%s%s%s',"
+    "     json_extract(value,'$.id'),"
+    "     CASE WHEN EXISTS(SELECT 1 FROM models m"
+    "                      WHERE m.id=json_extract(value,'$.id'))"
+    "          THEN ' (update)' ELSE ' (register)' END,"
+    "     CASE WHEN json_extract(value,'$.context_window') IS NOT NULL"
+    "          THEN ', context '||json_extract(value,'$.context_window')"
+    "          ELSE '' END,"
+    "     CASE WHEN json_extract(value,'$.status') IS NOT NULL"
+    "          THEN ', status '||json_extract(value,'$.status') ELSE '' END)"
+    "   FROM json_each(?1,'$.changes.models')";
 
 /* create_agent enumeration over the parked definition — values, not counts:
  * this is the approval that mints a new autonomous actor, so it must be the

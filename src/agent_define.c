@@ -508,12 +508,14 @@ static int update_validate_inner(sqlite3 *db, const char *json,
           " ('description','system_prompt','primary_model','secondary_model',"
           "  'sandbox_profile','reason') AND type!='text'",
           "'%s' must be a string%s" },
+        /* Canonical models.id only (schema v44) — a bare name used to resolve
+         * to whichever provider's row the scan reached first. */
         { "SELECT atom FROM json_each(?1) je WHERE key IN"
           " ('primary_model','secondary_model')"
-          " AND NOT EXISTS (SELECT 1 FROM models m"
-          "                 WHERE m.id=je.atom OR m.model=je.atom)",
-          "model '%s' does not resolve to a registered model — define its "
-          "provider first (request_config request_changes)%s" },
+          " AND NOT EXISTS (SELECT 1 FROM models m WHERE m.id=je.atom)",
+          "model '%s' is not a registered model id — list them with "
+          "search_config, or register one with request_config "
+          "(models:[{id:'<model>@<provider>'}])%s" },
         { "SELECT 1 FROM json_each(?1)"
           " WHERE key NOT IN ('name','reason') LIMIT 1",
           NULL /* inverted: no row = nothing to update */ },

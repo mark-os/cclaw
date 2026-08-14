@@ -30,18 +30,24 @@ static const char *PARAMS_JSON =
     "{grants:{tools:[names],hosts:[hostnames],read_paths:[abs paths],write_paths:[abs paths]}, "
     "agent:{primary_model?,secondary_model?,max_iterations?,shell_timeout?}, "
     "routes:['channel:chat_id',...], "
-    "config:{key:value-string,...}, provider:{provider,base_url?,model?,api_key_env?}, "
+    "config:{key:value-string,...}, provider:{provider,base_url?,api_key_env?}, "
+    "models:[{id:'model@provider',context_window?,max_output_tokens?,capabilities?,"
+    "priority?,status?}], "
     "secret_bindings:{SECRET_NAME:[hostnames]}}. "
     "One human approval covers the whole document. Host prefix '.' covers subdomains "
     "('.example.com' covers example.com AND sub.example.com). agent updates YOUR OWN row "
-    "(models accept 'model' or 'model@provider'). routes let you send to a chat via "
+    "(models are canonical ids — exactly as listed by search_config). routes let you send "
+    "to a chat via "
     "channel_send (wildcards are operator-only). Config keys must be registered (see "
-    "search_config); values are strings. provider: openrouter, gemini, openai, deepseek, "
+    "search_config); values are strings. provider is TRANSPORT ONLY (endpoint + which "
+    "secret pays for it): openrouter, gemini, openai, deepseek, "
     "groq, mistral, cerebras, or a "
     "custom name with base_url; api_key_env is the secret NAME holding the API key "
-    "(defaults to <PROVIDER>_API_KEY) — store the key first with save_secret, never pass "
-    "key material. Defining a provider also registers its model, so one document can "
-    "define a provider AND point your agent at it via agent.primary_model. "
+    "(defaults to <PROVIDER>_API_KEY for a NEW provider) — store the key with save_secret "
+    "FIRST, never pass key material. models registers/updates/disables a model on an "
+    "already-registered provider (status:'disabled' retires one); one document can "
+    "define a provider, register a model on it, AND point your agent at it via "
+    "agent.primary_model. "
     "secret_bindings bind a saved secret to the hosts it may be submitted to — a "
     "{{SECRET:X}} call is denied when its target isn't bound; batch every host a "
     "denial named into one document\"},"
@@ -292,13 +298,63 @@ static char *validate_secret_bindings(sqlite3 *db, const char *changes) {
     return err;
 }
 
+/* True when this credential name resolves to something: env var or a
+ * system-scope secret. Mirrors llm_proc's provider_key_available (existence
+ * only, no decrypt) — that is the runtime test this validation front-runs. */
+static int key_name_resolves(sqlite3 *db, const char *name) {
+    if (!name || !name[0]) return 1;         /* keyless provider — nothing to find */
+    const char *v = getenv(name);
+    if (v && v[0]) return 1;
+    return q1_true(db, "SELECT 1 FROM secrets WHERE name=?1 AND scope='system'",
+                   name);
+}
+
+/* Suggestion for a model reference that isn't a registered id: the canonical
+ * id of a registered model whose bare name matches. NULL when there is none
+ * (or when several providers carry the name — then no single "did you mean").
+ * Bare names stopped resolving at schema v44; the teaching error is the only
+ * thing standing between the agent and a silent mis-route. */
+static char *model_id_suggestion(sqlite3 *db, const char *bare) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT id FROM models WHERE model=?1"
+            " ORDER BY priority, id LIMIT 1", -1, &st, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(st, 1, bare, -1, SQLITE_STATIC);
+    char *out = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) out = strdup(v);
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
+/* "unknown model 'x'" error, with a did-you-mean when a bare name was used
+ * for a model that IS registered under a canonical id. */
+static char *unknown_model_err(sqlite3 *db, const char *ref) {
+    char *sugg = model_id_suggestion(db, ref);
+    char buf[512];
+    if (sugg)
+        snprintf(buf, sizeof(buf),
+                 "error: '%s' is a bare model name — models are referenced by "
+                 "their canonical id. Did you mean '%s'?", ref, sugg);
+    else
+        snprintf(buf, sizeof(buf),
+                 "error: unknown model '%s' — use a registered model id (see "
+                 "search_config), or register it in this document's models "
+                 "section ({id:'%s@<provider>'})", ref, ref);
+    free(sugg);
+    return strdup(buf);
+}
+
 /* Validate $.agent — self-scoped settings on the calling agent's own row.
- * Whitelisted keys only; models may be 'model' or 'model@provider' and must
- * resolve to a models row, OR match the model the same document's provider
- * section defines (one document can define a provider and adopt it).
- * canon_provider is that section's canonical JSON, or NULL. */
+ * Whitelisted keys only; model references must be a canonical models.id (no
+ * bare names — see model-id migration, schema v44), either already registered
+ * or registered by this same document's models section. canon_models is that
+ * section's canonical JSON array, or NULL. */
 static char *validate_agent(sqlite3 *db, const char *changes,
-                            const char *canon_provider) {
+                            const char *canon_models) {
     if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.agent')='object'", changes))
         return strdup("error: changes.agent must be an object");
     char *bad = q1_text(db,
@@ -321,38 +377,242 @@ static char *validate_agent(sqlite3 *db, const char *changes,
         free(bad);
         return m;
     }
-    /* Model references resolve like llm_proc's candidate lookup: models.id
-     * ('model@provider') or bare models.model. */
+    /* Canonical-id only: models.id, or an id this document's models section
+     * registers. The '[]' fallback keeps json_each valid when the document
+     * carries no models section. */
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "SELECT atom FROM json_each(?1,'$.agent')"
             " WHERE key IN ('primary_model','secondary_model')"
             " AND (type!='text' OR atom=''"
-            "      OR (NOT EXISTS(SELECT 1 FROM models m"
-            "                     WHERE m.id=atom OR m.model=atom)"
-            /* NULL-proof: a NULL in a NOT IN list poisons the whole test
-             * (unknown → filtered → error suppressed), so absent provider
-             * fields collapse to '' which a validated atom can never be. */
-            "          AND atom NOT IN ("
-            "            COALESCE(json_extract(?2,'$.model'),''),"
-            "            COALESCE(json_extract(?2,'$.model'),'')"
-            "              ||'@'||COALESCE(json_extract(?2,'$.provider'),''))))"
+            "      OR (NOT EXISTS(SELECT 1 FROM models m WHERE m.id=atom)"
+            "          AND NOT EXISTS(SELECT 1 FROM json_each(?2) j"
+            "                         WHERE json_extract(j.value,'$.id')=atom)))"
             " LIMIT 1", -1, &st, NULL) != SQLITE_OK)
         return strdup("error: agent validation failed");
     sqlite3_bind_text(st, 1, changes, -1, SQLITE_STATIC);
-    if (canon_provider)
-        sqlite3_bind_text(st, 2, canon_provider, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(st, 2);
+    sqlite3_bind_text(st, 2, canon_models ? canon_models : "[]", -1,
+                      SQLITE_STATIC);
     char *err = NULL;
     if (sqlite3_step(st) == SQLITE_ROW) {
         const char *v = (const char *)sqlite3_column_text(st, 0);
-        err = errf("error: unknown model '%s' — use a registered model "
-                   "('model' or 'model@provider'; see search_config), or "
-                   "define it in this document's provider section", v);
+        err = v && v[0] ? unknown_model_err(db, v)
+                        : strdup("error: agent model must be a non-empty "
+                                 "canonical model id");
     }
     sqlite3_finalize(st);
     return err;
+}
+
+/* ── $.models — the model catalog surface (2A) ───────────────────────────
+ * Parallel to and independent of $.provider: a provider is transport, a model
+ * is what actually answers. Registration requires the provider to exist
+ * already (or to be defined by this same document) — the inverse of the old
+ * "register a model by re-submitting a whole provider doc" trap that knocked
+ * prod off its gateway (A1/A7).
+ *
+ * Canonical form written into *canon_out: every entry gains explicit
+ * 'provider' and 'model' fields, so the apply is pure SQL and the approval
+ * card can name what is being registered without re-parsing an id. */
+static const char *MODEL_KEYS_SQL =
+    "('id','context_window','max_output_tokens','capabilities','priority','status')";
+
+/* Split a canonical id at its LAST '@' — model names carry '/' and ':' but a
+ * provider name never carries '@'. Returns 0 and fills the halves, or -1. */
+static int model_id_split(const char *id, char **model_out, char **prov_out) {
+    const char *at = id ? strrchr(id, '@') : NULL;
+    if (!at || at == id || !at[1]) return -1;
+    size_t mlen = (size_t)(at - id);
+    char *m = malloc(mlen + 1);
+    char *p = strdup(at + 1);
+    if (!m || !p) { free(m); free(p); return -1; }
+    memcpy(m, id, mlen);
+    m[mlen] = '\0';
+    *model_out = m;
+    *prov_out = p;
+    return 0;
+}
+
+/* Shape checks that SQL expresses better than C: one query per rule. */
+static char *validate_models_shape(sqlite3 *db, const char *changes) {
+    if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.models')='array'", changes))
+        return strdup("error: changes.models must be an array of model objects "
+                      "({id:'model@provider', context_window?, "
+                      "max_output_tokens?, capabilities?, priority?, status?})");
+    if (q1_true(db, "SELECT 1 FROM json_each(?1,'$.models')"
+                    " WHERE type!='object' LIMIT 1", changes))
+        return strdup("error: each changes.models entry must be an object");
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "SELECT k.key FROM json_each(?1,'$.models') m, json_each(m.value) k"
+             " WHERE k.key NOT IN %s LIMIT 1", MODEL_KEYS_SQL);
+    char *bad = q1_text(db, sql, changes);
+    if (bad) {
+        char *e = errf("error: unknown models key '%s' (use id, context_window, "
+                       "max_output_tokens, capabilities, priority, status)", bad);
+        free(bad);
+        return e;
+    }
+    bad = q1_text(db,
+        "SELECT k.key FROM json_each(?1,'$.models') m, json_each(m.value) k"
+        " WHERE k.key IN ('context_window','max_output_tokens','priority')"
+        " AND (k.type!='integer' OR CAST(k.atom AS INTEGER) < 0) LIMIT 1", changes);
+    if (bad) {
+        char *e = errf("error: models.%s must be a non-negative integer", bad);
+        free(bad);
+        return e;
+    }
+    if (q1_true(db,
+            "SELECT 1 FROM json_each(?1,'$.models') m"
+            " WHERE json_type(m.value,'$.capabilities') IS NOT NULL"
+            "   AND json_type(m.value,'$.capabilities')!='array' LIMIT 1", changes))
+        return strdup("error: models.capabilities must be an array of strings "
+                      "(e.g. [\"text\",\"image\",\"audio\"])");
+    if (q1_true(db,
+            "SELECT 1 FROM json_each(?1,'$.models') m,"
+            "            json_each(m.value,'$.capabilities') c"
+            " WHERE c.type!='text' OR c.atom='' LIMIT 1", changes))
+        return strdup("error: models.capabilities entries must be non-empty "
+                      "strings");
+    bad = q1_text(db,
+        "SELECT json_extract(value,'$.status') FROM json_each(?1,'$.models')"
+        " WHERE json_extract(value,'$.status') IS NOT NULL"
+        "   AND json_extract(value,'$.status') NOT IN ('healthy','disabled')"
+        " LIMIT 1", changes);
+    if (bad) {
+        char *e = errf("error: models.status '%s' must be 'healthy' or "
+                       "'disabled'", bad);
+        free(bad);
+        return e;
+    }
+    /* Two entries for one id would apply in arbitrary order — the approver
+     * could not tell which one wins. */
+    if (q1_true(db,
+            "SELECT 1 FROM json_each(?1,'$.models')"
+            " GROUP BY json_extract(value,'$.id') HAVING COUNT(*) > 1 LIMIT 1",
+            changes))
+        return strdup("error: changes.models lists the same model id twice");
+    return NULL;
+}
+
+/* Append one canonicalized entry (provider/model filled in) to *canon. */
+static int models_canon_append(sqlite3 *db, char **canon, const char *entry,
+                               const char *model, const char *prov) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_insert(?1,'$[#]',"
+            "  json_patch(json(?2), json_object('model',?3,'provider',?4)))",
+            -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, *canon, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, entry, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, model, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, prov, -1, SQLITE_STATIC);
+    char *next = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) next = strdup(v);
+    }
+    sqlite3_finalize(st);
+    if (!next) return -1;
+    free(*canon);
+    *canon = next;
+    return 0;
+}
+
+/* canon_provider is the $.provider section's canonical JSON (or NULL): a
+ * document may define a provider and register models on it at once. */
+static char *validate_models(sqlite3 *db, const char *changes,
+                             const char *canon_provider, char **canon_out) {
+    *canon_out = NULL;
+    char *err = validate_models_shape(db, changes);
+    if (err) return err;
+
+    char *doc_prov = canon_provider
+        ? q1_text(db, "SELECT json_extract(?1,'$.provider')", canon_provider)
+        : NULL;
+    char *canon = strdup("[]");
+    if (!canon) { free(doc_prov); return strdup("error: out of memory"); }
+
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_extract(value,'$.id'), value"
+            " FROM json_each(?1,'$.models')", -1, &st, NULL) != SQLITE_OK) {
+        free(canon); free(doc_prov);
+        return strdup("error: models validation failed");
+    }
+    sqlite3_bind_text(st, 1, changes, -1, SQLITE_STATIC);
+    int rows = 0;
+    while (!err && sqlite3_step(st) == SQLITE_ROW) {
+        const char *id = (const char *)sqlite3_column_text(st, 0);
+        const char *entry = (const char *)sqlite3_column_text(st, 1);
+        rows++;
+        if (!id || !id[0] || !entry) {
+            err = strdup("error: each changes.models entry needs a non-empty "
+                         "'id' (the canonical 'model@provider' id)");
+            break;
+        }
+        /* An id already in the catalog is an update — its provider/model are
+         * whatever the row says, seeded ids included (they predate the
+         * 'model@provider' convention). */
+        char *cur_model = q1_text(db, "SELECT model FROM models WHERE id=?1", id);
+        char *cur_prov = NULL;
+        if (cur_model)
+            cur_prov = q1_text(db, "SELECT provider_name FROM models WHERE id=?1", id);
+        if (cur_model && cur_prov) {
+            if (models_canon_append(db, &canon, entry, cur_model, cur_prov) != 0)
+                err = strdup("error: failed to build models JSON");
+            free(cur_model); free(cur_prov);
+            continue;
+        }
+        free(cur_model); free(cur_prov);
+
+        char *nm = NULL, *np = NULL;
+        if (model_id_split(id, &nm, &np) != 0) {
+            char *sugg = model_id_suggestion(db, id);
+            if (sugg) {
+                char buf[512];
+                snprintf(buf, sizeof(buf),
+                         "error: '%s' is a bare model name — models are "
+                         "registered and referenced by canonical id. It is "
+                         "already registered as '%s'.", id, sugg);
+                err = strdup(buf);
+                free(sugg);
+            } else {
+                err = errf("error: model id '%s' must be canonical "
+                           "'model@provider' (the provider must already be "
+                           "registered — see search_config)", id);
+            }
+            break;
+        }
+        /* The inversion: a model is registered ON a provider, never the other
+         * way round. */
+        int prov_ok = q1_true(db, "SELECT 1 FROM providers WHERE name=?1", np)
+                   || (doc_prov && strcmp(doc_prov, np) == 0);
+        char *pk = prov_ok ? q1_text(db,
+            "SELECT api_key_env FROM providers WHERE name=?1", np) : NULL;
+        if (!prov_ok) {
+            err = errf("error: provider '%s' is not registered — define it "
+                       "first (changes.provider: {provider, base_url, "
+                       "api_key_env}), then register models on it", np);
+        } else if (pk && !key_name_resolves(db, pk)) {
+            /* Registering onto a provider whose key is missing produces a row
+             * routing will skip in silence — say so now, not never. */
+            err = errf("error: provider's key '%s' does not exist — store it "
+                       "with save_secret first, or the model registers into a "
+                       "provider routing will skip", pk);
+        } else if (models_canon_append(db, &canon, entry, nm, np) != 0) {
+            err = strdup("error: failed to build models JSON");
+        }
+        free(pk); free(nm); free(np);
+    }
+    sqlite3_finalize(st);
+    free(doc_prov);
+    if (!err && rows == 0)
+        err = strdup("error: changes.models is empty — nothing to register");
+    if (err) { free(canon); return err; }
+    *canon_out = canon;
+    return NULL;
 }
 
 /* First route under routes_path already owned by a different agent:
@@ -439,18 +699,29 @@ static char *validate_routes(sqlite3 *db, const char *changes,
 }
 
 /* Validate $.provider and build its canonical JSON (defaults filled) into
- * *canon_out. Returns a heap error string or NULL. */
+ * *canon_out. Returns a heap error string or NULL.
+ *
+ * The provider document is TRANSPORT only — endpoint plus the name of the
+ * secret that pays for it. Models are registered through $.models (2A); a
+ * 'model' key here used to be the only way to register one, and the
+ * masquerade is exactly what took prod's gateway down (A1). */
 static char *validate_provider(sqlite3 *db, const char *changes, char **canon_out) {
     *canon_out = NULL;
     if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.provider')='object'", changes))
         return strdup("error: changes.provider must be an object");
+    if (q1_true(db, "SELECT 1 WHERE json_type(?1,'$.provider.model') IS NOT NULL",
+                changes))
+        return strdup("error: provider.model is gone — a provider is transport "
+                      "(base_url + api_key_env). Register the model in the "
+                      "'models' section instead: "
+                      "models:[{id:'<model>@<provider>'}]");
     char *bad = q1_text(db,
         "SELECT key FROM json_each(?1,'$.provider')"
-        " WHERE key NOT IN ('provider','base_url','model','api_key_env') LIMIT 1",
+        " WHERE key NOT IN ('provider','base_url','api_key_env') LIMIT 1",
         changes);
     if (bad) {
         char *m = errf("error: unknown provider key '%s' (use provider, "
-                       "base_url, model, api_key_env)", bad);
+                       "base_url, api_key_env)", bad);
         free(bad);
         return m;
     }
@@ -458,13 +729,13 @@ static char *validate_provider(sqlite3 *db, const char *changes, char **canon_ou
     if (!pj) return strdup("error: changes.provider must be an object");
     char *prov = tool_args_str(db, pj, "provider");
     char *base_url = tool_args_str(db, pj, "base_url");
-    char *model = tool_args_str(db, pj, "model");
     char *key_env = tool_args_str(db, pj, "api_key_env");
     free(pj);
     char *err = NULL;
-    const char *url_val = NULL, *model_val = NULL, *env_val = NULL;
+    const char *url_val = NULL, *env_val = NULL;
     char env_buf[96];
-    char *db_url = NULL, *db_model = NULL;
+    char *db_url = NULL, *db_key_env = NULL;
+    int row_exists = 0;
 
     if (!prov || !prov[0]) {
         err = strdup("error: provider.provider (the name) is required");
@@ -472,10 +743,13 @@ static char *validate_provider(sqlite3 *db, const char *changes, char **canon_ou
     }
     /* Known-provider defaults come from the providers table (seeded rows
      * included) — the DB is the one home for provider shape, not a C array. */
+    row_exists = q1_true(db, "SELECT 1 FROM providers WHERE name=?1", prov);
     db_url = q1_text(db,
         "SELECT base_url FROM providers WHERE name=?1 AND base_url!=''", prov);
-    db_model = q1_text(db,
-        "SELECT default_model FROM providers WHERE name=?1 AND default_model!=''", prov);
+    /* Empty string is a real, deliberate value here (a keyless local gateway),
+     * so this read must not filter it out — see A7. */
+    db_key_env = q1_text(db, "SELECT api_key_env FROM providers WHERE name=?1",
+                         prov);
     if (!db_url && (!base_url || !base_url[0])) {
         err = strdup("error: 'base_url' required for unknown providers");
         goto out;
@@ -485,7 +759,6 @@ static char *validate_provider(sqlite3 *db, const char *changes, char **canon_ou
         err = strdup("error: base_url must start with http:// or https://");
         goto out;
     }
-    model_val = (model && model[0]) ? model : db_model;
     /* api_key_env is a secret NAME, never key material. Default derives
      * <PROVIDER>_API_KEY so config_load's env → kv fallback resolves it. */
     if (key_env && key_env[0]) {
@@ -498,6 +771,13 @@ static char *validate_provider(sqlite3 *db, const char *changes, char **canon_ou
             goto out;
         }
         env_val = key_env;
+    } else if (row_exists) {
+        /* A7: an existing row's credential name is preserved verbatim — the
+         * empty string included. A deliberately keyless provider that gets a
+         * derived <PROVIDER>_API_KEY back has every one of its models silently
+         * dropped from routing at the next request (A8). Absent means "leave
+         * it alone", never "guess it again". */
+        env_val = db_key_env ? db_key_env : "";
     } else {
         size_t en = 0;
         for (const char *c = prov; *c && en < sizeof(env_buf) - 12; c++)
@@ -506,19 +786,32 @@ static char *validate_provider(sqlite3 *db, const char *changes, char **canon_ou
         memcpy(env_buf + en, "_API_KEY", 9);
         env_val = env_buf;
     }
+    /* Config-time key check (A8's prevention half): at request time the agent
+     * can still fix this. At request time the alternative is a routing layer
+     * that drops the model with a debug line nobody reads. */
+    if (!key_name_resolves(db, env_val)) {
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+                 "error: no key named '%s' exists — neither an environment "
+                 "variable nor a saved system secret. Store it first "
+                 "(save_secret '%s'), then request the provider; a provider "
+                 "whose key cannot be resolved has all its models skipped at "
+                 "request time. (A provider that genuinely needs no key: pass "
+                 "api_key_env:\"\".)", env_val, env_val);
+        err = strdup(buf);
+        goto out;
+    }
     {
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
-                "SELECT json_object('provider',?1,'base_url',?2,'model',?3,"
-                "'api_key_env',?4)", -1, &st, NULL) != SQLITE_OK) {
+                "SELECT json_object('provider',?1,'base_url',?2,"
+                "'api_key_env',?3)", -1, &st, NULL) != SQLITE_OK) {
             err = strdup("error: failed to build provider JSON");
             goto out;
         }
         sqlite3_bind_text(st, 1, prov, -1, SQLITE_STATIC);
         sqlite3_bind_text(st, 2, url_val, -1, SQLITE_STATIC);
-        if (model_val) sqlite3_bind_text(st, 3, model_val, -1, SQLITE_STATIC);
-        else sqlite3_bind_null(st, 3);
-        sqlite3_bind_text(st, 4, env_val, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 3, env_val, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
             const char *v = (const char *)sqlite3_column_text(st, 0);
             if (v) *canon_out = strdup(v);
@@ -527,8 +820,8 @@ static char *validate_provider(sqlite3 *db, const char *changes, char **canon_ou
         if (!*canon_out) err = strdup("error: failed to build provider JSON");
     }
 out:
-    free(prov); free(base_url); free(model); free(key_env);
-    free(db_url); free(db_model);
+    free(prov); free(base_url); free(key_env);
+    free(db_url); free(db_key_env);
     return err;
 }
 
@@ -542,16 +835,17 @@ static char *validate_changes(sqlite3 *db, const char *changes,
         return strdup("error: 'changes' must be a JSON object (see the tool schema)");
     char *bad = q1_text(db,
         "SELECT key FROM json_each(?1)"
-        " WHERE key NOT IN ('grants','config','provider','agent','routes',"
-        "                   'secret_bindings')"
+        " WHERE key NOT IN ('grants','config','provider','models','agent',"
+        "                   'routes','secret_bindings')"
         " LIMIT 1", changes);
     if (bad) {
         char *m = errf("error: unknown changes section '%s' (use grants, "
-                       "agent, routes, config, provider, secret_bindings)", bad);
+                       "agent, routes, config, provider, models, "
+                       "secret_bindings)", bad);
         free(bad);
         return m;
     }
-    char *grants = NULL, *config = NULL, *provider = NULL;
+    char *grants = NULL, *config = NULL, *provider = NULL, *models = NULL;
     char *agent = NULL, *routes = NULL, *bindings = NULL, *err = NULL;
     int has_grants = q1_true(db,
         "SELECT 1 WHERE json_type(?1,'$.grants') IS NOT NULL", changes);
@@ -559,6 +853,8 @@ static char *validate_changes(sqlite3 *db, const char *changes,
         "SELECT 1 WHERE json_type(?1,'$.config') IS NOT NULL", changes);
     int has_provider = q1_true(db,
         "SELECT 1 WHERE json_type(?1,'$.provider') IS NOT NULL", changes);
+    int has_models = q1_true(db,
+        "SELECT 1 WHERE json_type(?1,'$.models') IS NOT NULL", changes);
     int has_agent = q1_true(db,
         "SELECT 1 WHERE json_type(?1,'$.agent') IS NOT NULL", changes);
     int has_routes = q1_true(db,
@@ -569,10 +865,12 @@ static char *validate_changes(sqlite3 *db, const char *changes,
     if (has_grants && (err = validate_grants(db, changes))) goto out;
     if (has_config && (err = validate_config(db, changes))) goto out;
     if (has_bindings && (err = validate_secret_bindings(db, changes))) goto out;
-    /* provider before agent: agent.primary_model may adopt the model this
-     * same document defines, checked against the canonical provider JSON. */
+    /* Order is the dependency chain of one document: a provider carries the
+     * models registered on it, and the agent may adopt a model this same
+     * document registers. */
     if (has_provider && (err = validate_provider(db, changes, &provider))) goto out;
-    if (has_agent && (err = validate_agent(db, changes, provider))) goto out;
+    if (has_models && (err = validate_models(db, changes, provider, &models))) goto out;
+    if (has_agent && (err = validate_agent(db, changes, models))) goto out;
     if (has_routes && (err = validate_routes(db, changes, agent_name))) goto out;
 
     /* Reject a document with nothing to apply (all sections absent/empty):
@@ -588,7 +886,7 @@ static char *validate_changes(sqlite3 *db, const char *changes,
             "     + COALESCE(json_array_length(?1,'$.routes'),0)", changes);
         long total = n ? atol(n) : 0;
         free(n);
-        if (total == 0 && !has_provider) {
+        if (total == 0 && !has_provider && !has_models) {
             err = strdup("error: changes document is empty — nothing to request");
             goto out;
         }
@@ -602,14 +900,14 @@ static char *validate_changes(sqlite3 *db, const char *changes,
 
     /* Canonical document: only present sections, minified by json(). */
     {
-        char sql[320];
+        char sql[384];
         int off = snprintf(sql, sizeof(sql), "SELECT json_object(");
         int next = 1, first = 1;
-        const char *sec[6][2] = {
+        const char *sec[7][2] = {
             {"grants", grants}, {"agent", agent}, {"routes", routes},
-            {"config", config}, {"provider", provider},
+            {"config", config}, {"provider", provider}, {"models", models},
             {"secret_bindings", bindings}};
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 7; i++) {
             if (!sec[i][1]) continue;
             off += snprintf(sql + off, sizeof(sql) - (size_t)off, "%s'%s',json(?%d)",
                             first ? "" : ",", sec[i][0], next++);
@@ -619,7 +917,7 @@ static char *validate_changes(sqlite3 *db, const char *changes,
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
             next = 1;
-            for (int i = 0; i < 6; i++)
+            for (int i = 0; i < 7; i++)
                 if (sec[i][1])
                     sqlite3_bind_text(st, next++, sec[i][1], -1, SQLITE_STATIC);
             if (sqlite3_step(st) == SQLITE_ROW) {
@@ -631,8 +929,8 @@ static char *validate_changes(sqlite3 *db, const char *changes,
         if (!*canon_out) err = strdup("error: failed to build changes JSON");
     }
 out:
-    free(grants); free(config); free(provider); free(agent); free(routes);
-    free(bindings);
+    free(grants); free(config); free(provider); free(models); free(agent);
+    free(routes); free(bindings);
     return err;
 }
 
@@ -932,6 +1230,64 @@ static void apply_detail(char **detail_out, const char *fmt, ...) {
     *detail_out = strdup(buf);
 }
 
+/* Verify-after-write receipt: every line is a RE-READ of the row the section
+ * claims to have written, never an echo of the request. Intent and effect
+ * diverged in the 2026-08-10 incident ("Gemini is now active" over a config
+ * that had silently not taken), and the agent has no other way to tell.
+ * ?1 = parked args_json, ?2 = agent name. */
+static const char *RECEIPT_SQL =
+    "SELECT group_concat(line, '; ') FROM ("
+    /* grants — the rows that are live now, by kind and value. */
+    "  SELECT 'grants now: '||group_concat(g.kind||' '||g.value, ', ') AS line"
+    "    FROM grants g WHERE g.agent_name=?2"
+    "     AND (g.expires_at IS NULL OR g.expires_at>unixepoch())"
+    "     AND EXISTS(SELECT 1 FROM json_each(?1,'$.changes.grants') k,"
+    "                          json_each(k.value) v WHERE v.atom=g.value)"
+    "   HAVING line IS NOT NULL"
+    /* config — key=value as stored, not as asked. */
+    "  UNION ALL"
+    "  SELECT 'config now: '||group_concat(c.key||'='||COALESCE(c.value,'(unset)'), ', ')"
+    "    FROM config c WHERE c.key IN"
+    "     (SELECT key FROM json_each(?1,'$.changes.config'))"
+    "   HAVING group_concat(c.key,',') IS NOT NULL"
+    "  UNION ALL"
+    "  SELECT 'secret bindings now: '||COUNT(*)||' host(s) bound'"
+    "    FROM secret_hosts sh WHERE EXISTS("
+    "      SELECT 1 FROM json_each(?1,'$.changes.secret_bindings') s,"
+    "               json_each(s.value) h"
+    "       WHERE s.key=sh.secret_name AND h.atom=sh.host)"
+    "   HAVING COUNT(*) > 0"
+    /* provider — endpoint and credential NAME as the row now holds them. */
+    "  UNION ALL"
+    "  SELECT 'provider '||p.name||' -> '||p.base_url||' (key: '"
+    "         ||CASE WHEN p.api_key_env='' THEN 'none' ELSE p.api_key_env END||')'"
+    "    FROM providers p"
+    "   WHERE p.name = json_extract(?1,'$.changes.provider.provider')"
+    /* models — one line per requested id, re-read. */
+    "  UNION ALL"
+    "  SELECT 'model '||m.id||' ('||m.status||', context '"
+    "         ||COALESCE(m.context_window,'unset')||')'"
+    "    FROM models m WHERE m.id IN"
+    "     (SELECT json_extract(value,'$.id') FROM json_each(?1,'$.changes.models'))"
+    /* agent — the whole self-scoped row, since any of it may have moved. */
+    "  UNION ALL"
+    "  SELECT 'your settings now: primary_model='"
+    "         ||COALESCE(NULLIF(a.primary_model,''),'(default)')"
+    "         ||', secondary_model='"
+    "         ||COALESCE(NULLIF(a.secondary_model,''),'(none)')"
+    "         ||', max_iterations='||a.max_iterations"
+    "         ||', shell_timeout='||a.shell_timeout"
+    "    FROM agents a WHERE a.name=?2"
+    "     AND json_type(?1,'$.changes.agent')='object'"
+    /* routes — bound to one of THIS agent's sessions, verified by join. */
+    "  UNION ALL"
+    "  SELECT 'routes now bound to you: '||COUNT(*)"
+    "    FROM channel_routes c JOIN sessions s ON s.id=c.session_id"
+    "   WHERE s.agent_name=?2 AND c.channel_name||':'||c.chat_id IN"
+    "     (SELECT atom FROM json_each(?1,'$.changes.routes'))"
+    "   HAVING COUNT(*) > 0"
+    ")";
+
 int request_config_changes_apply(sqlite3 *db, const char *agent,
                                  const char *args_json, int64_t expires_at,
                                  char **detail_out) {
@@ -999,23 +1355,20 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                 rc = -1;
             }
         }
-        /* Provider upsert straight from the parked JSON. The API key is NOT
-         * here — the document carries only the secret's name (api_key_env);
-         * a missing secret is fine (either-order capture: key can land via
-         * save_secret or env before or after this grant). */
+        /* Provider upsert straight from the parked JSON — transport only.
+         * The API key is NOT here: the document carries the secret's NAME
+         * (api_key_env), validated at request time to actually resolve. */
         if (rc == 0) {
             sqlite3_stmt *ps;
             if (sqlite3_prepare_v2(db,
-                    "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)"
+                    "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, priority)"
                     " SELECT json_extract(?1,'$.changes.provider.provider'),"
                     "        json_extract(?1,'$.changes.provider.base_url'), 'openai',"
                     "        json_extract(?1,'$.changes.provider.api_key_env'),"
-                    "        json_extract(?1,'$.changes.provider.model'),"
                     "        COALESCE((SELECT MAX(priority)+1 FROM providers), 0)"
                     " WHERE json_extract(?1,'$.changes.provider.provider') IS NOT NULL"
                     " ON CONFLICT(name) DO UPDATE SET base_url=excluded.base_url,"
-                    "   api_key_env=excluded.api_key_env,"
-                    "   default_model=COALESCE(excluded.default_model, default_model)",
+                    "   api_key_env=excluded.api_key_env",
                     -1, &ps, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(ps, 1, args_json, -1, SQLITE_STATIC);
                 if (sqlite3_step(ps) != SQLITE_DONE) rc = -1;
@@ -1025,30 +1378,67 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             }
             if (rc != 0) apply_detail(detail_out, "failed defining provider");
         }
-        /* Seed the provider's default model into `models` (id = model@name,
-         * lowest routing priority). Per-request routing joins models →
-         * providers, so a provider row without a models row is unreachable
-         * except through the empty-table fallback; this makes the parked
-         * definition actually routable and lets agent.primary_model adopt
-         * 'model@provider' in the same document. */
-        if (rc == 0) {
-            sqlite3_stmt *ms;
-            if (sqlite3_prepare_v2(db,
-                    "INSERT OR IGNORE INTO models(id, provider_name, model, priority)"
-                    " SELECT json_extract(?1,'$.changes.provider.model')"
-                    "          ||'@'||json_extract(?1,'$.changes.provider.provider'),"
-                    "        json_extract(?1,'$.changes.provider.provider'),"
-                    "        json_extract(?1,'$.changes.provider.model'),"
-                    "        (SELECT COALESCE(MAX(priority),0)+1 FROM models)"
-                    " WHERE json_extract(?1,'$.changes.provider.model') IS NOT NULL",
-                    -1, &ms, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(ms, 1, args_json, -1, SQLITE_STATIC);
-                if (sqlite3_step(ms) != SQLITE_DONE) rc = -1;
-                sqlite3_finalize(ms);
-            } else {
-                rc = -1;
+        /* Models: register missing rows, then update the fields this document
+         * actually carries. Two statements rather than one upsert because an
+         * absent field must keep the row's current value, and an ON CONFLICT
+         * clause cannot tell "absent" from "the default I just computed".
+         * providers.default_model is bootstrap sugar now (templates/seed.sql);
+         * this is the only path that registers a model at runtime. */
+        if (rc == 0 &&
+            q1_true(db, "SELECT 1 WHERE json_type(?1,'$.changes.models')='array'",
+                    args_json)) {
+            static const char *MODEL_SQL[] = {
+                "INSERT OR IGNORE INTO models(id, provider_name, model,"
+                "  context_window, max_output_tokens, capabilities, priority, status)"
+                " SELECT json_extract(value,'$.id'), json_extract(value,'$.provider'),"
+                "        json_extract(value,'$.model'),"
+                "        json_extract(value,'$.context_window'),"
+                "        json_extract(value,'$.max_output_tokens'),"
+                "        COALESCE(json_extract(value,'$.capabilities'),'[]'),"
+                "        COALESCE(json_extract(value,'$.priority'),"
+                "                 (SELECT COALESCE(MAX(priority),0)+1 FROM models)),"
+                "        COALESCE(json_extract(value,'$.status'),'healthy')"
+                " FROM json_each(?1,'$.changes.models')",
+                /* Re-scanned per column so an absent key reads NULL and
+                 * COALESCE keeps the stored value. */
+                "UPDATE models SET"
+                "  context_window = COALESCE((SELECT json_extract(j.value,'$.context_window')"
+                "    FROM json_each(?1,'$.changes.models') j"
+                "    WHERE json_extract(j.value,'$.id')=models.id), context_window),"
+                "  max_output_tokens = COALESCE((SELECT json_extract(j.value,'$.max_output_tokens')"
+                "    FROM json_each(?1,'$.changes.models') j"
+                "    WHERE json_extract(j.value,'$.id')=models.id), max_output_tokens),"
+                "  capabilities = COALESCE((SELECT json_extract(j.value,'$.capabilities')"
+                "    FROM json_each(?1,'$.changes.models') j"
+                "    WHERE json_extract(j.value,'$.id')=models.id), capabilities),"
+                "  priority = COALESCE((SELECT json_extract(j.value,'$.priority')"
+                "    FROM json_each(?1,'$.changes.models') j"
+                "    WHERE json_extract(j.value,'$.id')=models.id), priority),"
+                "  status = COALESCE((SELECT json_extract(j.value,'$.status')"
+                "    FROM json_each(?1,'$.changes.models') j"
+                "    WHERE json_extract(j.value,'$.id')=models.id), status)"
+                " WHERE id IN (SELECT json_extract(value,'$.id')"
+                "              FROM json_each(?1,'$.changes.models'))",
+            };
+            for (size_t i = 0; rc == 0 && i < sizeof(MODEL_SQL) / sizeof(*MODEL_SQL); i++) {
+                sqlite3_stmt *ms;
+                if (sqlite3_prepare_v2(db, MODEL_SQL[i], -1, &ms, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(ms, 1, args_json, -1, SQLITE_STATIC);
+                    if (sqlite3_step(ms) != SQLITE_DONE) rc = -1;
+                    sqlite3_finalize(ms);
+                } else {
+                    rc = -1;
+                }
             }
-            if (rc != 0) apply_detail(detail_out, "failed registering model");
+            /* No-op assertion (M3): every requested id must exist now, or the
+             * receipt would report a registration that never happened. */
+            if (rc == 0 && q1_true(db,
+                    "SELECT 1 FROM json_each(?1,'$.changes.models') j"
+                    " WHERE NOT EXISTS(SELECT 1 FROM models m"
+                    "   WHERE m.id=json_extract(j.value,'$.id')) LIMIT 1",
+                    args_json))
+                rc = -1;
+            if (rc != 0) apply_detail(detail_out, "failed registering models");
         }
         /* Self-scoped agent settings — whitelisted columns on the caller's
          * own agents row; absent keys keep their current values. */
@@ -1156,39 +1546,18 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
              * its own request (or assert success unchecked, as observed). */
             if (detail_out) {
                 sqlite3_stmt *rs;
-                const char *rsql =
-                    "SELECT trim(rtrim("
-                    "  CASE WHEN ?3 > 0 THEN ?3||' grant/config line'"
-                    "       ||(CASE WHEN ?3=1 THEN '' ELSE 's' END)"
-                    "       ||' applied; ' ELSE '' END"
-                    "  || CASE WHEN json_extract(?1,'$.changes.provider.provider')"
-                    "          IS NOT NULL THEN 'provider '''"
-                    "       ||json_extract(?1,'$.changes.provider.provider')"
-                    "       ||''' defined; ' ELSE '' END"
-                    "  || CASE WHEN json_extract(?1,'$.changes.provider.model')"
-                    "          IS NOT NULL THEN 'model '''"
-                    "       ||json_extract(?1,'$.changes.provider.model')||'@'"
-                    "       ||json_extract(?1,'$.changes.provider.provider')"
-                    "       ||''' registered; ' ELSE '' END"
-                    "  || CASE WHEN json_type(?1,'$.changes.agent')='object'"
-                    "       THEN (SELECT 'your settings now: primary_model='"
-                    "               ||COALESCE(NULLIF(primary_model,''),'(default)')"
-                    "               ||', max_iterations='||max_iterations"
-                    "             FROM agents WHERE name=?2)||'; ' ELSE '' END"
-                    "  || CASE WHEN json_array_length(?1,'$.changes.routes') > 0"
-                    "       THEN json_array_length(?1,'$.changes.routes')"
-                    "            ||' route(s) bound; ' ELSE '' END"
-                    ", '; '))";
-                if (sqlite3_prepare_v2(db, rsql, -1, &rs, NULL) == SQLITE_OK) {
+                if (sqlite3_prepare_v2(db, RECEIPT_SQL, -1, &rs, NULL) == SQLITE_OK) {
                     sqlite3_bind_text(rs, 1, args_json, -1, SQLITE_STATIC);
                     sqlite3_bind_text(rs, 2, agent, -1, SQLITE_STATIC);
-                    sqlite3_bind_int64(rs, 3, (int64_t)n);
                     if (sqlite3_step(rs) == SQLITE_ROW) {
                         const char *v = (const char *)sqlite3_column_text(rs, 0);
                         if (v && v[0]) *detail_out = strdup(v);
                     }
                     sqlite3_finalize(rs);
                 }
+                if (!*detail_out)
+                    apply_detail(detail_out, "applied (no effective state to "
+                                             "report)");
             }
         } else {
             sqlite3_exec(db, "ROLLBACK TO req_changes; RELEASE req_changes",

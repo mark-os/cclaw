@@ -363,7 +363,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     LOG_DEBUG_("llm_req: %d entries, cut=%d", plan.count, plan.cut);
 
     /* Session context: recall plus live per-turn state (context-placement
-     * memory blocks, running sub-agents, pending approvals) — never baked
+     * memory blocks, running sub-agents, open approvals) — never baked
      * into the system prompt. Materialized ONCE at turn start (recall != 0
      * ⟺ iteration 0) and persisted on the session row; tool-loop iterations
      * read the frozen text back verbatim. Content and position (turn

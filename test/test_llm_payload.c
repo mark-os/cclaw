@@ -287,7 +287,7 @@ static void test_recall_in_session_context(void) {
     printf("  PASS test_recall_in_session_context\n");
 }
 
-/* session_context_text: pending approvals and running sub-agents surface in
+/* session_context_text: open approvals and running sub-agents surface in
  * the assembled payload; with nothing pending/running and no recall the block
  * carries the wall clock alone — the zone is stated, since cron expressions
  * evaluate in local time and the model has to translate "9am" into one. */
@@ -311,11 +311,14 @@ static void test_session_context_live_state(void) {
     unsetenv("TZ");
     tzset();
 
-    /* Pending approval */
+    /* Three approvals: pending and approved-unconsumed are both open (A3);
+     * a consumed ticket is closed and must not surface. */
     sqlite3_stmt *ins;
     sqlite3_prepare_v2(db,
         "INSERT INTO approvals(session_id,tool_name,action,state)"
-        " VALUES(?1,'request_config','request_changes','pending');",
+        " VALUES(?1,'request_config','request_changes','pending'),"
+        "       (?1,'shell_exec',NULL,'approved'),"
+        "       (?1,'web_fetch',NULL,'consumed');",
         -1, &ins, NULL);
     sqlite3_bind_int64(ins, 1, sid);
     assert(sqlite3_step(ins) == SQLITE_DONE);
@@ -341,7 +344,10 @@ static void test_session_context_live_state(void) {
 
     char *context_text = session_context_text(db, sid, NULL);
     assert(context_text);
-    assert(strstr(context_text, "<pending_approvals>"));
+    assert(strstr(context_text, "<open_approvals>"));
+    assert(strstr(context_text, "shell_exec — approved, unused: re-issue"));
+    assert(strstr(context_text, "pending: waiting on a human decision"));
+    assert(!strstr(context_text, "web_fetch"));   /* consumed = closed */
     /* the renderer shows COALESCE(tool_name, action) — tool_name wins */
     assert(strstr(context_text, "request_config"));
     assert(strstr(context_text, "<running_sub_agents>"));

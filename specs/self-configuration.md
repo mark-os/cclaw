@@ -41,7 +41,8 @@ Design invariants (from the architecture review, SELF-CONFIGURATION-REVIEW.md):
    "agent":{"primary_model":"gemini-2.5-flash@gemini","max_iterations":40},
    "routes":["telegram:12345"],
    "config":{"registered.key":"value-string"},
-   "provider":{"provider":"openrouter","model":"deepseek/deepseek-v4-flash"}
+   "provider":{"provider":"openrouter","base_url":"https://openrouter.ai/api/v1"},
+   "models":[{"id":"deepseek/deepseek-v4-flash@openrouter","context_window":128000}]
  },"reason":"shown to approver"}
 ```
 
@@ -53,23 +54,50 @@ Sections by scope — the approval prompt groups them the same way:
 | `agent` | agent | whitelisted columns on the caller's `agents` row (`primary_model`, `secondary_model`, `max_iterations`, `shell_timeout`) |
 | `routes` | agent | session + `channel_routes` pin (`channel:chat_id`, first-come, `explicit` delivery; no wildcards — channel defaults are operator config) |
 | `config` | **system** | global `config` table |
-| `provider` | **system** | `providers` upsert + a `models` row for its default model |
+| `provider` | **system** | `providers` upsert — transport only (endpoint + credential name) |
+| `models` | **system** | `models` upsert per entry — register, update, or disable by canonical id |
 
+- **Models are separate from providers.** A provider is protocol/endpoint/auth,
+  set once and near-fixed; models change often and carry the things the loop
+  actually reads (context window, capabilities, routing priority). Registration
+  therefore points the same way the runtime does: `models` entries name a
+  provider that must **already** exist (or be defined by the same document),
+  and `provider` documents no longer carry a `model` key at all.
+  `providers.default_model` survives as fresh-install seed sugar
+  (`templates/seed.sql`) and is not a registration path.
+- **Model ids are canonical.** `agent.primary_model`/`secondary_model` and
+  `create_agent`/`update_agent` accept a `models.id` and nothing else; a bare
+  name gets a did-you-mean naming the registered id. Bare names used to resolve
+  to whichever provider's row the scan reached first — schema v44 rewrote the
+  existing ones once (unambiguous → rewritten, no match → left as-is,
+  ambiguous → the row routing preferred), and no fallback parser was kept.
 - **Eager validation (typo-hostile)**: unknown sections/keys are errors, never
   dropped. Config keys must be registered (`search_config` lists them);
   secret-flagged keys are rejected (`save_secret` is the path for those).
-  Provider defaults are filled at park time so the approver sees the final values.
-  Paths must be absolute. `agent` model references must resolve to a `models`
-  row (`model` or `model@provider`) — or to the model this same document's
-  `provider` section defines. Routes already owned by another agent are
+  Provider defaults are filled at park time so the approver sees the final values;
+  an existing provider's `api_key_env` is **preserved verbatim, empty included**
+  (an absent field means "leave it", never "re-derive it" — the derivation
+  applies to genuinely new providers only). A document whose credential name
+  resolves to neither an environment variable nor a system-scope secret is
+  refused at request time, where the agent can still fix it, rather than
+  silently skipped by routing later.
+  Paths must be absolute. Routes already owned by another agent are
   refused. A document that can't apply never parks.
 - **All-or-nothing apply**: on approval, the entire document is applied inside a
   savepoint. If any line fails (including a route captured between park and
   apply), the whole document rolls back.
+- **Verify-after-write receipt**: the success notice is built by **re-reading**
+  the rows each section claims to have written (live grants, stored config
+  values, the provider row, each model row, the agent's own settings, bound
+  routes) — never by echoing the request. Intent and effect diverged silently
+  in the 2026-08-10 incident, and the agent has no other way to tell.
 - **Approval summary**: enumerates every requested line (hosts, paths, tools,
-  routes, agent k=v, config k=v, provider) in fenced blocks grouped
+  routes, agent k=v, config k=v, models, provider) in fenced blocks grouped
   **agent-scoped vs system-wide** so the approver sees the blast radius at a
-  glance — values, never counts.
+  glance — values, never counts. A provider document aimed at an **existing**
+  row renders a field-level diff (`provider X base_url: old -> new`), not the
+  canonical doc: re-stating fields that did not move is how a single rewritten
+  `api_key_env` went unnoticed.
 
 ### Scoping model (why `config` is system-wide)
 
@@ -82,10 +110,12 @@ section), not a scoped config key.
 
 ### Attachment model (one-liner each)
 
-- **provider → agent**: a provider is system-level; an agent *adopts* one by
-  setting `agent.primary_model` to a `model@provider` id. Providers are only
-  reachable through `models` rows (per-request routing joins models →
-  providers), which is why the provider apply seeds one.
+- **provider → model → agent**: a provider is system-level transport; a model
+  is registered *on* a provider (`models` section, canonical `model@provider`
+  id); an agent *adopts* a model by setting `agent.primary_model` to that id.
+  Providers are only reachable through `models` rows (per-request routing joins
+  models → providers), so a provider with no models row is unreachable — one
+  document can carry all three steps.
 - **session → agent**: fixed at creation (`launch_agent`, channel routing);
   never reassigned. Moving work = a new session, not a transfer.
 - **session → channel**: a session's `channel_name`/`chat_id` is its
@@ -187,7 +217,7 @@ immutable to agents once applied.
   exclusively `request_changes` (escalation) and the delegation/escalation
   split survives.
 - **Overlay semantics, typo-hostile**: provided fields overwrite
-  (`description`, `system_prompt`, models — must resolve to `models` rows —
+  (`description`, `system_prompt`, models — canonical `models.id` only —
   `sandbox_profile`, `max_iterations`, `shell_timeout`); absent fields keep
   their value, so unknown keys are hard errors (a typo would otherwise
   silently change nothing). An update with no updatable field is an error.

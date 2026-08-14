@@ -68,7 +68,9 @@ Only `name` is required (PascalCase). Everything else defaults sensibly.
 `clone_from` copies an existing agent's row, grants, and extensions first,
 then overlays the fields you set — "like Assistant but with X" is one field.
 
-Models accept `model` or `model@provider` (the id form pins the provider).
+Models are canonical ids exactly as `search_config` lists them (typically
+`model@provider`) — a bare model name is refused, since the same name can
+exist on more than one provider.
 
 ## Creation caps — and the two-step when you hit them
 

@@ -40,7 +40,8 @@ one approval covers the whole document:
    "agent": {"primary_model": "gemini-2.5-flash@gemini", "max_iterations": 40},
    "routes": ["telegram:12345"],
    "config": {"registered.key": "value"},
-   "provider": {"provider": "gemini"}
+   "provider": {"provider": "gemini"},
+   "models": [{"id": "gemini-2.5-flash@gemini", "context_window": 1000000}]
  }, "reason": "why you need these"}
 ```
 
@@ -52,10 +53,10 @@ one approval covers the whole document:
 - `grants`: host prefix `.` covers subdomains (`.example.com` covers
   `example.com` AND `api.example.com`); shell/web egress is default-deny.
   Paths must be absolute; `read_paths` and `write_paths` are separate.
-- `agent`: your own settings — `primary_model` / `secondary_model` (accepts
-  `model` or `model@provider`; must resolve to a registered model or the one
-  this document's `provider` section defines), `max_iterations`,
-  `shell_timeout`.
+- `agent`: your own settings — `primary_model` / `secondary_model` (a
+  canonical model id exactly as `search_config` lists it, or one this same
+  document's `models` section registers; bare model names are refused with the
+  id you probably meant), `max_iterations`, `shell_timeout`.
 - `routes`: `"channel:chat_id"` strings authorizing `channel_send` to that
   chat. First-come: a chat routed to another agent is refused. Wildcards are
   operator-only.
@@ -64,11 +65,20 @@ one approval covers the whole document:
 
 - `config`: keys must exist in the registry; unknown keys fail immediately
   (no approval is parked), so check `search_config` first. Values are strings.
-- `provider`: define an LLM provider (`provider`, `base_url` for custom
-  names, optional `model`, `api_key_env` naming the secret that holds the API
-  key — store the key first with `save_secret`, never pass key material).
-  Applying also registers the provider's model, so one document can define a
-  provider and adopt it via `agent.primary_model: "model@provider"`.
+- `provider`: define an LLM provider's **transport** — `provider`, `base_url`
+  for custom names, and `api_key_env` naming the secret that holds the API key.
+  Store the key first with `save_secret` (never pass key material): a provider
+  whose key does not exist is refused here, because at request time its models
+  are skipped in silence. A keyless endpoint says so explicitly with
+  `"api_key_env": ""`. Editing an existing provider leaves its credential name
+  alone unless you pass a new one.
+- `models`: register, update, or disable a model — `[{"id": "<model>@<provider>",
+  "context_window": N, "max_output_tokens": N, "capabilities": ["text"],
+  "priority": N, "status": "healthy"|"disabled"}]`. The provider must already
+  exist (or be defined by this same document); only `id` is required, and
+  fields you omit keep their current values. One document can therefore define
+  a provider, register a model on it, and adopt it via
+  `agent.primary_model: "<model>@<provider>"`.
 
 `rename_agent {name}` — request a new agent name (separate action).
 

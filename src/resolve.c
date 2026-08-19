@@ -230,19 +230,24 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                  * the raw decided_via token — "auto:expired" means nobody
                  * decided, which is not a denial. */
                 int expired = decided_via && strcmp(decided_via, "auto:expired") == 0;
-                char buf[288];
+                char buf[768], state[256];
+                approval_state_restatement(proc_db(), a, state, sizeof(state));
                 if (expired)
                     snprintf(buf, sizeof(buf),
                              "error: approval for %s expired without a decision "
                              "— the operator may not have seen it. Not a denial "
                              "— re-request only if the task still needs it, and "
-                             "mention that it expired.", a->action);
-                else
+                             "mention that it expired. Nothing was applied. "
+                             "Current state: %s", a->action, state);
+                else {
+                    char who[128];
+                    approval_decider_phrase(decided_via, who, sizeof(who));
                     snprintf(buf, sizeof(buf),
-                             "error: %s denied. Don't re-request the same thing "
-                             "— adjust your approach, or explain what you were "
-                             "trying to do and let the operator decide.",
-                             a->action);
+                             "error: %s denied by the operator%s: this is a "
+                             "decision, not an error — do not re-request unless "
+                             "the operator asks. Unchanged: %s",
+                             a->action, who, state);
+                }
                 ToolResult tr = { .tool_call_id = a->tool_call_id, .content = buf };
                 Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                                 .tool_name = a->action, .is_error = 1 };
@@ -301,7 +306,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
     /* Build tool result message. Receipts over intent: on apply the detail is
      * what is now in effect (re-read from the DB); on failure it names the
      * failing step — approved-then-failed must never read as a denial. */
-    char result_buf[768];
+    char result_buf[1024];
     if (rename_failed)
         snprintf(result_buf, sizeof(result_buf),
                  "error: %s was approved but applying it failed (%s) — "
@@ -317,9 +322,15 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
     else if (decision == APPROVAL_ALWAYS)
         snprintf(result_buf, sizeof(result_buf), "approved: %s%s%s", a->action,
                  apply_detail ? " — " : "", apply_detail ? apply_detail : "");
-    else
-        snprintf(result_buf, sizeof(result_buf), "denied (%s): %s",
-                 decided_via, a->action);
+    else {
+        char who[128], state[256];
+        approval_decider_phrase(decided_via, who, sizeof(who));
+        approval_state_restatement(proc_db(), a, state, sizeof(state));
+        snprintf(result_buf, sizeof(result_buf),
+                 "denied by the operator%s: this is a decision, not an error "
+                 "— do not re-request unless the operator asks. Unchanged: %s",
+                 who, state);
+    }
 
     if (a->tool_call_id) {
         ToolResult tr = { .tool_call_id = a->tool_call_id, .content = result_buf };

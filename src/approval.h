@@ -127,6 +127,18 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a,
                                     ApprovalPostWindow outcome,
                                     const char *detail);
 
+/* decided_via ("channel:<ch>:<sender>", "channel:<ch>", "cli", "auto:...") →
+ * plain-language provenance for a receipt: " (<sender>, via <channel>)",
+ * " (via <channel>)", or "" when there is no usable token. */
+void approval_decider_phrase(const char *via, char *buf, size_t len);
+
+/* One-line re-read of current effective state for the sections the approval's
+ * request touched (models list, grants) — read from the DB, never echoed from
+ * the request. Terminal receipts (deny, expiry) end with it so the model
+ * cannot confabulate what was applied. Always writes something. */
+void approval_state_restatement(sqlite3 *db, const Approval *a,
+                                char *buf, size_t len);
+
 /* Render a human-readable markdown summary of an approval for the approver's
  * prompt — never the raw args_json blob. Returns a heap string, caller frees. */
 char *approval_format_summary(sqlite3 *db, const Approval *a);

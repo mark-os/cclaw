@@ -150,7 +150,8 @@ int main(void) {
         " data:{custom_id:'appr:5:yes'}, user:{id:'42',global_name:'Mark'},"
         " message:{content:'Prompt'}});"
         "__emits[0].type + ' ' + __emits[0].payload + ' ' + __emits[0].ext",
-        "approval_decision {\"approval_id\":5,\"decision\":\"yes\"} disc_int_i1");
+        "approval_decision {\"approval_id\":5,\"decision\":\"yes\","
+        "\"sender\":\"Mark\"} disc_int_i1");
     expect_has("interaction_admin_updates_message",
         "channel.admin.isAdmin=function(){return true;};"
         "config.base='https://d.test';"

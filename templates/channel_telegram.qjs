@@ -370,13 +370,16 @@ function handleApprovalCallback(fromId, data, cbq) {
         tgCast("answerCallbackQuery", {callback_query_id: cbq.id, text: toast});
     }
 
+    // sender = the clicker, recorded in approvals.decided_via so the receipt
+    // can name who decided (mirrors channel_discord.qjs onInteraction).
+    var who = (cbq.from && cbq.from.first_name) || fromId;
     channel.emit("approval_decision",
-        JSON.stringify({approval_id: parseInt(approvalId, 10), decision: decision}),
+        JSON.stringify({approval_id: parseInt(approvalId, 10), decision: decision,
+                        sender: who}),
         "appr_" + cbq.id);
 
     // Resolve the prompt in place so stale buttons can't be clicked twice.
     if (cbq.message && cbq.message.chat) {
-        var who = (cbq.from && cbq.from.first_name) || fromId;
         var outcome = (cbq.message.text || "Approval") + "\n\n" + toast + " by " + who;
         tgCast("editMessageText", {
             chat_id: cbq.message.chat.id,

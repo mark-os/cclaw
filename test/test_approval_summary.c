@@ -127,9 +127,9 @@ static void test_request_changes_branch(void) {
     char *s = summarize(db, "request_config", "request_changes",
         "{\"changes\":{\"grants\":{\"hosts\":[\"api.github.com\"]},"
         "\"config\":{\"log_level\":\"debug\"}},\"reason\":\"need gh\"}");
-    assert(strstr(s, "Agent-scoped (this agent only):"));
+    assert(strstr(s, "Authority (this agent only — widens what it can reach):"));
     assert(strstr(s, "host   api.github.com"));
-    assert(strstr(s, "System-wide:"));
+    assert(strstr(s, "System-wide (affects every agent):"));
     assert(strstr(s, "log_level = debug"));
     assert(strstr(s, "Reason: need gh"));
     free(s);
@@ -144,7 +144,7 @@ static void test_secret_bindings_lines(void) {
     char *s = summarize(db, "request_config", "request_changes",
         "{\"changes\":{\"secret_bindings\":{\"ALPACA_KEY\":"
         "[\"api.alpaca.markets\",\".example.com\"]}}}");
-    assert(strstr(s, "System-wide:"));
+    assert(strstr(s, "Authority (system-wide):"));
     assert(strstr(s, "secret ALPACA_KEY -> api.alpaca.markets"));
     assert(strstr(s, "secret ALPACA_KEY -> .example.com"));
     free(s);
@@ -222,6 +222,104 @@ static void test_provider_swap_names_model(void) {
     printf("  provider swap names model: OK\n");
 }
 
+/* The prod defect (2026-08-19, approvals #32/#34): json_each.atom is NULL for
+ * arrays, so the operator was asked to approve `models = `. Containers render
+ * their elements, and the overwrite shows what it replaces. */
+static void test_agent_settings_array_and_diff(void) {
+    sqlite3 *db = fresh_db();
+    exec_sql(db, "DELETE FROM agent_models WHERE agent_name='bot';"
+                 "INSERT OR IGNORE INTO models(id,provider_name,model)"
+                 " VALUES('old-model','p','m');"
+                 "INSERT INTO agent_models(agent_name,model_id,pos) VALUES"
+                 " ('bot','old-model',0);"
+                 "UPDATE agents SET max_iterations=10 WHERE name='bot';");
+    char *s = summarize(db, "request_config", "request_changes",
+        "{\"changes\":{\"agent\":{\"models\":[\"claude-sonnet-4.6@local-gateway\"],"
+        "\"max_iterations\":25}}}");
+    assert(strstr(s, "Settings (this agent only):"));
+    assert(strstr(s, "models = claude-sonnet-4.6@local-gateway"));
+    assert(!strstr(s, "models = \n"));                 /* never a blank RHS */
+    assert(strstr(s, "(now: old-model)"));
+    assert(strstr(s, "max_iterations = 25"));
+    assert(strstr(s, "(now: 10)"));
+    free(s);
+    db_close(db);
+    printf("  agent settings array + diff: OK\n");
+}
+
+/* Kind axis: authority (what it can reach) is a different question from
+ * settings (how it behaves), and the card must not blur them. */
+static void test_kind_headers_split(void) {
+    sqlite3 *db = fresh_db();
+    char *s = summarize(db, "request_config", "request_changes",
+        "{\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]},"
+        "\"agent\":{\"shell_timeout\":90}}}");
+    assert(strstr(s, "Authority (this agent only — widens what it can reach):"));
+    assert(strstr(s, "tool   shell_exec"));
+    assert(strstr(s, "Settings (this agent only):"));
+    assert(strstr(s, "shell_timeout = 90"));
+    free(s);
+    db_close(db);
+    printf("  kind headers split: OK\n");
+}
+
+/* Terminal receipts re-read state; they never echo the request. */
+static void test_state_restatement(void) {
+    sqlite3 *db = fresh_db();
+    exec_sql(db, "DELETE FROM agent_models WHERE agent_name='bot';"
+                 "INSERT OR IGNORE INTO models(id,provider_name,model)"
+                 " VALUES('a','p','m'),('b','p','m');"
+                 "INSERT INTO agent_models(agent_name,model_id,pos) VALUES"
+                 " ('bot','a',0),('bot','b',1);");
+    int64_t sid = session_create(db, "s", "bot", -1, 0);
+    int64_t aid = approval_create(db, sid, "c1", "request_config",
+        "request_changes",
+        "{\"changes\":{\"agent\":{\"models\":[\"never-applied\"]},"
+        "\"grants\":{\"hosts\":[\"x.example\"]}}}", "apply");
+    assert(aid > 0);
+    Approval *a = approval_get_pending(db, sid);
+    char st[256];
+    approval_state_restatement(db, a, st, sizeof(st));
+    assert(strstr(st, "models = a, b"));
+    assert(strstr(st, "grants unchanged"));
+    assert(!strstr(st, "never-applied"));
+    /* The expiry notice carries it, and still says "not a denial". */
+    assert(approval_deliver_postwindow(db, a, APPROVAL_PW_EXPIRED, NULL) > 0);
+    char *notice = NULL;
+    sqlite3_stmt *s2;
+    assert(sqlite3_prepare_v2(db, "SELECT payload FROM inbox ORDER BY id DESC"
+                                  " LIMIT 1", -1, &s2, NULL) == SQLITE_OK);
+    if (sqlite3_step(s2) == SQLITE_ROW)
+        notice = strdup((const char *)sqlite3_column_text(s2, 0));
+    sqlite3_finalize(s2);
+    assert(notice != NULL);
+    assert(strstr(notice, "Not a denial"));
+    assert(strstr(notice, "Nothing was applied. Current state: models = a, b"));
+    free(notice);
+    approval_free(a);
+    db_close(db);
+    printf("  state restatement: OK\n");
+}
+
+/* The deny receipt names who decided, in words — "denied (channel:discord)"
+ * told the operator's agent neither who nor in what. */
+static void test_decider_phrase(void) {
+    char b[128];
+    approval_decider_phrase("channel:discord:Mark", b, sizeof(b));
+    assert(strcmp(b, " (Mark, via discord)") == 0);
+    approval_decider_phrase("channel:discord", b, sizeof(b));
+    assert(strcmp(b, " (via discord)") == 0);
+    approval_decider_phrase("channel:discord:", b, sizeof(b));
+    assert(strcmp(b, " (via discord)") == 0);
+    approval_decider_phrase("cli", b, sizeof(b));
+    assert(strcmp(b, " (via cli)") == 0);
+    approval_decider_phrase("auto:no-approver", b, sizeof(b));
+    assert(strcmp(b, " (via auto:no-approver)") == 0);
+    approval_decider_phrase(NULL, b, sizeof(b));
+    assert(b[0] == '\0');
+    printf("  decider phrase: OK\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_approval_summary:\n");
@@ -233,6 +331,10 @@ int main(void) {
     test_secret_bindings_lines();
     test_create_agent_discloses_scalars();
     test_provider_swap_names_model();
+    test_agent_settings_array_and_diff();
+    test_kind_headers_split();
+    test_state_restatement();
+    test_decider_phrase();
     test_db_clean(DB_PATH);
     printf("test_approval_summary: ALL PASS\n");
     return 0;

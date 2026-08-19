@@ -451,14 +451,17 @@ function onInteraction(d) {
 
     // Interaction ids are unique per click — free idempotency via the
     // channel_events UNIQUE(channel_name, external_id) constraint.
+    // `sender` is the clicker as a human reads them: it lands in
+    // approvals.decided_via, which the deny receipt quotes back to the agent.
+    var who = user.global_name || user.username || fromId;
     channel.emit("approval_decision",
-        JSON.stringify({ approval_id: approvalId, decision: decision }),
+        JSON.stringify({ approval_id: approvalId, decision: decision,
+                         sender: who }),
         "disc_int_" + d.id);
 
     // Resolve the prompt in place so stale buttons can't be clicked twice.
     // The original content rides d.message; cap the edit under the message
     // limit before appending the receipt line.
-    var who = user.global_name || user.username || fromId;
     var orig = (d.message && d.message.content) || "Approval";
     var suffix = "\n\n" + toast + " by " + who;
     if (orig.length + suffix.length > DISCORD_MAX_MSG_LEN)

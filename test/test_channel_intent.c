@@ -97,6 +97,12 @@ static void test_parse_decision_event(void) {
     assert(it.origin == CHANNEL_ORIGIN_EVENT);
     assert(it.approval_id == 5);
     assert(it.decide == CHANNEL_DECIDE_APPROVE_ALWAYS);
+    assert(it.sender[0] == '\0');   /* absent sender is not an error */
+
+    /* The clicker rides the payload so decided_via can name them. */
+    assert(channel_intent_from_decision_event(db,
+        "{\"approval_id\":5,\"decision\":\"no\",\"sender\":\"Mark\"}", &it) == 0);
+    assert(strcmp(it.sender, "Mark") == 0);
 
     assert(channel_intent_from_decision_event(db,
         "{\"approval_id\":5,\"decision\":\"once\"}", &it) == 0);

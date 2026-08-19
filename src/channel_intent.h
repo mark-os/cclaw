@@ -54,6 +54,10 @@ typedef struct {
     ChannelDecide decide;     /* DECIDE only */
     int64_t approval_id;      /* DECIDE; <= 0 = unusable arg (usage reply) */
     int64_t session_id;       /* PIN_SESSION */
+    /* DECIDE from a structural event: the clicker, as the extension reported
+     * them. Empty when the payload carried none. Recorded in decided_via so
+     * the receipt can name who decided, not just which channel. */
+    char sender[64];
 } ChannelIntent;
 
 /* Chat text → intent. kind=NONE for anything that isn't an admin command.
@@ -61,7 +65,8 @@ typedef struct {
  * "/new". Pure — no DB, no allocation. */
 ChannelIntent channel_intent_from_text(const char *text);
 
-/* approval_decision payload {approval_id, decision:"yes"|"once"|other} →
+/* approval_decision payload {approval_id, decision:"yes"|"once"|other,
+ * sender?} →
  * DECIDE intent. `db` is used as the JSON parser only (jsmn stays banned
  * where a handle exists). Returns 0, or -1 for a malformed payload. */
 int channel_intent_from_decision_event(sqlite3 *db, const char *payload,

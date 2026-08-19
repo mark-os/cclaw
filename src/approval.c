@@ -439,6 +439,63 @@ int64_t *approval_list_block_due(sqlite3 *db, int block_sec, const char *me, int
     return drain_ids(stmt, out_count);
 }
 
+/* Plain-language provenance for a receipt, from decided_via
+ * ("channel:<ch>:<sender>", "channel:<ch>", "cli", "auto:..."). The operator
+ * clicked a button in a room; "denied (channel:discord)" told the model
+ * neither who nor in what — and a wire token is not an explanation. Writes
+ * " (<sender>, via <channel>)", " (via <channel>)", or "" when there is no
+ * usable token. */
+void approval_decider_phrase(const char *via, char *buf, size_t len) {
+    buf[0] = '\0';
+    if (!via || !via[0]) return;
+    if (strncmp(via, "channel:", 8) == 0) {
+        const char *ch = via + 8;
+        const char *sep = strchr(ch, ':');
+        int chlen = sep ? (int)(sep - ch) : (int)strlen(ch);
+        if (sep && sep[1])
+            snprintf(buf, len, " (%s, via %.*s)", sep + 1, chlen, ch);
+        else
+            snprintf(buf, len, " (via %.*s)", chlen, ch);
+    } else {
+        snprintf(buf, len, " (via %s)", via);
+    }
+}
+
+/* One-line re-read of the state a terminal approval did NOT change, for the
+ * sections the request touched. Receipts over intent: the model confabulated
+ * "Sonnet is running" for hours off a notice that said only "expired", so
+ * every terminal message ends with what is actually true right now, read from
+ * the DB — never an echo of the request. */
+void approval_state_restatement(sqlite3 *db, const Approval *a,
+                                char *buf, size_t len) {
+    const char *args = (a && a->args_json) ? a->args_json : "{}";
+    size_t n = 0;
+    buf[0] = '\0';
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_type(?1,'$.changes.agent') IS NOT NULL,"
+            "       json_type(?1,'$.changes.grants') IS NOT NULL,"
+            "       COALESCE((SELECT group_concat(model_id, ', ')"
+            "         FROM (SELECT model_id FROM agent_models"
+            "                WHERE agent_name=(SELECT agent_name FROM sessions"
+            "                                   WHERE id=?2) ORDER BY pos)),"
+            "        '(none)')",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, args, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 2, a ? a->session_id : 0);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            if (sqlite3_column_int(st, 0))
+                n += (size_t)snprintf(buf + n, len - n, "models = %s",
+                                      (const char *)sqlite3_column_text(st, 2));
+            if (n >= len) n = len - 1;  /* truncated — keep the tail in bounds */
+            if (sqlite3_column_int(st, 1) && n < len)
+                snprintf(buf + n, len - n, "%sgrants unchanged", n ? "; " : "");
+        }
+        sqlite3_finalize(st);
+    }
+    if (!buf[0]) snprintf(buf, len, "nothing was applied");
+}
+
 int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a,
                                     ApprovalPostWindow outcome,
                                     const char *detail) {
@@ -498,14 +555,17 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a,
                  (long long)a->id, what);
         break;
     case APPROVAL_PW_EXPIRED:
-    default:
+    default: {
+        char state[256];
+        approval_state_restatement(db, a, state, sizeof(state));
         snprintf(buf, sizeof(buf),
                  "Approval #%lld for '%s' expired without a decision — the "
                  "operator may not have seen it. Not a denial — re-request "
                  "only if the task still needs it, and mention that it "
-                 "expired.",
-                 (long long)a->id, what);
+                 "expired. Nothing was applied. Current state: %s",
+                 (long long)a->id, what, state);
         break;
+    }
     }
     return inbox_insert(db, a->session_id, "approval", NULL, buf);
 }
@@ -533,12 +593,18 @@ static void append_fence_escaped(Buf *out, const char *s) {
  * text column, one text bind) — or nothing when the query yields no rows.
  * The fence renders as monospace <pre> on chat channels so columns stay
  * aligned; in a terminal it reads fine as-is. Values are model-authored,
- * so they get the fence escape. */
+ * so they get the fence escape.
+ *
+ * ?1 is the args JSON; a query that also wants live state binds the session
+ * id as ?2 (see SQL_CHANGES_AGENT_SETTINGS) — bound only when the statement
+ * declares it, so the single-bind queries stay untouched. */
 static void append_enum_block(sqlite3 *db, Buf *out, const char *header,
-                              const char *sql, const char *bind) {
+                              const char *sql, const char *bind, int64_t sid) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return;
     sqlite3_bind_text(st, 1, bind, -1, SQLITE_STATIC);
+    if (sqlite3_bind_parameter_count(st) >= 2)
+        sqlite3_bind_int64(st, 2, sid);
     int n = 0;
     while (sqlite3_step(st) == SQLITE_ROW) {
         const char *v = (const char *)sqlite3_column_text(st, 0);
@@ -554,20 +620,50 @@ static void append_enum_block(sqlite3 *db, Buf *out, const char *header,
 /* request_changes enumerations, grouped by scope: the approver must see
  * whether a line changes only the asking agent or the whole system. Every
  * requested VALUE is listed (which hosts, which paths) — never counts. */
-static const char *SQL_CHANGES_AGENT_SCOPED =
+static const char *SQL_CHANGES_AUTHORITY_AGENT =
     "SELECT format('%-7s%s','tool',atom) FROM json_each(?1,'$.changes.grants.tools')"
     " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.changes.grants.hosts')"
     " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.changes.grants.read_paths')"
     " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.changes.grants.write_paths')"
-    " UNION ALL SELECT format('%-7s%s','route',atom) FROM json_each(?1,'$.changes.routes')"
-    " UNION ALL SELECT format('%s = %s',key,atom) FROM json_each(?1,'$.changes.agent')";
+    " UNION ALL SELECT format('%-7s%s','route',atom) FROM json_each(?1,'$.changes.routes')";
+
+/* Agent settings, with a diff against live state. Two hazards, both seen in
+ * prod: json_each.atom is NULL for arrays/objects (the `models = ` blank the
+ * operator was asked to approve), and an overwrite whose current value is
+ * invisible reads as news when it is a no-op — the same principle as the
+ * provider diff below. So: containers render their elements, and every line
+ * that would change something shows what it replaces. ?2 is the session id,
+ * from which the asking agent's row is read. */
+#define SQL_CUR_AGENT "(SELECT agent_name FROM sessions WHERE id=?2)"
+static const char *SQL_CHANGES_AGENT_SETTINGS =
+    "SELECT format('%s = %s%s', key, req,"
+    "   CASE WHEN cur IS NOT NULL AND cur <> req"
+    "        THEN '   (now: '||cur||')' ELSE '' END)"
+    " FROM (SELECT j.key AS key,"
+    "   CASE WHEN j.type IN ('array','object')"
+    "     THEN COALESCE((SELECT group_concat(atom, ', ') FROM json_each(j.value)),"
+    "                   '(empty)')"
+    "     ELSE COALESCE(j.atom,'(empty)') END AS req,"
+    "   CASE j.key"
+    "     WHEN 'models' THEN (SELECT group_concat(model_id, ', ')"
+    "       FROM (SELECT model_id FROM agent_models"
+    "              WHERE agent_name=" SQL_CUR_AGENT " ORDER BY pos))"
+    "     WHEN 'max_iterations' THEN (SELECT CAST(max_iterations AS TEXT)"
+    "       FROM agents WHERE name=" SQL_CUR_AGENT ")"
+    "     WHEN 'shell_timeout' THEN (SELECT CAST(shell_timeout AS TEXT)"
+    "       FROM agents WHERE name=" SQL_CUR_AGENT ")"
+    "   END AS cur"
+    "  FROM json_each(?1,'$.changes.agent') j)";
+
+/* One line per (secret, host) pair — the pair IS the decision: after approval
+ * this credential may be submitted to that host, durably. Authority, and
+ * system-wide: the binding is not scoped to the asking agent. */
+static const char *SQL_CHANGES_AUTHORITY_SYSTEM =
+    "SELECT format('secret %s -> %s', s.key, h.atom)"
+    "   FROM json_each(?1,'$.changes.secret_bindings') s, json_each(s.value) h";
 
 static const char *SQL_CHANGES_SYSTEM_WIDE =
     "SELECT format('%s = %s',key,atom) FROM json_each(?1,'$.changes.config')"
-    /* One line per (secret, host) pair — the pair IS the decision: after
-     * approval this credential may be submitted to that host, durably. */
-    " UNION ALL SELECT format('secret %s -> %s', s.key, h.atom)"
-    "   FROM json_each(?1,'$.changes.secret_bindings') s, json_each(s.value) h"
     /* A provider document is transport: endpoint plus the secret that pays
      * for it. For a NEW provider the whole doc is the news; for an existing
      * one the news is the DIFF — "provider X -> <same url it already had>"
@@ -744,9 +840,19 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
     if (a->tool_name && strcmp(a->tool_name, "request_config") == 0 &&
         a->action && strcmp(a->action, "request_changes") == 0) {
         buf_append_str(&out, "requests these changes:\n");
-        append_enum_block(db, &out, "Agent-scoped (this agent only):",
-                          SQL_CHANGES_AGENT_SCOPED, args);
-        append_enum_block(db, &out, "System-wide:", SQL_CHANGES_SYSTEM_WIDE, args);
+        /* Two axes: scope (whose reach changes) and kind (authority vs
+         * settings). Authority widens what the agent can touch and is the
+         * line an approver must never skim past; a setting only retunes what
+         * it already has. */
+        append_enum_block(db, &out,
+                          "Authority (this agent only — widens what it can reach):",
+                          SQL_CHANGES_AUTHORITY_AGENT, args, a->session_id);
+        append_enum_block(db, &out, "Settings (this agent only):",
+                          SQL_CHANGES_AGENT_SETTINGS, args, a->session_id);
+        append_enum_block(db, &out, "Authority (system-wide):",
+                          SQL_CHANGES_AUTHORITY_SYSTEM, args, a->session_id);
+        append_enum_block(db, &out, "System-wide (affects every agent):",
+                          SQL_CHANGES_SYSTEM_WIDE, args, a->session_id);
         f[0] = tool_args_str(db, args, "reason");
         if (f[0] && f[0][0]) buf_appendf(&out, "Reason: %s\n", f[0]);
     } else if (a->tool_name && strcmp(a->tool_name, "request_config") == 0 &&
@@ -770,20 +876,20 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
                     f[0] ? f[0] : "?", f[1] ? f[1] : "default",
                     f[2] ? ", clone of " : "", f[2] ? f[2] : "");
         append_enum_block(db, &out, "Capabilities (all within the creator's own):",
-                          SQL_CREATE_AGENT_LINES, args);
+                          SQL_CREATE_AGENT_LINES, args, a->session_id);
     } else if (a->tool_name && strcmp(a->tool_name, "update_agent") == 0) {
         f[0] = tool_args_str(db, args, "name");
         f[1] = tool_args_str(db, args, "reason");
         buf_appendf(&out, "wants to update agent **%s**:\n", f[0] ? f[0] : "?");
         append_enum_block(db, &out, "Changes (grants add; fields overwrite):",
-                          SQL_UPDATE_AGENT_LINES, args);
+                          SQL_UPDATE_AGENT_LINES, args, a->session_id);
         if (f[1] && f[1][0]) buf_appendf(&out, "Reason: %s\n", f[1]);
     } else if (a->tool_name && strcmp(a->tool_name, "cron_set") == 0) {
         f[0] = tool_args_str(db, args, "name");
         buf_appendf(&out, "wants to schedule job **%s**, running as another "
                           "agent (its grants and model, every fire):\n",
                     f[0] ? f[0] : "?");
-        append_enum_block(db, &out, "Job:", SQL_CRON_SET_LINES, args);
+        append_enum_block(db, &out, "Job:", SQL_CRON_SET_LINES, args, a->session_id);
     } else {
         /* Generic tail — two-axis: the tool + its args (axis 1), and why the
          * gate parked it (axis 2, rendered as an overlay). No guessed salient
@@ -801,7 +907,7 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
         else
             buf_appendf(&out, "%s\n", tn);
         if (is_sens) overlay_sensitive(db, &out, args);
-        append_enum_block(db, &out, "Args:", SQL_ARGS_LINES, args);
+        append_enum_block(db, &out, "Args:", SQL_ARGS_LINES, args, a->session_id);
         append_body_block(db, &out, args);
     }
     for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) free(f[i]);

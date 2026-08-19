@@ -642,6 +642,29 @@ static void test_channel_events_approval_decision(void) {
         sqlite3_finalize(s);
     }
 
+    /* A button payload that names its clicker: decided_via carries the
+     * sender, so the deny receipt can say who decided, not just where. */
+    resolve_spy_reset();
+    {
+        int64_t aid = approval_create(db, sid, "tc3b", "shell_exec", "run", "{}", "rerun");
+        assert(aid > 0);
+        char payload[160];
+        snprintf(payload, sizeof(payload),
+                 "{\"approval_id\":%lld,\"decision\":\"no\",\"sender\":\"Mark\"}",
+                 (long long)aid);
+        test_event_insert(db, "mychannel", "approval_decision", payload);
+        channel_consume_events(db);
+
+        assert(g_resolve_calls == 1);
+        assert(strcmp(g_resolve_decided_via, "channel:mychannel:Mark") == 0);
+
+        sqlite3_stmt *s;
+        assert(sqlite3_prepare_v2(db, "UPDATE approvals SET state='denied' WHERE id=?;", -1, &s, NULL) == SQLITE_OK);
+        sqlite3_bind_int64(s, 1, aid);
+        assert(sqlite3_step(s) == SQLITE_DONE);
+        sqlite3_finalize(s);
+    }
+
     /* Ordinary chat text while an approval is pending is NOT an implicit
      * decision — it forwards to the inbox untouched, and the approval
      * stays pending for a later structural decision (or expiry). */

@@ -866,8 +866,9 @@ void channel_consume_events(sqlite3 *db) {
                            ch_name, (long long)eid, payload);
                 goto del;
             }
-            if (channel_intent_allowed(db, ch_name, NULL, &it))
-                channel_intent_execute(db, ch_name, NULL, NULL, &it);
+            const char *who = it.sender[0] ? it.sender : NULL;
+            if (channel_intent_allowed(db, ch_name, who, &it))
+                channel_intent_execute(db, ch_name, NULL, who, &it);
             goto del;
         }
 

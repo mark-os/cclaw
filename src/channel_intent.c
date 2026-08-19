@@ -72,13 +72,16 @@ int channel_intent_from_decision_event(sqlite3 *db, const char *payload,
     char decision_str[16] = {0};
     sqlite3_stmt *js;
     if (sqlite3_prepare_v2(db,
-            "SELECT json_extract(?1,'$.approval_id'), json_extract(?1,'$.decision');",
+            "SELECT json_extract(?1,'$.approval_id'), json_extract(?1,'$.decision'),"
+            "       json_extract(?1,'$.sender');",
             -1, &js, NULL) == SQLITE_OK) {
         sqlite3_bind_text(js, 1, payload, -1, SQLITE_STATIC);
         if (sqlite3_step(js) == SQLITE_ROW) {
             approval_id = sqlite3_column_int64(js, 0);
             const char *dv = (const char *)sqlite3_column_text(js, 1);
             if (dv) snprintf(decision_str, sizeof(decision_str), "%s", dv);
+            const char *sv = (const char *)sqlite3_column_text(js, 2);
+            if (sv) snprintf(out->sender, sizeof(out->sender), "%s", sv);
         }
         sqlite3_finalize(js);
     }

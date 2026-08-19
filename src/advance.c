@@ -215,9 +215,41 @@ static void parent_push(sqlite3 *db, int64_t parent_sid, int64_t child_sid,
     sqlite3_finalize(ins);
 }
 
-/* One outbox row toward the session's bound chat (deliver_response's shape). */
+/* One outbox row toward the session's bound chat (deliver_response's shape).
+ * Error dedup (model-routing.md R4): an unattended source (cron, chatter)
+ * during a provider outage produces the same "error: ..." answer every turn;
+ * deliver the first, suppress identical repeats until a human message
+ * intervenes (they deserve a fresh answer, even the same bad news). Success
+ * text is never deduped, so recovery speaks by itself. */
 static void channel_push(sqlite3 *db, const char *channel, int64_t session_id,
                          const char *chat_id, const char *text) {
+    if (text && strncmp(text, "error: ", 7) == 0) {
+        sqlite3_stmt *chk;
+        if (sqlite3_prepare_v2(db,
+                "SELECT 1 FROM channel_outbox o"
+                " WHERE o.channel_name=?1 AND o.session_id=?2"
+                " AND json_extract(o.payload,'$.text')=?3"
+                " AND o.id=(SELECT MAX(id) FROM channel_outbox"
+                "            WHERE channel_name=?1 AND session_id=?2)"
+                /* human sources are named by channel ('discord', 'cli'...);
+                 * the machinery's own sources are the fixed set below */
+                " AND NOT EXISTS (SELECT 1 FROM inbox i"
+                "   WHERE i.session_id=?2 AND i.created_at >= o.created_at"
+                "   AND i.source NOT IN ('cron','cron_error','system',"
+                "                        'approval','agent_result'))",
+                -1, &chk, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(chk, 1, channel, -1, SQLITE_STATIC);
+            sqlite3_bind_int64(chk, 2, session_id);
+            sqlite3_bind_text(chk, 3, text, -1, SQLITE_STATIC);
+            int dup = sqlite3_step(chk) == SQLITE_ROW;
+            sqlite3_finalize(chk);
+            if (dup) {
+                LOG_INFO_("advance deliver suppressed duplicate error"
+                          " session=%lld", (long long)session_id);
+                return;
+            }
+        }
+    }
     sqlite3_stmt *ins;
     if (sqlite3_prepare_v2(db,
             "INSERT INTO channel_outbox(channel_name, session_id, payload)"

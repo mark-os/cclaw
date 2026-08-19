@@ -194,6 +194,69 @@ static int profile_capped(sqlite3 *db, const char *profile, const char *creator,
     return 0;
 }
 
+/* Validate $.models when present (model-routing.md R1/R2): an ordered,
+ * non-empty, dupe-free array of registered model ids, each within the
+ * creator's own routing list (creator NULL = operator: existence only).
+ * Absent is legal — the apply path inherits the creator's list. */
+static int models_check(sqlite3 *db, const char *json, const char *creator,
+                        char **err) {
+    sqlite3_stmt *st;
+    int has = 0, is_array = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_extract(?1,'$.models') IS NOT NULL,"
+            " json_type(?1,'$.models')='array'", -1, &st, NULL) != SQLITE_OK)
+        return fail(err, "models query failed");
+    sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        has = sqlite3_column_int(st, 0);
+        is_array = sqlite3_column_int(st, 1);
+    }
+    sqlite3_finalize(st);
+    if (!has) return 0;
+    if (!is_array)
+        return fail(err, "'models' must be a JSON array of model ids, "
+                    "in routing order");
+
+    int n = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COUNT(*), COUNT(DISTINCT value)"
+            " FROM json_each(?1,'$.models')", -1, &st, NULL) != SQLITE_OK)
+        return fail(err, "models query failed");
+    sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+    int dedup = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        n = sqlite3_column_int(st, 0);
+        dedup = sqlite3_column_int(st, 1);
+    }
+    sqlite3_finalize(st);
+    if (n == 0)
+        return fail(err, "'models' must not be empty — an agent with no "
+                    "routing list cannot serve a single request");
+    if (dedup != n)
+        return fail(err, "'models' contains a duplicate entry");
+
+    if (sqlite3_prepare_v2(db,
+            "SELECT value FROM json_each(?1,'$.models') je"
+            " WHERE type!='text'"
+            "    OR NOT EXISTS (SELECT 1 FROM models m WHERE m.id=je.value)"
+            "    OR (?2 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM agent_models am"
+            "         WHERE am.agent_name=?2 AND am.model_id=je.value))",
+            -1, &st, NULL) != SQLITE_OK)
+        return fail(err, "models query failed");
+    sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+    if (creator) sqlite3_bind_text(st, 2, creator, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(st, 2);
+    int rc = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        rc = failf(err, "model '%s' is not a registered model id within your "
+                   "own routing list — list ids with search_config; a new "
+                   "model needs request_config first", v ? v : "?", "");
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
 /* Validate name/profile/grants/extensions/clone_from; no writes.
  * name_out (optional): heap copy of $.name on success. */
 static int validate_inner(sqlite3 *db, const char *json, const char *creator,
@@ -269,6 +332,8 @@ static int validate_inner(sqlite3 *db, const char *json, const char *creator,
         rc = grants_walk(db, json, NULL, creator, 0, i, err);
     if (rc == 0)
         rc = extensions_check(db, json, creator, err);
+    if (rc == 0)
+        rc = models_check(db, json, creator, err);
 
     if (rc == 0 && name_out) { *name_out = name; name = NULL; }
     free(name);
@@ -292,8 +357,6 @@ static int apply_fields_and_grants(sqlite3 *db, const char *name,
         "UPDATE agents SET"
         " description   = COALESCE(json_extract(?2,'$.description'), description),"
         " system_prompt = COALESCE(json_extract(?2,'$.system_prompt'), system_prompt),"
-        " primary_model = COALESCE(json_extract(?2,'$.primary_model'), primary_model),"
-        " secondary_model = COALESCE(json_extract(?2,'$.secondary_model'), secondary_model),"
         " sandbox_profile = COALESCE(json_extract(?2,'$.sandbox_profile'), sandbox_profile),"
         " max_iterations  = COALESCE(json_extract(?2,'$.max_iterations'), max_iterations),"
         " shell_timeout   = COALESCE(json_extract(?2,'$.shell_timeout'), shell_timeout)"
@@ -304,6 +367,38 @@ static int apply_fields_and_grants(sqlite3 *db, const char *name,
         if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
         sqlite3_finalize(st);
     } else rc = -1;
+
+    /* Routing list: whole-list replace when declared (absent = keep). The
+     * declared array IS the resulting order — pos follows array position. */
+    if (rc == 0) {
+        int has_models = 0;
+        if (sqlite3_prepare_v2(db,
+                "SELECT json_type(?1,'$.models')='array'", -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) has_models = sqlite3_column_int(st, 0);
+            sqlite3_finalize(st);
+        }
+        if (has_models) {
+            if (sqlite3_prepare_v2(db,
+                    "DELETE FROM agent_models WHERE agent_name=?1",
+                    -1, &st, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+                if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
+                sqlite3_finalize(st);
+            } else rc = -1;
+            if (rc == 0) {
+                if (sqlite3_prepare_v2(db,
+                        "INSERT INTO agent_models(agent_name, model_id, pos)"
+                        " SELECT ?1, value, key FROM json_each(?2,'$.models')",
+                        -1, &st, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(st, 2, json, -1, SQLITE_STATIC);
+                    if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
+                    sqlite3_finalize(st);
+                } else rc = -1;
+            }
+        }
+    }
 
     for (size_t i = 0; rc == 0 && i < GRANT_KIND_COUNT; i++)
         rc = grants_walk(db, json, name, NULL, 1, i, err);
@@ -348,10 +443,10 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
          * created_by is the creator, never the source's — provenance
          * doesn't clone. */
         static const char *copies[] = {
-            ("INSERT INTO agents(name, created_by, primary_model, secondary_model,"
+            ("INSERT INTO agents(name, created_by,"
              " system_prompt, description, max_iterations, max_output_tokens,"
              " shell_timeout, shell_path, sandbox_profile)"
-             " SELECT ?1, ?3, primary_model, secondary_model, system_prompt, description,"
+             " SELECT ?1, ?3, system_prompt, description,"
              "  max_iterations, max_output_tokens, shell_timeout, shell_path,"
              "  sandbox_profile FROM agents WHERE name=?2"),
             ("INSERT OR IGNORE INTO grants(agent_name, kind, value, approval_mode, expires_at)"
@@ -359,8 +454,10 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
              " WHERE agent_name=?2"),
             ("INSERT OR IGNORE INTO agent_extensions(agent_name, extension_name, enabled)"
              " SELECT ?1, extension_name, enabled FROM agent_extensions WHERE agent_name=?2"),
+            ("INSERT INTO agent_models(agent_name, model_id, pos)"
+             " SELECT ?1, model_id, pos FROM agent_models WHERE agent_name=?2"),
         };
-        for (size_t i = 0; rc == 0 && i < 3; i++) {
+        for (size_t i = 0; rc == 0 && i < 4; i++) {
             if (sqlite3_prepare_v2(db, copies[i], -1, &st, NULL) != SQLITE_OK) { rc = -1; break; }
             sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
             sqlite3_bind_text(st, 2, clone, -1, SQLITE_STATIC);
@@ -388,6 +485,39 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
         agent_grant_defaults(db, name);
     if (rc == 0)
         rc = apply_fields_and_grants(db, name, json, err);
+
+    /* Routing list provenance (R2): declared list applied above; otherwise
+     * inherit the creator's list verbatim. An agent that would end up with
+     * no list is refused here, at creation — not left to fail at runtime. */
+    if (rc == 0) {
+        if (sqlite3_prepare_v2(db,
+                "INSERT INTO agent_models(agent_name, model_id, pos)"
+                " SELECT ?1, model_id, pos FROM agent_models"
+                " WHERE agent_name=?2"
+                " AND NOT EXISTS (SELECT 1 FROM agent_models WHERE agent_name=?1)",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+            if (creator) sqlite3_bind_text(st, 2, creator, -1, SQLITE_STATIC);
+            else sqlite3_bind_null(st, 2);
+            if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
+            sqlite3_finalize(st);
+        } else rc = -1;
+        if (rc == 0) {
+            sqlite3_stmt *ck;
+            int have = 0;
+            if (sqlite3_prepare_v2(db,
+                    "SELECT 1 FROM agent_models WHERE agent_name=?1 LIMIT 1",
+                    -1, &ck, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(ck, 1, name, -1, SQLITE_STATIC);
+                have = sqlite3_step(ck) == SQLITE_ROW;
+                sqlite3_finalize(ck);
+            }
+            if (!have)
+                rc = fail(err, "definition needs 'models' (an ordered array of "
+                          "registered model ids) — there is no creator list to "
+                          "inherit");
+        }
+    }
 
     /* Declared + default extension attachments. */
     if (rc == 0) {
@@ -454,7 +584,7 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
 /* Absent field = keep, so a typo'd key would silently no-op — reject
  * anything outside the whitelist instead. */
 #define UPDATE_KEYS_SQL \
-    "('name','description','system_prompt','primary_model','secondary_model'," \
+    "('name','description','system_prompt','models'," \
     "'sandbox_profile','max_iterations','shell_timeout','grants','reason')"
 
 static int update_validate_inner(sqlite3 *db, const char *json,
@@ -505,17 +635,9 @@ static int update_validate_inner(sqlite3 *db, const char *json,
           " AND (type!='integer' OR atom<=0)",
           "'%s' must be a positive integer%s" },
         { "SELECT key FROM json_each(?1) WHERE key IN"
-          " ('description','system_prompt','primary_model','secondary_model',"
+          " ('description','system_prompt',"
           "  'sandbox_profile','reason') AND type!='text'",
           "'%s' must be a string%s" },
-        /* Canonical models.id only (schema v44) — a bare name used to resolve
-         * to whichever provider's row the scan reached first. */
-        { "SELECT atom FROM json_each(?1) je WHERE key IN"
-          " ('primary_model','secondary_model')"
-          " AND NOT EXISTS (SELECT 1 FROM models m WHERE m.id=je.atom)",
-          "model '%s' is not a registered model id — list them with "
-          "search_config, or register one with request_config "
-          "(models:[{id:'<model>@<provider>'}])%s" },
         { "SELECT 1 FROM json_each(?1)"
           " WHERE key NOT IN ('name','reason') LIMIT 1",
           NULL /* inverted: no row = nothing to update */ },
@@ -549,6 +671,8 @@ static int update_validate_inner(sqlite3 *db, const char *json,
     free(profile);
     for (size_t i = 0; rc == 0 && i < GRANT_KIND_COUNT; i++)
         rc = grants_walk(db, json, NULL, caller, 0, i, err);
+    if (rc == 0)
+        rc = models_check(db, json, caller, err);
     return rc;
 }
 

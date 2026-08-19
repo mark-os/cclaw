@@ -30,8 +30,10 @@ static char *handler(const char *arguments, void *user_data, int *is_error) {
      * override, when set, applies to every agent equally, so show it. */
     sqlite3_stmt *st = NULL;
     int rc = sqlite3_prepare_v2(ctx->db,
-        "SELECT COALESCE(NULLIF(primary_model,''),'(system default)'),"
-        "       COALESCE(NULLIF(secondary_model,''),'(none)'),"
+        "SELECT COALESCE((SELECT group_concat(model_id, ' > ')"
+        "                 FROM (SELECT model_id FROM agent_models"
+        "                       WHERE agent_name=?1 ORDER BY pos)),"
+        "                '(none — unroutable)'),"
         "       max_iterations, shell_timeout,"
         "       COALESCE(NULLIF(?2,''),NULLIF(shell_path,''),'/bin/sh')"
         " FROM agents WHERE name=?1", -1, &st, NULL);
@@ -42,17 +44,15 @@ static char *handler(const char *arguments, void *user_data, int *is_error) {
         if (sqlite3_step(st) == SQLITE_ROW) {
             buf_appendf(&out,
                 "## Your settings (agent: %s)\n"
-                "primary_model: %s\n"
-                "secondary_model: %s\n"
+                "models: %s\n"
                 "max_iterations: %lld\n"
                 "shell_timeout: %lld\n"
                 "shell_path: %s\n",
                 ctx->agent_name,
                 sqlite3_column_text(st, 0),
-                sqlite3_column_text(st, 1),
+                (long long)sqlite3_column_int64(st, 1),
                 (long long)sqlite3_column_int64(st, 2),
-                (long long)sqlite3_column_int64(st, 3),
-                sqlite3_column_text(st, 4));
+                sqlite3_column_text(st, 3));
         }
         sqlite3_finalize(st);
     }
@@ -162,17 +162,17 @@ static char *handler(const char *arguments, void *user_data, int *is_error) {
         if (!any) buf_appendf(&out, "(none)\n");
     }
 
-    /* Registered models: the valid values for agent.primary_model. Marks the
-     * caller's active one so "what am I running" is a one-call lookup. */
+    /* Registered models: the valid values for an agent's routing list.
+     * Marks the caller's list position so "what am I running" is a one-call
+     * lookup. */
     buf_appendf(&out, "\n## Registered models\n");
     rc = sqlite3_prepare_v2(ctx->db,
         "SELECT m.id, m.status, COALESCE(m.context_window,0),"
-        "       (m.id=a.primary_model OR m.model=a.primary_model) AS is_primary,"
-        "       (m.id=a.secondary_model OR m.model=a.secondary_model) AS is_secondary"
-        " FROM models m, agents a"
-        " WHERE a.name=?2"
-        "   AND (?1 IS NULL OR m.id LIKE '%'||?1||'%')"
-        " ORDER BY m.priority, m.id", -1, &st, NULL);
+        "       (SELECT pos FROM agent_models am"
+        "         WHERE am.agent_name=?2 AND am.model_id=m.id)"
+        " FROM models m"
+        " WHERE (?1 IS NULL OR m.id LIKE '%'||?1||'%')"
+        " ORDER BY m.created_at, m.id", -1, &st, NULL);
     if (rc == SQLITE_OK) {
         int any = 0;
         if (query)
@@ -186,8 +186,8 @@ static char *handler(const char *arguments, void *user_data, int *is_error) {
             buf_appendf(&out, "%s [%s]", sqlite3_column_text(st, 0),
                         sqlite3_column_text(st, 1));
             if (cw > 0) buf_appendf(&out, " ctx:%lld", cw);
-            if (sqlite3_column_int(st, 3)) buf_appendf(&out, " <- your primary");
-            if (sqlite3_column_int(st, 4)) buf_appendf(&out, " <- your secondary");
+            if (sqlite3_column_type(st, 3) != SQLITE_NULL)
+                buf_appendf(&out, " <- your list #%d", sqlite3_column_int(st, 3) + 1);
             buf_appendf(&out, "\n");
         }
         sqlite3_finalize(st);
@@ -312,7 +312,7 @@ static char *handler(const char *arguments, void *user_data, int *is_error) {
         "  {\"action\":\"request_changes\",\"changes\":{\n"
         "    \"grants\":{\"tools\":[\"<name>\"],\"hosts\":[\"<hostname>\"],"
         "\"read_paths\":[\"/abs/path\"],\"write_paths\":[\"/abs/path\"]},\n"
-        "    \"agent\":{\"primary_model\":\"<model[@provider]>\","
+        "    \"agent\":{\"models\":[\"<model[@provider]>\", \"...\"],"
         "\"max_iterations\":<n>,\"shell_timeout\":<n>},\n"
         "    \"routes\":[\"<channel>:<chat_id>\"],\n"
         "    \"config\":{\"<key>\":\"<value>\"},\n"

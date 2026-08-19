@@ -494,8 +494,7 @@ static void test_models_section(void) {
     r = call_handler(&reg,
         "{\"action\":\"request_changes\",\"changes\":{\"models\":"
         "[{\"id\":\"newmodel@openrouter\",\"context_window\":200000,"
-        "\"max_output_tokens\":8192,\"capabilities\":[\"text\",\"image\"],"
-        "\"priority\":3}]}}");
+        "\"max_output_tokens\":8192,\"capabilities\":[\"text\",\"image\"]}]}}");
     assert(r == NULL);
     char *receipt = NULL;
     apply_latest(db, sid, &receipt);
@@ -506,7 +505,7 @@ static void test_models_section(void) {
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(db,
         "SELECT provider_name, model, context_window, max_output_tokens,"
-        "       capabilities, priority, status FROM models"
+        "       capabilities, status FROM models"
         " WHERE id='newmodel@openrouter'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "openrouter") == 0);
@@ -514,8 +513,7 @@ static void test_models_section(void) {
     assert(sqlite3_column_int(s, 2) == 200000);
     assert(sqlite3_column_int(s, 3) == 8192);
     assert(strstr((const char *)sqlite3_column_text(s, 4), "image") != NULL);
-    assert(sqlite3_column_int(s, 5) == 3);
-    assert(strcmp((const char *)sqlite3_column_text(s, 6), "healthy") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 5), "healthy") == 0);
     sqlite3_finalize(s);
 
     /* Update: only the fields present move; the rest keep their values. */
@@ -526,13 +524,12 @@ static void test_models_section(void) {
     assert(r == NULL);
     apply_latest(db, sid, NULL);
     assert(sqlite3_prepare_v2(db,
-        "SELECT context_window, max_output_tokens, priority, status"
+        "SELECT context_window, max_output_tokens, status"
         " FROM models WHERE id='newmodel@openrouter'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(sqlite3_column_int(s, 0) == 64000);
     assert(sqlite3_column_int(s, 1) == 8192);      /* untouched */
-    assert(sqlite3_column_int(s, 2) == 3);         /* untouched */
-    assert(strcmp((const char *)sqlite3_column_text(s, 3), "healthy") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "healthy") == 0);
     sqlite3_finalize(s);
 
     /* Disable — a first-class verb now, not a DELETE nobody could request. */
@@ -589,7 +586,7 @@ static void test_bare_model_name_teaching(void) {
     /* 'deepseek/deepseek-v4-flash' is seeded, under a canonical id. */
     char *r = call_handler(&reg,
         "{\"action\":\"request_changes\",\"changes\":{\"agent\":"
-        "{\"primary_model\":\"deepseek/deepseek-v4-flash\"}}}");
+        "{\"models\":[\"deepseek/deepseek-v4-flash\"]}}}");
     assert(r && strstr(r, "bare model name"));
     assert(r && strstr(r, "openrouter/deepseek/deepseek-v4-flash"));
     free(r);
@@ -598,7 +595,7 @@ static void test_bare_model_name_teaching(void) {
     ctx.current_tool_call_id = "bn2";
     r = call_handler(&reg,
         "{\"action\":\"request_changes\",\"changes\":{\"agent\":"
-        "{\"primary_model\":\"ghost\"}}}");
+        "{\"models\":[\"ghost\"]}}}");
     assert(r && strstr(r, "unknown model 'ghost'"));
     assert(r && !strstr(r, "Did you mean"));
     free(r);
@@ -829,7 +826,7 @@ static void test_agent_routes_sections(void) {
     free(r);
     r = call_handler(&reg,
         "{\"action\":\"request_changes\",\"changes\":"
-        "{\"agent\":{\"primary_model\":\"ghost-model\"}}}");
+        "{\"agent\":{\"models\":[\"ghost-model\"]}}}");
     assert(r && strstr(r, "unknown model"));
     free(r);
 
@@ -859,7 +856,7 @@ static void test_agent_routes_sections(void) {
         "\"provider\":{\"provider\":\"gemini\"},"
         "\"models\":[{\"id\":\"gemini-3.5-flash-lite@gemini\","
         "\"context_window\":1000000}],"
-        "\"agent\":{\"primary_model\":\"gemini-3.5-flash-lite@gemini\","
+        "\"agent\":{\"models\":[\"gemini-3.5-flash-lite@gemini\"],"
         "\"max_iterations\":40},"
         "\"routes\":[\"tg:777\"]}}");
     assert(r == NULL); /* parked */
@@ -885,9 +882,11 @@ static void test_agent_routes_sections(void) {
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "gemini-3.5-flash-lite") == 0);
     sqlite3_finalize(s);
 
-    /* agents row updated, untouched columns kept. */
+    /* routing list replaced; untouched scalar columns kept. */
     assert(sqlite3_prepare_v2(db,
-        "SELECT primary_model, max_iterations, shell_timeout FROM agents"
+        "SELECT (SELECT model_id FROM agent_models"
+        "         WHERE agent_name='test' ORDER BY pos LIMIT 1),"
+        "       max_iterations, shell_timeout FROM agents"
         " WHERE name='test'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0),

@@ -57,8 +57,8 @@ env-var `CC`/`BUILDDIR` overrides). Still future:
 - Reduced feature set for 128MB targets (build without QuickJS? smaller JS heap)
 
 ## Multi-model Routing
-Per-agent routing shipped (`agents.primary_model`/`secondary_model`, fallback
-in `llm_proc.c`). Still future:
+Per-agent routing shipped (`agent_models` explicit per-agent lists, selection
+loop in `llm_proc.c` — see plan/projects/model-routing.md). Still future:
 - Per-session model override stored in DB
 
 ## Additional Provider Wire Formats (Responses API, Gemini Interactions)

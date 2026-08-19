@@ -172,7 +172,7 @@ static void render_providers_models(Buf *b) {
 
         /* Model header */
         buf_appendf(b, "<tr><th>model</th><th>status</th><th>ctx</th>"
-                       "<th>5xx/429</th><th></th></tr>");
+                       "<th>fails</th><th></th></tr>");
 
         /* Models for this provider */
         for (size_t mi = 0; mi < nm; mi++) {
@@ -185,8 +185,8 @@ static void render_providers_models(Buf *b) {
             buf_html(b, m->status);
             if (m->degraded_left > 0)
                 buf_appendf(b, " (%ds)", m->degraded_left);
-            buf_appendf(b, "</td><td>%d</td><td>%lld/%lld</td><td>",
-                        m->context_window, (long long)m->err_5xx, (long long)m->err_429);
+            buf_appendf(b, "</td><td>%d</td><td>%lld</td><td>",
+                        m->context_window, (long long)m->consec_failures);
             /* Set as default button */
             buf_appendf(b, "<form class=i method=post action=/admin/act>"
                            "<input type=hidden name=action value=set_default_model>"
@@ -593,8 +593,10 @@ static int handle_act(struct mg_connection *conn) {
         if (mg_get_var(body, blen, "model_id", v1, sizeof(v1)) > 0)
             rc = admin_toggle_model(s_db, v1);
     } else if (strcmp(action, "set_default_model") == 0) {
+        /* Legacy form action: with per-agent routing lists this is the same
+         * emergency lever as switch_model — head of every agent's list. */
         if (mg_get_var(body, blen, "model_id", v1, sizeof(v1)) > 0)
-            rc = config_set(s_db, "default_primary_model", v1);
+            rc = admin_switch_model(s_db, v1, v2, sizeof(v2));
     } else if (strcmp(action, "add_provider") == 0) {
         if (mg_get_var(body, blen, "name", v1, sizeof(v1)) > 0 &&
             mg_get_var(body, blen, "base_url", v2, sizeof(v2)) > 0) {

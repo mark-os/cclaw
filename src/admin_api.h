@@ -60,19 +60,17 @@ typedef struct {
     int context_window;    /* 0 = global default */
     int degraded_left;     /* seconds until degradation cooldown expires, 0 if past/none */
     int64_t total_requests;
-    int64_t err_5xx;
-    int64_t err_429;
+    int64_t consec_failures;
 } AdminModel;
 
 int admin_list_models(sqlite3 *db, AdminModel **out, size_t *out_count);
 void admin_models_free(AdminModel *list, size_t count);
 
-/* Make model_id the head of the routing order. The previous head shifts to
- * first fallback (llm_req's per-request skip + degradation give automatic
- * fallback); the chosen model's health is reset so stale degradation can't
- * sideline an explicit operator switch. Agents whose model preference pointed
- * at the previous head (or was unset) are repointed so context-window
- * resolution follows. Writes the previous head's id into prev (empty if none).
+/* Emergency lever: make model_id the head of EVERY agent's routing list
+ * (existing entries shift down one; a prior occurrence of the model is
+ * removed first so lists stay dupe-free). The chosen model's health is reset
+ * so stale degradation can't sideline an explicit operator switch. Writes the
+ * first agent's previous head into prev (empty if none).
  * Returns 0 on success, -1 if model_id doesn't exist. */
 int admin_switch_model(sqlite3 *db, const char *model_id, char *prev, size_t prev_sz);
 

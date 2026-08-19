@@ -27,9 +27,9 @@ static void test_models_table(void) {
     sqlite3_finalize(s);
 
     /* Verify health config defaults via registry */
-    assert(config_get_int(db, "health_5xx_threshold") == 3);
-    assert(config_get_int(db, "health_429_threshold") == 10);
+    assert(config_get_int(db, "health_fail_threshold") == 4);
     assert(config_get_int(db, "health_cooldown_sec") == 300);
+    assert(config_get_int(db, "notify_model_change") == 1);
 
     db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_models_table\n");

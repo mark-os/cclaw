@@ -65,6 +65,22 @@ static inline void test_seed_agent(sqlite3 *db, const char *name) {
     sqlite3_finalize(s);
 }
 
+/* Append a model at the tail of an agent's routing list (creating the
+ * models/providers rows is the caller's business). */
+static inline void test_agent_add_model(sqlite3 *db, const char *agent,
+                                        const char *model_id) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO agent_models(agent_name, model_id, pos)"
+            " VALUES(?1, ?2, COALESCE((SELECT MAX(pos)+1 FROM agent_models"
+            "                          WHERE agent_name=?1), 0))",
+            -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(s, 1, agent, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, model_id, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+}
+
 /* Tier-leaf drivers for sandboxed tools: extract args_json into wire params
  * exactly as the dispatching parent does (tool_args_extract on a :memory:
  * db; NULL schema — every top-level key ships, file_edit's edits flatten),

@@ -131,14 +131,14 @@ static void test_llm_req_skips_keyless_provider(void) {
     sqlite3_finalize(st);
 
     assert(sqlite3_exec(db,
-        "INSERT INTO models(id, provider_name, model, priority) VALUES"
-        " ('nokey/model-a','nokey-prov','model-a',0),"
-        " ('keyed/model-b','keyed-prov','model-b',10);", NULL, NULL, NULL) == SQLITE_OK);
+        "INSERT INTO models(id, provider_name, model) VALUES"
+        " ('nokey/model-a','nokey-prov','model-a'),"
+        " ('keyed/model-b','keyed-prov','model-b');", NULL, NULL, NULL) == SQLITE_OK);
 
-    /* Pin the agent at the keyless model — the strongest form of the bug:
-     * an explicit primary_model that cannot possibly authenticate. */
-    assert(sqlite3_exec(db, "UPDATE agents SET primary_model='nokey/model-a'"
-                            " WHERE name='Router';", NULL, NULL, NULL) == SQLITE_OK);
+    /* List the keyless model first — the strongest form of the bug: an
+     * explicit head candidate that cannot possibly authenticate. */
+    test_agent_add_model(db, "Router", "nokey/model-a");
+    test_agent_add_model(db, "Router", "keyed/model-b");
 
     int64_t sid = session_create(db, "keyless", "Router", -1, 0);
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
@@ -175,9 +175,9 @@ static void test_llm_req_skips_keyless_provider(void) {
  * The 2026-08-10 incident's silent half — a phantom api_key_env dropped both
  * gateway models pre-request, so nothing recorded errors, the rows stayed
  * 'healthy', and every request quietly served from a different provider.
- * Dropping now marks the row degraded on the healthy→degraded transition
- * (exactly one operator notice, like the error paths), and un-marks it when
- * the key resolves again. */
+ * Dropping now marks the row degraded on the healthy→degraded transition,
+ * and un-marks it when the key resolves again. The operator-visible signal is
+ * the serving-model-change notice (R6), asserted separately. */
 static void test_dropped_candidate_degrades_and_recovers(void) {
     TEST(dropped_candidate_degrades_and_recovers);
 
@@ -205,12 +205,12 @@ static void test_dropped_candidate_degrades_and_recovers(void) {
     assert(sqlite3_step(st) == SQLITE_DONE);
     sqlite3_finalize(st);
     assert(sqlite3_exec(db,
-        "INSERT INTO models(id, provider_name, model, priority) VALUES"
-        " ('model-a@nokey-prov','nokey-prov','model-a',0),"
-        " ('model-b@keyed-prov','keyed-prov','model-b',10);"
-        "UPDATE agents SET primary_model='model-a@nokey-prov',"
-        " secondary_model='model-b@keyed-prov' WHERE name='Router';",
+        "INSERT INTO models(id, provider_name, model) VALUES"
+        " ('model-a@nokey-prov','nokey-prov','model-a'),"
+        " ('model-b@keyed-prov','keyed-prov','model-b');",
         NULL, NULL, NULL) == SQLITE_OK);
+    test_agent_add_model(db, "Router", "model-a@nokey-prov");
+    test_agent_add_model(db, "Router", "model-b@keyed-prov");
 
     int64_t sid = session_create(db, "a8", "Router", -1, 0);
     /* A channel-bound session is what makes the operator notice observable. */
@@ -239,9 +239,11 @@ static void test_dropped_candidate_degrades_and_recovers(void) {
     notices = sqlite3_column_int(q, 1);
     sqlite3_finalize(q);
     if (!degraded) { db_close(db); test_db_clean(db_path); FAIL("candidate not degraded"); }
-    if (notices != 1) { db_close(db); test_db_clean(db_path); FAIL("expected exactly 1 notice"); }
+    /* R6: no per-degrade notice — the serving-model-change notice is the
+     * operator signal, and turn 1 has no previous server to differ from. */
+    if (notices != 0) { db_close(db); test_db_clean(db_path); FAIL("unexpected notice"); }
 
-    /* Second turn, same missing key: no second notice (transition-guarded). */
+    /* Second turn, same missing key, same server: still no notice. */
     Message u2 = {.role = ROLE_USER, .content = "Again"};
     entry_append_with_iteration(db, sid, &u2, 1);
     assert(llm_req(db, NULL, sid, 0) == 0);
@@ -250,7 +252,7 @@ static void test_dropped_candidate_degrades_and_recovers(void) {
     assert(sqlite3_step(q) == SQLITE_ROW);
     notices = sqlite3_column_int(q, 0);
     sqlite3_finalize(q);
-    if (notices != 1) { db_close(db); test_db_clean(db_path); FAIL("notice repeated"); }
+    if (notices != 0) { db_close(db); test_db_clean(db_path); FAIL("unexpected notice"); }
 
     /* The key comes back — recovery, mirroring model_stat_success. */
     setenv("CCLAW_TEST_ABSENT_KEY", "sk-present", 1);

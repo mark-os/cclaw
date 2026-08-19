@@ -265,7 +265,8 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   `select id, tool_call_id, args_json, state from approvals` before and after.
 - **Verify config changes in the DB, never from the agent's claims.** The
   agent will assert success ("Gemini is now active") without checking; the
-  truth is `agents.primary_model`, `grants`, `approvals.state`.
+  truth is `agent_models` (the agent's routing list), `grants`,
+  `approvals.state`.
 - **Debugging trail for a turn:** `entries` (role 2=assistant tool-call args,
   3=tool results, 1 includes system approval notices), `tool_calls`
   (pending/done per call_id), `approvals` (parked docs), `cclaw resp` (LLM

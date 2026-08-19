@@ -57,8 +57,8 @@ static void seed_audio_model(sqlite3 *db) {
         "DELETE FROM models; DELETE FROM providers;"
         "INSERT INTO providers(name, base_url, endpoint_type, api_key_env)"
         " VALUES('mockgem', 'http://127.0.0.1:%d', 'gemini', 'MOCKGEM_KEY');"
-        "INSERT INTO models(id, provider_name, model, capabilities, priority)"
-        " VALUES('mockgem/lite', 'mockgem', 'gem-lite', '[\"audio\"]', 0);", s_port);
+        "INSERT INTO models(id, provider_name, model, capabilities)"
+        " VALUES('mockgem/lite', 'mockgem', 'gem-lite', '[\"audio\"]');", s_port);
     exec_sql(db, sql);
 }
 

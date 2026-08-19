@@ -83,7 +83,8 @@ LLM API endpoints. Multiple providers enable fallback routing.
 
 ## models
 
-Per-model routing metadata + lifetime stats. The router picks by `(priority, status)`.
+Pure catalog + health stats. Routing order lives in `agent_models` — nothing
+here orders candidates.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -93,21 +94,32 @@ Per-model routing metadata + lifetime stats. The router picks by `(priority, sta
 | `context_window` | INTEGER | |
 | `max_output_tokens` | INTEGER | |
 | `capabilities` | TEXT DEFAULT '[]' | JSON array of capability tags |
-| `priority` | INTEGER NOT NULL DEFAULT 0 | lower = preferred |
-| `status` | TEXT NOT NULL DEFAULT 'healthy' | healthy / degraded / down |
-| `degraded_until` | INTEGER | unixepoch; auto-heal after this time |
+| `status` | TEXT NOT NULL DEFAULT 'healthy' | healthy / degraded / disabled |
+| `degraded_until` | INTEGER | unixepoch cooldown; NULL while degraded = config-degraded (missing key) |
 | `total_requests` | INTEGER DEFAULT 0 | lifetime counter |
 | `total_tokens_in` | INTEGER DEFAULT 0 | |
 | `total_tokens_out` | INTEGER DEFAULT 0 | |
 | `total_cost_nano` | INTEGER DEFAULT 0 | nanodollars |
-| `error_count_5xx` | INTEGER DEFAULT 0 | |
-| `error_count_429` | INTEGER DEFAULT 0 | |
+| `consec_failures` | INTEGER DEFAULT 0 | consecutive transient failures; any success resets; >= `health_fail_threshold` stamps `degraded_until` (re-stamped on every further crossing) |
 | `last_success_at` | INTEGER | |
 | `last_error_at` | INTEGER | |
 | `synced_at` | INTEGER | last remote metadata sync |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
-Index: `idx_models_routing ON models(priority, status)`.
+---
+
+## agent_models
+
+The whole routing policy (`plan/projects/model-routing.md`): an agent's
+candidates in `pos` order, nothing appended after the list. Health reorders it
+(degraded rows sink at selection), never empties it. `models` rows referenced
+here can't be deleted — fix lists first; `disabled` is the soft option.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `agent_name` | TEXT NOT NULL | FK agents(name), ON UPDATE CASCADE ON DELETE CASCADE |
+| `model_id` | TEXT NOT NULL | FK models(id) |
+| `pos` | INTEGER NOT NULL | 0 = primary; PK (agent_name, pos) |
 
 ---
 
@@ -202,8 +214,6 @@ Agent identity and per-agent config. Name is the primary key — no integer id.
 | Column | Type | Notes |
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
-| `primary_model` | TEXT | canonical `models.id` (bare names rewritten at v44); NULL uses config `default_model` |
-| `secondary_model` | TEXT | canonical `models.id`; NULL uses config `default_secondary_model` |
 | `system_prompt` | TEXT | inline prompt override |
 | `description` | TEXT | |
 | `max_iterations` | INTEGER DEFAULT 25 | tool loop cap per turn |

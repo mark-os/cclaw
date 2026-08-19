@@ -250,9 +250,9 @@ int admin_list_models(sqlite3 *db, AdminModel **out, size_t *out_count) {
         "       m.status, COALESCE(m.context_window, 0),"
         "       MAX(0, COALESCE(m.degraded_until, 0) - unixepoch()),"
         "       COALESCE(m.total_requests, 0),"
-        "       COALESCE(m.error_count_5xx, 0), COALESCE(m.error_count_429, 0)"
+        "       COALESCE(m.consec_failures, 0)"
         " FROM models m JOIN providers p ON m.provider_name = p.name"
-        " ORDER BY m.priority;";
+        " ORDER BY m.created_at, m.id;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -284,8 +284,7 @@ int admin_list_models(sqlite3 *db, AdminModel **out, size_t *out_count) {
         m->context_window = sqlite3_column_int(stmt, 6);
         m->degraded_left = sqlite3_column_int(stmt, 7);
         m->total_requests = sqlite3_column_int64(stmt, 8);
-        m->err_5xx = sqlite3_column_int64(stmt, 9);
-        m->err_429 = sqlite3_column_int64(stmt, 10);
+        m->consec_failures = sqlite3_column_int64(stmt, 9);
 
         /* Key presence: env first, encrypted kv second — same resolution
          * order llm_req uses at request time. */
@@ -332,43 +331,48 @@ int admin_switch_model(sqlite3 *db, const char *model_id, char *prev, size_t pre
     sqlite3_finalize(stmt);
     if (!found) return -1;
 
-    /* Previous routing head — becomes the first fallback */
-    char prev_id[128] = "";
-    if (sqlite3_prepare_v2(db,
-            "SELECT id FROM models WHERE id != ?1 AND status != 'disabled'"
-            " ORDER BY priority LIMIT 1", -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
+    /* Previous head (first agent's pos 0) — reported, not load-bearing. */
+    if (prev && prev_sz && sqlite3_prepare_v2(db,
+            "SELECT model_id FROM agent_models"
+            " ORDER BY agent_name, pos LIMIT 1", -1, &stmt, NULL) == SQLITE_OK) {
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             const char *v = (const char *)sqlite3_column_text(stmt, 0);
-            if (v) snprintf(prev_id, sizeof(prev_id), "%s", v);
+            if (v) snprintf(prev, prev_sz, "%s", v);
         }
         sqlite3_finalize(stmt);
     }
-    if (prev && prev_sz) snprintf(prev, prev_sz, "%s", prev_id);
 
-    /* Shift everyone down one, put the chosen model at the head with fresh
-     * health — stale degradation must not sideline an explicit switch. */
+    /* Prepend to every agent's list (dupe removed first, relative order kept
+     * by a uniform +1 shift), with fresh health — stale degradation must not
+     * sideline an explicit switch. */
     sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
-    sqlite3_exec(db, "UPDATE models SET priority = priority + 1;", NULL, NULL, NULL);
-    int rc = -1;
+    int rc = 0;
     if (sqlite3_prepare_v2(db,
-            "UPDATE models SET priority=0, status='healthy', degraded_until=NULL,"
-            " error_count_5xx=0, error_count_429=0 WHERE id=?1;",
-            -1, &stmt, NULL) == SQLITE_OK) {
+            "DELETE FROM agent_models WHERE model_id=?1", -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
-        rc = sqlite3_step(stmt) == SQLITE_DONE ? 0 : -1;
+        if (sqlite3_step(stmt) != SQLITE_DONE) rc = -1;
         sqlite3_finalize(stmt);
+    } else rc = -1;
+    if (rc == 0 && sqlite3_exec(db,
+            "UPDATE agent_models SET pos = pos + 1;", NULL, NULL, NULL) != SQLITE_OK)
+        rc = -1;
+    if (rc == 0) {
+        if (sqlite3_prepare_v2(db,
+                "INSERT INTO agent_models(agent_name, model_id, pos)"
+                " SELECT name, ?1, 0 FROM agents;", -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
+            if (sqlite3_step(stmt) != SQLITE_DONE) rc = -1;
+            sqlite3_finalize(stmt);
+        } else rc = -1;
     }
-    /* Context-window resolution (agents.primary_model → models) follows the switch:
-     * repoint agents that tracked the old head or had no explicit preference. */
-    if (rc == 0 && sqlite3_prepare_v2(db,
-            "UPDATE agents SET primary_model=?1 WHERE primary_model IS NULL OR primary_model=?2"
-            " OR primary_model=(SELECT model FROM models WHERE id=?2);",
-            -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, prev_id, -1, SQLITE_STATIC);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
+    if (rc == 0) {
+        if (sqlite3_prepare_v2(db,
+                "UPDATE models SET status='healthy', degraded_until=NULL,"
+                " consec_failures=0 WHERE id=?1;", -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
+            if (sqlite3_step(stmt) != SQLITE_DONE) rc = -1;
+            sqlite3_finalize(stmt);
+        } else rc = -1;
     }
     sqlite3_exec(db, rc == 0 ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
     return rc;
@@ -505,8 +509,8 @@ int admin_add_model(sqlite3 *db, const char *provider_name, const char *model,
     snprintf(id, id_len, "%s@%s", model, provider_name);
 
     const char *sql =
-        "INSERT OR IGNORE INTO models(id, provider_name, model, context_window, priority)"
-        " VALUES(?1, ?2, ?3, ?4, (SELECT COALESCE(MAX(priority),0)+1 FROM models));";
+        "INSERT OR IGNORE INTO models(id, provider_name, model, context_window)"
+        " VALUES(?1, ?2, ?3, ?4);";
     sqlite3_stmt *stmt;
     int rc = -1;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
@@ -555,7 +559,13 @@ int admin_list_agents(sqlite3 *db, AdminAgent **out, size_t *out_count) {
     *out = NULL;
     *out_count = 0;
 
-    const char *sql = "SELECT name, primary_model, secondary_model, max_iterations, sandbox_profile FROM agents ORDER BY name;";
+    const char *sql =
+        "SELECT name,"
+        " (SELECT model_id FROM agent_models am WHERE am.agent_name=agents.name"
+        "   ORDER BY pos LIMIT 1),"
+        " (SELECT model_id FROM agent_models am WHERE am.agent_name=agents.name"
+        "   ORDER BY pos LIMIT 1 OFFSET 1),"
+        " max_iterations, sandbox_profile FROM agents ORDER BY name;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
 
@@ -602,20 +612,34 @@ void admin_agents_free(AdminAgent *list, size_t count) {
 int admin_set_agent_model(sqlite3 *db, const char *agent_name,
                           const char *primary_model, const char *secondary_model) {
     if (!db || !agent_name) return -1;
-    const char *sql = "UPDATE agents SET primary_model=?2, secondary_model=?3 WHERE name=?1;";
+    /* Whole-list write of the dashboard's two slots. An empty primary would
+     * leave the agent unroutable — refuse rather than clear. */
+    if (!primary_model || !primary_model[0]) return -1;
+    sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+    int rc = 0;
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
-    if (primary_model && primary_model[0])
-        sqlite3_bind_text(stmt, 2, primary_model, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 2);
-    if (secondary_model && secondary_model[0])
-        sqlite3_bind_text(stmt, 3, secondary_model, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 3);
-    int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
-    sqlite3_finalize(stmt);
+    if (sqlite3_prepare_v2(db, "DELETE FROM agent_models WHERE agent_name=?1",
+                           -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) != SQLITE_DONE) rc = -1;
+        sqlite3_finalize(stmt);
+    } else rc = -1;
+    if (rc == 0) {
+        if (sqlite3_prepare_v2(db,
+                "INSERT INTO agent_models(agent_name, model_id, pos)"
+                " SELECT ?1, ?2, 0"
+                " UNION ALL SELECT ?1, ?3, 1 WHERE ?3 IS NOT NULL AND ?3 != ?2",
+                -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, primary_model, -1, SQLITE_STATIC);
+            if (secondary_model && secondary_model[0])
+                sqlite3_bind_text(stmt, 3, secondary_model, -1, SQLITE_STATIC);
+            else sqlite3_bind_null(stmt, 3);
+            if (sqlite3_step(stmt) != SQLITE_DONE) rc = -1;
+            sqlite3_finalize(stmt);
+        } else rc = -1;
+    }
+    sqlite3_exec(db, rc == 0 ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
     return rc;
 }
 

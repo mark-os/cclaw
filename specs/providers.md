@@ -19,20 +19,20 @@ Agents ⊥ store provider keys. Keys decrypted at runtime, injected to worker th
 | OpenAI | `OPENAI_API_KEY` | Direct. |
 | Anthropic | `ANTHROPIC_API_KEY` | Direct. Different wire format (content blocks). |
 
-Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows themselves change only via the approval-gated `request_config` action `request_changes` (the `provider` section of the changes document) or operator SQL. A provider document is **transport only**; models are registered separately through the `models` section by canonical `model@provider` id, and the provider must already exist. Per-request routing joins `models → providers`, so a provider row without a models row is unreachable outside the empty-table fallback — one document can define the provider, register a model on it, and adopt it via `agent.primary_model: "model@provider"`. `providers.default_model` is fresh-install seed sugar only (`templates/seed.sql`), never a registration path.
+Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows themselves change only via the approval-gated `request_config` action `request_changes` (the `provider` section of the changes document) or operator SQL. A provider document is **transport only**; models are registered separately through the `models` section by canonical `model@provider` id, and the provider must already exist. Per-request routing joins `models → providers`, so a provider row without a models row is unreachable outside the empty-table fallback — one document can define the provider, register a model on it, and adopt it via `agent.models: ["model@provider", ...]` (the full replacement routing order). `providers.default_model` is fresh-install seed sugar only (`templates/seed.sql`), never a registration path.
 
 A provider whose `api_key_env` resolves to no key (neither env var nor system-scope secret) has **all of its models skipped at request time** — `request_changes` therefore refuses such a document up front, and a canonicalized provider document preserves an existing row's `api_key_env` verbatim, empty string included (a deliberately keyless local gateway must survive a provider edit).
 
 The skip is no longer silent. A candidate named by an agent's
-`primary_model`/`secondary_model` (or by the `default_*_model` config keys) and
-dropped for an unresolvable key logs at WARN and is marked **degraded by
-configuration**: `models.status='degraded'` with `degraded_until` left NULL.
-That state is set directly on the healthy→degraded transition — no error
-counts are faked, because no request happened — which is exactly what makes the
-existing one-shot operator notice fire once and only once. The NULL cooldown is
-the marker distinguishing it from every error-driven degradation (those always
-set one), and it is what lets routing restore `healthy` the moment the key
-resolves again, mirroring `model_stat_success`. This is the operator-visible
+routing list (`agent_models`) and dropped for an unresolvable key logs at WARN
+and is marked **degraded by configuration**: `models.status='degraded'` with
+`degraded_until` left NULL. That state is set directly on the
+healthy→degraded transition — no failure counts are faked, because no request
+happened. The NULL cooldown is the marker distinguishing it from every
+error-driven degradation (those always set one), and it is what lets routing
+restore `healthy` the moment the key resolves again, mirroring
+`model_stat_success`. The operator-visible signal for any of this is the
+serving-model-change notice (specs/error-handling.md). This is the operator-visible
 half of the same defect the apply-time probe covers for the agent
 (see [self-configuration.md](self-configuration.md)).
 

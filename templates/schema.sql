@@ -36,21 +36,30 @@ CREATE TABLE IF NOT EXISTS models (
   context_window INTEGER,
   max_output_tokens INTEGER,
   capabilities TEXT DEFAULT '[]',
-  priority INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'healthy',
   degraded_until INTEGER,
   total_requests INTEGER DEFAULT 0,
   total_tokens_in INTEGER DEFAULT 0,
   total_tokens_out INTEGER DEFAULT 0,
   total_cost_nano INTEGER DEFAULT 0,
-  error_count_5xx INTEGER DEFAULT 0,
-  error_count_429 INTEGER DEFAULT 0,
+  consec_failures INTEGER DEFAULT 0,
   last_success_at INTEGER,
   last_error_at INTEGER,
   synced_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
-CREATE INDEX IF NOT EXISTS idx_models_routing ON models(priority, status);
+
+-- ═══ Agent routing order ═══
+-- The whole routing policy: an agent's candidates in pos order, nothing
+-- appended after the list. Health reorders it (degraded rows sink), never
+-- empties it. Rows reference the models catalog; deleting a referenced model
+-- is refused (fix lists first; 'disabled' is the soft option).
+CREATE TABLE IF NOT EXISTS agent_models (
+  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,
+  model_id TEXT NOT NULL REFERENCES models(id),
+  pos INTEGER NOT NULL,
+  PRIMARY KEY (agent_name, pos)
+);
 
 -- Availability probe cache: what a provider says it can serve, as opposed to
 -- what `models` registers for routing. Slim on purpose — an aggregator's
@@ -98,8 +107,6 @@ CREATE TABLE IF NOT EXISTS extensions (
 -- NO ACTION refuses deleting an in-use agent — fail-closed until one exists.
 CREATE TABLE IF NOT EXISTS agents (
   name TEXT PRIMARY KEY,
-  primary_model TEXT,
-  secondary_model TEXT,
   system_prompt TEXT,
   description TEXT,
   max_iterations INTEGER DEFAULT 25,

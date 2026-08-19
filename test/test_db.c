@@ -473,22 +473,26 @@ static void test_schema_patch_application(void) {
 
     assert(db_schema_compat(old_db) == 1);   /* runs every pending patch */
 
-    /* Unambiguous → rewritten; ambiguous → the row routing prefers (lowest
-     * models.priority); no match → left alone (already broken, and inventing
-     * an id would move it somewhere nobody chose); already canonical → byte
-     * identical. */
+    /* v44 canonicalized the scalars (unambiguous → rewritten; ambiguous →
+     * lowest models.priority; no match → left alone), then v46 folded them
+     * into agent_models rows — an unresolvable scalar yields NO row (that
+     * agent was already unroutable; inventing an id would move it somewhere
+     * nobody chose). */
     sqlite3_stmt *mm;
     assert(sqlite3_prepare_v2(old_db,
-        "SELECT name, COALESCE(primary_model,''), COALESCE(secondary_model,'')"
-        " FROM agents WHERE name IN ('Uniq','Zero','Canon') ORDER BY name",
+        "SELECT agent_name, model_id, pos FROM agent_models"
+        " WHERE agent_name IN ('Uniq','Zero','Canon')"
+        " ORDER BY agent_name, pos",
         -1, &mm, NULL) == SQLITE_OK);
-    assert(sqlite3_step(mm) == SQLITE_ROW);           /* Canon */
+    assert(sqlite3_step(mm) == SQLITE_ROW);           /* Canon pos 0 */
     assert(strcmp((const char *)sqlite3_column_text(mm, 1), "solo@p1") == 0);
-    assert(sqlite3_step(mm) == SQLITE_ROW);           /* Uniq */
+    assert(sqlite3_column_int(mm, 2) == 0);
+    assert(sqlite3_step(mm) == SQLITE_ROW);           /* Uniq pos 0 */
     assert(strcmp((const char *)sqlite3_column_text(mm, 1), "solo@p1") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(mm, 2), "dup@hi") == 0);
-    assert(sqlite3_step(mm) == SQLITE_ROW);           /* Zero */
-    assert(strcmp((const char *)sqlite3_column_text(mm, 1), "nowhere") == 0);
+    assert(sqlite3_step(mm) == SQLITE_ROW);           /* Uniq pos 1 */
+    assert(strcmp((const char *)sqlite3_column_text(mm, 1), "dup@hi") == 0);
+    assert(sqlite3_column_int(mm, 2) == 1);
+    assert(sqlite3_step(mm) == SQLITE_DONE);          /* Zero: no rows */
     sqlite3_finalize(mm);
     int uv = 0;
     assert(db_schema_state(old_db, &uv) == DB_SCHEMA_CURRENT);

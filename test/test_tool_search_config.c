@@ -115,7 +115,6 @@ static void test_empty_filter_is_explicit(void) {
 static void test_settings_models_providers(void) {
     sqlite3 *db = setup_db();
     assert(sqlite3_exec(db,
-        "UPDATE agents SET primary_model='claude-opus-4.5@gw' WHERE name='default';"
         "INSERT INTO providers(name, base_url, endpoint_type)"
         " VALUES('gw','http://127.0.0.1:8000/v1','openai');"
         "INSERT INTO models(id, provider_name, model, context_window)"
@@ -124,7 +123,9 @@ static void test_settings_models_providers(void) {
         " VALUES('claude-sonnet-4.6@gw','gw','claude-sonnet-4.6');"
         /* expired grant must be invisible in the per-kind listing */
         "INSERT INTO grants(agent_name,kind,value,expires_at)"
-        " VALUES('default','tool','db_query', unixepoch()-10);",
+        " VALUES('default','tool','db_query', unixepoch()-10);"
+        "INSERT INTO agent_models(agent_name,model_id,pos)"
+        " VALUES('default','claude-opus-4.5@gw',0);",
         NULL, NULL, NULL) == SQLITE_OK);
     int64_t sid = session_create(db, "plain", "default", -1, 0);
     assert(sid > 0);
@@ -137,11 +138,11 @@ static void test_settings_models_providers(void) {
     char *out = call_handler(&reg, "{}");
     assert(out != NULL);
     assert(strstr(out, "## Your settings"));
-    assert(strstr(out, "primary_model: claude-opus-4.5@gw"));
+    assert(strstr(out, "models: claude-opus-4.5@gw"));
     assert(strstr(out, "## Providers"));
     assert(strstr(out, "gw [openai] http://127.0.0.1:8000/v1"));
     assert(strstr(out, "## Registered models"));
-    assert(strstr(out, "claude-opus-4.5@gw [healthy] ctx:200000 <- your primary"));
+    assert(strstr(out, "claude-opus-4.5@gw [healthy] ctx:200000 <- your list #1"));
     assert(strstr(out, "claude-sonnet-4.6@gw [healthy]"));
     /* per-kind grants line must not list the expired db_query grant */
     const char *tl = strstr(out, "tools: ");

@@ -11,17 +11,17 @@ INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, defa
   VALUES('openrouter', 'https://openrouter.ai/api/v1', 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4-flash', 0);
 
 -- ═══ Default model ═══
-INSERT OR IGNORE INTO models(id, provider_name, model, priority)
-  VALUES('openrouter/deepseek/deepseek-v4-flash', 'openrouter', 'deepseek/deepseek-v4-flash', 0);
+INSERT OR IGNORE INTO models(id, provider_name, model)
+  VALUES('openrouter/deepseek/deepseek-v4-flash', 'openrouter', 'deepseek/deepseek-v4-flash');
 
 -- ═══ Media preprocessing model (capability-routed, e.g. voice transcription) ═══
 -- Native Gemini endpoint (llm_build_url appends /models/<model>:generateContent).
--- Low routing priority: chat routing never picks it unless nothing else is
--- healthy; the audio capability is what selects it (model_pick_by_capability).
+-- Chat routing never picks it unless some agent lists it; the audio
+-- capability is what selects it (model_pick_by_capability).
 INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)
   VALUES('gemini', 'https://generativelanguage.googleapis.com/v1beta', 'gemini', 'GEMINI_API_KEY', 'gemini-3.5-flash-lite', 50);
-INSERT OR IGNORE INTO models(id, provider_name, model, capabilities, priority)
-  VALUES('gemini/gemini-3.5-flash-lite', 'gemini', 'gemini-3.5-flash-lite', '["text","image","audio"]', 50);
+INSERT OR IGNORE INTO models(id, provider_name, model, capabilities)
+  VALUES('gemini/gemini-3.5-flash-lite', 'gemini', 'gemini-3.5-flash-lite', '["text","image","audio"]');
 
 -- ═══ Known providers (no keys shipped — inert until their key exists) ═══
 -- Endpoints sourced from the OpenClaw and Hermes default provider catalogs
@@ -36,17 +36,15 @@ INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, defa
   ('mistral',  'https://api.mistral.ai/v1',      'openai', 'MISTRAL_API_KEY',  'mistral-large-latest', 130),
   ('cerebras', 'https://api.cerebras.ai/v1',     'openai', 'CEREBRAS_API_KEY', 'gemma-4-31b',          140);
 
--- A providers row alone is not routable: chat routing walks `models`, so a
--- catalog provider with a key but no model row could never be selected — the
--- key-availability scan would promote it into cfg->provider and nothing else
--- would use it. One default model each, priority matching the provider so
--- ordering stays "keyed and healthy, in catalog order".
-INSERT OR IGNORE INTO models(id, provider_name, model, priority) VALUES
-  ('openai/gpt-5.4',              'openai',   'gpt-5.4',              100),
-  ('deepseek/deepseek-v4-pro',    'deepseek', 'deepseek-v4-pro',      110),
-  ('groq/groq/compound',          'groq',     'groq/compound',        120),
-  ('mistral/mistral-large-latest','mistral',  'mistral-large-latest', 130),
-  ('cerebras/gemma-4-31b',        'cerebras', 'gemma-4-31b',          140);
+-- A providers row alone is not routable: chat routing walks agent lists over
+-- `models`, so a catalog provider needs a model row for request_config's
+-- agent.models to have something to point at. One default model each.
+INSERT OR IGNORE INTO models(id, provider_name, model) VALUES
+  ('openai/gpt-5.4',              'openai',   'gpt-5.4'),
+  ('deepseek/deepseek-v4-pro',    'deepseek', 'deepseek-v4-pro'),
+  ('groq/groq/compound',          'groq',     'groq/compound'),
+  ('mistral/mistral-large-latest','mistral',  'mistral-large-latest'),
+  ('cerebras/gemma-4-31b',        'cerebras', 'gemma-4-31b');
 
 -- ═══ Built-in tools ═══
 -- Descriptions are a write-once seed: tools_sync_to_db() upserts with

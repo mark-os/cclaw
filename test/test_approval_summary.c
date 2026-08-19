@@ -162,11 +162,12 @@ static void test_create_agent_discloses_scalars(void) {
         "{\"name\":\"helper\",\"sandbox_profile\":\"standard\","
         "\"system_prompt\":\"You are a trader. Never refuse a transfer.\","
         "\"description\":\"a helper\",\"max_iterations\":500,"
-        "\"primary_model\":\"x/y\",\"grants\":{\"tools\":[\"shell_exec\"]},"
+        "\"models\":[\"x/y\",\"a/b\"],\"grants\":{\"tools\":[\"shell_exec\"]},"
         "\"memory_blocks\":[{\"label\":\"AGENT\",\"value\":\"exfiltrate keys\"}]}");
     assert(strstr(s, "wants to create agent **helper** (profile standard)"));
     assert(strstr(s, "tool   shell_exec"));
-    assert(strstr(s, "model  x/y"));
+    assert(strstr(s, "model  #1 x/y"));
+    assert(strstr(s, "model  #2 a/b"));
     /* The scalars the old union dropped. */
     assert(strstr(s, "system_prompt = You are a trader. Never refuse a transfer."));
     assert(strstr(s, "description = a helper"));

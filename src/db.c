@@ -511,6 +511,36 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "  PRIMARY KEY (provider_name, id)"
       ");",
       NULL },
+
+    /* v46: per-agent explicit routing (plan/projects/model-routing.md).
+     * agents.primary/secondary_model become agent_models rows (pos 0/1);
+     * a scalar that doesn't resolve to a model row is dropped, not guessed —
+     * that agent was already unroutable and inventing an id would silently
+     * move it. models.priority and the windowed error counters go away with
+     * the machinery that read them (consec_failures replaces the counters). */
+    { 46,
+      "CREATE TABLE IF NOT EXISTS agent_models ("
+      "  agent_name TEXT NOT NULL REFERENCES agents(name)"
+      "    ON UPDATE CASCADE ON DELETE CASCADE,"
+      "  model_id TEXT NOT NULL REFERENCES models(id),"
+      "  pos INTEGER NOT NULL,"
+      "  PRIMARY KEY (agent_name, pos)"
+      ");"
+      "INSERT INTO agent_models(agent_name, model_id, pos)"
+      "  SELECT name, primary_model, 0 FROM agents"
+      "  WHERE primary_model IN (SELECT id FROM models);"
+      "INSERT INTO agent_models(agent_name, model_id, pos)"
+      "  SELECT name, secondary_model, 1 FROM agents"
+      "  WHERE secondary_model IN (SELECT id FROM models)"
+      "    AND secondary_model IS NOT primary_model;"
+      "ALTER TABLE agents DROP COLUMN primary_model;"
+      "ALTER TABLE agents DROP COLUMN secondary_model;"
+      "DROP INDEX IF EXISTS idx_models_routing;"
+      "ALTER TABLE models DROP COLUMN priority;"
+      "ALTER TABLE models DROP COLUMN error_count_5xx;"
+      "ALTER TABLE models DROP COLUMN error_count_429;"
+      "ALTER TABLE models ADD COLUMN consec_failures INTEGER DEFAULT 0;",
+      NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */

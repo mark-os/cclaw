@@ -427,10 +427,10 @@ static void test_list_models(void) {
     sqlite3_exec(db,
         "INSERT INTO providers(name,base_url,api_key_env,priority)"
         " VALUES('p1','https://p1.example/v1','TEST_MODELS_KEY',0);"
-        "INSERT INTO models(id,provider_name,model,context_window,priority,status,"
-        "                   error_count_5xx,degraded_until) VALUES"
-        " ('p1/alpha','p1','alpha',NULL,0,'healthy',0,NULL),"
-        " ('p1/beta','p1','beta',200000,1,'degraded',3,unixepoch()+120);",
+        "INSERT INTO models(id,provider_name,model,context_window,status,"
+        "                   consec_failures,degraded_until) VALUES"
+        " ('p1/alpha','p1','alpha',NULL,'healthy',0,NULL),"
+        " ('p1/beta','p1','beta',200000,'degraded',3,unixepoch()+120);",
         NULL, NULL, NULL);
 
     AdminModel *list = NULL;
@@ -444,7 +444,7 @@ static void test_list_models(void) {
     assert(strcmp(list[1].id, "p1/beta") == 0);
     assert(list[1].context_window == 200000);
     assert(list[1].degraded_left > 0 && list[1].degraded_left <= 120);
-    assert(list[1].err_5xx == 3);
+    assert(list[1].consec_failures == 3);
     admin_models_free(list, count);
 
     /* Key presence via encrypted kv */
@@ -464,36 +464,47 @@ static void test_switch_model(void) {
     sqlite3_exec(db,
         "INSERT INTO providers(name,base_url,api_key_env,priority)"
         " VALUES('p1','https://p1.example/v1','K1',0);"
-        "INSERT INTO models(id,provider_name,model,priority,status,degraded_until,error_count_5xx)"
-        " VALUES ('p1/alpha','p1','alpha',0,'healthy',NULL,0),"
-        "        ('p1/beta','p1','beta',1,'degraded',unixepoch()+300,5);"
-        "INSERT INTO agents(name,primary_model) VALUES('tracker','p1/alpha'),('pinned','other/x');",
+        "INSERT INTO models(id,provider_name,model,status,degraded_until,consec_failures)"
+        " VALUES ('p1/alpha','p1','alpha','healthy',NULL,0),"
+        "        ('p1/beta','p1','beta','degraded',unixepoch()+300,5),"
+        "        ('other/x','p1','x','healthy',NULL,0);"
+        "INSERT INTO agents(name) VALUES('tracker'),('pinned');"
+        "INSERT INTO agent_models(agent_name,model_id,pos) VALUES"
+        " ('tracker','p1/alpha',0),('pinned','other/x',0),('pinned','p1/beta',1);",
         NULL, NULL, NULL);
 
     char prev[128];
     assert(admin_switch_model(db, "p1/beta", prev, sizeof(prev)) == 0);
-    assert(strcmp(prev, "p1/alpha") == 0);
+    assert(strcmp(prev, "other/x") == 0);   /* first agent (pinned)'s old head */
 
-    /* beta now heads the routing order with fresh health */
+    /* beta got fresh health */
     AdminModel *list = NULL;
     size_t count = 0;
     assert(admin_list_models(db, &list, &count) == 0);
-    assert(count == 2);
-    assert(strcmp(list[0].id, "p1/beta") == 0);
-    assert(strcmp(list[0].status, "healthy") == 0);
-    assert(list[0].degraded_left == 0 && list[0].err_5xx == 0);
-    assert(strcmp(list[1].id, "p1/alpha") == 0);   /* previous head = first fallback */
+    assert(count == 3);
+    size_t bi = 0;
+    while (bi < count && strcmp(list[bi].id, "p1/beta") != 0) bi++;
+    assert(bi < count);
+    assert(strcmp(list[bi].status, "healthy") == 0);
+    assert(list[bi].degraded_left == 0 && list[bi].consec_failures == 0);
     admin_models_free(list, count);
 
-    /* Agents tracking the old head follow; explicit other pins don't */
+    /* beta heads EVERY agent's list; prior tails shift down, dupes removed */
     sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db, "SELECT primary_model FROM agents WHERE name='tracker'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "p1/beta") == 0);
-    sqlite3_finalize(s);
-    assert(sqlite3_prepare_v2(db, "SELECT primary_model FROM agents WHERE name='pinned'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "other/x") == 0);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT agent_name, model_id, pos FROM agent_models"
+        " ORDER BY agent_name, pos", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);   /* pinned #0 = beta */
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "p1/beta") == 0);
+    assert(sqlite3_column_int(s, 2) == 0);
+    assert(sqlite3_step(s) == SQLITE_ROW);   /* pinned next = other/x */
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "other/x") == 0);
+    assert(sqlite3_step(s) == SQLITE_ROW);   /* tracker #0 = beta */
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "p1/beta") == 0);
+    assert(sqlite3_column_int(s, 2) == 0);
+    assert(sqlite3_step(s) == SQLITE_ROW);   /* tracker next = alpha */
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "p1/alpha") == 0);
+    assert(sqlite3_step(s) == SQLITE_DONE);
     sqlite3_finalize(s);
 
     /* Unknown model refused */

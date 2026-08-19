@@ -42,8 +42,10 @@ char *config_probe_snapshot(sqlite3 *db, const char *agent, const char *args_jso
      * state the operator changed by other means in the meantime. */
     return q_json(db,
         "SELECT json_object("
-        " 'agent', (SELECT json_object('primary_model', COALESCE(primary_model,''),"
-        "                              'secondary_model', COALESCE(secondary_model,''))"
+        " 'agent', (SELECT json_object('models', COALESCE((SELECT"
+        "               json_group_array(model_id) FROM (SELECT model_id"
+        "               FROM agent_models WHERE agent_name=?2 ORDER BY pos)),"
+        "               json_array()))"
         "             FROM agents WHERE name=?2),"
         " 'provider', (SELECT json_object('name', name, 'base_url', base_url,"
         "                                 'api_key_env', api_key_env)"
@@ -53,7 +55,7 @@ char *config_probe_snapshot(sqlite3 *db, const char *agent, const char *args_jso
         "                 'id', id, 'provider_name', provider_name, 'model', model,"
         "                 'context_window', context_window,"
         "                 'max_output_tokens', max_output_tokens,"
-        "                 'capabilities', capabilities, 'priority', priority,"
+        "                 'capabilities', capabilities,"
         "                 'status', status))"
         "              FROM models WHERE id IN (SELECT json_extract(value,'$.id')"
         "                FROM json_each(?1,'$.changes.models'))))",
@@ -63,31 +65,20 @@ char *config_probe_snapshot(sqlite3 *db, const char *agent, const char *args_jso
 int config_probe_needed(sqlite3 *db, const char *agent, const char *args_json) {
     if (!db || !agent || !args_json) return 0;
     /* "Affects which model serves requests" — read against the state the
-     * document just wrote: the agent's own model choice moved, a model row the
-     * agent routes to was touched, or the provider behind it changed
-     * transport. A grants/config-value document matches none of these.
-     * An agent with no explicit model rides whatever routing picks, so for it
-     * "in use" means the top-priority routable row — registering an unrelated
-     * provider or model moves nothing and is not probed. */
+     * document just wrote: the agent's routing list moved, a model row on
+     * that list was touched, or the provider behind one of them changed
+     * transport. A grants/config-value document matches none of these. */
     char *v = q_json(db,
         "SELECT 1 FROM agents a WHERE a.name=?2 AND ("
-        "   json_extract(?1,'$.changes.agent.primary_model') IS NOT NULL"
-        "   OR json_extract(?1,'$.changes.agent.secondary_model') IS NOT NULL"
+        "   json_extract(?1,'$.changes.agent.models') IS NOT NULL"
         "   OR EXISTS(SELECT 1 FROM json_each(?1,'$.changes.models') j"
-        "              WHERE json_extract(j.value,'$.id')"
-        "                    IN (a.primary_model, a.secondary_model))"
+        "              WHERE json_extract(j.value,'$.id') IN"
+        "                (SELECT model_id FROM agent_models WHERE agent_name=?2))"
         "   OR EXISTS(SELECT 1 FROM models m"
-        "              WHERE m.id IN (a.primary_model, a.secondary_model)"
+        "              WHERE m.id IN (SELECT model_id FROM agent_models"
+        "                             WHERE agent_name=?2)"
         "                AND m.provider_name ="
-        "                    json_extract(?1,'$.changes.provider.provider'))"
-        "   OR (COALESCE(a.primary_model,'')='' AND ("
-        "        (SELECT m2.id FROM models m2 WHERE m2.status!='disabled'"
-        "          ORDER BY m2.priority LIMIT 1)"
-        "          IN (SELECT json_extract(value,'$.id')"
-        "                FROM json_each(?1,'$.changes.models'))"
-        "        OR (SELECT m2.provider_name FROM models m2 WHERE m2.status!='disabled'"
-        "             ORDER BY m2.priority LIMIT 1)"
-        "           = json_extract(?1,'$.changes.provider.provider'))))",
+        "                    json_extract(?1,'$.changes.provider.provider')))",
         args_json, agent);
     int needed = v != NULL;
     free(v);
@@ -100,13 +91,16 @@ int config_probe_restore(sqlite3 *db, const char *agent, const char *args_json,
     int rc = 0;
     sqlite3_exec(db, "SAVEPOINT probe_revert", NULL, NULL, NULL);
 
-    /* Agent row: the fields the document is allowed to move. */
+    /* Agent routing list: whole-list restore from the snapshot array. */
     if (rc == 0)
         rc = exec2(db,
-            "UPDATE agents SET"
-            " primary_model   = json_extract(?1,'$.agent.primary_model'),"
-            " secondary_model = json_extract(?1,'$.agent.secondary_model')"
-            " WHERE name=?2 AND json_type(?1,'$.agent')='object'",
+            "DELETE FROM agent_models WHERE agent_name=?2"
+            " AND json_type(?1,'$.agent.models')='array'",
+            snap_json, agent);
+    if (rc == 0)
+        rc = exec2(db,
+            "INSERT INTO agent_models(agent_name, model_id, pos)"
+            " SELECT ?2, value, key FROM json_each(?1,'$.agent.models')",
             snap_json, agent);
 
     /* Provider: restored if it existed, dropped if the document created it. */
@@ -133,8 +127,6 @@ int config_probe_restore(sqlite3 *db, const char *agent, const char *args_json,
             "     FROM json_each(?1,'$.models') j WHERE json_extract(j.value,'$.id')=models.id),"
             "  capabilities = (SELECT json_extract(j.value,'$.capabilities')"
             "     FROM json_each(?1,'$.models') j WHERE json_extract(j.value,'$.id')=models.id),"
-            "  priority = (SELECT json_extract(j.value,'$.priority')"
-            "     FROM json_each(?1,'$.models') j WHERE json_extract(j.value,'$.id')=models.id),"
             "  status = (SELECT json_extract(j.value,'$.status')"
             "     FROM json_each(?1,'$.models') j WHERE json_extract(j.value,'$.id')=models.id)"
             " WHERE id IN (SELECT json_extract(value,'$.id') FROM json_each(?1,'$.models'))",
@@ -155,8 +147,9 @@ int config_probe_restore(sqlite3 *db, const char *agent, const char *args_json,
 /* Human-readable "what you are back on", read from the snapshot. */
 static char *restored_text(sqlite3 *db, const char *snap_json) {
     char *t = q_json(db,
-        "SELECT 'primary_model='"
-        "  ||COALESCE(NULLIF(json_extract(?1,'$.agent.primary_model'),''),'(default)')"
+        "SELECT 'models='"
+        "  ||COALESCE(NULLIF((SELECT group_concat(value,' > ')"
+        "      FROM json_each(?1,'$.agent.models')),''),'(default)')"
         "  ||CASE WHEN json_extract(?1,'$.provider.name') IS NOT NULL"
         "     THEN ', provider '||json_extract(?1,'$.provider.name')||' -> '"
         "          ||json_extract(?1,'$.provider.base_url')"

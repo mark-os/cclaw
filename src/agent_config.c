@@ -212,7 +212,11 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
 AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
     if (!db || !name) return NULL;
 
-    const char *sql = "SELECT primary_model, max_iterations FROM agents WHERE name=?;";
+    /* Head of the agent's routing list stands in for the old scalar model. */
+    const char *sql =
+        "SELECT (SELECT model_id FROM agent_models am"
+        "         WHERE am.agent_name=agents.name ORDER BY pos LIMIT 1),"
+        "       max_iterations FROM agents WHERE name=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);

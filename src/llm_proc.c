@@ -22,8 +22,6 @@
 #include <unistd.h>
 
 #define MAX_MODELS 16
-#define MAX_RETRIES 3          /* transient failures: attempts per model */
-#define MAX_TIMEOUT_RETRIES 1  /* timeouts burn minutes per attempt — one retry */
 /* Generous ceiling on any provider response body — a real completion is a few
  * MB at most; this only bounds daemon OOM from a malicious/buggy provider
  * (web_fetch/js_http already cap their own). */
@@ -69,133 +67,60 @@ static int provider_key_available(sqlite3 *db, const char *api_key_env) {
 
 /* Defined below with the rest of the degradation machinery; load_candidates is
  * the one caller that runs *before* a request exists. */
-static void model_degrade_config(sqlite3 *db, const char *db_path, int64_t session_id,
-                                 const char *model_id, const char *api_key_env);
+static void model_degrade_config(sqlite3 *db, const char *model_id,
+                                 const char *api_key_env);
 static void model_config_recover(sqlite3 *db, const char *model_id);
 
-static int load_candidates(sqlite3 *db, const char *agent_name, int64_t session_id,
+/* The agent's explicit list (agent_models, pos order) IS the routing policy —
+ * nothing is appended after it (plan/projects/model-routing.md R1). Degraded
+ * rows are NOT filtered here: health is consulted at selection time inside
+ * llm_req, because health reorders the list but never empties it (R4). Only
+ * 'disabled' (an operator statement) and missing-credential rows drop out. */
+static int load_candidates(sqlite3 *db, const char *agent_name,
                            ModelCandidate *out, int max) {
     if (max <= 0) return 0;
     int n = 0;
-    const char *db_path = sqlite3_db_filename(db, "main");
 
-    /* Helper: load a single candidate by model id/name if healthy.
-     * Returns 1 if loaded, 0 otherwise. */
-    #define TRY_MODEL(model_ref) do { \
-        const char *_mr = (model_ref); \
-        if (_mr && _mr[0] && n < max) { \
-            int dup = 0; \
-            for (int _d = 0; _d < n; _d++) \
-                if (strcmp(out[_d].id, _mr) == 0) { dup = 1; break; } \
-            if (!dup) { \
-                const char *lsql = \
-                    "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type, m.context_window" \
-                    " FROM models m JOIN providers p ON m.provider_name = p.name" \
-                    " WHERE m.id = ?1" \
-                    " AND m.status != 'disabled'" \
-                    " AND (m.degraded_until IS NULL OR m.degraded_until < unixepoch())" \
-                    " LIMIT 1;"; \
-                sqlite3_stmt *ls; \
-                if (sqlite3_prepare_v2(db, lsql, -1, &ls, NULL) == SQLITE_OK) { \
-                    sqlite3_bind_text(ls, 1, _mr, -1, SQLITE_STATIC); \
-                    if (sqlite3_step(ls) == SQLITE_ROW) { \
-                        ModelCandidate *c = &out[n]; \
-                        memset(c, 0, sizeof(*c)); \
-                        const char *v; \
-                        v = (const char *)sqlite3_column_text(ls, 0); snprintf(c->id, sizeof(c->id), "%s", v ? v : ""); \
-                        v = (const char *)sqlite3_column_text(ls, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : ""); \
-                        v = (const char *)sqlite3_column_text(ls, 2); snprintf(c->base_url, sizeof(c->base_url), "%s", v ? v : ""); \
-                        v = (const char *)sqlite3_column_text(ls, 3); snprintf(c->api_key_env, sizeof(c->api_key_env), "%s", v ? v : ""); \
-                        v = (const char *)sqlite3_column_text(ls, 4); \
-                        c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI; \
-                        c->context_window = sqlite3_column_int(ls, 5); \
-                        if (c->context_window <= 0) c->context_window = 128000; \
-                        /* A named candidate dropped for a missing key is the \
-                         * 2026-08-10 silent-reroute: it never reached the \
-                         * request, so nothing recorded it. Record it through \
-                         * the degrade machinery instead (A8). */ \
-                        if (provider_key_available(db, c->api_key_env)) { \
-                            model_config_recover(db, c->id); \
-                            n++; \
-                        } else { \
-                            LOG_WARN_("llm: candidate %s dropped — api_key_env %s " \
-                                      "resolves to nothing (agent=%s)", c->id, \
-                                      c->api_key_env, agent_name ? agent_name : "?"); \
-                            model_degrade_config(db, db_path, session_id, c->id, \
-                                                 c->api_key_env); \
-                        } \
-                    } \
-                    sqlite3_finalize(ls); \
-                } \
-            } \
-        } \
-    } while (0)
-
-    /* 1. Agent's primary and secondary models */
-    char agent_primary[128] = "", agent_secondary[128] = "";
-    if (agent_name && agent_name[0]) {
-        sqlite3_stmt *as;
-        if (sqlite3_prepare_v2(db,
-                "SELECT primary_model, secondary_model FROM agents WHERE name=?;",
-                -1, &as, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(as, 1, agent_name, -1, SQLITE_STATIC);
-            if (sqlite3_step(as) == SQLITE_ROW) {
-                const char *v = (const char *)sqlite3_column_text(as, 0);
-                if (v) snprintf(agent_primary, sizeof(agent_primary), "%s", v);
-                v = (const char *)sqlite3_column_text(as, 1);
-                if (v) snprintf(agent_secondary, sizeof(agent_secondary), "%s", v);
-            }
-            sqlite3_finalize(as);
-        }
-    }
-    TRY_MODEL(agent_primary);
-    TRY_MODEL(agent_secondary);
-
-    /* 2. System default primary/secondary from config */
-    char *cfg_primary = config_get(db, "default_primary_model");
-    char *cfg_secondary = config_get(db, "default_secondary_model");
-    TRY_MODEL(cfg_primary);
-    TRY_MODEL(cfg_secondary);
-    free(cfg_primary);
-    free(cfg_secondary);
-
-    /* 3. Remaining healthy models by priority, skipping already-added */
     const char *sql =
-        "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type, m.context_window"
-        " FROM models m JOIN providers p ON m.provider_name = p.name"
-        " WHERE m.status != 'disabled'"
-        " AND (m.degraded_until IS NULL OR m.degraded_until < unixepoch())"
-        " ORDER BY m.priority";
+        "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type,"
+        "       m.context_window"
+        " FROM agent_models am"
+        " JOIN models m ON m.id = am.model_id"
+        " JOIN providers p ON p.name = m.provider_name"
+        " WHERE am.agent_name = ?1 AND m.status != 'disabled'"
+        " ORDER BY am.pos";
     sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
-        while (n < max && sqlite3_step(s) == SQLITE_ROW) {
-            const char *rid = (const char *)sqlite3_column_text(s, 0);
-            if (!rid) continue;
-            /* skip duplicates */
-            int dup = 0;
-            for (int d = 0; d < n; d++)
-                if (strcmp(out[d].id, rid) == 0) { dup = 1; break; }
-            if (dup) continue;
-
-            ModelCandidate *c = &out[n];
-            memset(c, 0, sizeof(*c));
-            const char *v;
-            snprintf(c->id, sizeof(c->id), "%s", rid);
-            v = (const char *)sqlite3_column_text(s, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : "");
-            v = (const char *)sqlite3_column_text(s, 2); snprintf(c->base_url, sizeof(c->base_url), "%s", v ? v : "");
-            v = (const char *)sqlite3_column_text(s, 3); snprintf(c->api_key_env, sizeof(c->api_key_env), "%s", v ? v : "");
-            v = (const char *)sqlite3_column_text(s, 4);
-            c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
-            c->context_window = sqlite3_column_int(s, 5);
-            if (c->context_window <= 0) c->context_window = 128000;
-            if (provider_key_available(db, c->api_key_env)) n++;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(s, 1, agent_name ? agent_name : "", -1, SQLITE_STATIC);
+    while (n < max && sqlite3_step(s) == SQLITE_ROW) {
+        ModelCandidate *c = &out[n];
+        memset(c, 0, sizeof(*c));
+        const char *v;
+        v = (const char *)sqlite3_column_text(s, 0); snprintf(c->id, sizeof(c->id), "%s", v ? v : "");
+        v = (const char *)sqlite3_column_text(s, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : "");
+        v = (const char *)sqlite3_column_text(s, 2); snprintf(c->base_url, sizeof(c->base_url), "%s", v ? v : "");
+        v = (const char *)sqlite3_column_text(s, 3); snprintf(c->api_key_env, sizeof(c->api_key_env), "%s", v ? v : "");
+        v = (const char *)sqlite3_column_text(s, 4);
+        c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
+        c->context_window = sqlite3_column_int(s, 5);
+        if (c->context_window <= 0) c->context_window = 128000;
+        /* A named candidate dropped for a missing key is the 2026-08-10
+         * silent-reroute: it never reached the request, so nothing recorded
+         * it. Record it through the degrade machinery instead (A8). */
+        if (provider_key_available(db, c->api_key_env)) {
+            model_config_recover(db, c->id);
+            n++;
+        } else {
+            LOG_WARN_("llm: candidate %s dropped — api_key_env %s resolves to "
+                      "nothing (agent=%s)", c->id, c->api_key_env,
+                      agent_name ? agent_name : "?");
+            model_degrade_config(db, c->id, c->api_key_env);
         }
-        sqlite3_finalize(s);
     }
-
-    #undef TRY_MODEL
+    sqlite3_finalize(s);
     return n;
 }
+
 
 int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, int max) {
     if (max <= 0) return 0;
@@ -207,7 +132,7 @@ int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, 
         " AND (m.degraded_until IS NULL OR m.degraded_until < unixepoch())"
         " AND m.capabilities IS NOT NULL AND json_valid(m.capabilities)"
         " AND EXISTS (SELECT 1 FROM json_each(m.capabilities) WHERE value = ?1)"
-        " ORDER BY m.priority";
+        " ORDER BY m.created_at, m.id";
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_text(s, 1, cap, -1, SQLITE_STATIC);
@@ -238,105 +163,113 @@ int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, 
 
 /* ── Stats + degradation ───────────────────────────────────────── */
 
-/* Tell the operator (via the session's channel chat) that routing changed.
- * Best-effort — a CLI session or notify failure never blocks the turn. */
-static void notify_degraded(sqlite3 *db, const char *db_path, int64_t session_id,
-                            const char *model_id, int status, const char *why) {
-    char detail[24];
-    if (status > 0) snprintf(detail, sizeof(detail), "http %d", status);
-    else if (status == 0) snprintf(detail, sizeof(detail), "not routable");
-    else snprintf(detail, sizeof(detail), "no response");
-    char text[256];
-    snprintf(text, sizeof(text),
-             "⚠ model %s degraded (%s, %s) — requests fall back to the "
-             "next candidate until it recovers. /model shows the routing order.",
-             model_id, why, detail);
-    channel_notify_session(db, db_path, session_id, text);
-}
-
-static void model_stat_error(sqlite3 *db, const char *db_path, int64_t session_id,
-                             const char *model_id, int status) {
-    const char *col = (status == 429) ? "error_count_429" : "error_count_5xx";
-    char sql[256];
-    snprintf(sql, sizeof(sql),
-        "UPDATE models SET total_requests=total_requests+1, %s=%s+1,"
-        " last_error_at=unixepoch() WHERE id=?", col, col);
+/* One counter drives degradation (model-routing.md R3): any transient failure
+ * increments consec_failures, any success zeroes it. At or past
+ * health_fail_threshold the cooldown is stamped UNCONDITIONALLY — every
+ * further failure re-stamps it, so a still-dead model keeps getting
+ * re-sidelined after its cooldown lapses instead of being retried with the
+ * full ladder forever (the 2026-08-19 one-shot bug: the old transition guard
+ * required status='healthy', which only a success could restore).
+ * No per-degrade operator message — the serving-model-change notice after the
+ * next success is what the user actually experiences (R6). */
+static void model_stat_error(sqlite3 *db, const char *model_id, int status) {
     sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE models SET total_requests=total_requests+1,"
+            " consec_failures=consec_failures+1, last_error_at=unixepoch()"
+            " WHERE id=?1", -1, &s, NULL) != SQLITE_OK)
+        return;
     sqlite3_bind_text(s, 1, model_id, -1, SQLITE_STATIC);
     sqlite3_step(s); sqlite3_finalize(s);
 
-    /* Check degradation threshold. status='healthy' guard makes this fire on
-     * the transition only (model_stat_success restores 'healthy'). */
-    const char *degrade_sql =
-        "UPDATE models SET status='degraded',"
-        " degraded_until=unixepoch()+(SELECT CAST(COALESCE(value, default_value, '300') AS INTEGER) FROM config WHERE key='health_cooldown_sec')"
-        " WHERE id=?1 AND status='healthy'"
-        " AND (CASE WHEN ?2=429"
-        "   THEN error_count_429 >= (SELECT CAST(COALESCE(value, default_value, '10') AS INTEGER) FROM config WHERE key='health_429_threshold')"
-        "   ELSE error_count_5xx >= (SELECT CAST(COALESCE(value, default_value, '3') AS INTEGER) FROM config WHERE key='health_5xx_threshold')"
-        " END)"
-        " AND last_error_at >= unixepoch()-(SELECT CAST(COALESCE(value, default_value, '300') AS INTEGER) FROM config WHERE key='health_window_sec');";
-    sqlite3_stmt *ds;
-    if (sqlite3_prepare_v2(db, degrade_sql, -1, &ds, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(ds, 1, model_id, -1, SQLITE_STATIC);
-        sqlite3_bind_int(ds, 2, status);
-        sqlite3_step(ds);
-        if (sqlite3_changes(db) > 0) {
-            LOG_INFO_("model degraded model=%s status=%d", model_id, status);
-            notify_degraded(db, db_path, session_id, model_id, status,
-                            status == 429 ? "rate limited" : "repeated errors");
-        }
-        sqlite3_finalize(ds);
-    }
-}
-
-/* Auth/not-found failures (401/403/404) don't self-heal within a turn:
- * sideline the model for a cooldown so it isn't retried every request, and
- * tell the operator once (on the healthy→degraded transition). The cooldown
- * still re-probes periodically in case the key/model was fixed. */
-static void model_degrade_unavailable(sqlite3 *db, const char *db_path,
-                                      int64_t session_id, const char *model_id,
-                                      int status) {
-    const char *sql =
-        "UPDATE models SET status='degraded', last_error_at=unixepoch(),"
-        " degraded_until=unixepoch()+(SELECT CAST(COALESCE(value, default_value, '300') AS INTEGER) FROM config WHERE key='health_cooldown_sec')"
-        " WHERE id=?1;";
-    /* Transition check first — the UPDATE below always extends the cooldown. */
-    int was_healthy = 0;
-    sqlite3_stmt *cs;
-    if (sqlite3_prepare_v2(db, "SELECT 1 FROM models WHERE id=?1 AND status='healthy'",
-                           -1, &cs, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(cs, 1, model_id, -1, SQLITE_STATIC);
-        was_healthy = sqlite3_step(cs) == SQLITE_ROW;
-        sqlite3_finalize(cs);
-    }
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE models SET status='degraded',"
+            " degraded_until=unixepoch()+(SELECT CAST(COALESCE(value, default_value, '300') AS INTEGER)"
+            "   FROM config WHERE key='health_cooldown_sec')"
+            " WHERE id=?1 AND status != 'disabled'"
+            " AND consec_failures >= (SELECT CAST(COALESCE(value, default_value, '4') AS INTEGER)"
+            "   FROM config WHERE key='health_fail_threshold')",
+            -1, &s, NULL) != SQLITE_OK)
+        return;
     sqlite3_bind_text(s, 1, model_id, -1, SQLITE_STATIC);
     sqlite3_step(s);
-    int changed = sqlite3_changes(db);
+    if (sqlite3_changes(db) > 0)
+        LOG_INFO_("model degraded model=%s status=%d", model_id, status);
     sqlite3_finalize(s);
-    if (changed > 0 && was_healthy) {
+}
+
+/* A Retry-After beyond the backoff scale is the server saying "go away for
+ * real": degrade immediately without burning the remaining attempts, honoring
+ * the longer of the server's ask and our own cooldown. Counter jumps to the
+ * threshold so the row reads coherently (it IS at its failure limit). */
+static void model_degrade_retry_after(sqlite3 *db, const char *model_id,
+                                      int retry_after) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE models SET status='degraded', last_error_at=unixepoch(),"
+            " consec_failures=MAX(consec_failures+1,"
+            "   (SELECT CAST(COALESCE(value, default_value, '4') AS INTEGER)"
+            "     FROM config WHERE key='health_fail_threshold')),"
+            " degraded_until=unixepoch()+MAX(?2,"
+            "   (SELECT CAST(COALESCE(value, default_value, '300') AS INTEGER)"
+            "     FROM config WHERE key='health_cooldown_sec'))"
+            " WHERE id=?1 AND status != 'disabled'", -1, &s, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(s, 1, model_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(s, 2, retry_after);
+    sqlite3_step(s);
+    if (sqlite3_changes(db) > 0)
+        LOG_INFO_("model degraded model=%s reason=retry_after=%ds", model_id, retry_after);
+    sqlite3_finalize(s);
+}
+
+/* Auth/not-found/bad-request don't self-heal within a turn: sideline for a
+ * cooldown so the model isn't retried every request. The cooldown still
+ * re-probes periodically in case the key/model was fixed. */
+static void model_degrade_unavailable(sqlite3 *db, const char *model_id,
+                                      int status) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE models SET status='degraded', last_error_at=unixepoch(),"
+            " degraded_until=unixepoch()+(SELECT CAST(COALESCE(value, default_value, '300') AS INTEGER)"
+            "   FROM config WHERE key='health_cooldown_sec')"
+            " WHERE id=?1 AND status != 'disabled'", -1, &s, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(s, 1, model_id, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    if (sqlite3_changes(db) > 0)
         LOG_INFO_("model degraded model=%s status=%d reason=unavailable", model_id, status);
-        notify_degraded(db, db_path, session_id, model_id, status,
-                        status == 404 ? "model not found" : "auth failed — check its key");
-    }
+    sqlite3_finalize(s);
+}
+
+/* Health at selection time: an active error cooldown. Config degradation
+ * (NULL degraded_until) never blocks selection — those candidates were
+ * already dropped by the key check in load_candidates. */
+static int model_degraded_now(sqlite3 *db, const char *model_id) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM models WHERE id=?1 AND status='degraded'"
+            " AND degraded_until IS NOT NULL AND degraded_until > unixepoch()",
+            -1, &s, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_text(s, 1, model_id, -1, SQLITE_STATIC);
+    int hit = sqlite3_step(s) == SQLITE_ROW;
+    sqlite3_finalize(s);
+    return hit;
 }
 
 /* Config-shaped degradation: the model can't be routed to at all because its
  * provider's api_key_env resolves to neither an env var nor a system secret.
  * Not an error count — the request never happened — so the state is set
- * directly on the healthy→degraded transition, which is what makes
- * notify_degraded fire exactly once (as with the error paths).
+ * directly on the healthy→degraded transition.
  *
  * degraded_until stays NULL, and that is the marker: every error-driven
  * degradation sets a cooldown, so "degraded with no cooldown" means "degraded
  * by configuration", which model_config_recover is allowed to clear the moment
  * the key resolves again. Routing is unaffected either way — the candidate is
  * dropped by the key check itself. */
-static void model_degrade_config(sqlite3 *db, const char *db_path, int64_t session_id,
-                                 const char *model_id, const char *api_key_env) {
+static void model_degrade_config(sqlite3 *db, const char *model_id,
+                                 const char *api_key_env) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
             "UPDATE models SET status='degraded', degraded_until=NULL"
@@ -348,10 +281,6 @@ static void model_degrade_config(sqlite3 *db, const char *db_path, int64_t sessi
     sqlite3_finalize(s);
     if (changed <= 0) return;
     LOG_INFO_("model degraded model=%s reason=config key=%s", model_id, api_key_env);
-    char why[128];
-    snprintf(why, sizeof(why), "no key: %s is set neither in the environment "
-                               "nor as a system secret", api_key_env);
-    notify_degraded(db, db_path, session_id, model_id, 0, why);
 }
 
 /* The recovery half of model_degrade_config: the key resolves again, so undo
@@ -379,7 +308,7 @@ static void model_stat_success(sqlite3 *db, const char *model_id,
     const char *sql = "UPDATE models SET total_requests=total_requests+1,"
         " total_tokens_in=total_tokens_in+?, total_tokens_out=total_tokens_out+?,"
         " total_cost_nano=total_cost_nano+?, last_success_at=unixepoch(),"
-        " error_count_5xx=0, error_count_429=0,"
+        " consec_failures=0,"
         " status='healthy', degraded_until=NULL"
         " WHERE id=? AND status != 'disabled'";
     sqlite3_stmt *s;
@@ -442,7 +371,7 @@ int llm_probe_agent(sqlite3 *db, const char *agent_name, int64_t session_id,
 
     /* Whoever would serve the very next request — same loader, same order. */
     ModelCandidate m;
-    if (load_candidates(db, agent_name, session_id, &m, 1) != 1) {
+    if (load_candidates(db, agent_name, &m, 1) != 1) {
         snprintf(reason, reason_sz, "no routable model for this agent");
         return -1;
     }
@@ -623,7 +552,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
     /* ── Routing state machine ─────────────────────────────────── */
     ModelCandidate models[MAX_MODELS];
-    int nmodels = load_candidates(db, agent_name, session_id, models, MAX_MODELS);
+    int nmodels = load_candidates(db, agent_name, models, MAX_MODELS);
 
     /* Fallback: if no models in DB, use config provider directly */
     if (nmodels == 0) {
@@ -644,6 +573,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
      * the loop below sets this; the init value only survives if no attempt was
      * ever made (payload/url build failed for every candidate). */
     const char *fail_text = "error: LLM request failed";
+    char served_id[128] = "";   /* candidate that answered, for the R6 notice */
 
     /* One iteration id for this LLM request: every raw response archived below
      * (the failed attempts and the final ingest) shares it. db_next_iteration_id
@@ -652,8 +582,46 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
      * (entries.turn_id, filled from the parent by entries_turn_ai). */
     int64_t iteration_id = db_next_iteration_id(db, session_id);
 
-    for (int mi = 0; mi < nmodels && !llm_ok && !had_dberr; mi++) {
+    /* ── Selection loop (model-routing.md R3/R4): degradation IS the retry
+     * policy. Each pass picks the first candidate in list order that isn't
+     * skipped for this request, isn't inside an error cooldown, and hasn't
+     * hit the failure threshold locally; a model keeps getting attempts only
+     * while it's the best eligible candidate, and its own consec_failures
+     * crossing the threshold is what dethrones it. When every candidate is
+     * cooling down, the first one still gets ONE live attempt (health
+     * reorders the list, never empties it — and that attempt doubles as the
+     * early-recovery probe). Backoff 1s/2s/4s applies only between
+     * consecutive attempts on the SAME model; switching costs nothing. */
+    int fail_threshold = config_get_int(db, "health_fail_threshold");
+    if (fail_threshold <= 0) fail_threshold = 4;
+    int attempts[MAX_MODELS] = {0};
+    int skip[MAX_MODELS] = {0};   /* prompt-specific / rejected: out for this request */
+    int desperation_done = 0;
+    int last_mi = -1, same_run = 0;
+    int next_wait = 0;            /* short Retry-After, replaces the ladder step */
+
+    while (!llm_ok && !had_dberr) {
+        int mi = -1;
+        for (int i = 0; i < nmodels; i++)
+            if (!skip[i] && attempts[i] < fail_threshold &&
+                !model_degraded_now(db, models[i].id)) { mi = i; break; }
+        if (mi < 0 && !desperation_done) {
+            for (int i = 0; i < nmodels; i++)
+                if (!skip[i] && attempts[i] == 0) { mi = i; desperation_done = 1; break; }
+        }
+        if (mi < 0) break;
         ModelCandidate *m = &models[mi];
+
+        if (mi == last_mi) {
+            same_run++;
+            int step = same_run <= 3 ? (1 << (same_run - 1)) : 4;
+            sleep((unsigned)(next_wait > 0 ? next_wait : step));
+        } else {
+            same_run = 0;
+        }
+        next_wait = 0;
+        last_mi = mi;
+        attempts[mi]++;
 
         /* Build config for this model */
         Config route_cfg = *cfg;
@@ -689,10 +657,9 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             free(key_buf); continue;
         }
 
-        /* Stash request body on the heap: payload.body is only valid while the
-         * stmt is open, but we must release the stmt (drop TRANS_READ) before any
-         * DB write, and the body has to outlive that release to survive 429/5xx
-         * resends in the retry loop below. */
+        /* Stash request body on the heap: payload.body is only valid while
+         * the stmt is open, but we must release the stmt (drop TRANS_READ)
+         * before any DB write, and archiving a failed attempt writes. */
         char *req_body = payload.body ? strdup(payload.body) : NULL;
         llm_payload_release(&payload);
 
@@ -705,130 +672,107 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         snprintf(session_hdr, sizeof(session_hdr), "x-session-id: cclaw-%lld", (long long)session_id);
         const char *headers[] = { "Content-Type: application/json", auth, session_hdr, NULL };
 
-        /* Inner loop: same-model retry. The whole failure policy lives here:
-         *
-         *   transient → backoff retry this model, then the next candidate:
-         *     429 / 5xx              (Retry-After honored)
-         *     network error          (-1)
-         *     timeout                (-2 — single retry, attempts cost minutes)
-         *     2xx empty body         (gateway hiccup)
-         *     2xx empty completion   (zero-usage "stop" with no content)
-         *     2xx malformed body
-         *   permanent for this model → next candidate immediately:
-         *     401/403/404            (degraded with cooldown)
-         *     400 context overflow   (prompt-specific, no degrade)
-         *     other 4xx              (request rejected — resending can't help)
-         *   our-side fatal → abort the turn, no further candidates:
-         *     DB error during ingest (paying another provider won't fix our DB)
-         */
-        for (int retry = 0; retry <= MAX_RETRIES; retry++) {
-            HttpResponse resp = {0};
-            struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+        /* One attempt. Classification (specs/error-handling.md):
+         *   transient (E1/E2/E3/E4/E6/E10) -> count toward the model's
+         *     consec_failures and loop (selection decides who's next);
+         *   Retry-After > 4s -> immediate degrade, no more attempts here;
+         *   permanent for this model (E5/E11/E12/E13) -> local skip, and
+         *     E11/E12/other-400 also degrade with a cooldown;
+         *   our-side fatal (E14) -> abort the turn. */
+        HttpResponse resp = {0};
+        struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
 
-            HttpRequestOpts opts = {
-                .url = url, .method = "POST", .headers = headers,
-                .body = req_body, .curl_handle = curl,
-                .max_response_bytes = LLM_RESP_MAX,
-            };
-            int status = http_do(&opts, &resp);
+        HttpRequestOpts opts = {
+            .url = url, .method = "POST", .headers = headers,
+            .body = req_body, .curl_handle = curl,
+            .max_response_bytes = LLM_RESP_MAX,
+        };
+        int status = http_do(&opts, &resp);
 
-            struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
-            long elapsed = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
-            LOG_DEBUG_("llm_req: %ldms status=%d model=%s", elapsed, status, m->model);
-            LOG_DEBUG_("llm_req: ttfb=%.0fms tls=%.0fms bytes=%zu reuse=%d",
-                       resp.ttfb * 1000.0, resp.tls_time * 1000.0,
-                       resp.len, resp.conn_reused);
+        struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
+        long elapsed = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+        LOG_DEBUG_("llm_req: %ldms status=%d model=%s attempt=%d", elapsed, status,
+                   m->model, attempts[mi]);
+        LOG_DEBUG_("llm_req: ttfb=%.0fms tls=%.0fms bytes=%zu reuse=%d",
+                   resp.ttfb * 1000.0, resp.tls_time * 1000.0,
+                   resp.len, resp.conn_reused);
 
-            if (cfg->log_level >= LOG_LEVEL_TRACE && resp.data)
-                LOG_TRACE_("RESP %s", resp.data);
+        if (cfg->log_level >= LOG_LEVEL_TRACE && resp.data)
+            LOG_TRACE_("RESP %s", resp.data);
 
-            /* Archive every non-2xx / network response (2xx bodies are archived
-             * by db_ingest_response below). */
-            if (status < 200 || status >= 300) {
-                char lbl[24];
-                if (status == -2) snprintf(lbl, sizeof(lbl), "timeout");
-                else if (status < 0) snprintf(lbl, sizeof(lbl), "network_error");
-                else snprintf(lbl, sizeof(lbl), "http_%d", status);
-                db_archive_response(db, session_id, iteration_id, m->id, lbl,
-                                    resp.data ? resp.data : resp.err_detail,
-                                    req_body);
-            }
+        /* Archive every non-2xx / network response (2xx bodies are archived
+         * by db_ingest_response below). */
+        if (status < 200 || status >= 300) {
+            char lbl[24];
+            if (status == -2) snprintf(lbl, sizeof(lbl), "timeout");
+            else if (status < 0) snprintf(lbl, sizeof(lbl), "network_error");
+            else snprintf(lbl, sizeof(lbl), "http_%d", status);
+            db_archive_response(db, session_id, iteration_id, m->id, lbl,
+                                resp.data ? resp.data : resp.err_detail,
+                                req_body);
+        }
 
-            /* 429 / 5xx: transient — backoff retry */
-            if (status == 429 || (status >= 500 && status < 600)) {
-                int wait = resp.retry_after > 0 ? resp.retry_after : (1 << retry);
-                fail_text = status == 429 ? "error: rate limited"
-                                          : "error: provider server error";
-                http_response_free(&resp);
-                model_stat_error(db, cfg->db_path, session_id, m->id, status);
-                if (retry < MAX_RETRIES) { sleep((unsigned)wait); continue; }
-                break;
+        if (status == 429 || (status >= 500 && status < 600)) {
+            fail_text = status == 429 ? "error: rate limited"
+                                      : "error: provider server error";
+            if (status == 429 && resp.retry_after > 4) {
+                model_degrade_retry_after(db, m->id, resp.retry_after);
+            } else {
+                if (status == 429 && resp.retry_after > 0)
+                    next_wait = resp.retry_after;
+                model_stat_error(db, m->id, status);
             }
-            /* Prompt-specific errors: skip this model */
-            if (status == 400 && llm_is_context_overflow(resp.data)) {
-                LOG_DEBUG_("llm_req model_skip model=%s reason=context_overflow", m->model);
-                fail_text = "error: prompt too large for the model's context window";
-                http_response_free(&resp);
-                break;
-            }
-            /* Other 400: persistent rejection (bad payload shape, encoding
-             * issues) — degrade so we don't retry every turn. */
-            if (status == 400) {
-                LOG_DEBUG_("llm_req model_skip model=%s reason=bad_request", m->model);
-                fail_text = "error: provider rejected the request";
-                http_response_free(&resp);
-                model_degrade_unavailable(db, cfg->db_path, session_id, m->id, status);
-                break;
-            }
-            if (status == 401 || status == 403 || status == 404) {
-                LOG_DEBUG_("llm_req model_skip model=%s reason=%s", m->model,
-                           status == 404 ? "not_found" : "auth_failed");
-                fail_text = status == 404 ? "error: model not available"
-                                          : "error: authentication failed";
-                http_response_free(&resp);
-                model_degrade_unavailable(db, cfg->db_path, session_id, m->id, status);
-                break;
-            }
-            /* Timeout: transient but each attempt burns minutes — one retry,
-             * no extra backoff (the failed attempt was the wait). */
-            if (status == -2) {
-                fail_text = "error: request timed out";
-                http_response_free(&resp);
-                model_stat_error(db, cfg->db_path, session_id, m->id, status);
-                if (retry < MAX_TIMEOUT_RETRIES) continue;
-                break;
-            }
-            /* Network error: transient — backoff retry */
-            if (status < 0) {
-                fail_text = "error: network error";
-                http_response_free(&resp);
-                model_stat_error(db, cfg->db_path, session_id, m->id, status);
-                if (retry < MAX_RETRIES) { sleep(1u << retry); continue; }
-                break;
-            }
-            /* Other 4xx: the request itself was rejected — resending it to the
-             * same model can't change the answer; another candidate might. */
-            if (status < 200 || status >= 300) {
-                fail_text = "error: provider rejected the request";
-                http_response_free(&resp);
-                break;
-            }
-
-            /* A 2xx with an empty body is a provider/gateway hiccup (often a slow
-             * near-timeout response). db_ingest_response would bail on the NULL
-             * body *before* archiving, leaving an opaque error with no forensic
-             * trail. Archive it (with the request we sent) and retry. */
-            if (!resp.data || !resp.data[0]) {
-                LOG_INFO_("llm_req empty_body model=%s retry=%d", m->model, retry);
-                db_archive_response(db, session_id, iteration_id, m->id, "empty",
-                                    resp.data, req_body);
-                fail_text = "error: provider returned an empty response";
-                http_response_free(&resp);
-                model_stat_error(db, cfg->db_path, session_id, m->id, status);
-                if (retry < MAX_RETRIES) { sleep(1u << retry); continue; }
-                break;
-            }
-
+            http_response_free(&resp);
+        } else if (status == 400 && llm_is_context_overflow(resp.data)) {
+            /* Prompt-specific — the model's fault it doesn't fit, not its
+             * health. No count. */
+            LOG_DEBUG_("llm_req model_skip model=%s reason=context_overflow", m->model);
+            fail_text = "error: prompt too large for the model's context window";
+            skip[mi] = 1;
+            http_response_free(&resp);
+        } else if (status == 400) {
+            /* Persistent rejection (bad payload shape, encoding issues) —
+             * degrade so we don't retry every turn. */
+            LOG_DEBUG_("llm_req model_skip model=%s reason=bad_request", m->model);
+            fail_text = "error: provider rejected the request";
+            skip[mi] = 1;
+            model_degrade_unavailable(db, m->id, status);
+            http_response_free(&resp);
+        } else if (status == 401 || status == 403 || status == 404) {
+            LOG_DEBUG_("llm_req model_skip model=%s reason=%s", m->model,
+                       status == 404 ? "not_found" : "auth_failed");
+            fail_text = status == 404 ? "error: model not available"
+                                      : "error: authentication failed";
+            skip[mi] = 1;
+            model_degrade_unavailable(db, m->id, status);
+            http_response_free(&resp);
+        } else if (status == -2) {
+            fail_text = "error: request timed out";
+            model_stat_error(db, m->id, status);
+            http_response_free(&resp);
+        } else if (status < 0) {
+            fail_text = "error: network error";
+            model_stat_error(db, m->id, status);
+            http_response_free(&resp);
+        } else if (status < 200 || status >= 300) {
+            /* Other 4xx: the request itself was rejected — resending it to
+             * the same model can't change the answer; another candidate
+             * might. No count (E13). */
+            fail_text = "error: provider rejected the request";
+            skip[mi] = 1;
+            http_response_free(&resp);
+        } else if (!resp.data || !resp.data[0]) {
+            /* A 2xx with an empty body is a provider/gateway hiccup (often a
+             * slow near-timeout response). db_ingest_response would bail on
+             * the NULL body *before* archiving, leaving an opaque error with
+             * no forensic trail. Archive it (with the request we sent). */
+            LOG_INFO_("llm_req empty_body model=%s attempt=%d", m->model, attempts[mi]);
+            db_archive_response(db, session_id, iteration_id, m->id, "empty",
+                                resp.data, req_body);
+            fail_text = "error: provider returned an empty response";
+            model_stat_error(db, m->id, status);
+            http_response_free(&resp);
+        } else {
             /* ── Ingest response straight to the DB ── */
             TypedIngestResult ir;
             LlmRespStatus st = db_ingest_response(db, session_id, iteration_id,
@@ -838,29 +782,62 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
             if (st == LLM_RESP_OK) {
                 model_stat_success(db, m->id, ir.prompt_tokens, ir.completion_tokens, ir.cost_nano);
+                snprintf(served_id, sizeof(served_id), "%s", m->id);
                 llm_ok = 1;
-                break;
+            } else if (st == LLM_RESP_DBERR) {
+                /* Our DB failed (SQLITE_BUSY) — body was valid. Diagnostics
+                 * already logged by db_ingest_response. */
+                had_dberr = 1;
+            } else {
+                /* EMPTY (zero-usage stop, archived 'empty') and MALFORMED
+                 * (bad body, archived 'malformed') are provider glitches
+                 * wrapped in a 2xx: transient. */
+                LOG_INFO_("llm_req %s model=%s attempt=%d",
+                          st == LLM_RESP_EMPTY ? "empty_completion" : "malformed_body",
+                          m->model, attempts[mi]);
+                fail_text = st == LLM_RESP_EMPTY
+                    ? "error: provider returned an empty response"
+                    : "error: provider returned a malformed response";
+                model_stat_error(db, m->id, status);
             }
-            /* LLM_RESP_DBERR: our DB failed (SQLITE_BUSY) — body was valid.
-             * Diagnostics already logged by db_ingest_response. */
-            if (st == LLM_RESP_DBERR) { had_dberr = 1; break; }
-            /* EMPTY (zero-usage stop, archived 'empty') and MALFORMED (bad
-             * body, archived 'malformed') are both provider glitches wrapped
-             * in a 2xx: transient, same as an empty body. */
-            LOG_INFO_("llm_req %s model=%s retry=%d",
-                      st == LLM_RESP_EMPTY ? "empty_completion" : "malformed_body",
-                      m->model, retry);
-            fail_text = st == LLM_RESP_EMPTY
-                ? "error: provider returned an empty response"
-                : "error: provider returned a malformed response";
-            model_stat_error(db, cfg->db_path, session_id, m->id, status);
-            if (retry < MAX_RETRIES) { sleep(1u << retry); continue; }
-            break;
         }
 
         free(url); free(auth);
         free(req_body);
         free(key_buf);
+    }
+
+    /* R6 notice: the model serving this agent changed. Derived from the
+     * archive (last two ok rows for this agent), never from new state; fires
+     * on any transition — fallback, recovery, config change — because "who is
+     * answering me" is the thing the operator can't otherwise see. Cause
+     * attached when the previous server is inside an error cooldown. */
+    if (llm_ok && served_id[0] && config_get_int(db, "notify_model_change")) {
+        char prev_id[128] = "";
+        sqlite3_stmt *ps;
+        if (sqlite3_prepare_v2(db,
+                "SELECT r.model FROM llm_responses r JOIN sessions s ON r.session_id=s.id"
+                " WHERE s.agent_name=(SELECT agent_name FROM sessions WHERE id=?1)"
+                " AND r.status='ok' ORDER BY r.id DESC LIMIT 1 OFFSET 1",
+                -1, &ps, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(ps, 1, session_id);
+            if (sqlite3_step(ps) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(ps, 0);
+                if (v) snprintf(prev_id, sizeof(prev_id), "%s", v);
+            }
+            sqlite3_finalize(ps);
+        }
+        if (prev_id[0] && strcmp(prev_id, served_id) != 0) {
+            char text[512];
+            if (model_degraded_now(db, prev_id))
+                snprintf(text, sizeof(text),
+                         "now serving via %s (%s degraded — will switch back "
+                         "when it recovers)", served_id, prev_id);
+            else
+                snprintf(text, sizeof(text),
+                         "now serving via %s (was %s)", served_id, prev_id);
+            channel_notify_session(db, cfg->db_path, session_id, text);
+        }
     }
 
     free(context_text); context_text = NULL;   /* err: frees again on !llm_ok */
@@ -1459,7 +1436,6 @@ int llm_transcribe(sqlite3 *db, CURL *curl, int64_t job_id) {
         sqlite3_step(up); sqlite3_finalize(up);
     }
 
-    const char *db_path = sqlite3_db_filename(db, "main");
     ModelCandidate models[MAX_MODELS];
     int nmodels = model_pick_by_capability(db, mj.cap, models, MAX_MODELS);
     if (nmodels == 0)
@@ -1513,19 +1489,19 @@ int llm_transcribe(sqlite3 *db, CURL *curl, int64_t job_id) {
                 }
                 /* 2xx with no text: provider glitch — same transient class
                  * as an empty chat completion. */
-                model_stat_error(db, db_path, session_id, m->id, status);
+                model_stat_error(db, m->id, status);
                 if (retry < TRANSCRIBE_RETRIES) { sleep(1); continue; }
                 break;
             }
             /* Persistent rejections: sideline the model, next candidate. */
             if (status == 400 || status == 401 || status == 403 || status == 404) {
                 http_response_free(&resp);
-                model_degrade_unavailable(db, db_path, session_id, m->id, status);
+                model_degrade_unavailable(db, m->id, status);
                 break;
             }
             /* 429/5xx/timeout/network: transient — one retry, then next. */
             http_response_free(&resp);
-            model_stat_error(db, db_path, session_id, m->id, status);
+            model_stat_error(db, m->id, status);
             if (retry < TRANSCRIBE_RETRIES) { sleep(1u << retry); continue; }
             break;
         }

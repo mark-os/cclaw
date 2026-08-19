@@ -12,6 +12,16 @@ static sqlite3 *g_db;
 
 static void seed_creator(const char *name, const char *profile) {
     db_agent_upsert(g_db, name, NULL, NULL);
+    /* Every creator gets a routing list — created agents inherit it (R2). */
+    sqlite3_exec(g_db,
+        "INSERT OR IGNORE INTO providers(name,base_url) VALUES('p','http://p');"
+        "INSERT OR IGNORE INTO models(id,provider_name,model) VALUES('p/m','p','m');",
+        NULL, NULL, NULL);
+    char q[192];
+    snprintf(q, sizeof(q),
+        "INSERT OR IGNORE INTO agent_models(agent_name,model_id,pos)"
+        " VALUES('%s','p/m',0);", name);
+    sqlite3_exec(g_db, q, NULL, NULL, NULL);
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(g_db,
         "UPDATE agents SET sandbox_profile=?2 WHERE name=?1", -1, &s, NULL) == SQLITE_OK);
@@ -22,9 +32,13 @@ static void seed_creator(const char *name, const char *profile) {
 }
 
 static void test_operator_apply(void) {
+    sqlite3_exec(g_db,
+        "INSERT OR IGNORE INTO providers(name,base_url) VALUES('p','http://p');"
+        "INSERT OR IGNORE INTO models(id,provider_name,model) VALUES('p/m','p','m');",
+        NULL, NULL, NULL);
     char *err = NULL;
     int rc = agent_definition_apply(g_db,
-        "{\"name\":\"Scout\",\"description\":\"scouts\","
+        "{\"name\":\"Scout\",\"description\":\"scouts\",\"models\":[\"p/m\"],"
         "\"system_prompt\":\"be scouty\",\"sandbox_profile\":\"restricted\","
         "\"grants\":{\"tools\":[\"web_fetch\"],\"hosts\":[\".example.com\"]},"
         "\"max_iterations\":7,"
@@ -247,18 +261,26 @@ static void test_update_agent(void) {
     assert(err && strstr(err, "nothing to update"));
     free(err);
 
-    /* Models must resolve; caps apply against the caller. */
+    /* Models must resolve within the caller's own list; caps apply against
+     * the caller. */
     err = NULL;
     assert(agent_definition_update_validate(g_db,
-        "{\"name\":\"Pupil\",\"primary_model\":\"made-up-model\"}", "Mentor", &err) != 0);
+        "{\"name\":\"Pupil\",\"models\":[\"made-up-model\"]}", "Mentor", &err) != 0);
     assert(err && strstr(err, "not a registered model id"));
     free(err);
     sqlite3_exec(g_db,
         "INSERT INTO providers(name, base_url) VALUES('prov','http://x');"
-        "INSERT INTO models(id, provider_name, model, priority)"
-        " VALUES('good-model@prov','prov','good-model',9)", NULL, NULL, NULL);
+        "INSERT INTO models(id, provider_name, model)"
+        " VALUES('good-model@prov','prov','good-model')", NULL, NULL, NULL);
+    /* Registered but outside Mentor's own list → still refused (cap). */
+    err = NULL;
     assert(agent_definition_update_validate(g_db,
-        "{\"name\":\"Pupil\",\"primary_model\":\"good-model@prov\"}", "Mentor", NULL) == 0);
+        "{\"name\":\"Pupil\",\"models\":[\"good-model@prov\"]}", "Mentor", &err) != 0);
+    assert(err && strstr(err, "not a registered model id within your"));
+    free(err);
+    /* Within the caller's list (seed_creator gave Mentor p/m) → OK. */
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Pupil\",\"models\":[\"p/m\"]}", "Mentor", NULL) == 0);
     err = NULL;
     assert(agent_definition_update_validate(g_db,
         "{\"name\":\"Pupil\",\"sandbox_profile\":\"host\"}", "Mentor", &err) != 0);

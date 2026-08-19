@@ -383,19 +383,17 @@ static void test_model_context_window(void) {
     if (!db) FAIL("db_open");
 
     sqlite3_exec(db,
-        "INSERT INTO agents(name, primary_model) VALUES"
-        "  ('a-id','m-big'),"           /* matches models.id */
-        "  ('a-name','vendor/big'),"    /* matches models.model */
-        "  ('a-null','m-null');"        /* model row has NULL window */
+        "INSERT INTO agents(name) VALUES ('a-id'),('a-null');"
         "INSERT INTO models(id, provider_name, model, context_window) VALUES"
         "  ('m-big','p','vendor/big',200000),"
-        "  ('m-null','p','vendor/null',NULL);",
+        "  ('m-null','p','vendor/null',NULL);"
+        "INSERT INTO agent_models(agent_name, model_id, pos) VALUES"
+        "  ('a-id','m-big',0),"
+        "  ('a-null','m-null',0);",
         NULL, NULL, NULL);
 
     if (model_context_window(db, "a-id", 128000) != 200000)
-        FAIL("window not resolved via models.id");
-    if (model_context_window(db, "a-name", 128000) != 200000)
-        FAIL("window not resolved via models.model");
+        FAIL("window not resolved via the agent's routing head");
     if (model_context_window(db, "a-null", 128000) != 128000)
         FAIL("NULL window should fall back to default");
     if (model_context_window(db, "ghost", 128000) != 128000)

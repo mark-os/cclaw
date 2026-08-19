@@ -622,7 +622,7 @@ static const char *SQL_CHANGES_SYSTEM_WIDE =
  *
  * The hand-listed arms cover the structured keys; the scalar tail at the end
  * covers everything else apply_fields_and_grants writes (system_prompt,
- * description, secondary_model, max_iterations, shell_timeout), so a field
+ * description, max_iterations, shell_timeout), so a field
  * agent_define learns to apply cannot go unrendered by omission. Keep the
  * tail's NOT IN list in step with the headline — those keys are already on
  * the line above this block. */
@@ -632,8 +632,9 @@ static const char *SQL_CREATE_AGENT_LINES =
     " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.grants.read_paths')"
     " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.grants.write_paths')"
     " UNION ALL SELECT format('%-7s%s','ext',atom) FROM json_each(?1,'$.extensions')"
-    " UNION ALL SELECT format('%-7s%s','model',json_extract(?1,'$.primary_model'))"
-    "   WHERE json_extract(?1,'$.primary_model') IS NOT NULL"
+    /* the models array IS the routing order — render each entry in pos order */
+    " UNION ALL SELECT format('model  #%d %s', key+1, atom)"
+    "   FROM json_each(?1,'$.models')"
     /* Block contents, not a count: a seeded memory block is standing context
      * the new agent boots with — indistinguishable in effect from part of its
      * system prompt, and 'N block(s)' says nothing about what it carries. */
@@ -647,7 +648,7 @@ static const char *SQL_CREATE_AGENT_LINES =
     "     CASE WHEN length(atom) > 200 THEN substr(atom,1,200)||'...' ELSE atom END)"
     "   FROM json_each(?1)"
     "   WHERE type NOT IN ('object','array')"
-    "     AND key NOT IN ('name','sandbox_profile','clone_from','primary_model')";
+        "     AND key NOT IN ('name','sandbox_profile','clone_from')";
 
 /* update_agent enumeration — grants add, scalar fields overwrite; long text
  * (system_prompt) is clipped per line, the whole-summary truncation below is
@@ -657,10 +658,12 @@ static const char *SQL_UPDATE_AGENT_LINES =
     " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.grants.hosts')"
     " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.grants.read_paths')"
     " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.grants.write_paths')"
+    " UNION ALL SELECT format('model  #%d %s', key+1, atom)"
+    "   FROM json_each(?1,'$.models')"
     " UNION ALL SELECT format('%s = %s', key,"
     "     CASE WHEN length(atom) > 200 THEN substr(atom,1,200)||'...' ELSE atom END)"
     "   FROM json_each(?1)"
-    "   WHERE key NOT IN ('name','grants','reason') AND type!='object'";
+    "   WHERE key NOT IN ('name','grants','reason','models') AND type!='object'";
 
 /* cron_set enumeration — every field the job was asked to carry. The
  * escalation being approved is *which agent* fires it, so the agent and the

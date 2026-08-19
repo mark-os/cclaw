@@ -38,7 +38,7 @@ Design invariants (from the architecture review, SELF-CONFIGURATION-REVIEW.md):
 ```json
 {"action":"request_changes","changes":{
    "grants":{"tools":["name"],"hosts":[".example.com"],"read_paths":["/abs"],"write_paths":["/abs"]},
-   "agent":{"primary_model":"gemini-2.5-flash@gemini","max_iterations":40},
+   "agent":{"models":["gemini-2.5-flash@gemini"],"max_iterations":40},
    "routes":["telegram:12345"],
    "config":{"registered.key":"value-string"},
    "provider":{"provider":"openrouter","base_url":"https://openrouter.ai/api/v1"},
@@ -51,7 +51,7 @@ Sections by scope — the approval prompt groups them the same way:
 | Section | Scope | Applies as |
 |---------|-------|-----------|
 | `grants` | agent | `grants` rows for the caller |
-| `agent` | agent | whitelisted columns on the caller's `agents` row (`primary_model`, `secondary_model`, `max_iterations`, `shell_timeout`) |
+| `agent` | agent | the caller's own settings — `models` is a whole-list replace of the caller's `agent_models` routing order (first entry = primary); `max_iterations`/`shell_timeout` are columns on its `agents` row |
 | `routes` | agent | session + `channel_routes` pin (`channel:chat_id`, first-come, `explicit` delivery; no wildcards — channel defaults are operator config) |
 | `config` | **system** | global `config` table |
 | `provider` | **system** | `providers` upsert — transport only (endpoint + credential name) |
@@ -59,14 +59,14 @@ Sections by scope — the approval prompt groups them the same way:
 
 - **Models are separate from providers.** A provider is protocol/endpoint/auth,
   set once and near-fixed; models change often and carry the things the loop
-  actually reads (context window, capabilities, routing priority). Registration
+  actually reads (context window, capabilities). Registration
   therefore points the same way the runtime does: `models` entries name a
   provider that must **already** exist (or be defined by the same document),
   and `provider` documents no longer carry a `model` key at all.
   `providers.default_model` survives as fresh-install seed sugar
   (`templates/seed.sql`) and is not a registration path.
-- **Model ids are canonical.** `agent.primary_model`/`secondary_model` and
-  `create_agent`/`update_agent` accept a `models.id` and nothing else; a bare
+- **Model ids are canonical.** `agent.models` and
+  `create_agent`/`update_agent` accept `models.id` entries and nothing else; a bare
   name gets a did-you-mean naming the registered id. Bare names used to resolve
   to whichever provider's row the scan reached first — schema v44 rewrote the
   existing ones once (unambiguous → rewritten, no match → left as-is,
@@ -95,8 +95,8 @@ Sections by scope — the approval prompt groups them the same way:
   *say*, not that a request now reaches a model — the 2026-08-10 incident wrote
   a perfectly valid provider row and knocked prod off its gateway for 2.5h. So
   a document that changes **which model would serve the next request** (the
-  agent's own `primary_model`/`secondary_model`, a `models` entry the agent
-  routes to, or the provider behind it) is verified for real before it stands:
+  agent's own routing list, a `models` entry on that list, or the provider
+  behind one of them) is verified for real before it stands:
   the rows it is about to move are snapshotted, the write commits, and then the
   new top candidate gets **one minimal completion** (`max_tokens` 1) over the
   normal transport — same candidate loader, same URL/auth builders, **15s hard
@@ -136,7 +136,8 @@ section), not a scoped config key.
 
 - **provider → model → agent**: a provider is system-level transport; a model
   is registered *on* a provider (`models` section, canonical `model@provider`
-  id); an agent *adopts* a model by setting `agent.primary_model` to that id.
+  id); an agent *adopts* models by declaring `agent.models` — its full
+  replacement routing order.
   Providers are only reachable through `models` rows (per-request routing joins
   models → providers), so a provider with no models row is unreachable — one
   document can carry all three steps.
@@ -162,8 +163,7 @@ One JSON object describes an agent, everywhere an agent is declared:
   "name": "Watcher",
   "description": "Monitors feeds and reports anomalies",
   "system_prompt": "…",
-  "primary_model": "…",
-  "secondary_model": "…",
+  "models": ["…", "…"],
   "sandbox_profile": "standard",
   "grants": {
     "tools": ["web_fetch", "file_read"],

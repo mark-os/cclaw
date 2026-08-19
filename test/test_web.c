@@ -286,8 +286,8 @@ static void test_admin_dashboard(void) {
     assert(sqlite3_exec(db,
         "INSERT OR REPLACE INTO providers(name, base_url, api_key_env) VALUES"
         "  ('openrouter','https://openrouter.example/v1','OPENROUTER_API_KEY');"
-        "INSERT OR REPLACE INTO models(id, provider_name, model, priority) VALUES"
-        "  ('m1','openrouter','vendor/one',0), ('m2','openrouter','vendor/two',1);"
+        "INSERT OR REPLACE INTO models(id, provider_name, model) VALUES"
+        "  ('m1','openrouter','vendor/one'), ('m2','openrouter','vendor/two');"
         "INSERT OR IGNORE INTO agents(name) VALUES('Assistant'), ('ev<il&name');"
         "INSERT INTO sessions(name, agent_name, channel_name)"
         "  VALUES('s','Assistant','telegram');"
@@ -330,10 +330,12 @@ static void test_admin_dashboard(void) {
     assert(strstr(page, "ev&lt;il&amp;name"));
     assert(strstr(page, "ev<il&name") == NULL);
 
-    /* switch_model makes m2 the routing head */
+    /* switch_model makes m2 the head of every agent's routing list */
     assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
                      "action=switch_model&model_id=m2", page, sizeof(page)) == 303);
-    char *head = query_text(db, "SELECT id FROM models ORDER BY priority LIMIT 1");
+    char *head = query_text(db,
+        "SELECT model_id FROM agent_models"
+        " WHERE agent_name='Assistant' AND pos=0");
     assert(head && strcmp(head, "m2") == 0);
     free(head);
 

@@ -176,6 +176,13 @@ static void seed_generic_row(sqlite3 *db, const char *table, const char *agent) 
         char val[64];
         if (strcmp(name, "agent_name") == 0) {
             snprintf(val, sizeof(val), "'%s'", agent);
+        } else if (strcmp(name, "model_id") == 0) {
+            /* FK into models: seed the referenced row once. */
+            sqlite3_exec(db,
+                "INSERT OR IGNORE INTO providers(name,base_url) VALUES('p','http://p');"
+                "INSERT OR IGNORE INTO models(id,provider_name,model)"
+                " VALUES('p/m','p','m');", NULL, NULL, NULL);
+            snprintf(val, sizeof(val), "'p/m'");
         } else if (has_dflt || !notnull) {
             continue;  /* defaulted / nullable / autoincrement rowid — skip */
         } else if (type && (strstr(type, "INT") || strstr(type, "int"))) {

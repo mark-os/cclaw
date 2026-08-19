@@ -51,8 +51,7 @@ One JSON schema everywhere an agent is defined (`create_agent` arguments,
   "name": "Watcher",
   "description": "Watches the NWS feed and alerts on warnings",
   "system_prompt": "You are…",
-  "primary_model": "deepseek/deepseek-v4-flash",
-  "secondary_model": null,
+  "models": ["openrouter/deepseek/deepseek-v4-flash"],
   "sandbox_profile": "standard",
   "grants": { "tools": ["web_fetch"], "hosts": ["api.weather.gov"],
               "read_paths": [], "write_paths": [] },
@@ -105,7 +104,8 @@ you created (`agents.created_by`). Same approval gate and the same caps as
 creation, applied against you:
 
 - Fields overlay: `description`, `system_prompt` (full replacement text),
-  `primary_model` / `secondary_model` (must resolve to registered models),
+  `models` (an ordered array of registered model ids within your own routing
+  list — the new agent's full routing order; omit to inherit your list),
   `sandbox_profile` (never looser than yours), `max_iterations`,
   `shell_timeout`. Absent fields keep their value; unknown keys are errors.
 - `grants` **adds** (each must be one you hold) — it never removes. Removing

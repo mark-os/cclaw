@@ -998,8 +998,12 @@ static void test_chat_status_command(void) {
     test_binding_set(db, "stch", "9", "testagent");
     int64_t sid = test_session_find(db, "stch", "9", "testagent");
     assert(sid > 0);
-    assert(sqlite3_exec(db, "UPDATE agents SET primary_model='some/model'"
-                            " WHERE name='testagent';", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(db,
+        "INSERT OR IGNORE INTO providers(name,base_url) VALUES('some','http://x');"
+        "INSERT OR IGNORE INTO models(id,provider_name,model)"
+        " VALUES('some/model','some','model');"
+        "INSERT OR REPLACE INTO agent_models(agent_name,model_id,pos)"
+        " VALUES('testagent','some/model',0);", NULL, NULL, NULL) == SQLITE_OK);
     assert(approval_create(db, sid, "tc1", "shell_exec", "run", "{}", "rerun") > 0);
 
     chat_say(db, "stch", "9", "/status");

@@ -29,11 +29,11 @@ static const char *PARAMS_JSON =
     "\"description\":\"Type of config request\"},"
     "\"changes\":{\"type\":\"object\",\"description\":\"For request_changes: any subset of "
     "{grants:{tools:[names],hosts:[hostnames],read_paths:[abs paths],write_paths:[abs paths]}, "
-    "agent:{primary_model?,secondary_model?,max_iterations?,shell_timeout?}, "
+    "agent:{models?:[canonical model ids in routing order],max_iterations?,shell_timeout?}, "
     "routes:['channel:chat_id',...], "
     "config:{key:value-string,...}, provider:{provider,base_url?,api_key_env?}, "
     "models:[{id:'model@provider',context_window?,max_output_tokens?,capabilities?,"
-    "priority?,status?}], "
+    "status?}], "
     "secret_bindings:{SECRET_NAME:[hostnames]}}. "
     "One human approval covers the whole document. Host prefix '.' covers subdomains "
     "('.example.com' covers example.com AND sub.example.com). agent updates YOUR OWN row "
@@ -47,8 +47,8 @@ static const char *PARAMS_JSON =
     "(defaults to <PROVIDER>_API_KEY for a NEW provider) — store the key with save_secret "
     "FIRST, never pass key material. models registers/updates/disables a model on an "
     "already-registered provider (status:'disabled' retires one); one document can "
-    "define a provider, register a model on it, AND point your agent at it via "
-    "agent.primary_model. "
+    "define a provider, register a model on it, AND adopt it via agent.models "
+    "(the full replacement routing order — first entry is primary). "
     "secret_bindings bind a saved secret to the hosts it may be submitted to — a "
     "{{SECRET:X}} call is denied when its target isn't bound; batch every host a "
     "denial named into one document\"},"
@@ -319,7 +319,7 @@ static char *model_id_suggestion(sqlite3 *db, const char *bare) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "SELECT id FROM models WHERE model=?1"
-            " ORDER BY priority, id LIMIT 1", -1, &st, NULL) != SQLITE_OK)
+            " ORDER BY id LIMIT 1", -1, &st, NULL) != SQLITE_OK)
         return NULL;
     sqlite3_bind_text(st, 1, bare, -1, SQLITE_STATIC);
     char *out = NULL;
@@ -360,15 +360,26 @@ static char *validate_agent(sqlite3 *db, const char *changes,
         return strdup("error: changes.agent must be an object");
     char *bad = q1_text(db,
         "SELECT key FROM json_each(?1,'$.agent')"
-        " WHERE key NOT IN ('primary_model','secondary_model',"
-        "                   'max_iterations','shell_timeout') LIMIT 1",
+        " WHERE key NOT IN ('models','max_iterations','shell_timeout') LIMIT 1",
         changes);
     if (bad) {
-        char *m = errf("error: unknown agent key '%s' (use primary_model, "
-                       "secondary_model, max_iterations, shell_timeout)", bad);
+        char *m = errf("error: unknown agent key '%s' (use models, "
+                       "max_iterations, shell_timeout)", bad);
         free(bad);
         return m;
     }
+    /* models: the full replacement routing order — non-empty, dupe-free. */
+    if (q1_true(db, "SELECT 1 WHERE json_extract(?1,'$.agent.models') IS NOT NULL"
+                    " AND json_type(?1,'$.agent.models')!='array'", changes))
+        return strdup("error: agent.models must be a JSON array of canonical "
+                      "model ids, in routing order (first = primary)");
+    if (q1_true(db, "SELECT 1 WHERE json_type(?1,'$.agent.models')='array'"
+                    " AND json_array_length(?1,'$.agent.models')=0", changes))
+        return strdup("error: agent.models must not be empty — an agent with "
+                      "no routing list cannot serve a single request");
+    if (q1_true(db, "SELECT 1 FROM (SELECT COUNT(*) c, COUNT(DISTINCT value) d"
+                    " FROM json_each(?1,'$.agent.models')) WHERE c!=d", changes))
+        return strdup("error: agent.models contains a duplicate entry");
     bad = q1_text(db,
         "SELECT key FROM json_each(?1,'$.agent')"
         " WHERE key IN ('max_iterations','shell_timeout')"
@@ -385,12 +396,11 @@ static char *validate_agent(sqlite3 *db, const char *changes,
     if (sqlite3_prepare_v2(db,
             /* The outer row must be aliased: an unqualified 'atom' inside the
              * json_each(?2) subquery would bind to that table's own column. */
-            "SELECT a.atom FROM json_each(?1,'$.agent') a"
-            " WHERE a.key IN ('primary_model','secondary_model')"
-            " AND (a.type!='text' OR a.atom=''"
-            "      OR (NOT EXISTS(SELECT 1 FROM models m WHERE m.id=a.atom)"
-            "          AND NOT EXISTS(SELECT 1 FROM json_each(?2) j"
-            "                         WHERE json_extract(j.value,'$.id')=a.atom)))"
+            "SELECT a.atom FROM json_each(?1,'$.agent.models') a"
+            " WHERE a.type!='text' OR a.atom=''"
+            "    OR (NOT EXISTS(SELECT 1 FROM models m WHERE m.id=a.atom)"
+            "        AND NOT EXISTS(SELECT 1 FROM json_each(?2) j"
+            "                       WHERE json_extract(j.value,'$.id')=a.atom))"
             " LIMIT 1", -1, &st, NULL) != SQLITE_OK)
         return strdup("error: agent validation failed");
     sqlite3_bind_text(st, 1, changes, -1, SQLITE_STATIC);
@@ -418,7 +428,7 @@ static char *validate_agent(sqlite3 *db, const char *changes,
  * 'provider' and 'model' fields, so the apply is pure SQL and the approval
  * card can name what is being registered without re-parsing an id. */
 static const char *MODEL_KEYS_SQL =
-    "('id','context_window','max_output_tokens','capabilities','priority','status')";
+    "('id','context_window','max_output_tokens','capabilities','status')";
 
 /* Split a canonical id at its LAST '@' — model names carry '/' and ':' but a
  * provider name never carries '@'. Returns 0 and fills the halves, or -1. */
@@ -441,7 +451,7 @@ static char *validate_models_shape(sqlite3 *db, const char *changes) {
     if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.models')='array'", changes))
         return strdup("error: changes.models must be an array of model objects "
                       "({id:'model@provider', context_window?, "
-                      "max_output_tokens?, capabilities?, priority?, status?})");
+                      "max_output_tokens?, capabilities?, status?})");
     if (q1_true(db, "SELECT 1 FROM json_each(?1,'$.models')"
                     " WHERE type!='object' LIMIT 1", changes))
         return strdup("error: each changes.models entry must be an object");
@@ -452,13 +462,13 @@ static char *validate_models_shape(sqlite3 *db, const char *changes) {
     char *bad = q1_text(db, sql, changes);
     if (bad) {
         char *e = errf("error: unknown models key '%s' (use id, context_window, "
-                       "max_output_tokens, capabilities, priority, status)", bad);
+                       "max_output_tokens, capabilities, status)", bad);
         free(bad);
         return e;
     }
     bad = q1_text(db,
         "SELECT k.key FROM json_each(?1,'$.models') m, json_each(m.value) k"
-        " WHERE k.key IN ('context_window','max_output_tokens','priority')"
+        " WHERE k.key IN ('context_window','max_output_tokens')"
         " AND (k.type!='integer' OR CAST(k.atom AS INTEGER) < 0) LIMIT 1", changes);
     if (bad) {
         char *e = errf("error: models.%s must be a non-negative integer", bad);
@@ -1321,12 +1331,12 @@ static const char *RECEIPT_SQL =
     "         ||COALESCE(m.context_window,'unset')||')'"
     "    FROM models m WHERE m.id IN"
     "     (SELECT json_extract(value,'$.id') FROM json_each(?1,'$.changes.models'))"
-    /* agent — the whole self-scoped row, since any of it may have moved. */
+    /* agent — the whole self-scoped state, since any of it may have moved. */
     "  UNION ALL"
-    "  SELECT 'your settings now: primary_model='"
-    "         ||COALESCE(NULLIF(a.primary_model,''),'(default)')"
-    "         ||', secondary_model='"
-    "         ||COALESCE(NULLIF(a.secondary_model,''),'(none)')"
+    "  SELECT 'your settings now: models='"
+    "         ||COALESCE((SELECT group_concat(model_id,' > ')"
+    "             FROM (SELECT model_id FROM agent_models"
+    "                   WHERE agent_name=?2 ORDER BY pos)),'(none)')"
     "         ||', max_iterations='||a.max_iterations"
     "         ||', shell_timeout='||a.shell_timeout"
     "    FROM agents a WHERE a.name=?2"
@@ -1447,14 +1457,12 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                     args_json)) {
             static const char *MODEL_SQL[] = {
                 "INSERT OR IGNORE INTO models(id, provider_name, model,"
-                "  context_window, max_output_tokens, capabilities, priority, status)"
+                "  context_window, max_output_tokens, capabilities, status)"
                 " SELECT json_extract(value,'$.id'), json_extract(value,'$.provider'),"
                 "        json_extract(value,'$.model'),"
                 "        json_extract(value,'$.context_window'),"
                 "        json_extract(value,'$.max_output_tokens'),"
                 "        COALESCE(json_extract(value,'$.capabilities'),'[]'),"
-                "        COALESCE(json_extract(value,'$.priority'),"
-                "                 (SELECT COALESCE(MAX(priority),0)+1 FROM models)),"
                 "        COALESCE(json_extract(value,'$.status'),'healthy')"
                 " FROM json_each(?1,'$.changes.models')",
                 /* Re-scanned per column so an absent key reads NULL and
@@ -1469,9 +1477,6 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                 "  capabilities = COALESCE((SELECT json_extract(j.value,'$.capabilities')"
                 "    FROM json_each(?1,'$.changes.models') j"
                 "    WHERE json_extract(j.value,'$.id')=models.id), capabilities),"
-                "  priority = COALESCE((SELECT json_extract(j.value,'$.priority')"
-                "    FROM json_each(?1,'$.changes.models') j"
-                "    WHERE json_extract(j.value,'$.id')=models.id), priority),"
                 "  status = COALESCE((SELECT json_extract(j.value,'$.status')"
                 "    FROM json_each(?1,'$.changes.models') j"
                 "    WHERE json_extract(j.value,'$.id')=models.id), status)"
@@ -1498,14 +1503,39 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                 rc = -1;
             if (rc != 0) apply_detail(detail_out, "failed registering models");
         }
-        /* Self-scoped agent settings — whitelisted columns on the caller's
-         * own agents row; absent keys keep their current values. */
+        /* Self-scoped agent settings — whitelisted fields on the caller's
+         * own row; absent keys keep their current values. agent.models is a
+         * whole-list replace into agent_models (the declared order IS the
+         * routing order). */
+        if (rc == 0 &&
+            q1_true(db, "SELECT 1 WHERE json_type(?1,'$.changes.agent.models')"
+                        "='array'", args_json)) {
+            sqlite3_stmt *ms;
+            if (sqlite3_prepare_v2(db,
+                    "DELETE FROM agent_models WHERE agent_name=?1",
+                    -1, &ms, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(ms, 1, agent, -1, SQLITE_STATIC);
+                if (sqlite3_step(ms) != SQLITE_DONE) rc = -1;
+                sqlite3_finalize(ms);
+            } else rc = -1;
+            if (rc == 0) {
+                if (sqlite3_prepare_v2(db,
+                        "INSERT INTO agent_models(agent_name, model_id, pos)"
+                        " SELECT ?1, value, key"
+                        " FROM json_each(?2,'$.changes.agent.models')",
+                        -1, &ms, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(ms, 1, agent, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(ms, 2, args_json, -1, SQLITE_STATIC);
+                    if (sqlite3_step(ms) != SQLITE_DONE) rc = -1;
+                    sqlite3_finalize(ms);
+                } else rc = -1;
+            }
+            if (rc != 0) apply_detail(detail_out, "failed applying agent.models");
+        }
         if (rc == 0) {
             sqlite3_stmt *as;
             if (sqlite3_prepare_v2(db,
                     "UPDATE agents SET"
-                    " primary_model   = COALESCE(json_extract(?1,'$.changes.agent.primary_model'), primary_model),"
-                    " secondary_model = COALESCE(json_extract(?1,'$.changes.agent.secondary_model'), secondary_model),"
                     " max_iterations  = COALESCE(json_extract(?1,'$.changes.agent.max_iterations'), max_iterations),"
                     " shell_timeout   = COALESCE(json_extract(?1,'$.changes.agent.shell_timeout'), shell_timeout)"
                     " WHERE name=?2"
@@ -1660,7 +1690,8 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
         "request_changes takes ONE 'changes' document batching everything you "
         "need — tool grants, host grants (prefix '.' covers subdomains), path "
         "grants (read_paths/write_paths, absolute), your own agent settings "
-        "(agent: primary_model/secondary_model/max_iterations/shell_timeout), "
+        "(agent: models — your full replacement routing order, first entry is "
+        "primary — max_iterations/shell_timeout), "
         "channel send routes (routes: ['channel:chat_id']), config values "
         "(registered keys — discover with search_config), and/or an LLM "
         "provider definition (openrouter, gemini, openai, deepseek, groq, "
@@ -1668,8 +1699,8 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
         "with base_url; store the API key first via save_secret and reference "
         "its NAME as api_key_env — never key material). One approval covers "
         "the whole document, so batch related needs into a single request — "
-        "e.g. define a provider AND adopt it via agent.primary_model "
-        "('model@provider') in one document. Action rename_agent renames this "
+        "e.g. define a provider AND adopt it via agent.models "
+        "(['model@provider', ...]) in one document. Action rename_agent renames this "
         "agent (optional preamble). All actions accept an optional 'reason' "
         "shown to the approver.",
         PARAMS_JSON, handler, ctx);

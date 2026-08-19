@@ -689,6 +689,13 @@ static void test_manifest_agents(void) {
     db_agent_upsert(db, "Owner", NULL, NULL);
     sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value)"
                      " VALUES('Owner','tool','web_fetch')", NULL, NULL, NULL);
+    /* Owner needs a routing list — manifest agents inherit it (R2). */
+    sqlite3_exec(db,
+        "INSERT OR IGNORE INTO providers(name,base_url) VALUES('p','http://p');"
+        "INSERT OR IGNORE INTO models(id,provider_name,model)"
+        " VALUES('p/m','p','m');"
+        "INSERT INTO agent_models(agent_name,model_id,pos)"
+        " VALUES('Owner','p/m',0);", NULL, NULL, NULL);
 
     /* Validation failures: bad name, bad profile, missing prompt file. */
     char *err = NULL;

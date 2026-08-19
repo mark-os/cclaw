@@ -181,7 +181,7 @@ static void check_models(sqlite3 *db) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
             "SELECT id, provider_name, context_window, status"
-            " FROM models ORDER BY priority", -1, &s, NULL) != SQLITE_OK) {
+            " FROM models ORDER BY created_at, id", -1, &s, NULL) != SQLITE_OK) {
         printf("  (no models table)\n");
         return;
     }

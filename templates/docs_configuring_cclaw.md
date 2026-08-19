@@ -37,7 +37,7 @@ one approval covers the whole document:
 {"action": "request_changes", "changes": {
    "grants": {"tools": ["shell_exec"], "hosts": [".example.com"],
               "read_paths": ["/abs/path"], "write_paths": ["/abs/path"]},
-   "agent": {"primary_model": "gemini-2.5-flash@gemini", "max_iterations": 40},
+   "agent": {"models": ["gemini-2.5-flash@gemini"], "max_iterations": 40},
    "routes": ["telegram:12345"],
    "config": {"registered.key": "value"},
    "provider": {"provider": "gemini"},
@@ -53,10 +53,11 @@ one approval covers the whole document:
 - `grants`: host prefix `.` covers subdomains (`.example.com` covers
   `example.com` AND `api.example.com`); shell/web egress is default-deny.
   Paths must be absolute; `read_paths` and `write_paths` are separate.
-- `agent`: your own settings — `primary_model` / `secondary_model` (a
-  canonical model id exactly as `search_config` lists it, or one this same
-  document's `models` section registers; bare model names are refused with the
-  id you probably meant), `max_iterations`, `shell_timeout`.
+- `agent`: your own settings — `models` (your FULL replacement routing order:
+  an array of canonical model ids exactly as `search_config` lists them, or
+  ids this same document's `models` section registers; first entry is primary;
+  bare model names are refused with the id you probably meant),
+  `max_iterations`, `shell_timeout`.
 - `routes`: `"channel:chat_id"` strings authorizing `channel_send` to that
   chat. First-come: a chat routed to another agent is refused. Wildcards are
   operator-only.
@@ -74,11 +75,11 @@ one approval covers the whole document:
   alone unless you pass a new one.
 - `models`: register, update, or disable a model — `[{"id": "<model>@<provider>",
   "context_window": N, "max_output_tokens": N, "capabilities": ["text"],
-  "priority": N, "status": "healthy"|"disabled"}]`. The provider must already
+  "status": "healthy"|"disabled"}]`. The provider must already
   exist (or be defined by this same document); only `id` is required, and
   fields you omit keep their current values. One document can therefore define
   a provider, register a model on it, and adopt it via
-  `agent.primary_model: "<model>@<provider>"`.
+  `agent.models: ["<model>@<provider>", ...]`.
 
 `rename_agent {name}` — request a new agent name (separate action).
 

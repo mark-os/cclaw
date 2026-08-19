@@ -117,14 +117,12 @@ static const ConfigDef s_defs[] = {
     { "agent_approval_tools",
       "[\"extension_publish\"]",
       "Tools that require human approval (approval_mode='always') when granted" },
-    { "health_5xx_threshold", "3",
-      "5xx errors within the window before a model is marked degraded" },
-    { "health_429_threshold", "10",
-      "429 errors within the window before a model is marked degraded" },
-    { "health_window_sec",  "300",
-      "Sliding window in seconds for provider error counting" },
+    { "health_fail_threshold", "4",
+      "Consecutive failures before a model is marked degraded (any success resets)" },
     { "health_cooldown_sec", "300",
-      "Seconds a degraded model is skipped before retry" },
+      "Seconds a degraded model sinks below healthy candidates before retry" },
+    { "notify_model_change", "1",
+      "Notify the operator's channel when the model serving an agent changes (1 = on)" },
     { "llm_response_archive_max", "500",
       "llm_responses rows kept, ok and failures counted separately (0 = archiving off, negative = keep all)" },
     { "inbox_retention_sec", "604800",
@@ -146,10 +144,6 @@ static const ConfigDef s_defs[] = {
       "Skill discovery directories (JSON array, ~ expanded; SKILL.md convention"
       " shared with pi/OpenClaw/Claude Code). Per-agent agents/<name>/skills/"
       " is always scanned too." },
-    { "default_primary_model", "",
-      "Default primary model for agents without an explicit assignment" },
-    { "default_secondary_model", "",
-      "Default secondary (fallback) model for agents without an explicit assignment" },
 };
 
 const char *config_default(const char *key) {

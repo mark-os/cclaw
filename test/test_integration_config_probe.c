@@ -36,16 +36,18 @@ static int64_t seed(sqlite3 *db, const char *base_url) {
     char sql[1024];
     snprintf(sql, sizeof(sql),
         "DELETE FROM models; DELETE FROM providers;"
-        "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, priority)"
-        " VALUES('mockp','%s','openai','',0);"
-        "INSERT INTO models(id, provider_name, model, context_window, priority)"
-        " VALUES('model-a@mockp','mockp','model-a',128000,0),"
-        "       ('model-b@mockp','mockp','model-b',128000,1);",
+        "INSERT INTO providers(name, base_url, endpoint_type, api_key_env)"
+        " VALUES('mockp','%s','openai','');"
+        "INSERT INTO models(id, provider_name, model, context_window)"
+        " VALUES('model-a@mockp','mockp','model-a',128000),"
+        "       ('model-b@mockp','mockp','model-b',128000);",
         base_url);
     assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
     test_seed_agent(db, "test");
-    assert(sqlite3_exec(db, "UPDATE agents SET primary_model='model-a@mockp'"
-                            " WHERE name='test'", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(db,
+        "DELETE FROM agent_models WHERE agent_name='test';"
+        "INSERT INTO agent_models(agent_name,model_id,pos)"
+        " VALUES('test','model-a@mockp',0);", NULL, NULL, NULL) == SQLITE_OK);
     return session_create(db, "probe", "test", -1, 0);
 }
 
@@ -70,7 +72,7 @@ static int count(sqlite3 *db, const char *sql) {
 
 static const char *SWITCH_DOC =
     "{\"action\":\"request_changes\",\"changes\":"
-    "{\"agent\":{\"primary_model\":\"model-b@mockp\"}}}";
+    "{\"agent\":{\"models\":[\"model-b@mockp\"]}}}";
 
 /* ── tests ───────────────────────────────────────────────────────────── */
 
@@ -91,7 +93,8 @@ static void test_probe_success_applies(void) {
     assert(strstr(receipt, "served/model-b"));
     assert(mock_server_request_count() == 1);
 
-    char *pm = scalar(db, "SELECT primary_model FROM agents WHERE name='test'");
+    char *pm = scalar(db, "SELECT model_id FROM agent_models"
+                          " WHERE agent_name='test' ORDER BY pos LIMIT 1");
     assert(strcmp(pm, "model-b@mockp") == 0);
 
     /* A probe is not traffic: it archives, and touches nothing else. */
@@ -118,9 +121,10 @@ static void test_probe_failure_reverts(void) {
     assert(receipt);
     assert(strstr(receipt, "probe failed"));
     assert(strstr(receipt, "http 404"));
-    assert(strstr(receipt, "reverted to primary_model=model-a@mockp"));
+    assert(strstr(receipt, "reverted to models=model-a@mockp"));
 
-    char *pm = scalar(db, "SELECT primary_model FROM agents WHERE name='test'");
+    char *pm = scalar(db, "SELECT model_id FROM agent_models"
+                          " WHERE agent_name='test' ORDER BY pos LIMIT 1");
     assert(strcmp(pm, "model-a@mockp") == 0);
     assert(count(db, "SELECT COUNT(*) FROM entries") == 0);
     assert(count(db, "SELECT COUNT(*) FROM llm_responses"
@@ -165,8 +169,9 @@ static void test_probe_timeout_is_failure(void) {
     assert(request_config_changes_apply(db, "test", SWITCH_DOC, 0, sid, &receipt) == -1);
     assert(receipt);
     assert(strstr(receipt, "probe failed: timed out"));
-    assert(strstr(receipt, "reverted to primary_model=model-a@mockp"));
-    char *pm = scalar(db, "SELECT primary_model FROM agents WHERE name='test'");
+    assert(strstr(receipt, "reverted to models=model-a@mockp"));
+    char *pm = scalar(db, "SELECT model_id FROM agent_models"
+                          " WHERE agent_name='test' ORDER BY pos LIMIT 1");
     assert(strcmp(pm, "model-a@mockp") == 0);
     assert(count(db, "SELECT COUNT(*) FROM llm_responses"
                      " WHERE status='probe_timeout'") == 1);

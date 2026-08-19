@@ -40,13 +40,13 @@ static void seed_models(sqlite3 *db) {
         "INSERT INTO providers(name, base_url, endpoint_type, api_key_env) VALUES"
         " ('oai', 'https://oai.example/v1', 'openai', 'OAI_KEY'),"
         " ('gem', 'https://gem.example/v1beta', 'gemini', 'GEM_KEY');"
-        "INSERT INTO models(id, provider_name, model, capabilities, priority, status, degraded_until) VALUES"
-        " ('oai/chat', 'oai', 'chat-model', '[\"text\"]', 0, 'healthy', NULL),"
-        " ('gem/audio', 'gem', 'gemini-lite', '[\"text\",\"image\",\"audio\"]', 10, 'healthy', NULL),"
-        " ('oai/audio2', 'oai', 'audio-two', '[\"audio\"]', 20, 'healthy', NULL),"
-        " ('oai/audio-degraded', 'oai', 'audio-deg', '[\"audio\"]', 1, 'degraded', unixepoch()+600),"
-        " ('oai/audio-disabled', 'oai', 'audio-dis', '[\"audio\"]', 2, 'disabled', NULL),"
-        " ('oai/caps-null', 'oai', 'caps-null', NULL, 3, 'healthy', NULL);");
+        "INSERT INTO models(id, provider_name, model, capabilities, status, degraded_until) VALUES"
+        " ('oai/chat', 'oai', 'chat-model', '[\"text\"]', 'healthy', NULL),"
+        " ('gem/audio', 'gem', 'gemini-lite', '[\"text\",\"image\",\"audio\"]', 'healthy', NULL),"
+        " ('oai/audio2', 'oai', 'audio-two', '[\"audio\"]', 'healthy', NULL),"
+        " ('oai/audio-degraded', 'oai', 'audio-deg', '[\"audio\"]', 'degraded', unixepoch()+600),"
+        " ('oai/audio-disabled', 'oai', 'audio-dis', '[\"audio\"]', 'disabled', NULL),"
+        " ('oai/caps-null', 'oai', 'caps-null', NULL, 'healthy', NULL);");
 }
 
 static void test_picker_filters(sqlite3 *db) {
@@ -54,8 +54,8 @@ static void test_picker_filters(sqlite3 *db) {
     ModelCandidate out[8];
     int n = model_pick_by_capability(db, "audio", out, 8);
     if (n != 2) { printf("FAIL: expected 2 candidates, got %d\n", n); return; }
-    /* priority order: gem/audio (10) before oai/audio2 (20); the degraded,
-     * disabled, missing-cap and NULL-cap models are all excluded */
+    /* catalog order (created_at, id): gem/audio before oai/audio2; the
+     * degraded, disabled, missing-cap and NULL-cap models are all excluded */
     if (strcmp(out[0].id, "gem/audio") != 0) FAIL("wrong first candidate");
     if (out[0].endpoint_type != ENDPOINT_GEMINI) FAIL("gemini endpoint expected");
     if (strcmp(out[0].api_key_env, "GEM_KEY") != 0) FAIL("wrong key env");
@@ -79,7 +79,10 @@ static void test_picker_degraded_expired(sqlite3 *db) {
     ModelCandidate out[8];
     int n = model_pick_by_capability(db, "audio", out, 8);
     if (n != 3) { printf("FAIL: expected 3 candidates, got %d\n", n); return; }
-    if (strcmp(out[0].id, "oai/audio-degraded") != 0) FAIL("expired-degraded should lead (priority 1)");
+    int seen = 0;
+    for (int i = 0; i < n; i++)
+        if (strcmp(out[i].id, "oai/audio-degraded") == 0) seen = 1;
+    if (!seen) FAIL("expired-degraded should be eligible again");
     exec_sql(db, "UPDATE models SET degraded_until=unixepoch()+600 WHERE id='oai/audio-degraded';");
     PASS();
 }

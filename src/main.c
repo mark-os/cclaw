@@ -208,6 +208,14 @@ static void ensure_default_agent(const char *base_dir) {
             sqlite3_bind_text(bs, 1, TPL_DEFAULT_SYSTEM_PROMPT_MD, -1, SQLITE_STATIC);
             sqlite3_step(bs); sqlite3_finalize(bs);
         }
+        /* One-row routing list: the seeded bootstrap model. Explicit — an
+         * agent with no list is unroutable by design (model-routing.md R2). */
+        sqlite3_exec(proc_db(),
+            "INSERT OR IGNORE INTO agent_models(agent_name, model_id, pos)"
+            " SELECT 'Assistant', 'openrouter/deepseek/deepseek-v4-flash', 0"
+            " WHERE EXISTS (SELECT 1 FROM models"
+            "               WHERE id='openrouter/deepseek/deepseek-v4-flash');",
+            NULL, NULL, NULL);
         /* Seed default tools as grants */
         agent_grant_defaults(proc_db(), "Assistant");
         /* Disabled 'heartbeat' bare-wake job — visible/enable-able in cron_list. */

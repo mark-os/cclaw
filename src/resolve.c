@@ -203,6 +203,15 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
     int64_t session_id = a->session_id;
     const char *agent = session_get_agent_name(proc_db(), session_id);
 
+    /* Apply-style effects land at decision time, so an approved apply row is
+     * terminal the moment it resolves — mark it consumed up front (success or
+     * apply-failure alike; the human's decision is spent either way, and an
+     * apply-failed result tells the model to open a fresh request). Leaving it
+     * 'approved' reads as a live unconsumed ticket to the open-approvals
+     * surfaces, which sends the model chasing phantom "unused" grants. */
+    if (approved && a->resolve && strcmp(a->resolve, "apply") == 0)
+        approval_consume(proc_db(), a->id);
+
     /* Block window already lapsed → deliver async, leave the turn untouched. */
     if (approval_is_post_window(session_id, a->tool_call_id)) {
         resolve_approval_post_window(a, agent, decision, decided_via, grant_expires_at);

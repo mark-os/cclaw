@@ -225,13 +225,14 @@ int main(void) {
 
         ok = 0;
         if (sqlite3_prepare_v2(db,
-                "SELECT 1 FROM approvals WHERE action='request_changes' AND state='approved'"
+                /* apply-style approvals are terminal at decision time */
+                "SELECT 1 FROM approvals WHERE action='request_changes' AND state='consumed'"
                 " AND json_extract(args_json,'$.reason')='pty integration test'",
                 -1, &s, NULL) == SQLITE_OK) {
             ok = (sqlite3_step(s) == SQLITE_ROW);
             sqlite3_finalize(s);
         }
-        if (!ok) { fprintf(stderr, "FAIL: approved approval with reason missing\n"); sqlite3_close(db); goto done; }
+        if (!ok) { fprintf(stderr, "FAIL: consumed approval with reason missing\n"); sqlite3_close(db); goto done; }
 
         ok = 0;
         if (sqlite3_prepare_v2(db,

@@ -647,17 +647,34 @@ static void test_dedup(void) {
         "\"changes\":{\"grants\":{\"hosts\":[\"example.com\"]}}}");
     assert(r == NULL);
 
-    /* Mark the first approval as denied. */
+    /* Mark the first approval as expired (auto:expired = nobody decided). */
     assert(sqlite3_exec(db,
-        "UPDATE approvals SET state='denied'"
+        "UPDATE approvals SET state='denied', decided_via='auto:expired'"
         " WHERE action='request_changes'"
         " AND json_extract(args_json,'$.changes.grants.tools[0]')='shell_exec'",
         NULL, NULL, NULL) == SQLITE_OK);
 
-    /* Same doc, re-requested after denial — must park (not dedup'd). */
+    /* Same doc after expiry — must park (expiry is not a denial). */
     ctx.current_tool_call_id = "dd4";
     r = call_handler(&reg, doc);
     assert(r == NULL);
+
+    /* Now a human denies it. */
+    assert(sqlite3_exec(db,
+        "UPDATE approvals SET state='denied', decided_via='channel:discord'"
+        " WHERE state='pending'"
+        " AND json_extract(args_json,'$.changes.grants.tools[0]')='shell_exec'",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    /* Same doc after a human denial — refused inline, even with a fresh
+     * reason (the guard matches the changes doc, not the commentary). */
+    ctx.current_tool_call_id = "dd5";
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\","
+        "\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}},"
+        "\"reason\":\"different wording, same ask\"}");
+    assert(r != NULL && strstr(r, "already denied") != NULL);
+    free(r);
 
     tools_free(&reg);
     db_close(db);

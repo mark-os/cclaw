@@ -947,14 +947,12 @@ static char *extract_content(sqlite3 *db, EndpointType ep, const char *body) {
  * COALESCE'd away when empty; all-empty yields '' and no coda at all. */
 static const char SQL_STATE_CODA[] =
     "WITH appr AS ("
-    /* Both open states: 'pending' (waiting on a human) and 'approved' (granted
-     * but never consumed — the ticket is spent only when the call is re-issued). */
+    /* Pending only — decided rows are history, not carryable state (see the
+     * matching rationale in llm_payload.c). */
     "  SELECT group_concat("
-    "    '  #' || a.id || ' ' || COALESCE(a.tool_name, a.action, '?') || ' — ' ||"
-    "    CASE a.state"
-    "      WHEN 'approved' THEN 'approved, unused: re-issue the tool call to consume'"
-    "      ELSE 'pending: waiting on a human decision' END, char(10)) AS txt"
-    "  FROM approvals a WHERE a.session_id=?1 AND a.state IN ('pending','approved')"
+    "    '  #' || a.id || ' ' || COALESCE(a.tool_name, a.action, '?') ||"
+    "    ' — pending: waiting on a human decision', char(10)) AS txt"
+    "  FROM approvals a WHERE a.session_id=?1 AND a.state='pending'"
     "), sub AS ("
     "  SELECT group_concat("
     "    '  session #' || s.id || ' (' || COALESCE(s.agent_name,'?') || ') — ' || s.state,"

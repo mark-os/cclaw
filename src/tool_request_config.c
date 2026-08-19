@@ -1052,6 +1052,32 @@ static char *filter_satisfied(sqlite3 *db, const char *agent,
  * heap error string on failure, or NULL to signal "parked". */
 static char *park_changes(RequestConfigCtx *ctx, const char *canon,
                           const char *reason) {
+    /* A denial stands: the same document denied earlier in this session is
+     * refused inline instead of re-parked — a "no" is an answer, not a timer.
+     * Matched on the canonical changes doc only (reason is commentary for the
+     * approver, and a reworded reason must not launder a denied request).
+     * auto:expired is excluded — nobody decided, and the expiry notice
+     * explicitly invites re-requesting. No time window: a human "no" holds
+     * until a human says otherwise or the session ends. */
+    sqlite3_stmt *den;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT 1 FROM approvals WHERE session_id=?1"
+            " AND tool_name='request_config' AND action='request_changes'"
+            " AND state='denied' AND decided_via != 'auto:expired'"
+            " AND json_extract(args_json,'$.changes')=?2",
+            -1, &den, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(den, 1, ctx->session_id);
+        sqlite3_bind_text(den, 2, canon, -1, SQLITE_STATIC);
+        if (sqlite3_step(den) == SQLITE_ROW) {
+            sqlite3_finalize(den);
+            return strdup("error: this exact change was already denied in "
+                          "this session — do not re-request it; adjust your "
+                          "approach, or explain to the operator what you were "
+                          "trying to do and let them decide");
+        }
+        sqlite3_finalize(den);
+    }
+
     /* Dedup: an identical document still pending in this session would queue
      * a second identical prompt. Both sides are canonically built, so
      * minified-text equality is exact. */
@@ -1105,6 +1131,25 @@ static char *park_changes(RequestConfigCtx *ctx, const char *canon,
  * on the requested name. */
 static char *park_rename(RequestConfigCtx *ctx, const char *name,
                          const char *preamble, const char *reason) {
+    /* Same denial-stands rule as park_changes, keyed on the requested name. */
+    sqlite3_stmt *den;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT 1 FROM approvals WHERE session_id=?1"
+            " AND tool_name='request_config' AND action='rename_agent'"
+            " AND state='denied' AND decided_via != 'auto:expired'"
+            " AND json_extract(args_json,'$.name')=?2",
+            -1, &den, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(den, 1, ctx->session_id);
+        sqlite3_bind_text(den, 2, name, -1, SQLITE_STATIC);
+        if (sqlite3_step(den) == SQLITE_ROW) {
+            sqlite3_finalize(den);
+            return strdup("error: this rename was already denied in this "
+                          "session — do not re-request it; adjust, or explain "
+                          "to the operator and let them decide");
+        }
+        sqlite3_finalize(den);
+    }
+
     sqlite3_stmt *chk;
     if (sqlite3_prepare_v2(ctx->db,
             "SELECT 1 FROM approvals WHERE session_id=?1"

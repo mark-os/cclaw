@@ -431,15 +431,15 @@ static const char SQL_SESSION_CONTEXT[] =
     "    char(10)) AS txt"
     "  FROM sessions s WHERE s.parent_session_id=?1 AND s.state != 'idle'"
     "), appr AS ("
-    /* Both open states: 'pending' (waiting on a human) and 'approved' (granted
-     * but never consumed — the ticket is only spent when the tool call is
-     * re-issued). Consumed/rejected/expired rows are closed and absent. */
+    /* Pending only — "waiting on a human" is the one approval state the model
+     * can act on (work around it). Decided rows are history: apply effects
+     * land at decision time, rerun tickets are consumed by the wake/rerun and
+     * ticket-transfer machinery, and advertising them here sends the model
+     * chasing "unused" grants it already has. */
     "  SELECT group_concat("
-    "    '#' || a.id || ' ' || COALESCE(a.tool_name, a.action, '?') || ' — ' ||"
-    "    CASE a.state"
-    "      WHEN 'approved' THEN 'approved, unused: re-issue the tool call to consume'"
-    "      ELSE 'pending: waiting on a human decision' END, char(10)) AS txt"
-    "  FROM approvals a WHERE a.session_id=?1 AND a.state IN ('pending','approved')"
+    "    '#' || a.id || ' ' || COALESCE(a.tool_name, a.action, '?') ||"
+    "    ' — pending: waiting on a human decision', char(10)) AS txt"
+    "  FROM approvals a WHERE a.session_id=?1 AND a.state='pending'"
     ")"
     "SELECT '<RELEVANT_CONTEXT>' || char(10) ||"
     "    '<current_time>' || ?3 || '</current_time>' || char(10) ||"

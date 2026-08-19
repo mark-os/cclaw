@@ -345,7 +345,8 @@ static void test_session_context_live_state(void) {
     char *context_text = session_context_text(db, sid, NULL);
     assert(context_text);
     assert(strstr(context_text, "<open_approvals>"));
-    assert(strstr(context_text, "shell_exec — approved, unused: re-issue"));
+    /* pending only: decided rows are history, never advertised */
+    assert(!strstr(context_text, "shell_exec"));  /* approved = closed too */
     assert(strstr(context_text, "pending: waiting on a human decision"));
     assert(!strstr(context_text, "web_fetch"));   /* consumed = closed */
     /* the renderer shows COALESCE(tool_name, action) — tool_name wins */

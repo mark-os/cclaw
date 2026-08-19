@@ -184,13 +184,14 @@ int main(void) {
 
         ok = 0;
         if (sqlite3_prepare_v2(db,
+                /* apply-style approvals are terminal at decision time */
                 "SELECT 1 FROM approvals WHERE tool_name='create_agent'"
-                " AND state='approved'", -1, &s, NULL) == SQLITE_OK) {
+                " AND state='consumed'", -1, &s, NULL) == SQLITE_OK) {
             ok = (sqlite3_step(s) == SQLITE_ROW);
             sqlite3_finalize(s);
         }
         sqlite3_close(db);
-        if (!ok) { fprintf(stderr, "FAIL: approved create_agent approval missing\n"); goto done; }
+        if (!ok) { fprintf(stderr, "FAIL: consumed create_agent approval missing\n"); goto done; }
     }
 
     if (mock_server_request_count() != 2) {

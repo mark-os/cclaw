@@ -290,7 +290,7 @@ static void test_llm_compaction_coda(int port) {
             const char *coda = strstr(c, COMPACTION_CODA_MARKER);
             assert(prose && coda && prose < coda);
             assert(strstr(coda, "shell_exec"));
-            assert(strstr(coda, "web_fetch") && strstr(coda, "approved, unused"));
+            assert(!strstr(coda, "web_fetch"));  /* approved = decided = absent */
             assert(strstr(coda, "llm_running"));
         }
     assert(found == 1);

@@ -264,7 +264,7 @@ static void test_state_coda(void) {
     assert(coda);
     assert(strstr(coda, COMPACTION_CODA_MARKER));
     assert(strstr(coda, "shell_exec") && strstr(coda, "waiting on a human"));
-    assert(strstr(coda, "web_fetch") && strstr(coda, "approved, unused"));
+    assert(!strstr(coda, "web_fetch"));  /* approved = decided = absent */
     assert(!strstr(coda, "js_eval") && !strstr(coda, "file_write"));
     assert(strstr(coda, "llm_running"));
     assert(!strstr(coda, "idle"));

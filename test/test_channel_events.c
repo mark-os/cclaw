@@ -567,7 +567,7 @@ static void test_channel_events_approval_decision(void) {
 
     /* decision "yes" -> APPROVAL_ALWAYS */
     {
-        int64_t aid = approval_create(db, sid, "tc1", "shell_exec", "run", "{}", "rerun");
+        int64_t aid = approval_create(db, sid, "tc1", "shell_exec", APPROVAL_PARK_REQUIRED, "{}", "rerun");
         assert(aid > 0);
         char payload[128];
         snprintf(payload, sizeof(payload),
@@ -596,7 +596,7 @@ static void test_channel_events_approval_decision(void) {
     /* decision "once" -> APPROVAL_ONCE */
     resolve_spy_reset();
     {
-        int64_t aid = approval_create(db, sid, "tc2", "shell_exec", "run", "{}", "rerun");
+        int64_t aid = approval_create(db, sid, "tc2", "shell_exec", APPROVAL_PARK_REQUIRED, "{}", "rerun");
         assert(aid > 0);
         char payload[128];
         snprintf(payload, sizeof(payload),
@@ -620,7 +620,7 @@ static void test_channel_events_approval_decision(void) {
     /* decision "no" (and anything not "yes"/"once") -> APPROVAL_DENY */
     resolve_spy_reset();
     {
-        int64_t aid = approval_create(db, sid, "tc3", "shell_exec", "run", "{}", "rerun");
+        int64_t aid = approval_create(db, sid, "tc3", "shell_exec", APPROVAL_PARK_REQUIRED, "{}", "rerun");
         assert(aid > 0);
         char payload[128];
         snprintf(payload, sizeof(payload),
@@ -646,7 +646,7 @@ static void test_channel_events_approval_decision(void) {
      * sender, so the deny receipt can say who decided, not just where. */
     resolve_spy_reset();
     {
-        int64_t aid = approval_create(db, sid, "tc3b", "shell_exec", "run", "{}", "rerun");
+        int64_t aid = approval_create(db, sid, "tc3b", "shell_exec", APPROVAL_PARK_REQUIRED, "{}", "rerun");
         assert(aid > 0);
         char payload[160];
         snprintf(payload, sizeof(payload),
@@ -670,7 +670,7 @@ static void test_channel_events_approval_decision(void) {
      * stays pending for a later structural decision (or expiry). */
     resolve_spy_reset();
     {
-        int64_t aid = approval_create(db, sid, "tc4", "shell_exec", "run", "{}", "rerun");
+        int64_t aid = approval_create(db, sid, "tc4", "shell_exec", APPROVAL_PARK_REQUIRED, "{}", "rerun");
         assert(aid > 0);
         test_event_insert(db, "mychannel", "message", "{\"chat_id\":\"user1\",\"text\":\"yes\"}");
         channel_consume_events(db);
@@ -691,7 +691,7 @@ static void test_channel_events_approval_decision(void) {
      * fires, the approval stays pending, the event is consumed. */
     resolve_spy_reset();
     {
-        int64_t aid = approval_create(db, sid, "tc5", "shell_exec", "run", "{}", "rerun");
+        int64_t aid = approval_create(db, sid, "tc5", "shell_exec", APPROVAL_PARK_REQUIRED, "{}", "rerun");
         assert(aid > 0);
         char payload[128];
         snprintf(payload, sizeof(payload),
@@ -922,7 +922,7 @@ static void test_chat_approve_commands(void) {
     int64_t sid = test_session_find(db, "apch", "9", "testagent");
     assert(sid > 0);
 
-    int64_t aid = approval_create(db, sid, "tc1", "shell_exec", "run",
+    int64_t aid = approval_create(db, sid, "tc1", "shell_exec", APPROVAL_PARK_REQUIRED,
                                   "{\"command\":\"rm -rf /tmp/x\"}", "rerun");
     assert(aid > 0);
     char cmd[128];
@@ -952,7 +952,7 @@ static void test_chat_approve_commands(void) {
     test_gate_channel_seed(db, "otherch", "9");
     test_binding_set(db, "otherch", "9", "testagent");
     int64_t osid = test_session_find(db, "otherch", "9", "testagent");
-    int64_t oaid = approval_create(db, osid, "tc9", "web_fetch", "fetch", "{}", "rerun");
+    int64_t oaid = approval_create(db, osid, "tc9", "web_fetch", APPROVAL_PARK_REQUIRED, "{}", "rerun");
     snprintf(cmd, sizeof(cmd), "/approve %lld", (long long)oaid);
     chat_say(db, "apch", "9", cmd);
     assert_reply_has(db, "apch", "on this channel");
@@ -966,7 +966,7 @@ static void test_chat_approve_commands(void) {
     assert(g_resolve_approval_id == aid);
     assert(g_resolve_decision == APPROVAL_ONCE);
     assert(strcmp(g_resolve_decided_via, "channel:apch:9") == 0);
-    assert_reply_has(db, "apch", "shell_exec run");
+    assert_reply_has(db, "apch", "shell_exec approval_required");
 
     /* Already decided (the spy left the row pending, so settle it as main.c
      * would): a second decision is refused with a message, not silence. */
@@ -988,7 +988,7 @@ static void test_chat_approve_commands(void) {
 
     /* An 'apply' grant has no once semantics — /approve sends ALWAYS. */
     int64_t gid = approval_create(db, sid, "tc2", "request_config",
-                                  "request_changes", "{}", "apply");
+                                  APPROVAL_PARK_REQUIRED, "{}", "apply");
     resolve_spy_reset();
     snprintf(cmd, sizeof(cmd), "/approve %lld", (long long)gid);
     chat_say(db, "apch", "9", cmd);
@@ -996,7 +996,7 @@ static void test_chat_approve_commands(void) {
     assert(g_resolve_decision == APPROVAL_ALWAYS);
 
     /* /deny maps to APPROVAL_DENY. */
-    int64_t did = approval_create(db, sid, "tc3", "shell_exec", "run", "{}", "rerun");
+    int64_t did = approval_create(db, sid, "tc3", "shell_exec", APPROVAL_PARK_REQUIRED, "{}", "rerun");
     resolve_spy_reset();
     snprintf(cmd, sizeof(cmd), "/deny %lld", (long long)did);
     chat_say(db, "apch", "9", cmd);
@@ -1027,7 +1027,7 @@ static void test_chat_status_command(void) {
         " VALUES('some/model','some','model');"
         "INSERT OR REPLACE INTO agent_models(agent_name,model_id,pos)"
         " VALUES('testagent','some/model',0);", NULL, NULL, NULL) == SQLITE_OK);
-    assert(approval_create(db, sid, "tc1", "shell_exec", "run", "{}", "rerun") > 0);
+    assert(approval_create(db, sid, "tc1", "shell_exec", APPROVAL_PARK_REQUIRED, "{}", "rerun") > 0);
 
     chat_say(db, "stch", "9", "/status");
     {

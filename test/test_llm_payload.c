@@ -315,8 +315,8 @@ static void test_session_context_live_state(void) {
      * a consumed ticket is closed and must not surface. */
     sqlite3_stmt *ins;
     sqlite3_prepare_v2(db,
-        "INSERT INTO approvals(session_id,tool_name,action,state)"
-        " VALUES(?1,'request_config','request_changes','pending'),"
+        "INSERT INTO approvals(session_id,tool_name,park_reason,state)"
+        " VALUES(?1,'request_config','approval_required','pending'),"
         "       (?1,'shell_exec',NULL,'approved'),"
         "       (?1,'web_fetch',NULL,'consumed');",
         -1, &ins, NULL);

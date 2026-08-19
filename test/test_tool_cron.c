@@ -536,7 +536,8 @@ static void test_cross_agent_parks(void) {
 
     Approval *a = approval_get_pending(db, sid);
     assert(a && strcmp(a->tool_name, "cron_set") == 0);
-    assert(strcmp(a->action, "cron_set") == 0);
+    assert(strcmp(a->park_reason, APPROVAL_PARK_REQUIRED) == 0);
+    assert(strcmp(a->tool_name, "cron_set") == 0);
     assert(strcmp(a->resolve, "apply") == 0);
     assert(strcmp(a->tool_call_id, "call_1") == 0);
     /* The parked document carries the whole request, name included. */

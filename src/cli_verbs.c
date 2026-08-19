@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <limits.h>
 #include "cclaw.h"
 #include "cli_verbs.h"
 #include "channel.h"
@@ -673,6 +675,164 @@ int backup_main(int argc, char *argv[]) {
     }
     printf("%s (%lld bytes)\n", dest, bytes);
     return 0;
+}
+
+/* ── `cclaw rename-agent <old> <new> [--timeout N]` ───────────────
+ * Operator identity surgery, deliberately CLI-only: an agent cannot rename
+ * itself (config-doc M2 deleted that tool arm). Works daemon-up or -down —
+ * the quiesce lease is a DB row, so the running daemon honours it at its own
+ * turn-open point without any IPC.
+ *
+ * Flow: take the lease → drain in-flight sessions (refreshing the lease so a
+ * long drain can't expire it) → rename both storage domains with SIGINT
+ * blocked → tell the agent → release. Every early exit releases the lease;
+ * a crash doesn't need to, because the lease expires. */
+
+static volatile sig_atomic_t g_rename_interrupted;
+static void rename_sigint(int sig) { (void)sig; g_rename_interrupted = 1; }
+
+/* Wait until the agent has no live-owned busy session. Returns 0 quiesced,
+ * -1 interrupted, -2 timed out. */
+static int rename_drain(sqlite3 *db, const char *name, const char *holder,
+                        int timeout_s) {
+    time_t deadline = time(NULL) + timeout_s;
+    int64_t last_reported = -1;
+    for (;;) {
+        char state[32];
+        int64_t sid = agent_busy_session(db, name, state, sizeof(state));
+        if (sid == 0) return 0;
+        if (g_rename_interrupted) return -1;
+        if (time(NULL) >= deadline) return -2;
+        if (sid != last_reported) {
+            printf("waiting for session %lld (state=%s)\n", (long long)sid, state);
+            fflush(stdout);
+            last_reported = sid;
+        }
+        /* The drain can outlast the lease it is protecting — refresh every
+         * pass so the window it holds is always the full timeout ahead. */
+        agent_hold_refresh(db, name, timeout_s, holder);
+        sleep(1);
+    }
+}
+
+/* The agent's own memory prose may name it; nothing else can rewrite that, so
+ * hand it the fact at its next turn. Queued on its most recent session — the
+ * rename already cascaded, so the row is under the NEW name. */
+static void rename_notify(sqlite3 *db, const char *new_name,
+                          const char *old_name) {
+    int64_t sid = 0;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT id FROM sessions WHERE agent_name=?1"
+            " ORDER BY updated_at DESC, id DESC LIMIT 1;", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, new_name, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) sid = sqlite3_column_int64(s, 0);
+        sqlite3_finalize(s);
+    }
+    if (sid <= 0) return;                       /* never talked to — nothing to tell */
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "Operator renamed you from %s to %s — update your memory if it "
+             "mentions your name.", old_name, new_name);
+    inbox_insert(db, sid, "system", NULL, msg);
+}
+
+int rename_agent_main(int argc, char *argv[]) {
+    const char *old_name = (argc >= 4) ? argv[2] : NULL;
+    const char *new_name = (argc >= 4) ? argv[3] : NULL;
+    int timeout_s = 60;
+    for (int i = 4; i < argc; i++) {
+        if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) timeout_s = atoi(argv[++i]);
+        else if (strncmp(argv[i], "--timeout=", 10) == 0) timeout_s = atoi(argv[i] + 10);
+    }
+    if (!old_name || !new_name || timeout_s <= 0) {
+        fprintf(stderr, "usage: cclaw rename-agent <old> <new> [--timeout N]\n");
+        return 2;
+    }
+
+    sqlite3 *db = verb_db_open();
+    if (!db) return 1;
+
+    char holder[40];
+    snprintf(holder, sizeof(holder), "cli:%ld", (long)getpid());
+
+    if (agent_hold_acquire(db, old_name, timeout_s, holder) != 0) {
+        char who[64] = "?";
+        sqlite3_stmt *s;
+        if (sqlite3_prepare_v2(db,
+                "SELECT COALESCE(hold_holder,'?') FROM agents WHERE name=?1"
+                " AND hold_until > unixepoch();", -1, &s, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(s, 1, old_name, -1, SQLITE_STATIC);
+            if (sqlite3_step(s) == SQLITE_ROW)
+                snprintf(who, sizeof(who), "%s", sqlite3_column_text(s, 0));
+            else
+                who[0] = '\0';
+            sqlite3_finalize(s);
+        }
+        if (who[0])
+            fprintf(stderr, "error: agent '%s' is already held by %s — "
+                            "another rename is in progress\n", old_name, who);
+        else
+            fprintf(stderr, "error: no such agent '%s'\n", old_name);
+        sqlite3_close(db);
+        return 1;
+    }
+
+    struct sigaction sa = {0}, old_sa;
+    sa.sa_handler = rename_sigint;
+    sigaction(SIGINT, &sa, &old_sa);
+
+    int rc = 1;
+    int drained = rename_drain(db, old_name, holder, timeout_s);
+    if (drained == -1) {
+        fprintf(stderr, "error: interrupted — nothing was renamed\n");
+        goto done;
+    }
+    if (drained == -2) {
+        fprintf(stderr, "error: agent '%s' still busy after %ds — nothing was "
+                        "renamed\n", old_name, timeout_s);
+        goto done;
+    }
+
+    /* The commit + directory move is the one window where an interrupt could
+     * split the two storage domains. Block SIGINT across it; the drain above
+     * and the notice below are interruptible. */
+    sigset_t block, prev;
+    sigemptyset(&block);
+    sigaddset(&block, SIGINT);
+    sigprocmask(SIG_BLOCK, &block, &prev);
+
+    char agents_dir[PATH_MAX];
+    agent_dir_resolve(NULL, sqlite3_db_filename(db, "main"),
+                      agents_dir, sizeof(agents_dir));
+    int r = agent_rename_full(db, old_name, new_name, 0, agents_dir);
+    sigprocmask(SIG_SETMASK, &prev, NULL);
+
+    if (r != 0) {
+        const char *why =
+            r == -2 ? "an agent with that name already exists" :
+            r == -3 ? "invalid new name" :
+            r == -4 ? "no such agent" :
+            r == -5 ? "SPLIT STATE: DB renamed but the directory move and its "
+                      "rollback both failed — fix by hand (see the log)" :
+                      "busy or DB error; nothing was renamed";
+        fprintf(stderr, "error: rename failed — %s\n", why);
+        goto done;
+    }
+
+    rename_notify(db, new_name, old_name);
+    printf("renamed agent %s -> %s (workspace %s/%s)\n",
+           old_name, new_name, agents_dir, new_name);
+    rc = 0;
+
+done:
+    /* hold_holder rode the rename with the row, so release under whichever
+     * name the agent now has. */
+    if (agent_hold_release(db, rc == 0 ? new_name : old_name, holder) != 0)
+        agent_hold_release(db, old_name, holder);
+    sigaction(SIGINT, &old_sa, NULL);
+    sqlite3_close(db);
+    return rc;
 }
 
 /* `cclaw resp` — read the llm_responses forensic archive. What "[resp #N]" in

@@ -22,7 +22,7 @@ static Approval *row_to_approval(sqlite3_stmt *stmt) {
     a->session_id = sqlite3_column_int64(stmt, 1);
     a->tool_call_id = dup_or_null(sqlite3_column_text(stmt, 2));
     a->tool_name = dup_or_null(sqlite3_column_text(stmt, 3));
-    a->action = dup_or_null(sqlite3_column_text(stmt, 4));
+    a->park_reason = dup_or_null(sqlite3_column_text(stmt, 4));
     a->args_json = dup_or_null(sqlite3_column_text(stmt, 5));
     a->resolve = dup_or_null(sqlite3_column_text(stmt, 6));
     a->state = dup_or_null(sqlite3_column_text(stmt, 7));
@@ -32,11 +32,19 @@ static Approval *row_to_approval(sqlite3_stmt *stmt) {
     return a;
 }
 
+/* The sensitivity overlay (specs/trust.md rule 1). One predicate, so every
+ * consumer — card, post-window notice, resolve's ALWAYS coercion, the ticket
+ * exclusion — agrees on what "sensitive" means. */
+int approval_is_sensitive(const Approval *a) {
+    return a && a->park_reason &&
+           strcmp(a->park_reason, APPROVAL_PARK_SENSITIVE) == 0;
+}
+
 void approval_free(Approval *a) {
     if (!a) return;
     free(a->tool_call_id);
     free(a->tool_name);
-    free(a->action);
+    free(a->park_reason);
     free(a->args_json);
     free(a->resolve);
     free(a->state);
@@ -123,15 +131,17 @@ void approval_background_notice(int64_t approval_id, char *buf, size_t len) {
 }
 
 int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_id,
-                        const char *tool_name, const char *action,
+                        const char *tool_name, const char *park_reason,
                         const char *args_json, const char *resolve) {
+    if (!park_reason) park_reason = APPROVAL_PARK_REQUIRED;
     if (!resolve) resolve = "rerun";
 
     /* Deadline: approval_timeout_sec from the config registry */
     int64_t expires_at = (int64_t)time(NULL) + approval_timeout_seconds(db);
 
     const char *sql =
-        "INSERT INTO approvals(session_id, tool_call_id, tool_name, action, args_json, resolve, expires_at)"
+        "INSERT INTO approvals(session_id, tool_call_id, tool_name, park_reason,"
+        " args_json, resolve, expires_at)"
         " VALUES(?,?,?,?,?,?,?)";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -139,7 +149,7 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
     sqlite3_bind_int64(stmt, 1, session_id);
     sqlite3_bind_text(stmt, 2, tool_call_id, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, tool_name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, action, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, park_reason, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 5, args_json, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 6, resolve, -1, SQLITE_STATIC);
     sqlite3_bind_int64(stmt, 7, expires_at);
@@ -159,7 +169,7 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
  * (handle_approval_park). */
 Approval *approval_get_pending(sqlite3 *db, int64_t session_id) {
     const char *sql =
-        "SELECT id, session_id, tool_call_id, tool_name, action,"
+        "SELECT id, session_id, tool_call_id, tool_name, park_reason,"
         " args_json, resolve, state, decided_via, requested_at, expires_at"
         " FROM approvals WHERE session_id=? AND state='pending'"
         " ORDER BY requested_at ASC, id ASC LIMIT 1";
@@ -181,7 +191,7 @@ Approval *approval_get_pending_subtree(sqlite3 *db, int64_t root_session_id) {
         "  UNION ALL"
         "  SELECT s.id FROM sessions s JOIN subtree t ON s.parent_session_id = t.id"
         ")"
-        " SELECT a.id, a.session_id, a.tool_call_id, a.tool_name, a.action,"
+        " SELECT a.id, a.session_id, a.tool_call_id, a.tool_name, a.park_reason,"
         " a.args_json, a.resolve, a.state, a.decided_via, a.requested_at, a.expires_at"
         " FROM approvals a WHERE a.session_id IN (SELECT id FROM subtree)"
         " AND a.state='pending' ORDER BY a.requested_at ASC, a.id ASC LIMIT 1";
@@ -203,7 +213,7 @@ Approval *approval_get_for_tool_call(sqlite3 *db, int64_t session_id,
      * and are not globally unique, so a bare tool_call_id match would let a
      * reused id collide with another session's approved row. */
     const char *sql =
-        "SELECT id, session_id, tool_call_id, tool_name, action,"
+        "SELECT id, session_id, tool_call_id, tool_name, park_reason,"
         " args_json, resolve, state, decided_via, requested_at, expires_at"
         " FROM approvals WHERE session_id=? AND tool_call_id=? ORDER BY id DESC LIMIT 1";
     sqlite3_stmt *stmt;
@@ -238,9 +248,7 @@ int approval_consume(sqlite3 *db, int64_t id) {
  * covers both: semantically identical args. A 'sensitive' park is per-call by
  * trust.md rule 1, so only an exact re-issue of the frozen call may dedupe
  * against it, and it never transfers (the gate excludes it from tickets). */
-static int capability_match(sqlite3 *db, const char *action,
-                            const char *args_a, const char *args_b) {
-    (void)action;
+static int capability_match(sqlite3 *db, const char *args_a, const char *args_b) {
     if (!args_a || !args_b) return 0;
     if (strcmp(args_a, args_b) == 0) return 1;  /* also covers non-JSON args */
 
@@ -275,12 +283,12 @@ static int capability_match(sqlite3 *db, const char *action,
  * park deadline is stale authority, not a ticket. Returns row id or 0. */
 static int64_t approval_match_state(sqlite3 *db, int64_t session_id,
                                     const char *state, int unexpired_only,
-                                    const char *action, const char *tool_name,
+                                    const char *park_reason, const char *tool_name,
                                     const char *args_json) {
     const char *sql =
         "SELECT id, args_json FROM approvals"
         " WHERE session_id=?1 AND state=?2 AND resolve='rerun'"
-        "   AND action IS ?3 AND tool_name IS ?4"
+        "   AND park_reason IS ?3 AND tool_name IS ?4"
         "   AND (?5 = 0 OR (expires_at IS NOT NULL AND expires_at > unixepoch()))"
         " ORDER BY id DESC LIMIT 8";
     sqlite3_stmt *stmt;
@@ -288,13 +296,13 @@ static int64_t approval_match_state(sqlite3 *db, int64_t session_id,
         return 0;
     sqlite3_bind_int64(stmt, 1, session_id);
     sqlite3_bind_text(stmt, 2, state, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, action, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, park_reason, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, tool_name, -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 5, unexpired_only);
     int64_t id = 0;
     while (id == 0 && sqlite3_step(stmt) == SQLITE_ROW) {
         const char *row_args = (const char *)sqlite3_column_text(stmt, 1);
-        if (capability_match(db, action, row_args, args_json))
+        if (capability_match(db, row_args, args_json))
             id = sqlite3_column_int64(stmt, 0);
     }
     sqlite3_finalize(stmt);
@@ -302,17 +310,17 @@ static int64_t approval_match_state(sqlite3 *db, int64_t session_id,
 }
 
 int64_t approval_find_pending_match(sqlite3 *db, int64_t session_id,
-                                    const char *action, const char *tool_name,
+                                    const char *park_reason, const char *tool_name,
                                     const char *args_json) {
     return approval_match_state(db, session_id, "pending", 0,
-                                action, tool_name, args_json);
+                                park_reason, tool_name, args_json);
 }
 
 int64_t approval_take_ticket(sqlite3 *db, int64_t session_id,
-                             const char *action, const char *tool_name,
+                             const char *park_reason, const char *tool_name,
                              const char *args_json) {
     int64_t id = approval_match_state(db, session_id, "approved", 1,
-                                      action, tool_name, args_json);
+                                      park_reason, tool_name, args_json);
     if (id <= 0) return 0;
     /* approval_consume is a CAS on state='approved' — a concurrent taker
      * loses cleanly and parks instead of double-spending the ticket. */
@@ -363,7 +371,7 @@ Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *de
 
     /* Return the resolved row */
     const char *sel =
-        "SELECT id, session_id, tool_call_id, tool_name, action,"
+        "SELECT id, session_id, tool_call_id, tool_name, park_reason,"
         " args_json, resolve, state, decided_via, requested_at, expires_at"
         " FROM approvals WHERE id=?";
     if (sqlite3_prepare_v2(db, sel, -1, &stmt, NULL) != SQLITE_OK)
@@ -500,7 +508,7 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a,
                                     ApprovalPostWindow outcome,
                                     const char *detail) {
     if (!a) return -1;
-    const char *what = a->action ? a->action : (a->tool_name ? a->tool_name : "tool");
+    const char *what = a->tool_name ? a->tool_name : "tool";
     /* Denied/expired messages carry the next-step norm — the moment the model
      * reads the outcome is the moment the norm matters, and the skill that
      * documents it may never be loaded. */
@@ -511,7 +519,7 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a,
          * call was already answered, so nothing transfers — say so instead of
          * implying a silent retry. Everything else leaves a ticket the gate
          * transfers to the next matching call (approval_take_ticket). */
-        if (a->action && strcmp(a->action, "sensitive") == 0)
+        if (approval_is_sensitive(a))
             snprintf(buf, sizeof(buf),
                      "Approval #%lld for '%s' was approved after the wait "
                      "window, but a sensitivity approval covers only that one "
@@ -842,8 +850,7 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
     Buf out = {0};
     /* Collected extracted fields — freed in one sweep at the end. */
     char *f[3] = {0};
-    if (a->tool_name && strcmp(a->tool_name, "request_config") == 0 &&
-        a->action && strcmp(a->action, "request_changes") == 0) {
+    if (a->tool_name && strcmp(a->tool_name, "request_config") == 0) {
         buf_append_str(&out, "requests these changes:\n");
         /* Two axes: scope (whose reach changes) and kind (authority vs
          * settings). Authority widens what the agent can touch and is the
@@ -860,8 +867,6 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
                           SQL_CHANGES_SYSTEM_WIDE, args, a->session_id);
         f[0] = tool_args_str(db, args, "reason");
         if (f[0] && f[0][0]) buf_appendf(&out, "Reason: %s\n", f[0]);
-    } else if (a->tool_name && strcmp(a->tool_name, "request_config") == 0) {
-        buf_append_str(&out, a->action ? a->action : "?");
     } else if (a->tool_name && strcmp(a->tool_name, "extension_promote") == 0) {
         f[0] = tool_args_str(db, args, "name");
         f[1] = tool_args_str(db, args, "summary");
@@ -894,15 +899,13 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
          * gate parked it (axis 2, rendered as an overlay). No guessed salient
          * field: every scalar arg is enumerated, so a tool the probes never
          * anticipated (js_eval's `code`) can't degrade to a blind
-         * "tool (action)" line. Ordering is load-bearing (R1): DB-derived
+         * blind one-liner. Ordering is load-bearing (R1): DB-derived
          * facts first, model-authored args and code last, so the bottom-up
          * truncation backstop eats the code before the facts. */
         const char *tn = a->tool_name ? a->tool_name : "?";
-        int is_sens = a->action && strcmp(a->action, "sensitive") == 0;
+        int is_sens = approval_is_sensitive(a);
         if (is_sens)
             buf_appendf(&out, "%s — parked: targets a sensitive-labeled host\n", tn);
-        else if (a->action && strcmp(a->action, tn) != 0)
-            buf_appendf(&out, "%s (%s)\n", tn, a->action);
         else
             buf_appendf(&out, "%s\n", tn);
         if (is_sens) overlay_sensitive(db, &out, args);

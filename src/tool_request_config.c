@@ -1177,7 +1177,7 @@ static char *park_changes(RequestConfigCtx *ctx, const char *canon,
     sqlite3_stmt *den;
     if (sqlite3_prepare_v2(ctx->db,
             "SELECT 1 FROM approvals WHERE session_id=?1"
-            " AND tool_name='request_config' AND action='request_changes'"
+            " AND tool_name='request_config'"
             " AND state='denied' AND decided_via != 'auto:expired'"
             " AND json_extract(args_json,'$.changes')=?2",
             -1, &den, NULL) == SQLITE_OK) {
@@ -1199,7 +1199,7 @@ static char *park_changes(RequestConfigCtx *ctx, const char *canon,
     sqlite3_stmt *chk;
     if (sqlite3_prepare_v2(ctx->db,
             "SELECT 1 FROM approvals WHERE session_id=?1"
-            " AND tool_name='request_config' AND action='request_changes'"
+            " AND tool_name='request_config'"
             " AND state='pending' AND json_extract(args_json,'$.changes')=?2",
             -1, &chk, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(chk, 1, ctx->session_id);
@@ -1232,7 +1232,7 @@ static char *park_changes(RequestConfigCtx *ctx, const char *canon,
     if (!args) return strdup("error: failed to build args JSON");
 
     int64_t aid = approval_create(ctx->db, ctx->session_id,
-        ctx->current_tool_call_id, "request_config", "request_changes", args,
+        ctx->current_tool_call_id, "request_config", APPROVAL_PARK_REQUIRED, args,
         "apply");
     free(args);
     if (aid < 0)

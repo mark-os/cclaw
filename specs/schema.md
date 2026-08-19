@@ -222,6 +222,8 @@ Agent identity and per-agent config. Name is the primary key — no integer id.
 | `shell_path` | TEXT | interpreter for shell_exec's `-c`; NULL = `/bin/sh` |
 | `sandbox_profile` | TEXT DEFAULT 'standard' | host / standard / restricted |
 | `created_by` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; creating agent (`update_agent` authorization); NULL = operator |
+| `hold_until` | INTEGER | quiesce lease deadline (`cclaw rename-agent`); while in the future no new turn opens for this agent. NULL = no hold; expiry self-heals |
+| `hold_holder` | TEXT | who holds the lease (`cli:<pid>`) |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 ---
@@ -256,8 +258,8 @@ Audit log for tool-call approvals. When a tool call is parked (`sessions.state` 
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `session_id` | INTEGER NOT NULL | |
 | `tool_call_id` | TEXT | |
-| `tool_name` | TEXT | |
-| `action` | TEXT | |
+| `tool_name` | TEXT | WHAT parked — the tool that asked. The sole dispatch/dedup key |
+| `park_reason` | TEXT | WHY it parked: `approval_required` or `sensitive_target` |
 | `args_json` | TEXT | |
 | `resolve` | TEXT NOT NULL DEFAULT 'rerun' | `rerun` = re-issue the frozen tool call on approval; `apply` = apply a capability grant (request_config) |
 | `state` | TEXT NOT NULL DEFAULT 'pending' | pending / approved / denied |
@@ -267,7 +269,7 @@ Audit log for tool-call approvals. When a tool call is parked (`sessions.state` 
 
 Index: `approvals_pending ON approvals(session_id, state) WHERE state='pending'`.
 
-`approvals.action` values beyond tool names: `sensitive` (sensitivity-axis park — ALWAYS is coerced to ONCE at resolve) and the `request_config` document action (`request_changes`). The former `secret_bind` action was deleted with the bind park (D17) — an unbound secret denies inline and the agent requests the binding via `request_config` `secret_bindings`.
+`park_reason` has exactly two values (v47 rekey, config-doc M3). `sensitive_target` is the sensitivity-axis overlay — per-call authority, ALWAYS coerced to ONCE at resolve, never transferable as a ticket; everything else parks as `approval_required`. What a row is *about* is `tool_name` alone (card dispatch, dedup, and apply all key on it), so the old dual-purpose `action` column — sometimes a tool name, sometimes a document verb, sometimes `sensitive` — is gone. The former `secret_bind` action was deleted with the bind park (D17) — an unbound secret denies inline and the agent requests the binding via `request_config` `secret_bindings`.
 
 ---
 
@@ -779,7 +781,7 @@ seconds) — the unused fields are `''` / NULL / NULL respectively
 | `channel_name` | TEXT | chat stamp — the durable route identity a fire resolves through `channel_routes` at fire time, rather than binding a session id at set time. In the default target mode it is copied from the setting session's own binding (NULL for CLI/sub-agent callers); under `'new'` it is the explicit delivery target |
 | `chat_id` | TEXT | with `channel_name`, the stamped chat |
 | `target` | TEXT | target-mode discriminator: NULL = follow the conversation (stamped chat, else the stamped `session_id`); `'pin'` = explicit session pin; `'new'` = a fresh session per fire |
-| `target_agent` | TEXT | agent that a `'new'`-mode fire runs under; NULL = `agent_name`. A value naming another agent is set only through an approval (see below) |
+| `target_agent` | TEXT | FK → `agents(name)` ON UPDATE CASCADE (v47); agent that a `'new'`-mode fire runs under; NULL = `agent_name`. A value naming another agent is set only through an approval (see below) |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `next_run_at` | INTEGER NOT NULL DEFAULT 0 | |
 | `last_run_at` | INTEGER | |

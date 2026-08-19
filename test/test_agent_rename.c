@@ -253,6 +253,110 @@ static void test_rename_no_orphans_self_audit(void) {
     printf("  PASS: test_rename_no_orphans_self_audit (%d agent_name tables)\n", nt);
 }
 
+/* ── v47: target_agent cascade, quiesce lease, two-domain rename ── */
+
+/* cron_jobs.target_agent gained its FK in v47 — a 'new'-mode job pointing at
+ * the renamed agent must follow it, exactly like agent_name does. */
+static void test_target_agent_cascade(void) {
+    sqlite3 *db = setup();
+    sqlite3_exec(db, "INSERT INTO agents(name) VALUES('Runner')", NULL, NULL, NULL);
+    sqlite3_exec(db,
+        "INSERT INTO cron_jobs(agent_name,name,cron_expr,session_id,task,"
+        " target,target_agent) VALUES('Runner','j2','* * * * *',1,'hi',"
+        " 'new','OldAgent')", NULL, NULL, NULL);
+    assert(agent_rename(db, "OldAgent", "NewAgent", 0) == 0);
+    assert(count_rows(db,
+        "SELECT COUNT(*) FROM cron_jobs WHERE target_agent='NewAgent'") == 1);
+    assert(count_rows(db,
+        "SELECT COUNT(*) FROM cron_jobs WHERE target_agent='OldAgent'") == 0);
+    db_close(db);
+    printf("  PASS: test_target_agent_cascade\n");
+}
+
+/* The lease is a CAS: the second taker loses, and only the holder can
+ * refresh or release it. An expired lease is free for the taking. */
+static void test_hold_lease(void) {
+    sqlite3 *db = setup();
+    assert(agent_hold_acquire(db, "OldAgent", 60, "cli:1") == 0);
+    assert(agent_hold_acquire(db, "OldAgent", 60, "cli:2") == -1);
+    assert(agent_hold_refresh(db, "OldAgent", 60, "cli:2") == -1);
+    assert(agent_hold_refresh(db, "OldAgent", 60, "cli:1") == 0);
+    assert(agent_hold_release(db, "OldAgent", "cli:2") == -1);
+    assert(agent_hold_release(db, "OldAgent", "cli:1") == 0);
+    assert(agent_hold_acquire(db, "OldAgent", 60, "cli:2") == 0);
+
+    /* Expired lease self-heals — no cleanup path needed for a dead holder. */
+    sqlite3_exec(db, "UPDATE agents SET hold_until=unixepoch()-1"
+                     " WHERE name='OldAgent'", NULL, NULL, NULL);
+    assert(agent_hold_acquire(db, "OldAgent", 60, "cli:3") == 0);
+
+    /* Missing agent is indistinguishable from contention at the SQL level;
+     * both are "you don't hold it". */
+    assert(agent_hold_acquire(db, "Ghost", 60, "cli:1") == -1);
+    db_close(db);
+    printf("  PASS: test_hold_lease\n");
+}
+
+/* The drain predicate: a busy session only counts while its owner is alive. */
+static void test_busy_session_liveness(void) {
+    sqlite3 *db = setup();
+    char state[32];
+    assert(agent_busy_session(db, "OldAgent", state, sizeof(state)) == 0);
+
+    sqlite3_exec(db, "UPDATE sessions SET state='llm_running',"
+                     " owner_instance='dead-1' WHERE agent_name='OldAgent'",
+                 NULL, NULL, NULL);
+    /* Dead owner (no processes row) reads as idle — otherwise a rename waits
+     * for a daemon that will never finish the turn. */
+    assert(agent_busy_session(db, "OldAgent", state, sizeof(state)) == 0);
+
+    sqlite3_exec(db, "INSERT INTO processes(instance_id,pid,mode)"
+                     " VALUES('dead-1',1,'daemon')", NULL, NULL, NULL);
+    int64_t sid = agent_busy_session(db, "OldAgent", state, sizeof(state));
+    assert(sid > 0);
+    assert(strcmp(state, "llm_running") == 0);
+
+    sqlite3_exec(db, "UPDATE sessions SET state='idle', owner_instance=NULL",
+                 NULL, NULL, NULL);
+    assert(agent_busy_session(db, "OldAgent", state, sizeof(state)) == 0);
+    db_close(db);
+    printf("  PASS: test_busy_session_liveness\n");
+}
+
+/* Two storage domains, one logical change: when the disk move can't happen,
+ * the committed DB rename is compensated so both domains agree again. */
+static void test_rename_full_disk_rollback(void) {
+    sqlite3 *db = setup();
+    char root[128];
+    snprintf(root, sizeof(root), "/tmp/test_rename_full_%ld", (long)getpid());
+    char old_dir[192], new_dir[192], cmd[1024];
+    snprintf(old_dir, sizeof(old_dir), "%s/OldAgent", root);
+    snprintf(new_dir, sizeof(new_dir), "%s/NewAgent", root);
+    snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s && mkdir -p %s",
+             root, old_dir, new_dir);
+    assert(system(cmd) == 0);
+
+    /* NewAgent/ already exists on disk: moving onto it would merge two
+     * agents' workspaces, so the rename must refuse and undo the DB step. */
+    assert(agent_rename_full(db, "OldAgent", "NewAgent", 0, root) == -1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE name='OldAgent'") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE name='NewAgent'") == 0);
+    assert(access(old_dir, F_OK) == 0);
+
+    /* Clear the obstacle and the same call succeeds in both domains. */
+    snprintf(cmd, sizeof(cmd), "rmdir %s", new_dir);
+    assert(system(cmd) == 0);
+    assert(agent_rename_full(db, "OldAgent", "NewAgent", 0, root) == 0);
+    assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE name='NewAgent'") == 1);
+    assert(access(new_dir, F_OK) == 0);
+    assert(access(old_dir, F_OK) != 0);
+
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", root);
+    assert(system(cmd) == 0);
+    db_close(db);
+    printf("  PASS: test_rename_full_disk_rollback\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_agent_rename:\n");
@@ -264,6 +368,10 @@ int main(void) {
     test_name_conflict();
     test_invalid_name();
     test_not_found();
+    test_target_agent_cascade();
+    test_hold_lease();
+    test_busy_session_liveness();
+    test_rename_full_disk_rollback();
     printf("all agent_rename tests passed\n");
     return 0;
 }

@@ -269,7 +269,7 @@ static void test_pending_approvals_section(void) {
     snprintf(args, sizeof(args),
         "{\"action\":\"request_changes\",\"changes\":"
         "{\"grants\":{\"hosts\":[\"api.example.com\"]}}}");
-    assert(approval_create(db, sid, "c1", "request_config", "request_changes",
+    assert(approval_create(db, sid, "c1", "request_config", APPROVAL_PARK_REQUIRED,
                            args, "apply") > 0);
 
     out = call_handler(&reg, "{}");

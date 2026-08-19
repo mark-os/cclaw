@@ -227,7 +227,7 @@ int main(void) {
         ok = 0;
         if (sqlite3_prepare_v2(db,
                 /* apply-style approvals are terminal at decision time */
-                "SELECT 1 FROM approvals WHERE action='request_changes' AND state='consumed'"
+                "SELECT 1 FROM approvals WHERE park_reason='approval_required' AND state='consumed'"
                 " AND json_extract(args_json,'$.reason')='pty integration test'",
                 -1, &s, NULL) == SQLITE_OK) {
             ok = (sqlite3_step(s) == SQLITE_ROW);

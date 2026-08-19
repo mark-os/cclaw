@@ -123,13 +123,13 @@ static void test_park_tools_grant(void) {
     /* Verify approvals row. */
     sqlite3_stmt *s;
     int rc = sqlite3_prepare_v2(db,
-        "SELECT action, json_extract(args_json,'$.changes.grants.tools[0]')"
+        "SELECT park_reason, json_extract(args_json,'$.changes.grants.tools[0]')"
         " FROM approvals WHERE session_id=?1 AND tool_name='request_config'",
         -1, &s, NULL);
     assert(rc == SQLITE_OK);
     sqlite3_bind_int64(s, 1, sid);
     assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "request_changes") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "approval_required") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "shell_exec") == 0);
     sqlite3_finalize(s);
 
@@ -405,7 +405,7 @@ static void test_provider_defaults(void) {
     int rc = sqlite3_prepare_v2(db,
         "SELECT json_extract(args_json,'$.changes.provider.base_url'),"
         "       json_extract(args_json,'$.changes.provider.api_key_env')"
-        " FROM approvals WHERE session_id=?1 AND action='request_changes'"
+        " FROM approvals WHERE session_id=?1 AND park_reason='approval_required'"
         " ORDER BY id DESC LIMIT 1", -1, &s, NULL);
     assert(rc == SQLITE_OK);
     sqlite3_bind_int64(s, 1, sid);
@@ -656,7 +656,7 @@ static void test_dedup(void) {
     /* Mark the first approval as expired (auto:expired = nobody decided). */
     assert(sqlite3_exec(db,
         "UPDATE approvals SET state='denied', decided_via='auto:expired'"
-        " WHERE action='request_changes'"
+        " WHERE park_reason='approval_required'"
         " AND json_extract(args_json,'$.changes.grants.tools[0]')='shell_exec'",
         NULL, NULL, NULL) == SQLITE_OK);
 

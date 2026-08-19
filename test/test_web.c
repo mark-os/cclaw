@@ -291,8 +291,8 @@ static void test_admin_dashboard(void) {
         "INSERT OR IGNORE INTO agents(name) VALUES('Assistant'), ('ev<il&name');"
         "INSERT INTO sessions(name, agent_name, channel_name)"
         "  VALUES('s','Assistant','telegram');"
-        "INSERT INTO approvals(session_id, tool_name, action, args_json, state)"
-        "  VALUES(1, 'shell_exec', 'exec', '{\"cmd\":\"ls\"}', 'pending');",
+        "INSERT INTO approvals(session_id, tool_name, park_reason, args_json, state)"
+        "  VALUES(1, 'shell_exec', 'approval_required', '{\"cmd\":\"ls\"}', 'pending');",
         NULL, NULL, NULL) == SQLITE_OK);
 
     assert(web_start(&cfg, db, cfg.db_path) == 0);

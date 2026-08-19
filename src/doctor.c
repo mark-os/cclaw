@@ -471,7 +471,7 @@ static void check_denials(sqlite3 *db) {
             "  FROM tool_calls tc LEFT JOIN sessions s ON s.id=tc.session_id"
             "  WHERE tc.resolved_by IN " DENIAL_SET
             "  UNION ALL"
-            "  SELECT a.requested_at, s.agent_name, COALESCE(a.tool_name, a.action),"
+            "  SELECT a.requested_at, s.agent_name, COALESCE(a.tool_name, '?'),"
             "         'approval:' || COALESCE(a.decided_via,'?')"
             "  FROM approvals a LEFT JOIN sessions s ON s.id=a.session_id"
             "  WHERE a.state='denied'"

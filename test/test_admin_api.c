@@ -300,14 +300,14 @@ static void test_admin_list_tool_names(void) {
 }
 
 static int64_t insert_approval(sqlite3 *db, int64_t sid, const char *tool_name,
-                               const char *action, const char *args_json, const char *state) {
+                               const char *park_reason, const char *args_json, const char *state) {
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(db,
-        "INSERT INTO approvals(session_id, tool_call_id, tool_name, action, args_json, resolve, state)"
+        "INSERT INTO approvals(session_id, tool_call_id, tool_name, park_reason, args_json, resolve, state)"
         " VALUES(?1,'call_0',?2,?3,?4,'apply',?5);", -1, &s, NULL) == SQLITE_OK);
     sqlite3_bind_int64(s, 1, sid);
     sqlite3_bind_text(s, 2, tool_name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(s, 3, action, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, park_reason, -1, SQLITE_STATIC);
     sqlite3_bind_text(s, 4, args_json, -1, SQLITE_STATIC);
     sqlite3_bind_text(s, 5, state, -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_DONE);

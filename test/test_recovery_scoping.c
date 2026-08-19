@@ -74,7 +74,7 @@ static void test_recovery_scoping(void) {
 
     /* Insert a pending approval for sid_b */
     int64_t appr_id = approval_create(db, sid_b, "call_orphan_b", "shell_exec",
-                                      "request_changes",
+                                      APPROVAL_PARK_REQUIRED,
                                       "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"x.com\"]}}}",
                                       "apply");
     assert(appr_id > 0);

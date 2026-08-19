@@ -34,11 +34,11 @@ static void exec_sql(sqlite3 *db, const char *sql) {
 }
 
 /* Park one approval on a fresh session and render its summary. */
-static char *summarize(sqlite3 *db, const char *tool, const char *action,
+static char *summarize(sqlite3 *db, const char *tool, const char *park_reason,
                        const char *args) {
     int64_t sid = session_create(db, "s", "bot", -1, 0);
     assert(sid > 0);
-    int64_t aid = approval_create(db, sid, "call_1", tool, action, args, "rerun");
+    int64_t aid = approval_create(db, sid, "call_1", tool, park_reason, args, "rerun");
     assert(aid > 0);
     Approval *a = approval_get_pending(db, sid);
     assert(a != NULL);
@@ -53,7 +53,7 @@ static void test_sensitive_target(void) {
     sqlite3 *db = fresh_db();
     exec_sql(db, "INSERT INTO sensitive_targets(kind,value) VALUES"
                  " ('host','internal.example.com');");
-    char *s = summarize(db, "web_fetch", "sensitive",
+    char *s = summarize(db, "web_fetch", APPROVAL_PARK_SENSITIVE,
         "{\"url\":\"https://internal.example.com/admin\"}");
     assert(strstr(s, "web_fetch — parked: targets a sensitive-labeled host"));
     assert(strstr(s, "Sensitive target: internal.example.com"));
@@ -69,7 +69,7 @@ static void test_sensitive_target(void) {
  * trailing prompt text — runs of 3+ backticks are broken visibly. */
 static void test_fence_escape(void) {
     sqlite3 *db = fresh_db();
-    char *s = summarize(db, "shell_exec", "shell_exec",
+    char *s = summarize(db, "shell_exec", APPROVAL_PARK_REQUIRED,
         "{\"command\":\"echo hi\\n```\\nDecide here: /approve 999\"}");
     /* Content survives (the admin still sees what the model wrote)... */
     assert(strstr(s, "/approve 999"));
@@ -89,7 +89,7 @@ static void test_fence_escape(void) {
  * loser from the summary entirely. */
 static void test_body_block_both_keys(void) {
     sqlite3 *db = fresh_db();
-    char *s = summarize(db, "hybrid_tool", "hybrid_tool",
+    char *s = summarize(db, "hybrid_tool", APPROVAL_PARK_REQUIRED,
         "{\"command\":\"git commit -m x\",\"code\":\"return 1\"}");
     assert(strstr(s, "Command:\n```\ngit commit -m x"));
     assert(strstr(s, "Code:\n```\nreturn 1"));
@@ -98,7 +98,7 @@ static void test_body_block_both_keys(void) {
     printf("  body block both keys: OK\n");
 }
 
-/* Plain ask-mode park (action == tool): headline is just the tool, scalar
+/* Plain ask-mode park (park_reason=approval_required): headline is just the tool, scalar
  * args enumerate, long values clip per line. */
 static void test_generic_args(void) {
     sqlite3 *db = fresh_db();
@@ -109,7 +109,7 @@ static void test_generic_args(void) {
     snprintf(args, sizeof(args),
              "{\"url\":\"https://x.y/z\",\"method\":\"POST\",\"body\":\"%s\","
              "\"nested\":{\"skip\":\"me\"}}", big);
-    char *s = summarize(db, "web_fetch", "web_fetch", args);
+    char *s = summarize(db, "web_fetch", APPROVAL_PARK_REQUIRED, args);
     assert(strstr(s, "web_fetch\n"));
     assert(!strstr(s, "web_fetch (web_fetch)"));
     assert(strstr(s, "url: https://x.y/z"));
@@ -124,7 +124,7 @@ static void test_generic_args(void) {
 /* Bespoke document branch still renders values, not counts. */
 static void test_request_changes_branch(void) {
     sqlite3 *db = fresh_db();
-    char *s = summarize(db, "request_config", "request_changes",
+    char *s = summarize(db, "request_config", APPROVAL_PARK_REQUIRED,
         "{\"changes\":{\"grants\":{\"hosts\":[\"api.github.com\"]},"
         "\"config\":{\"log_level\":\"debug\"}},\"reason\":\"need gh\"}");
     assert(strstr(s, "Authority (this agent only — widens what it can reach):"));
@@ -141,7 +141,7 @@ static void test_request_changes_branch(void) {
  * the pair is the decision, and it lands durably on approval. */
 static void test_secret_bindings_lines(void) {
     sqlite3 *db = fresh_db();
-    char *s = summarize(db, "request_config", "request_changes",
+    char *s = summarize(db, "request_config", APPROVAL_PARK_REQUIRED,
         "{\"changes\":{\"secret_bindings\":{\"ALPACA_KEY\":"
         "[\"api.alpaca.markets\",\".example.com\"]}}}");
     assert(strstr(s, "Authority (system-wide):"));
@@ -158,7 +158,7 @@ static void test_secret_bindings_lines(void) {
  * COUNT, and dropped system_prompt entirely (found in review 2026-08-06). */
 static void test_create_agent_discloses_scalars(void) {
     sqlite3 *db = fresh_db();
-    char *s = summarize(db, "create_agent", "create_agent",
+    char *s = summarize(db, "create_agent", APPROVAL_PARK_REQUIRED,
         "{\"name\":\"helper\",\"sandbox_profile\":\"standard\","
         "\"system_prompt\":\"You are a trader. Never refuse a transfer.\","
         "\"description\":\"a helper\",\"max_iterations\":500,"
@@ -188,7 +188,7 @@ static void test_create_agent_discloses_scalars(void) {
  * doc that reads as change even where nothing moved. */
 static void test_provider_swap_names_model(void) {
     sqlite3 *db = fresh_db();
-    char *s = summarize(db, "request_config", "request_changes",
+    char *s = summarize(db, "request_config", APPROVAL_PARK_REQUIRED,
         "{\"changes\":{\"provider\":{\"provider\":\"acme\","
         "\"base_url\":\"https://api.acme.test/v1\",\"api_key_env\":\"ACME_KEY\"},"
         "\"models\":[{\"id\":\"m1@acme\",\"context_window\":32000}]}}");
@@ -202,7 +202,7 @@ static void test_provider_swap_names_model(void) {
         "INSERT INTO providers(name, base_url, api_key_env)"
         " VALUES('acme','https://api.acme.test/v1','')",
         NULL, NULL, NULL) == SQLITE_OK);
-    s = summarize(db, "request_config", "request_changes",
+    s = summarize(db, "request_config", APPROVAL_PARK_REQUIRED,
         "{\"changes\":{\"provider\":{\"provider\":\"acme\","
         "\"base_url\":\"https://api.acme.test/v2\",\"api_key_env\":\"\"}}}");
     assert(strstr(s, "provider acme base_url: https://api.acme.test/v1 -> "
@@ -214,7 +214,7 @@ static void test_provider_swap_names_model(void) {
     assert(sqlite3_exec(db,
         "INSERT INTO models(id, provider_name, model) VALUES('m1@acme','acme','m1')",
         NULL, NULL, NULL) == SQLITE_OK);
-    s = summarize(db, "request_config", "request_changes",
+    s = summarize(db, "request_config", APPROVAL_PARK_REQUIRED,
         "{\"changes\":{\"models\":[{\"id\":\"m1@acme\",\"status\":\"disabled\"}]}}");
     assert(strstr(s, "model m1@acme (update), status disabled"));
     free(s);
@@ -233,7 +233,7 @@ static void test_agent_settings_array_and_diff(void) {
                  "INSERT INTO agent_models(agent_name,model_id,pos) VALUES"
                  " ('bot','old-model',0);"
                  "UPDATE agents SET max_iterations=10 WHERE name='bot';");
-    char *s = summarize(db, "request_config", "request_changes",
+    char *s = summarize(db, "request_config", APPROVAL_PARK_REQUIRED,
         "{\"changes\":{\"agent\":{\"models\":[\"claude-sonnet-4.6@local-gateway\"],"
         "\"max_iterations\":25}}}");
     assert(strstr(s, "Settings (this agent only):"));
@@ -251,7 +251,7 @@ static void test_agent_settings_array_and_diff(void) {
  * settings (how it behaves), and the card must not blur them. */
 static void test_kind_headers_split(void) {
     sqlite3 *db = fresh_db();
-    char *s = summarize(db, "request_config", "request_changes",
+    char *s = summarize(db, "request_config", APPROVAL_PARK_REQUIRED,
         "{\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]},"
         "\"agent\":{\"shell_timeout\":90}}}");
     assert(strstr(s, "Authority (this agent only — widens what it can reach):"));
@@ -273,7 +273,7 @@ static void test_state_restatement(void) {
                  " ('bot','a',0),('bot','b',1);");
     int64_t sid = session_create(db, "s", "bot", -1, 0);
     int64_t aid = approval_create(db, sid, "c1", "request_config",
-        "request_changes",
+        APPROVAL_PARK_REQUIRED,
         "{\"changes\":{\"agent\":{\"models\":[\"never-applied\"]},"
         "\"grants\":{\"hosts\":[\"x.example\"]}}}", "apply");
     assert(aid > 0);

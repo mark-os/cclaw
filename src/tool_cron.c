@@ -389,7 +389,7 @@ static char *park_cross_agent(ToolCronCtx *ctx, const char *doc,
 
     int64_t aid = approval_create(ctx->db, ctx->session_id,
                                   ctx->current_tool_call_id, "cron_set",
-                                  "cron_set", doc, "apply");
+                                  APPROVAL_PARK_REQUIRED, doc, "apply");
     if (aid < 0) return errf("error: failed to create approval");
     session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
     return NULL; /* park */

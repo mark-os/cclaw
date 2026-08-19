@@ -19,6 +19,7 @@
 #include <syslog.h>
 #include <unistd.h>
 #include <signal.h>
+#include <limits.h>
 #include <errno.h>
 #include <time.h>
 #include <stdint.h>
@@ -540,6 +541,65 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "ALTER TABLE models DROP COLUMN error_count_5xx;"
       "ALTER TABLE models DROP COLUMN error_count_429;"
       "ALTER TABLE models ADD COLUMN consec_failures INTEGER DEFAULT 0;",
+      NULL },
+
+    /* v47: operator rename (plan/projects/config-doc.md M3).
+     *  - agents.hold_until/hold_holder: the quiesce lease `cclaw rename-agent`
+     *    takes so no new turn opens while identity changes underneath.
+     *  - cron_jobs.target_agent becomes a real FK so a rename cascades into it
+     *    like every other agent_name column (D8). SQLite can't add an FK in
+     *    place — rebuild the table. Rows naming a nonexistent agent would fail
+     *    the new constraint; they are already broken (the fire path resolves
+     *    nothing), so NULL them first rather than refusing the upgrade.
+     *  - approvals.action → park_reason: tool_name alone says WHAT parked,
+     *    park_reason says WHY. The old column carried both, so dedup had to
+     *    key on a value that was sometimes the tool name and sometimes
+     *    'sensitive'. Map: 'sensitive' → 'sensitive_target', everything else
+     *    (tool names, 'request_changes', 'cron_set', …) → 'approval_required'.
+     * This patch runs inside BEGIN EXCLUSIVE with foreign_keys=ON: nothing
+     * references cron_jobs, so the drop/rename is FK-safe once the orphans
+     * are gone. */
+    { 47,
+      "ALTER TABLE agents ADD COLUMN hold_until INTEGER;"
+      "ALTER TABLE agents ADD COLUMN hold_holder TEXT;"
+
+      "UPDATE cron_jobs SET target_agent=NULL"
+      " WHERE target_agent IS NOT NULL"
+      "   AND target_agent NOT IN (SELECT name FROM agents);"
+      "CREATE TABLE cron_jobs_new ("
+      "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+      "  name TEXT NOT NULL,"
+      "  cron_expr TEXT NOT NULL,"
+      "  run_at INTEGER,"
+      "  interval_s INTEGER,"
+      "  kind TEXT NOT NULL DEFAULT 'task',"
+      "  session_id INTEGER NOT NULL,"
+      "  task TEXT NOT NULL,"
+      "  script TEXT,"
+      "  channel_name TEXT,"
+      "  chat_id TEXT,"
+      "  target TEXT,"
+      "  target_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+      "  enabled INTEGER NOT NULL DEFAULT 1,"
+      "  next_run_at INTEGER NOT NULL DEFAULT 0,"
+      "  last_run_at INTEGER,"
+      "  created_at INTEGER NOT NULL DEFAULT (unixepoch())"
+      ");"
+      "INSERT INTO cron_jobs_new"
+      " SELECT id, agent_name, name, cron_expr, run_at, interval_s, kind,"
+      "        session_id, task, script, channel_name, chat_id, target,"
+      "        target_agent, enabled, next_run_at, last_run_at, created_at"
+      "   FROM cron_jobs;"
+      "DROP TABLE cron_jobs;"
+      "ALTER TABLE cron_jobs_new RENAME TO cron_jobs;"
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_cron_jobs_name"
+      " ON cron_jobs(agent_name, name);"
+
+      "ALTER TABLE approvals RENAME COLUMN action TO park_reason;"
+      "UPDATE approvals SET park_reason ="
+      "  CASE WHEN park_reason='sensitive' THEN 'sensitive_target'"
+      "       ELSE 'approval_required' END;",
       NULL },
 };
 
@@ -2409,6 +2469,125 @@ rollback_busy:
     return -1;
 }
 
+/* ── Quiesce lease (agents.hold_until / hold_holder) ──────────────
+ * A time-bounded "don't open new turns for this agent" flag, taken by
+ * `cclaw rename-agent` and honoured at the one turn-open point
+ * (advance_session). A lease is a lease, not a lock: it expires, so a
+ * holder that dies mid-rename blocks the agent for at most `seconds` and
+ * needs no cleanup path. Acquire is one CAS-shaped UPDATE — zero rows
+ * changed means somebody else holds it (or the agent doesn't exist). */
+static int agent_hold_update(sqlite3 *db, const char *sql, const char *name,
+                             int seconds, const char *holder) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int(s, 1, seconds);
+    sqlite3_bind_text(s, 2, holder, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(s);
+    sqlite3_finalize(s);
+    if (rc != SQLITE_DONE) return -1;
+    return sqlite3_changes(db) > 0 ? 0 : -1;
+}
+
+int agent_hold_acquire(sqlite3 *db, const char *name, int seconds,
+                       const char *holder) {
+    if (!db || !name || !holder || seconds <= 0) return -1;
+    return agent_hold_update(db,
+        "UPDATE agents SET hold_until=unixepoch()+?1, hold_holder=?2"
+        " WHERE name=?3 AND (hold_until IS NULL OR hold_until < unixepoch());",
+        name, seconds, holder);
+}
+
+int agent_hold_refresh(sqlite3 *db, const char *name, int seconds,
+                       const char *holder) {
+    if (!db || !name || !holder || seconds <= 0) return -1;
+    return agent_hold_update(db,
+        "UPDATE agents SET hold_until=unixepoch()+?1"
+        " WHERE name=?3 AND hold_holder=?2;",
+        name, seconds, holder);
+}
+
+int agent_hold_release(sqlite3 *db, const char *name, const char *holder) {
+    if (!db || !name || !holder) return -1;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE agents SET hold_until=NULL, hold_holder=NULL"
+            " WHERE name=?1 AND hold_holder=?2;", -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, holder, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(s);
+    sqlite3_finalize(s);
+    return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+}
+
+int64_t agent_busy_session(sqlite3 *db, const char *name, char *state, size_t cap) {
+    if (state && cap) state[0] = '\0';
+    if (!db || !name) return 0;
+    /* "Busy" = a non-idle session whose owner is alive. A dead owner's stale
+     * state is not work in flight — recovery will reclaim it — and waiting on
+     * it would hang the rename until the daemon restarts. Same liveness
+     * idiom as RECOVER_DEAD_OWNER / approval_list_expired: an owner absent
+     * from `processes` is gone. */
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT id, state FROM sessions"
+            " WHERE agent_name=?1 AND state!='idle'"
+            "   AND owner_instance IS NOT NULL"
+            "   AND owner_instance IN (SELECT instance_id FROM processes)"
+            " ORDER BY id LIMIT 1;", -1, &s, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    int64_t id = 0;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        id = sqlite3_column_int64(s, 0);
+        const char *st = (const char *)sqlite3_column_text(s, 1);
+        if (state && cap && st) snprintf(state, cap, "%s", st);
+    }
+    sqlite3_finalize(s);
+    return id;
+}
+
+int agent_rename_full(sqlite3 *db, const char *old_name, const char *new_name,
+                      int64_t requesting_session_id, const char *agents_dir) {
+    int rc = agent_rename(db, old_name, new_name, requesting_session_id);
+    if (rc != 0) return rc;
+    if (!agents_dir || !agents_dir[0]) return 0;   /* DB-only deployment */
+
+    /* Two storage domains, one logical change: SQLite cannot enrol a
+     * directory rename in its transaction, so the DB step commits first and
+     * the disk step compensates on failure. Ordering is deliberate — DB
+     * first, because a committed rename with the old directory still in
+     * place is recoverable by hand (and by the compensation below), while a
+     * moved directory with an uncommitted DB is an agent whose workspace has
+     * vanished from under it. The compensation is the *same* function that
+     * did the rename, so it fails the same way or not at all; if even the
+     * compensation fails we say so loudly and return -5 (split state), which
+     * is the only outcome an operator must fix by hand. */
+    char old_path[PATH_MAX], new_path[PATH_MAX];
+    snprintf(old_path, sizeof(old_path), "%s/%s", agents_dir, old_name);
+    snprintf(new_path, sizeof(new_path), "%s/%s", agents_dir, new_name);
+
+    struct stat st;
+    if (stat(old_path, &st) != 0) return 0;        /* nothing on disk to move */
+    if (stat(new_path, &st) == 0) {                /* would clobber — refuse */
+        LOG_ERROR_("agent rename: %s already exists on disk", new_path);
+        goto undo;
+    }
+    if (rename(old_path, new_path) == 0) return 0;
+    LOG_ERROR_("agent rename: %s -> %s failed: %s", old_path, new_path,
+               strerror(errno));
+
+undo:
+    if (agent_rename(db, new_name, old_name, requesting_session_id) != 0) {
+        LOG_ERROR_("agent rename: DB rollback %s -> %s FAILED — DB says '%s', "
+                   "disk says '%s'; fix by hand", new_name, old_name,
+                   new_name, old_name);
+        return -5;
+    }
+    return -1;
+}
+
 /* tool_calls status helpers */
 
 int db_tool_call_set_status(sqlite3 *db, int64_t session_id, const char *call_id,
@@ -2875,7 +3054,7 @@ int db_recover_stale_sessions(sqlite3 *db) {
     const char *orphan_notice_sql =
         "INSERT INTO inbox(session_id, source, payload)"
         " SELECT a.session_id, 'approval',"
-        "        'Approval #'||a.id||' for '''||COALESCE(a.action,a.tool_name,'tool')"
+        "        'Approval #'||a.id||' for '''||COALESCE(a.tool_name,'tool')"
         "        ||''' was cancelled: the daemon restarted while it was pending."
         "        Not a denial - re-request if the task still needs it.'"
         " FROM approvals a WHERE a.state='pending'"

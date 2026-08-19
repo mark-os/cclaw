@@ -42,7 +42,8 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
                         int64_t grant_expires_at, char **detail) {
     *apply_failed = 0;
     if (detail) *detail = NULL;
-    if (strcmp(a->action, "request_changes") == 0) {
+    if (!a->tool_name) return;      /* nothing to dispatch on (v47: tool_name is the key) */
+    if (strcmp(a->tool_name, "request_config") == 0) {
         /* One savepoint applies the whole document — grants, config values,
          * provider upsert (tool_request_config.c). Failure rolls everything
          * back and surfaces as apply-failed, never a partial grant set.
@@ -53,7 +54,7 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
             LOG_WARN_("request_changes apply failed");
             *apply_failed = 1; /* generic apply-failed: error result, no grant */
         }
-    } else if (strcmp(a->action, "extension_promote") == 0) {
+    } else if (strcmp(a->tool_name, "extension_promote") == 0) {
         char *bundle = tool_args_str(proc_db(), a->args_json, "bundle");
         char *ierr = NULL;
         if (!bundle || extension_install(proc_db(), bundle, agent, &ierr) != 0) {
@@ -62,7 +63,7 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
         }
         free(ierr);
         free(bundle);
-    } else if (strcmp(a->action, "create_agent") == 0) {
+    } else if (strcmp(a->tool_name, "create_agent") == 0) {
         char *cerr = NULL;
         const char *adir = proc_tool_setup() ? proc_tool_setup()->req_cfg_ctx.agents_dir : NULL;
         if (agent_definition_apply(proc_db(), a->args_json, agent, adir, &cerr) != 0) {
@@ -70,14 +71,14 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
             *apply_failed = 1; /* generic apply-failed: error result, no grant */
         }
         free(cerr);
-    } else if (strcmp(a->action, "update_agent") == 0) {
+    } else if (strcmp(a->tool_name, "update_agent") == 0) {
         char *cerr = NULL;
         if (agent_definition_update_apply(proc_db(), a->args_json, agent, &cerr) != 0) {
             LOG_WARN_("update_agent apply failed: %s", cerr ? cerr : "?");
             *apply_failed = 1; /* generic apply-failed: error result, no grant */
         }
         free(cerr);
-    } else if (strcmp(a->action, "cron_set") == 0) {
+    } else if (strcmp(a->tool_name, "cron_set") == 0) {
         /* Standing job: approved once here, then it fires unattended. The
          * document is the same one cron_set validated before parking. */
         char *cerr = NULL;
@@ -198,7 +199,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                              "— the operator may not have seen it. Not a denial "
                              "— re-request only if the task still needs it, and "
                              "mention that it expired. Nothing was applied. "
-                             "Current state: %s", a->action, state);
+                             "Current state: %s", a->tool_name, state);
                 else {
                     char who[128];
                     approval_decider_phrase(decided_via, who, sizeof(who));
@@ -206,16 +207,16 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                              "error: %s denied by the operator%s: this is a "
                              "decision, not an error — do not re-request unless "
                              "the operator asks. Unchanged: %s",
-                             a->action, who, state);
+                             a->tool_name, who, state);
                 }
                 ToolResult tr = { .tool_call_id = a->tool_call_id, .content = buf };
                 Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
-                                .tool_name = a->action, .is_error = 1 };
+                                .tool_name = a->tool_name, .is_error = 1 };
                 entry_append_with_iteration(proc_db(), session_id, &msg, 0);
                 db_tool_call_set_status(proc_db(), session_id, a->tool_call_id, "done", decided_via);
             }
         } else if (decision == APPROVAL_ALWAYS && agent) {
-            if (a->action && strcmp(a->action, "sensitive") == 0) {
+            if (approval_is_sensitive(a)) {
                 /* Sensitivity axis: no standing grant may satisfy a sensitive
                  * target — ALWAYS is coerced to ONCE (specs/trust.md). The
                  * approval still passes this one frozen call; the next call
@@ -224,7 +225,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                           a->tool_name ? a->tool_name : "?");
             } else {
                 /* "Allow and stop asking" — flip the standing mode to silent. */
-                agent_config_set_tool_mode(proc_db(), agent, a->action, "silent");
+                agent_config_set_tool_mode(proc_db(), agent, a->tool_name, "silent");
             }
         }
         session_set_state(proc_db(), session_id, "tool_running");
@@ -242,7 +243,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
     if (decision == APPROVAL_ONCE) {
         char err[256];
         snprintf(err, sizeof(err),
-                 "error: once-approval invalid for %s", a->action);
+                 "error: once-approval invalid for %s", a->tool_name);
         if (a->tool_call_id) {
             ToolResult tr = { .tool_call_id = a->tool_call_id, .content = err };
             Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
@@ -272,15 +273,15 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                  "error: %s was approved but applying it failed (%s) — "
                  "everything rolled back. System error, not a denial: "
                  "re-request once; if it fails again, tell the operator.",
-                 a->action ? a->action : "apply",
+                 a->tool_name ? a->tool_name : "apply",
                  apply_detail ? apply_detail : "see daemon log");
-    else if (decision == APPROVAL_ALWAYS && a->action &&
-             strcmp(a->action, "extension_promote") == 0)
+    else if (decision == APPROVAL_ALWAYS && a->tool_name &&
+             strcmp(a->tool_name, "extension_promote") == 0)
         snprintf(result_buf, sizeof(result_buf),
                  "approved: extension_promote — registered; its tools are "
                  "granted to you and callable immediately");
     else if (decision == APPROVAL_ALWAYS)
-        snprintf(result_buf, sizeof(result_buf), "approved: %s%s%s", a->action,
+        snprintf(result_buf, sizeof(result_buf), "approved: %s%s%s", a->tool_name,
                  apply_detail ? " — " : "", apply_detail ? apply_detail : "");
     else {
         char who[128], state[256];
@@ -471,7 +472,7 @@ void handle_approval_park(int64_t session_id, const char *tool_call_id) {
          * coercion conditions exactly, or the button lies. */
         char keyboard[320];
         int is_apply = a->resolve && strcmp(a->resolve, "apply") == 0;
-        int coerced = a->action && strcmp(a->action, "sensitive") == 0;
+        int coerced = approval_is_sensitive(a);
         if (is_apply) {
             snprintf(keyboard, sizeof(keyboard),
                      "[[{\"text\":\"Grant\",\"callback_data\":\"appr:%lld:yes\"},"

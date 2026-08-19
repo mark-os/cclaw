@@ -555,7 +555,7 @@ function sendApprovalsMenu(chatId) {
     var keyboard = [];
     for (var i = 0; i < list.length; i++) {
         var a = list[i];
-        lines.push("#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.action);
+        lines.push("#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.park_reason);
         keyboard.push([
             {text: "Approve #" + a.id, callback_data: "appr:" + a.id + ":yes"},
             {text: "Deny #" + a.id, callback_data: "appr:" + a.id + ":no"}

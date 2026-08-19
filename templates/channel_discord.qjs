@@ -744,7 +744,7 @@ function sendApprovals(chatId) {
     var buf = header, rows = [];
     for (var i = 0; i < list.length; i++) {
         var a = list[i];
-        var line = "#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.action +
+        var line = "#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.park_reason +
                    "\n    " + argsSummary(a.args_json);
         var next = buf ? buf + "\n" + line : line;
         if ((next.length > DISCORD_MAX_MSG_LEN || rows.length >= 5) && buf) {

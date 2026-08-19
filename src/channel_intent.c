@@ -151,11 +151,11 @@ static int intent_exec_decide(sqlite3 *db, const char *ch_name, const char *cid,
     }
     int64_t id = it->approval_id;
 
-    char state[32] = {0}, tool[64] = {0}, action[64] = {0}, resolve[16] = {0};
+    char state[32] = {0}, tool[64] = {0}, why[64] = {0}, resolve[16] = {0};
     int found = 0, in_scope = 0;
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
-            "SELECT a.state, COALESCE(a.tool_name,'?'), COALESCE(a.action,'?'),"
+            "SELECT a.state, COALESCE(a.tool_name,'?'), COALESCE(a.park_reason,'?'),"
             "       COALESCE(a.resolve,'rerun'), s.channel_name IS ?2"
             " FROM approvals a JOIN sessions s ON s.id = a.session_id"
             " WHERE a.id = ?1;", -1, &s, NULL) == SQLITE_OK) {
@@ -165,7 +165,7 @@ static int intent_exec_decide(sqlite3 *db, const char *ch_name, const char *cid,
             found = 1;
             snprintf(state, sizeof(state), "%s", sqlite3_column_text(s, 0));
             snprintf(tool, sizeof(tool), "%s", sqlite3_column_text(s, 1));
-            snprintf(action, sizeof(action), "%s", sqlite3_column_text(s, 2));
+            snprintf(why, sizeof(why), "%s", sqlite3_column_text(s, 2));
             snprintf(resolve, sizeof(resolve), "%s", sqlite3_column_text(s, 3));
             in_scope = sqlite3_column_int(s, 4);
         }
@@ -207,13 +207,13 @@ static int intent_exec_decide(sqlite3 *db, const char *ch_name, const char *cid,
                  ch_name, sender);
     else
         snprintf(decided_via, sizeof(decided_via), "channel:%s", ch_name);
-    LOG_INFO_("channel %s ch=%s chat=%s sender=%s approval=%lld tool=%s action=%s",
+    LOG_INFO_("channel %s ch=%s chat=%s sender=%s approval=%lld tool=%s why=%s",
               verb, ch_name, cid ? cid : "-", sender ? sender : "-",
-              (long long)id, tool, action);
+              (long long)id, tool, why);
     resolve_approval(id, d, decided_via, 0);
 
     snprintf(msg, sizeof(msg), "%s #%lld (%s %s)%s",
-             deny ? "denied" : "approved", (long long)id, tool, action,
+             deny ? "denied" : "approved", (long long)id, tool, why,
              (!deny && d == APPROVAL_ONCE) ? " — once" : "");
     reply(db, ch_name, cid, msg);
     return 1;

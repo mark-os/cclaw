@@ -205,8 +205,8 @@ static void test_runtime_deny_note(void) {
 }
 
 /* Sensitivity is the orthogonal axis: a bound, covered call to a
- * sensitive-labeled host still parks per-call (action='sensitive') — and no
- * approvals row with action='secret_bind' is creatable anywhere. */
+ * sensitive-labeled host still parks per-call (park_reason='sensitive_target') — and no
+ * approvals row with park_reason='secret_bind' is creatable anywhere. */
 static void test_sensitivity_still_parks(void) {
     exec_sql("INSERT INTO sensitive_targets(kind,value)"
              " VALUES('host','bank.test');");
@@ -219,7 +219,7 @@ static void test_sensitivity_still_parks(void) {
     free(r);
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(g_db,
-        "SELECT COUNT(*), SUM(action='sensitive'), SUM(action='secret_bind')"
+        "SELECT COUNT(*), SUM(park_reason='sensitive_target'), SUM(park_reason='secret_bind')"
         " FROM approvals", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(sqlite3_column_int(s, 0) == 1);

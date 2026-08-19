@@ -32,7 +32,7 @@ static void test_create_and_pending(void) {
     assert(sid > 0);
 
     int64_t id = approval_create(db, sid, "call_1", "request_config",
-                                 "request_changes",
+                                 APPROVAL_PARK_REQUIRED,
                                  "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"api.example.com\"]}}}",
                                  "apply");
     assert(id > 0);
@@ -43,7 +43,7 @@ static void test_create_and_pending(void) {
     assert(a->session_id == sid);
     assert(strcmp(a->tool_call_id, "call_1") == 0);
     assert(strcmp(a->tool_name, "request_config") == 0);
-    assert(strcmp(a->action, "request_changes") == 0);
+    assert(strcmp(a->park_reason, APPROVAL_PARK_REQUIRED) == 0);
     assert(strcmp(a->state, "pending") == 0);
     approval_free(a);
 
@@ -58,7 +58,7 @@ static void test_approve(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_2", "request_config",
-                                 "request_changes",
+                                 APPROVAL_PARK_REQUIRED,
                                  "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}",
                                  "apply");
     assert(id > 0);
@@ -84,7 +84,7 @@ static void test_deny(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_3", "request_config",
-                                 "request_changes",
+                                 APPROVAL_PARK_REQUIRED,
                                  "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"evil.com\"]}}}",
                                  "apply");
     assert(id > 0);
@@ -110,11 +110,11 @@ static void test_approve_and_deny_states(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id1 = approval_create(db, sid, "c1", "request_config",
-                                  "request_changes",
+                                  APPROVAL_PARK_REQUIRED,
                                   "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"tmp.com\"]}}}",
                                   "apply");
     int64_t id2 = approval_create(db, sid, "c2", "request_config",
-                                  "request_changes",
+                                  APPROVAL_PARK_REQUIRED,
                                   "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"perm.com\"]}}}",
                                   "apply");
     assert(id1 > 0 && id2 > 0);
@@ -186,7 +186,7 @@ static void test_fail_closed_denied(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_x", "request_config",
-                                 "request_changes",
+                                 APPROVAL_PARK_REQUIRED,
                                  "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"bad.com\"]}}}",
                                  "apply");
     assert(id > 0);
@@ -240,7 +240,7 @@ static void test_approval_list_expired(void) {
 
     /* Create a pending approval (expires_at is in the future by default) */
     int64_t id = approval_create(db, sid, "call_e", "request_config",
-                                 "request_changes",
+                                 APPROVAL_PARK_REQUIRED,
                                  "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"exp.com\"]}}}",
                                  "apply");
     assert(id > 0);
@@ -264,7 +264,7 @@ static void test_approval_list_expired(void) {
 
     /* A fresh (future) approval should NOT be returned */
     int64_t id2 = approval_create(db, sid, "call_f", "request_config",
-                                  "request_changes",
+                                  APPROVAL_PARK_REQUIRED,
                                   "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"fresh.com\"]}}}",
                                   "apply");
     assert(id2 > 0);
@@ -321,7 +321,7 @@ static void test_get_for_tool_call(void) {
     /* No approval yet for this call. */
     assert(approval_get_for_tool_call(db, sid, "call_z") == NULL);
 
-    int64_t id = approval_create(db, sid, "call_z", "email_send", "email_send",
+    int64_t id = approval_create(db, sid, "call_z", "email_send", APPROVAL_PARK_REQUIRED,
                                  "{\"to\":\"a@b.c\"}", "rerun");
     assert(id > 0);
 
@@ -351,7 +351,7 @@ static void test_consume(void) {
     db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
-    int64_t id = approval_create(db, sid, "call_c", "email_send", "email_send",
+    int64_t id = approval_create(db, sid, "call_c", "email_send", APPROVAL_PARK_REQUIRED,
                                  "{\"to\":\"a@b.c\"}", "rerun");
     assert(id > 0);
     /* Cannot consume while still pending. */
@@ -392,13 +392,13 @@ static void test_pending_subtree(void) {
 
     /* An approval parked on an unrelated tree must not be found. */
     int64_t unrelated_id = approval_create(db, unrelated, "call_u", "shell_exec",
-                                           "shell_exec", "{}", "rerun");
+                                           APPROVAL_PARK_REQUIRED, "{}", "rerun");
     assert(unrelated_id > 0);
     assert(approval_get_pending_subtree(db, root) == NULL);
 
     /* A grandchild's park is found via the root — the whole-subtree fix. */
     int64_t gc_id = approval_create(db, grandchild, "call_g", "request_config",
-                                    "request_changes",
+                                    APPROVAL_PARK_REQUIRED,
                                     "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"api.example.com\"]}}}",
                                     "apply");
     assert(gc_id > 0);
@@ -412,7 +412,7 @@ static void test_pending_subtree(void) {
     /* Oldest-first: a later park on the child itself must not shadow the
      * grandchild's earlier one. */
     int64_t child_id = approval_create(db, child, "call_c", "shell_exec",
-                                       "shell_exec", "{}", "rerun");
+                                       APPROVAL_PARK_REQUIRED, "{}", "rerun");
     assert(child_id > 0);
     found = approval_get_pending_subtree(db, root);
     assert(found != NULL);
@@ -434,9 +434,9 @@ static void test_pending_order_matches_subtree(void) {
     assert(sid > 0);
 
     int64_t first = approval_create(db, sid, "call_first", "shell_exec",
-                                    "shell_exec", "{}", "rerun");
+                                    APPROVAL_PARK_REQUIRED, "{}", "rerun");
     int64_t second = approval_create(db, sid, "call_second", "shell_exec",
-                                     "shell_exec", "{}", "rerun");
+                                     APPROVAL_PARK_REQUIRED, "{}", "rerun");
     assert(first > 0 && second > 0);
 
     Approval *a = approval_get_pending(db, sid);
@@ -467,27 +467,27 @@ static void test_pending_match_dedupe(void) {
     db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
-    int64_t id = approval_create(db, sid, "call_d1", "js_eval", "js_eval",
+    int64_t id = approval_create(db, sid, "call_d1", "js_eval", APPROVAL_PARK_REQUIRED,
                                  ARGS_ASK_A, "rerun");
     assert(id > 0);
 
     /* Byte-identical re-issue → match (dedupe hit). */
-    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval",
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval",
                                        ARGS_ASK_A) == id);
     /* Mutated args → no match. */
-    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval",
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval",
                                        ARGS_ASK_B) == 0);
     /* Different tool → no match. */
-    assert(approval_find_pending_match(db, sid, "js_eval", "file_write",
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "file_write",
                                        ARGS_ASK_A) == 0);
     /* 'sensitive' stays per-call: an exact re-issue may dedupe, a variant
      * may not. */
-    int64_t s2 = approval_create(db, sid, "call_d2", "web_fetch", "sensitive",
+    int64_t s2 = approval_create(db, sid, "call_d2", "web_fetch", APPROVAL_PARK_SENSITIVE,
                                  "{\"url\":\"https://bank.example\"}", "rerun");
     assert(s2 > 0);
-    assert(approval_find_pending_match(db, sid, "sensitive", "web_fetch",
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_SENSITIVE, "web_fetch",
                                        "{\"url\":\"https://bank.example\"}") == s2);
-    assert(approval_find_pending_match(db, sid, "sensitive", "web_fetch",
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_SENSITIVE, "web_fetch",
                                        "{\"url\":\"https://bank.example/x\"}") == 0);
 
     db_close(db);
@@ -500,12 +500,12 @@ static void test_take_ticket(void) {
     db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
-    int64_t id = approval_create(db, sid, "call_t1", "js_eval", "js_eval",
+    int64_t id = approval_create(db, sid, "call_t1", "js_eval", APPROVAL_PARK_REQUIRED,
                                  ARGS_ASK_A, "rerun");
     assert(id > 0);
 
     /* Pending rows are not tickets. */
-    assert(approval_take_ticket(db, sid, "js_eval", "js_eval", ARGS_ASK_A) == 0);
+    assert(approval_take_ticket(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", ARGS_ASK_A) == 0);
 
     Approval *a = approval_resolve(db, id, 1, "test");
     assert(a != NULL);
@@ -513,12 +513,12 @@ static void test_take_ticket(void) {
 
     /* Approved + matching → consumed once; the second taker gets nothing.
      * A mutated re-issue is not a match. */
-    assert(approval_take_ticket(db, sid, "js_eval", "js_eval", ARGS_ASK_B) == 0);
-    assert(approval_take_ticket(db, sid, "js_eval", "js_eval", ARGS_ASK_A) == id);
-    assert(approval_take_ticket(db, sid, "js_eval", "js_eval", ARGS_ASK_A) == 0);
+    assert(approval_take_ticket(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", ARGS_ASK_B) == 0);
+    assert(approval_take_ticket(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", ARGS_ASK_A) == id);
+    assert(approval_take_ticket(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", ARGS_ASK_A) == 0);
 
     /* An approved row past its park expiry is stale, not a ticket. */
-    int64_t id2 = approval_create(db, sid, "call_t2", "js_eval", "js_eval",
+    int64_t id2 = approval_create(db, sid, "call_t2", "js_eval", APPROVAL_PARK_REQUIRED,
                                   ARGS_ASK_A, "rerun");
     a = approval_resolve(db, id2, 1, "test");
     assert(a != NULL);
@@ -528,7 +528,7 @@ static void test_take_ticket(void) {
              "UPDATE approvals SET expires_at = unixepoch()-5 WHERE id=%lld;",
              (long long)id2);
     assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
-    assert(approval_take_ticket(db, sid, "js_eval", "js_eval", ARGS_ASK_A) == 0);
+    assert(approval_take_ticket(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", ARGS_ASK_A) == 0);
 
     db_close(db);
     clean_db();
@@ -544,8 +544,8 @@ static void test_pending_ids(void) {
     assert(approval_pending_ids(db, sid, buf, sizeof(buf)) == 0);
     assert(buf[0] == '\0');
 
-    int64_t a1 = approval_create(db, sid, "c1", "js_eval", "js_eval", "{}", "rerun");
-    int64_t a2 = approval_create(db, sid, "c2", "js_eval", "js_eval", "{}", "rerun");
+    int64_t a1 = approval_create(db, sid, "c1", "js_eval", APPROVAL_PARK_REQUIRED, "{}", "rerun");
+    int64_t a2 = approval_create(db, sid, "c2", "js_eval", APPROVAL_PARK_REQUIRED, "{}", "rerun");
     assert(a1 > 0 && a2 > 0);
     assert(approval_pending_ids(db, sid, buf, sizeof(buf)) == 2);
     char want[64];
@@ -621,23 +621,23 @@ static void test_capability_match_canonical(void) {
 
     const char *doc = "{\"host\":\"api.example.com\",\"ports\":[80,443]}";
     int64_t id = approval_create(db, sid, "call_c1", "request_config",
-                                 "request_changes", doc, "rerun");
+                                 APPROVAL_PARK_REQUIRED, doc, "rerun");
     assert(id > 0);
 
     /* Key order differs → same capability. */
-    assert(approval_find_pending_match(db, sid, "request_changes", "request_config",
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "request_config",
                "{\"ports\":[80,443],\"host\":\"api.example.com\"}") == id);
     /* Whitespace/indentation differs → same capability. */
-    assert(approval_find_pending_match(db, sid, "request_changes", "request_config",
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "request_config",
                "{ \"host\" : \"api.example.com\" ,\n  \"ports\" : [ 80, 443 ] }") == id);
     /* A changed value parks a new approval. */
-    assert(approval_find_pending_match(db, sid, "request_changes", "request_config",
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "request_config",
                "{\"host\":\"evil.example.com\",\"ports\":[80,443]}") == 0);
     /* Array ORDER matters — fullkey carries the index. */
-    assert(approval_find_pending_match(db, sid, "request_changes", "request_config",
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "request_config",
                "{\"host\":\"api.example.com\",\"ports\":[443,80]}") == 0);
     /* An extra key is a different request. */
-    assert(approval_find_pending_match(db, sid, "request_changes", "request_config",
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "request_config",
                "{\"host\":\"api.example.com\",\"ports\":[80,443],\"tls\":false}") == 0);
 
     /* The stored row keeps exactly what the model sent — audit trail intact. */
@@ -647,14 +647,14 @@ static void test_capability_match_canonical(void) {
 
     /* Empty containers are represented: {"a":{}} must not match {"a":1},
      * nor {"a":[]}, nor a populated object at the same key. */
-    int64_t e = approval_create(db, sid, "call_c2", "js_eval", "js_eval",
+    int64_t e = approval_create(db, sid, "call_c2", "js_eval", APPROVAL_PARK_REQUIRED,
                                 "{\"a\":{}}", "rerun");
     assert(e > 0);
-    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval", "{\"a\": {}}") == e);
-    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval", "{\"a\":1}") == 0);
-    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval", "{\"a\":[]}") == 0);
-    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval", "{\"a\":{\"b\":1}}") == 0);
-    assert(approval_find_pending_match(db, sid, "js_eval", "js_eval", "{}") == 0);
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", "{\"a\": {}}") == e);
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", "{\"a\":1}") == 0);
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", "{\"a\":[]}") == 0);
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", "{\"a\":{\"b\":1}}") == 0);
+    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", "{}") == 0);
 
     db_close(db);
     clean_db();

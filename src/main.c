@@ -787,6 +787,12 @@ int main(int argc, char *argv[]) {
      * CLI-only, same rationale as sensitive/secret-bind — an authority change. */
     if (argc >= 2 && strcmp(argv[1], "route") == 0) return route_main(argc, argv);
 
+    /* rename-agent: operator identity surgery. CLI-only by design — no agent
+     * tool renames anything (config-doc M2 deleted that arm). Takes a quiesce
+     * lease so it works with the daemon running. */
+    if (argc >= 2 && strcmp(argv[1], "rename-agent") == 0)
+        return rename_agent_main(argc, argv);
+
     /* channel: operator verbs for the extension hot-swap flow (list/swap/
      * revert/restart). CLI-only — swapping channel code is an authority change. */
     if (argc >= 2 && strcmp(argv[1], "channel") == 0) return channel_cli_main(argc, argv);

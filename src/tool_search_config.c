@@ -34,7 +34,7 @@ static char *pending_approvals_json(sqlite3 *db, int64_t session_id) {
     sqlite3_stmt *st;
     if (!arr) return NULL;
     if (sqlite3_prepare_v2(db,
-            "SELECT id, tool_call_id, tool_name, action, args_json, resolve,"
+            "SELECT id, tool_call_id, tool_name, park_reason, args_json, resolve,"
             "       MAX(unixepoch() - requested_at, 0)"
             "  FROM approvals WHERE session_id=?1 AND state='pending'"
             " ORDER BY id", -1, &st, NULL) != SQLITE_OK)
@@ -48,7 +48,7 @@ static char *pending_approvals_json(sqlite3 *db, int64_t session_id) {
         a.session_id = session_id;
         a.tool_call_id = (char *)sqlite3_column_text(st, 1);
         a.tool_name = (char *)sqlite3_column_text(st, 2);
-        a.action = (char *)sqlite3_column_text(st, 3);
+        a.park_reason = (char *)sqlite3_column_text(st, 3);
         a.args_json = (char *)sqlite3_column_text(st, 4);
         a.resolve = (char *)sqlite3_column_text(st, 5);
         int64_t age = sqlite3_column_int64(st, 6);

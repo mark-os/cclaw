@@ -304,7 +304,8 @@ static JSValue admin_approvals_to_js(JSContext *ctx, const AdminApproval *list, 
         JS_SetPropertyStr(ctx, obj, "session_id", JS_NewInt64(ctx, list[i].session_id));
         JS_SetPropertyStr(ctx, obj, "agent", JS_NewString(ctx, list[i].agent_name ? list[i].agent_name : ""));
         JS_SetPropertyStr(ctx, obj, "tool_name", JS_NewString(ctx, list[i].tool_name ? list[i].tool_name : ""));
-        JS_SetPropertyStr(ctx, obj, "action", JS_NewString(ctx, list[i].action ? list[i].action : ""));
+        JS_SetPropertyStr(ctx, obj, "park_reason",
+                          JS_NewString(ctx, list[i].park_reason ? list[i].park_reason : ""));
         JS_SetPropertyStr(ctx, obj, "args_json", JS_NewString(ctx, list[i].args_json ? list[i].args_json : "{}"));
         JS_SetPropertyUint32(ctx, arr, (uint32_t)i, obj);
     }

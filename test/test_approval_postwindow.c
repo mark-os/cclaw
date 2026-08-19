@@ -47,7 +47,7 @@ static void test_postwindow_outcomes(void) {
         assert(sid > 0);
 
         int64_t aid = approval_create(db, sid, "call_pw", "shell_exec",
-                                      "run_cmd", "{\"cmd\":\"ls\"}", "rerun");
+                                      APPROVAL_PARK_REQUIRED, "{\"cmd\":\"ls\"}", "rerun");
         assert(aid > 0);
 
         Approval *a = approval_get_pending(db, sid);

@@ -39,7 +39,7 @@ static void test_block_window_timing(void) {
     assert(session_set_state(db, sid, "awaiting_approval") == 0);
 
     int64_t aid = approval_create(db, sid, "call_1", "shell_exec",
-                                  "run_cmd", "{\"cmd\":\"ls\"}", "rerun");
+                                  APPROVAL_PARK_REQUIRED, "{\"cmd\":\"ls\"}", "rerun");
     assert(aid > 0);
 
     /* With large block_sec, NOT due */
@@ -88,7 +88,7 @@ static void test_block_window_owner_filter(void) {
     assert(session_set_state(db, sid, "awaiting_approval") == 0);
 
     int64_t aid = approval_create(db, sid, "call_2", "shell_exec",
-                                  "run_cmd", "{\"cmd\":\"ls\"}", "rerun");
+                                  APPROVAL_PARK_REQUIRED, "{\"cmd\":\"ls\"}", "rerun");
     assert(aid > 0);
 
     /* Backdate so it's past block window */

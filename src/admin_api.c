@@ -390,12 +390,14 @@ static int admin_list_approvals_by_state(sqlite3 *db, const char *channel_name,
      * document). Used for the denial-history/"Grant now" listing; pending
      * approvals (any tool) are never filtered this way. */
     const char *sql = grantable_only ?
-        "SELECT a.id, a.session_id, s.agent_name, a.tool_name, a.action, a.args_json"
+        "SELECT a.id, a.session_id, s.agent_name, a.tool_name, a.park_reason,"
+        " a.args_json"
         " FROM approvals a JOIN sessions s ON s.id = a.session_id"
         " WHERE a.state=?1 AND (?2 IS NULL OR s.channel_name=?2)"
         " AND a.tool_name='request_config'"
         " ORDER BY a.id DESC LIMIT ?3;" :
-        "SELECT a.id, a.session_id, s.agent_name, a.tool_name, a.action, a.args_json"
+        "SELECT a.id, a.session_id, s.agent_name, a.tool_name, a.park_reason,"
+        " a.args_json"
         " FROM approvals a JOIN sessions s ON s.id = a.session_id"
         " WHERE a.state=?1 AND (?2 IS NULL OR s.channel_name=?2)"
         " ORDER BY a.id DESC LIMIT ?3;";
@@ -425,7 +427,7 @@ static int admin_list_approvals_by_state(sqlite3 *db, const char *channel_name,
         list[count].session_id = sqlite3_column_int64(stmt, 1);
         list[count].agent_name = ag ? strdup(ag) : NULL;
         list[count].tool_name = tn ? strdup(tn) : NULL;
-        list[count].action = ac ? strdup(ac) : NULL;
+        list[count].park_reason = ac ? strdup(ac) : NULL;
         list[count].args_json = aj ? strdup(aj) : NULL;
         count++;
     }
@@ -451,7 +453,7 @@ void admin_approvals_free(AdminApproval *list, size_t count) {
     for (size_t i = 0; i < count; i++) {
         free(list[i].agent_name);
         free(list[i].tool_name);
-        free(list[i].action);
+        free(list[i].park_reason);
         free(list[i].args_json);
     }
     free(list);
@@ -824,26 +826,26 @@ int admin_set_channel_route(sqlite3 *db, const char *channel_name,
 int admin_grant_from_history(sqlite3 *db, int64_t approval_id) {
     if (!db) return -1;
 
-    const char *sql = "SELECT session_id, tool_name, action, args_json FROM approvals WHERE id=?1;";
+    const char *sql = "SELECT session_id, tool_name, args_json FROM approvals WHERE id=?1;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_int64(stmt, 1, approval_id);
 
     int64_t session_id = -1;
-    char *tool_name = NULL, *action = NULL, *args_json = NULL;
+    char *tool_name = NULL, *args_json = NULL;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         session_id = sqlite3_column_int64(stmt, 0);
         const char *tn = (const char *)sqlite3_column_text(stmt, 1);
-        const char *ac = (const char *)sqlite3_column_text(stmt, 2);
-        const char *aj = (const char *)sqlite3_column_text(stmt, 3);
+        const char *aj = (const char *)sqlite3_column_text(stmt, 2);
         if (tn) tool_name = strdup(tn);
-        if (ac) action = strdup(ac);
         if (aj) args_json = strdup(aj);
     }
     sqlite3_finalize(stmt);
 
     int rc = -1;
-    if (!tool_name || strcmp(tool_name, "request_config") != 0 || !action || !args_json)
+    /* tool_name alone identifies the document (v47 rekey) — request_config
+     * is the only tool whose parked args a grant can be replayed from. */
+    if (!tool_name || strcmp(tool_name, "request_config") != 0 || !args_json)
         goto done;
 
     {
@@ -852,26 +854,26 @@ int admin_grant_from_history(sqlite3 *db, int64_t approval_id) {
 
         /* Same all-or-nothing apply as apply_grant (main.c) — one code path
          * for the document, no drift between the two grant routes. */
-        if (strcmp(action, "request_changes") == 0)
-            rc = request_config_changes_apply(db, agent, args_json, 0, 0, NULL);
+        rc = request_config_changes_apply(db, agent, args_json, 0, 0, NULL);
         free(agent);
     }
 
     if (rc == 0) {
         const char *isql =
-            "INSERT INTO approvals(session_id, tool_name, action, args_json, resolve, state, decided_via)"
-            " VALUES(?1,'request_config',?2,?3,'apply','approved','channel:telegram:history_grant');";
+            "INSERT INTO approvals(session_id, tool_name, park_reason, args_json,"
+            " resolve, state, decided_via)"
+            " VALUES(?1,'request_config','approval_required',?2,"
+            " 'apply','approved','channel:telegram:history_grant');";
         sqlite3_stmt *ins;
         if (sqlite3_prepare_v2(db, isql, -1, &ins, NULL) == SQLITE_OK) {
             sqlite3_bind_int64(ins, 1, session_id);
-            sqlite3_bind_text(ins, 2, action, -1, SQLITE_STATIC);
-            sqlite3_bind_text(ins, 3, args_json, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 2, args_json, -1, SQLITE_STATIC);
             sqlite3_step(ins);
             sqlite3_finalize(ins);
         }
     }
 
 done:
-    free(tool_name); free(action); free(args_json);
+    free(tool_name); free(args_json);
     return rc;
 }

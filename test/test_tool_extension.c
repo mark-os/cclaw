@@ -111,7 +111,7 @@ static void test_promote_parks_apply_approval(void) {
     /* ...the approval carries the action + bundle for the approver... */
     sqlite3_stmt *st;
     assert(sqlite3_prepare_v2(g_db,
-        "SELECT action, resolve, args_json FROM approvals WHERE state='pending';",
+        "SELECT tool_name, resolve, args_json FROM approvals WHERE state='pending';",
         -1, &st, NULL) == SQLITE_OK);
     assert(sqlite3_step(st) == SQLITE_ROW);
     const char *action = (const char *)sqlite3_column_text(st, 0);
@@ -261,7 +261,7 @@ static void test_subagent_draft_never_globally_callable(void) {
      * is asking for the capability. */
     sqlite3_stmt *st;
     assert(sqlite3_prepare_v2(g_db,
-        "SELECT session_id, action FROM approvals"
+        "SELECT session_id, tool_name FROM approvals"
         " WHERE state='pending' AND args_json LIKE '%subx%';",
         -1, &st, NULL) == SQLITE_OK);
     assert(sqlite3_step(st) == SQLITE_ROW);

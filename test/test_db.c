@@ -469,9 +469,30 @@ static void test_schema_patch_application(void) {
         " ('Uniq','solo','dup'), ('Zero','nowhere',NULL),"
         " ('Canon','solo@p1',NULL);",
         NULL, NULL, NULL) == SQLITE_OK);
+    /* v47 inputs: approvals rows carrying the old dual-purpose `action`
+     * (a tool name, a document verb, and the 'sensitive' overlay). The
+     * cron/lease half of v47 is exercised from a v46 fixture below, where
+     * the columns it touches already exist. */
+    assert(sqlite3_exec(old_db,
+        "INSERT INTO approvals(session_id, tool_name, action, state) VALUES"
+        " (100,'web_fetch','sensitive','pending'),"
+        " (100,'shell_exec','shell_exec','pending'),"
+        " (100,'request_config','request_changes','denied');",
+        NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(old_db, 40);
 
     assert(db_schema_compat(old_db) == 1);   /* runs every pending patch */
+
+    /* v47 rekey: 'sensitive' becomes the overlay value, everything else —
+     * tool names and document verbs alike — is an ordinary required park.
+     * tool_name is untouched: it is now the sole answer to "what parked". */
+    assert(db_scalar_i64(old_db,
+        "SELECT COUNT(*) FROM approvals WHERE park_reason='sensitive_target'"
+        " AND tool_name='web_fetch';", 0, -1) == 1);
+    assert(db_scalar_i64(old_db,
+        "SELECT COUNT(*) FROM approvals WHERE park_reason='approval_required';",
+        0, -1) == 2);
+
 
     /* v44 canonicalized the scalars (unambiguous → rewritten; ambiguous →
      * lowest models.priority; no match → left alone), then v46 folded them
@@ -564,6 +585,86 @@ static void test_schema_patch_application(void) {
     printf("  PASS test_schema_patch_application\n");
 }
 
+/* The v46→v47 step in isolation: a fixture reverse-shaped to v46 (the
+ * columns v47 rewrites all exist there), upgraded, then checked for the
+ * three shape changes and the two data migrations. */
+static void test_schema_patch_v47(void) {
+    const char *path = "/tmp/test_cclaw_schema_v47.sqlite";
+    char junk[192];
+    const char *suffixes[] = { "", "-wal", "-shm", ".v46.bak" };
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+
+    /* Reverse-shape to v46: FK-less cron_jobs, no lease columns, the old
+     * dual-purpose approvals.action. */
+    assert(sqlite3_exec(db,
+        "PRAGMA foreign_keys=OFF;"
+        "ALTER TABLE approvals RENAME COLUMN park_reason TO action;"
+        "ALTER TABLE agents DROP COLUMN hold_until;"
+        "ALTER TABLE agents DROP COLUMN hold_holder;"
+        "CREATE TABLE cj46 ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+        "  name TEXT NOT NULL, cron_expr TEXT NOT NULL, run_at INTEGER,"
+        "  interval_s INTEGER, kind TEXT NOT NULL DEFAULT 'task',"
+        "  session_id INTEGER NOT NULL, task TEXT NOT NULL, script TEXT,"
+        "  channel_name TEXT, chat_id TEXT, target TEXT, target_agent TEXT,"
+        "  enabled INTEGER NOT NULL DEFAULT 1,"
+        "  next_run_at INTEGER NOT NULL DEFAULT 0, last_run_at INTEGER,"
+        "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+        "DROP TABLE cron_jobs;"
+        "ALTER TABLE cj46 RENAME TO cron_jobs;"
+        "CREATE UNIQUE INDEX idx_cron_jobs_name ON cron_jobs(agent_name, name);"
+        "PRAGMA foreign_keys=ON;", NULL, NULL, NULL) == SQLITE_OK);
+
+    assert(sqlite3_exec(db,
+        "INSERT INTO agents(name) VALUES('Keep');"
+        "INSERT INTO approvals(session_id, tool_name, action, state) VALUES"
+        " (1,'web_fetch','sensitive','pending'), (1,'js_eval','js_eval','pending');"
+        "INSERT INTO cron_jobs(agent_name,name,cron_expr,session_id,task,"
+        " target,target_agent) VALUES"
+        " ('Keep','orphan','* * * * *',0,'x','new','GhostAgent'),"
+        " ('Keep','keeper','* * * * *',0,'x','new','Keep');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 46);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT);
+
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(*) FROM approvals WHERE park_reason='sensitive_target'"
+        " AND tool_name='web_fetch';", 0, -1) == 1);
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(*) FROM approvals WHERE park_reason='approval_required'"
+        " AND tool_name='js_eval';", 0, -1) == 1);
+    /* The already-broken row is NULLed (it named nothing the FK could
+     * accept); the good one survives the table rebuild... */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM cron_jobs WHERE name='orphan'"
+        " AND target_agent IS NULL;", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM cron_jobs WHERE name='keeper'"
+        " AND target_agent='Keep';", 0, -1) == 1);
+    /* ...with its index and its new FK, so a rename now cascades into it. */
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='index'"
+        " AND name='idx_cron_jobs_name';", 0, -1) == 1);
+    assert(agent_rename(db, "Keep", "Kept", 0) == 0);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM cron_jobs"
+        " WHERE target_agent='Kept';", 0, -1) == 1);
+    /* Lease columns land empty — nothing is held on a fresh upgrade. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agents"
+        " WHERE hold_until IS NOT NULL OR hold_holder IS NOT NULL;", 0, -1) == 0);
+
+    db_close(db);
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    printf("  PASS test_schema_patch_v47\n");
+}
+
 static void test_rate_limit_and_cost(void) {
     const char *path = "/tmp/test_cclaw_db_budget.sqlite";
     test_db_clean(path);
@@ -613,6 +714,7 @@ int main(void) {
     test_seed_backfills_and_preserves();
     test_schema_state();
     test_schema_patch_application();
+    test_schema_patch_v47();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");
     return 0;

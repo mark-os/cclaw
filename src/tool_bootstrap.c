@@ -53,7 +53,7 @@ static char *tool_create_agent_handler(const char *arguments, void *user_data, i
     }
 
     int64_t aid = approval_create(ctx->db, ctx->session_id,
-        ctx->current_tool_call_id, "create_agent", "create_agent",
+        ctx->current_tool_call_id, "create_agent", APPROVAL_PARK_REQUIRED,
         arguments, "apply");
     if (aid < 0)
         return tool_fail(is_error, "error: failed to create approval");
@@ -103,7 +103,7 @@ static char *tool_update_agent_handler(const char *arguments, void *user_data, i
     }
 
     int64_t aid = approval_create(ctx->db, ctx->session_id,
-        ctx->current_tool_call_id, "update_agent", "update_agent",
+        ctx->current_tool_call_id, "update_agent", APPROVAL_PARK_REQUIRED,
         arguments, "apply");
     if (aid < 0)
         return tool_fail(is_error, "error: failed to create approval");

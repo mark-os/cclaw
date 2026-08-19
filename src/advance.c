@@ -941,6 +941,24 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
     }
 
     if (strcmp(state, "idle") == 0) {
+        /* Quiesce lease (`cclaw rename-agent`): while the agent's identity is
+         * being changed underneath it, no NEW turn opens. Inbox and cron keep
+         * queueing — nothing is lost, delivery is deferred — and an expired
+         * lease self-heals, so a crashed holder blocks nobody. Checked before
+         * the turn-open transaction: this is the one place an idle session
+         * becomes a running turn. */
+        if (db_scalar_i64(db,
+                "SELECT EXISTS(SELECT 1 FROM sessions s JOIN agents a"
+                "               ON a.name = s.agent_name"
+                "              WHERE s.id=?1 AND a.hold_until > unixepoch());",
+                session_id, 0)) {
+            LOG_DEBUG_("advance defer reason=agent_hold session=%lld",
+                       (long long)session_id);
+            AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, iter);
+            out.deferred = 1;
+            free(agent);
+            return out;
+        }
         /* Idle: atomically consume inbox + flip to llm_running */
         if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
             free(agent);

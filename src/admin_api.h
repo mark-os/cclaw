@@ -158,7 +158,7 @@ typedef struct {
     int64_t session_id;
     char *agent_name;
     char *tool_name;
-    char *action;
+    char *park_reason;
     char *args_json;
 } AdminApproval;
 

@@ -927,7 +927,7 @@ static const char SQL_STATE_CODA[] =
     /* Pending only — decided rows are history, not carryable state (see the
      * matching rationale in llm_payload.c). */
     "  SELECT group_concat("
-    "    '  #' || a.id || ' ' || COALESCE(a.tool_name, a.action, '?') ||"
+    "    '  #' || a.id || ' ' || COALESCE(a.tool_name, '?') ||"
     "    ' — pending: waiting on a human decision', char(10)) AS txt"
     "  FROM approvals a WHERE a.session_id=?1 AND a.state='pending'"
     "), sub AS ("

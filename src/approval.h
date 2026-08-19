@@ -12,12 +12,20 @@
 
 typedef enum { APPROVAL_DENY, APPROVAL_ONCE, APPROVAL_ALWAYS } ApprovalDecision;
 
+/* approvals.park_reason — WHY a row parked. tool_name says WHAT parked; these
+ * two values are the whole vocabulary. 'sensitive_target' is the trust.md
+ * rule-1 overlay: per-call, never satisfiable by a standing grant, ALWAYS
+ * coerced to ONCE. Everything else — gated tools, apply-style tool documents
+ * — is an ordinary approval_required park. */
+#define APPROVAL_PARK_REQUIRED  "approval_required"
+#define APPROVAL_PARK_SENSITIVE "sensitive_target"
+
 typedef struct {
     int64_t id;
     int64_t session_id;
     char *tool_call_id;
     char *tool_name;
-    char *action;
+    char *park_reason;
     char *args_json;
     char *resolve;  /* "rerun" or "apply" — how approval is acted on */
     char *state;
@@ -30,6 +38,11 @@ typedef struct {
  * registry default). approval_timeout_seconds is the park expiry approval_create
  * stamps; approval_block_seconds is the short window a turn blocks before the
  * sweep unparks it, clamped to the timeout so it can never outlast it. */
+/* True when this row parked because it targets a sensitive-labeled target
+ * (park_reason = APPROVAL_PARK_SENSITIVE) — per-call authority that no
+ * standing grant satisfies and no ticket transfers. */
+int approval_is_sensitive(const Approval *a);
+
 int approval_timeout_seconds(sqlite3 *db);
 int approval_block_seconds(sqlite3 *db);
 
@@ -46,7 +59,7 @@ void approval_background_notice(int64_t approval_id, char *buf, size_t len);
  * resolve is "rerun" (re-execute frozen call) or "apply" (invoke tool's apply handler).
  * Returns the new row id (>0) or -1 on error. */
 int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_id,
-                        const char *tool_name, const char *action,
+                        const char *tool_name, const char *park_reason,
                         const char *args_json, const char *resolve);
 
 /* Get the pending approval for a session. Returns heap-allocated Approval or NULL. */
@@ -75,7 +88,7 @@ int approval_consume(sqlite3 *db, int64_t id);
  * capability (byte-identical args). Returns the row id or 0 — the gate
  * answers the duplicate call inline instead of parking a second row. */
 int64_t approval_find_pending_match(sqlite3 *db, int64_t session_id,
-                                    const char *action, const char *tool_name,
+                                    const char *park_reason, const char *tool_name,
                                     const char *args_json);
 
 /* Ticket transfer: an approved, unconsumed, unexpired rerun approval whose
@@ -84,7 +97,7 @@ int64_t approval_find_pending_match(sqlite3 *db, int64_t session_id,
  * (CAS) and its id returned; 0 when nothing transfers. Callers must exclude
  * sensitivity parks (per-call by trust.md rule 1). */
 int64_t approval_take_ticket(sqlite3 *db, int64_t session_id,
-                             const char *action, const char *tool_name,
+                             const char *park_reason, const char *tool_name,
                              const char *args_json);
 
 /* Count this session's pending approvals; when buf is non-NULL, format their

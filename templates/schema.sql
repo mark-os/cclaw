@@ -116,6 +116,10 @@ CREATE TABLE IF NOT EXISTS agents (
   sandbox_profile TEXT DEFAULT 'standard',
   created_by TEXT REFERENCES agents(name) ON UPDATE CASCADE,
                                  -- creating agent (update_agent authorization); NULL = operator
+  hold_until INTEGER,            -- quiesce lease (cclaw rename-agent): while in the
+                                 -- future no NEW turn opens for this agent. NULL = no
+                                 -- hold. Expiry self-heals — a crashed holder unblocks.
+  hold_holder TEXT,              -- who holds the lease ("cli:<pid>"), for the error text
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
@@ -544,7 +548,8 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   target TEXT,                               -- NULL = follow the conversation (stamped chat,
                                              -- else stamped session_id); 'pin' = explicit
                                              -- session pin; 'new' = fresh session per fire
-  target_agent TEXT,                         -- agent for 'new'-mode fires; NULL = agent_name
+  target_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,
+                                             -- agent for 'new'-mode fires; NULL = agent_name
   enabled INTEGER NOT NULL DEFAULT 1,
   next_run_at INTEGER NOT NULL DEFAULT 0,
   last_run_at INTEGER,
@@ -563,8 +568,11 @@ CREATE TABLE IF NOT EXISTS approvals (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id   INTEGER NOT NULL,
   tool_call_id TEXT,
-  tool_name    TEXT,
-  action       TEXT,
+  tool_name    TEXT,                         -- WHAT parked: the tool that asked
+  park_reason  TEXT,                         -- WHY it parked: 'approval_required' (the
+                                             -- gate/tool asked) or 'sensitive_target'
+                                             -- (specs/trust.md rule 1 — per-call, never
+                                             -- satisfiable by a standing grant)
   args_json    TEXT,
   resolve      TEXT NOT NULL DEFAULT 'rerun',
   state        TEXT NOT NULL DEFAULT 'pending',

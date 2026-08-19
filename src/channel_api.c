@@ -93,7 +93,14 @@ int channel_set_config(ChannelCtx *ctx, const char *key, const char *value) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* Get oldest pending outbox row */
+/* Get oldest pending outbox row.
+ *
+ * Addressed by row id + session_id + channel_name — never by agent name, and
+ * the channel runner holds no cached agent_name either. `cclaw rename-agent`
+ * relies on this: the rename cascades through sessions.agent_name while
+ * outbox rows and routes keep pointing at the same ids, so a delivery
+ * in flight across a rename still lands. Don't introduce an agent-name
+ * cache on this path. */
 ChannelOutboxRow *channel_next_outbox(ChannelCtx *ctx) {
     if (!ctx) return NULL;
     const char *sql =

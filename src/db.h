@@ -360,6 +360,28 @@ void agent_row_free(AgentRow *row);
 int agent_rename(sqlite3 *db, const char *old_name, const char *new_name,
                  int64_t requesting_session_id);
 
+/* Quiesce lease on an agent (agents.hold_until/hold_holder): while held, no
+ * new turn opens for that agent (advance_session). Acquire returns 0, or -1
+ * when another holder's lease is still live (or the agent is missing).
+ * Refresh/release are holder-scoped no-ops for anyone else. holder is a free
+ * string identifying the taker ("cli:<pid>"). */
+int agent_hold_acquire(sqlite3 *db, const char *name, int seconds, const char *holder);
+int agent_hold_refresh(sqlite3 *db, const char *name, int seconds, const char *holder);
+int agent_hold_release(sqlite3 *db, const char *name, const char *holder);
+
+/* Oldest live-owned non-idle session of this agent — what a drain waits on.
+ * Returns its id (and its state into `state`), or 0 when the agent is
+ * quiesced. Sessions owned by a dead instance count as idle. */
+int64_t agent_busy_session(sqlite3 *db, const char *name, char *state, size_t cap);
+
+/* Rename across both storage domains: the DB cascade above, then the agent's
+ * home directory (<agents_dir>/<name>). agents_dir NULL/empty = DB only.
+ * Returns agent_rename's codes, plus -5 for split state (disk move failed AND
+ * the DB rollback failed — operator repair). Anything <0 other than -5 leaves
+ * both domains as they were. */
+int agent_rename_full(sqlite3 *db, const char *old_name, const char *new_name,
+                      int64_t requesting_session_id, const char *agents_dir);
+
 /* Tag an entry with the JSON array of network hosts its tool run contacted
  * (provenance for query-time untrusted-content wrapping). Returns 0 on ok. */
 int db_entry_set_network_hosts(sqlite3 *db, int64_t entry_id, const char *hosts_json);

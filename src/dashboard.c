@@ -461,7 +461,7 @@ static void render_approval_row(Buf *b, const AdminApproval *a) {
     buf_appendf(b, "</td><td>");
     buf_html(b, a->tool_name);
     buf_appendf(b, "</td><td>");
-    buf_html(b, a->action);
+    buf_html(b, a->park_reason);
     buf_appendf(b, "</td><td class=args>");
     buf_html(b, a->args_json);
     buf_appendf(b, "</td><td>");

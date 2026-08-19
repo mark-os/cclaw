@@ -685,7 +685,12 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
             }
         }
         if (gate == HOOK_GATE_ASK) {
-            const char *ask_action = sens_hit ? "sensitive" : tc->name;
+            /* WHY this call parks — the tool name is already tc->name.
+             * The two reasons partition the dedup/ticket space: a
+             * sensitivity park must never match (or transfer to) an
+             * ordinary one for the same tool. */
+            const char *park_why = sens_hit ? APPROVAL_PARK_SENSITIVE
+                                            : APPROVAL_PARK_REQUIRED;
             Approval *ap = approval_get_for_tool_call(proc_db(), session_id, tc->call_id);
             int approved = ap && ap->state && strcmp(ap->state, "approved") == 0;
             int denied   = ap && ap->state && strcmp(ap->state, "denied") == 0;
@@ -709,7 +714,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
              * transfer (per-call, trust.md rule 1). */
             int via_ticket = 0;
             if (!approved && !pending && !sens_hit) {
-                int64_t tk = approval_take_ticket(proc_db(), session_id, ask_action,
+                int64_t tk = approval_take_ticket(proc_db(), session_id, park_why,
                                                   tc->name, tc->arguments);
                 if (tk > 0) {
                     LOG_INFO_("approval ticket consumed id=%lld tool=%s call=%s",
@@ -720,14 +725,15 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
             }
             if (!approved) {
                 /* none → create + park; pending → re-park idempotently.
-                 * A sensitivity hit is recorded as action='sensitive' so the
-                 * resolve path can refuse to mint anything standing from it. */
+                 * A sensitivity hit is recorded as
+                 * park_reason='sensitive_target' so the resolve path can
+                 * refuse to mint anything standing from it. */
                 if (!pending) {
                     /* Dedupe: this capability is already parked on another
                      * call — a second row storms the approver, and every
                      * duplicate park costs a full LLM iteration to unpark. */
                     int64_t dup = approval_find_pending_match(proc_db(), session_id,
-                                      ask_action, tc->name, tc->arguments);
+                                      park_why, tc->name, tc->arguments);
                     if (dup > 0) {
                         char err[256];
                         snprintf(err, sizeof(err),
@@ -754,7 +760,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                         return tool_inline_error(session_id, tc, err, "approval:cap");
                     }
                     approval_create(proc_db(), session_id, tc->call_id, tc->name,
-                                    ask_action, tc->arguments, "rerun");
+                                    park_why, tc->arguments, "rerun");
                 }
                 session_set_state(proc_db(), session_id, "awaiting_approval");
                 approval_free(ap);

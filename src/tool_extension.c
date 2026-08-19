@@ -121,7 +121,7 @@ static char *tool_extension_promote_handler(const char *arguments, void *user_da
     if (!args) return tool_fail(is_error, "error: failed to build approval args");
 
     int64_t aid = approval_create(ctx->db, ctx->session_id,
-        ctx->current_tool_call_id, "extension_promote", "extension_promote",
+        ctx->current_tool_call_id, "extension_promote", APPROVAL_PARK_REQUIRED,
         args, "apply");
     free(args);
     if (aid < 0) return tool_fail(is_error, "error: failed to create approval");

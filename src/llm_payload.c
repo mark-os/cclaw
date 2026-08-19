@@ -437,7 +437,7 @@ static const char SQL_SESSION_CONTEXT[] =
      * ticket-transfer machinery, and advertising them here sends the model
      * chasing "unused" grants it already has. */
     "  SELECT group_concat("
-    "    '#' || a.id || ' ' || COALESCE(a.tool_name, a.action, '?') ||"
+    "    '#' || a.id || ' ' || COALESCE(a.tool_name, '?') ||"
     "    ' — pending: waiting on a human decision', char(10)) AS txt"
     "  FROM approvals a WHERE a.session_id=?1 AND a.state='pending'"
     ")"

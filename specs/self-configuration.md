@@ -17,7 +17,7 @@ Companion specs: [trust.md](trust.md) (axis model), [config.md](config.md)
 | Surface | Direction | Mechanism | Gate |
 |---------|-----------|-----------|------|
 | **Read** | agent → config | `search_config` (curated view), `db_query` (arbitrary SELECT) | tool grant |
-| **Write (single)** | agent → config | `request_config` action `request_changes` — one JSON document batching grants, config values, and/or a provider definition; `rename_agent` | human approval (park → apply, all-or-nothing) |
+| **Write (single)** | agent → config | `request_config` — one JSON changes document batching grants, config values, and/or a provider definition ([config-doc.md](config-doc.md)) | human approval (park → apply, all-or-nothing) |
 | **Write (bulk/structured)** | agent → system | extension manifests via `extension_promote` — tools, hooks, channels, scripts, skills, config keys, **agents** | human approval with enumerated contents |
 | **Docs** | system → agent | builtin `cclaw-docs` skills extension (progressive disclosure via the skills index) | none (read-only knowledge) |
 

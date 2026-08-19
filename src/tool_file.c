@@ -121,8 +121,7 @@ static char *path_grant_hint(const FileReadCtx *ctx, const char *fullpath,
     if (!msg) return NULL;
     snprintf(msg, cap,
              "error: '%s' is outside your granted areas — request access with "
-             "request_config {\"action\":\"request_changes\","
-             "\"changes\":{\"grants\":{\"%s\":[\"%s\"]}}}",
+             "request_config {\"changes\":{\"grants\":{\"%s\":[\"%s\"]}}}",
              fullpath, want_write ? "write_paths" : "read_paths", dir);
     return msg;
 }

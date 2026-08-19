@@ -121,8 +121,7 @@ static int grants_walk(sqlite3 *db, const char *json, const char *target,
             }
             if (creator && !grants_contains(db, creator, GRANT_KINDS[ki].kind, v)) {
                 rc = failf(err, "grant %s:%s exceeds creator's grants — "
-                           "request it for yourself first (request_config "
-                           "request_changes), then retry",
+                           "request it for yourself first (request_config), then retry",
                            GRANT_KINDS[ki].kind, v);
                 break;
             }
@@ -315,8 +314,8 @@ static int validate_inner(sqlite3 *db, const char *json, const char *creator,
                             if (k && v && !grants_contains(db, creator, k, v)) {
                                 rc = failf(err, "clone_from grant %s:%s exceeds "
                                            "creator's grants — request it for "
-                                           "yourself first (request_config "
-                                           "request_changes), then retry", k, v);
+                                           "yourself first (request_config), then retry",
+                                           k, v);
                                 break;
                             }
                         }

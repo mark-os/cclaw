@@ -10,6 +10,7 @@
 #include "test_util.h"
 #include "tools.h"
 #include "tool_search_config.h"
+#include "approval.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -166,6 +167,132 @@ static void test_settings_models_providers(void) {
     printf("  PASS test_settings_models_providers\n");
 }
 
+/* json_extract over the tool's own output: the shape claim is checked by the
+ * same parser that built it, not by substring luck. */
+static char *doc_get(sqlite3 *db, const char *doc, const char *path) {
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db, "SELECT json_extract(?1, ?2)", -1, &s, NULL)
+           == SQLITE_OK);
+    sqlite3_bind_text(s, 1, doc, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, path, -1, SQLITE_STATIC);
+    char *out = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(s, 0);
+        if (v) out = strdup(v);
+    }
+    sqlite3_finalize(s);
+    return out;
+}
+
+static int doc_valid(sqlite3 *db, const char *doc) {
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db, "SELECT json_valid(?1)", -1, &s, NULL)
+           == SQLITE_OK);
+    sqlite3_bind_text(s, 1, doc, -1, SQLITE_STATIC);
+    int ok = sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    return ok;
+}
+
+/* format:json — one canonical document, section names matching the ones a
+ * request_config changes document patches (read-shape ≈ write-shape). */
+static void test_format_json(void) {
+    sqlite3 *db = setup_db();
+    assert(sqlite3_exec(db,
+        "INSERT INTO providers(name, base_url, endpoint_type)"
+        " VALUES('gw','http://127.0.0.1:8000/v1','openai');"
+        "INSERT INTO models(id, provider_name, model, context_window)"
+        " VALUES('claude-opus-4.5@gw','gw','claude-opus-4.5',200000);"
+        "INSERT INTO agent_models(agent_name,model_id,pos)"
+        " VALUES('default','claude-opus-4.5@gw',0);"
+        "INSERT INTO grants(agent_name,kind,value)"
+        " VALUES('default','host','api.example.com');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    int64_t sid = session_create(db, "plain", "default", -1, 0);
+
+    ToolRegistry reg;
+    tools_init(&reg);
+    SearchConfigCtx ctx = {.db = db, .agent_name = "default", .session_id = sid};
+    assert(tool_search_config_register(&reg, &ctx) == 0);
+
+    char *doc = call_handler(&reg, "{\"format\":\"json\"}");
+    assert(doc != NULL && doc_valid(db, doc));
+
+    char *v = doc_get(db, doc, "$.agent.name");
+    assert(v && strcmp(v, "default") == 0); free(v);
+    v = doc_get(db, doc, "$.agent.models[0]");
+    assert(v && strcmp(v, "claude-opus-4.5@gw") == 0); free(v);
+    v = doc_get(db, doc, "$.agent.sandbox_profile");
+    assert(v && v[0]); free(v);
+    v = doc_get(db, doc, "$.grants.hosts[0]");
+    assert(v && strcmp(v, "api.example.com") == 0); free(v);
+    v = doc_get(db, doc, "$.models[0].your_position");
+    assert(v && strcmp(v, "1") == 0); free(v);
+    v = doc_get(db, doc, "$.providers[0].base_url");
+    assert(v && strcmp(v, "http://127.0.0.1:8000/v1") == 0); free(v);
+    /* Sections present even when empty — an absent key would read as unknown
+     * rather than as "none". */
+    v = doc_get(db, doc, "$.secret_bindings");
+    assert(v != NULL); free(v);
+    v = doc_get(db, doc, "$.pending_approvals");
+    assert(v && strcmp(v, "[]") == 0); free(v);
+    v = doc_get(db, doc, "$.session.tool_filter");
+    assert(v == NULL);                              /* unfiltered = json null */
+    free(doc);
+
+    /* An unknown format is refused rather than silently rendered as prose. */
+    char *bad = call_handler(&reg, "{\"format\":\"yaml\"}");
+    assert(bad && strstr(bad, "error"));
+    free(bad);
+
+    tools_free(&reg);
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_format_json\n");
+}
+
+/* Pending approvals surface in BOTH formats — id, age, one-line summary. */
+static void test_pending_approvals_section(void) {
+    sqlite3 *db = setup_db();
+    int64_t sid = session_create(db, "plain", "default", -1, 0);
+
+    ToolRegistry reg;
+    tools_init(&reg);
+    SearchConfigCtx ctx = {.db = db, .agent_name = "default", .session_id = sid};
+    assert(tool_search_config_register(&reg, &ctx) == 0);
+
+    char *out = call_handler(&reg, "{}");
+    assert(out && strstr(out, "## Pending approvals"));
+    assert(strstr(out, "(none"));
+    free(out);
+
+    char args[256];
+    snprintf(args, sizeof(args),
+        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"grants\":{\"hosts\":[\"api.example.com\"]}}}");
+    assert(approval_create(db, sid, "c1", "request_config", "request_changes",
+                           args, "apply") > 0);
+
+    out = call_handler(&reg, "{}");
+    assert(out && strstr(out, "## Pending approvals"));
+    assert(strstr(out, "#1 ("));
+    assert(strstr(out, "api.example.com"));
+    free(out);
+
+    char *doc = call_handler(&reg, "{\"format\":\"json\"}");
+    assert(doc && doc_valid(db, doc));
+    char *v = doc_get(db, doc, "$.pending_approvals[0].id");
+    assert(v && strcmp(v, "1") == 0); free(v);
+    v = doc_get(db, doc, "$.pending_approvals[0].age");
+    assert(v && v[0]); free(v);
+    v = doc_get(db, doc, "$.pending_approvals[0].summary");
+    assert(v && strstr(v, "api.example.com")); free(v);
+    free(doc);
+
+    tools_free(&reg);
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_pending_approvals_section\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_tool_search_config:\n");
@@ -173,6 +300,8 @@ int main(void) {
     test_filter_line_present();
     test_empty_filter_is_explicit();
     test_settings_models_providers();
+    test_format_json();
+    test_pending_approvals_section();
     printf("All search_config tests passed.\n");
     return 0;
 }

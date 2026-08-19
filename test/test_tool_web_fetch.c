@@ -114,7 +114,7 @@ static void test_host_hint_denied(void) {
     char *h = web_fetch_host_hint("https://evil.example.com/x", rules, 1, 0);
     assert(h != NULL);
     assert(strstr(h, "host 'evil.example.com'") != NULL);
-    assert(strstr(h, "\"action\":\"request_changes\"") != NULL);
+    assert(strstr(h, "request_config {\"changes\"") != NULL);
     assert(strstr(h, "\"hosts\"") != NULL);
     free(h);
     printf("  PASS: host_hint_denied\n");

@@ -242,8 +242,7 @@ char *web_fetch_host_hint(const char *url, char **rules, size_t n, int host_mode
     if (!msg) return NULL;
     snprintf(msg, cap,
              "error: host '%s' is not in your allowed hosts — request it with "
-             "request_config {\"action\":\"request_changes\","
-             "\"changes\":{\"grants\":{\"hosts\":[\"%s\"]}}}",
+             "request_config {\"changes\":{\"grants\":{\"hosts\":[\"%s\"]}}}",
              host, host);
     return msg;
 }

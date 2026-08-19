@@ -308,4 +308,4 @@ Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
 
 Default: OpenRouter → DeepSeek V4 Flash (`deepseek/deepseek-v4-flash`).
 
-All providers use the OpenAI-compatible chat completions format. Switch provider via the `providers` table (or the approval-gated `request_config` action `request_changes` with a `provider` section); API keys are stored encrypted in the `secrets` table (scope `system`) via `save_secret`, referenced by name (`api_key_env`). Env var `OPENROUTER_API_KEY` is all you need to start.
+All providers use the OpenAI-compatible chat completions format. Switch provider via the `providers` table (or an approval-gated `request_config` changes document with a `provider` section — see [specs/config-doc.md](specs/config-doc.md)); API keys are stored encrypted in the `secrets` table (scope `system`) via `save_secret`, referenced by name (`api_key_env`). Env var `OPENROUTER_API_KEY` is all you need to start.

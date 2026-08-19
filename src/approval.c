@@ -617,7 +617,12 @@ static void append_enum_block(sqlite3 *db, Buf *out, const char *header,
     sqlite3_finalize(st);
 }
 
-/* request_changes enumerations, grouped by scope: the approver must see
+/* One of four consumers of the changes-doc section names (grants, agent,
+ * routes, config, provider, models, secret_bindings): park/validate and apply
+ * live in src/tool_request_config.c, export in src/tool_search_config.c, this
+ * render here. Contract: specs/config-doc.md.
+ *
+ * request_changes enumerations, grouped by scope: the approver must see
  * whether a line changes only the asking agent or the whole system. Every
  * requested VALUE is listed (which hosts, which paths) — never counts. */
 static const char *SQL_CHANGES_AUTHORITY_AGENT =
@@ -855,12 +860,6 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
                           SQL_CHANGES_SYSTEM_WIDE, args, a->session_id);
         f[0] = tool_args_str(db, args, "reason");
         if (f[0] && f[0][0]) buf_appendf(&out, "Reason: %s\n", f[0]);
-    } else if (a->tool_name && strcmp(a->tool_name, "request_config") == 0 &&
-               a->action && strcmp(a->action, "rename_agent") == 0) {
-        f[0] = tool_args_str(db, args, "name");
-        f[1] = tool_args_str(db, args, "reason");
-        buf_appendf(&out, "rename_agent: %s", f[0] ? f[0] : "?");
-        if (f[1] && f[1][0]) buf_appendf(&out, "\nReason: %s", f[1]);
     } else if (a->tool_name && strcmp(a->tool_name, "request_config") == 0) {
         buf_append_str(&out, a->action ? a->action : "?");
     } else if (a->tool_name && strcmp(a->tool_name, "extension_promote") == 0) {

@@ -1,6 +1,6 @@
 ---
 name: configuring-cclaw
-description: How to read and change CClaw configuration — search_config, request_config (request_changes document, rename), env-var precedence, and the config registry.
+description: How to read and change CClaw configuration — search_config, request_config (the changes document), env-var precedence, and the config registry.
 ---
 
 # Configuring CClaw
@@ -30,13 +30,14 @@ them (ask the operator to use `save_secret` / the environment instead).
 ## Changing configuration
 
 All writes go through `request_config`, which parks an approval for the
-operator. Batch everything one task needs into ONE `request_changes` document —
+operator. Batch everything one task needs into ONE changes document —
 one approval covers the whole document:
 
 ```json
-{"action": "request_changes", "changes": {
+{"changes": {
    "grants": {"tools": ["shell_exec"], "hosts": [".example.com"],
-              "read_paths": ["/abs/path"], "write_paths": ["/abs/path"]},
+              "read_paths": ["/abs/path"], "write_paths": ["/abs/path"],
+              "remove": {"hosts": ["old.example.com"]}},
    "agent": {"models": ["gemini-2.5-flash@gemini"], "max_iterations": 40},
    "routes": ["telegram:12345"],
    "config": {"registered.key": "value"},
@@ -81,7 +82,10 @@ one approval covers the whole document:
   a provider, register a model on it, and adopt it via
   `agent.models: ["<model>@<provider>", ...]`.
 
-`rename_agent {name}` — request a new agent name (separate action).
+The document is a PATCH against what `search_config` shows: `agent.*` fields
+replace, `grants.*` add, `models`/`provider` upsert, and
+`grants.remove` (same four kinds) gives up grants you already hold — applied
+immediately, with no approval.
 
 Give a concrete `reason` — the operator sees it in the approval prompt. If the
 approval is denied, do not re-request the same thing; explain what you were

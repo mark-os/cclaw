@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -35,13 +34,13 @@
 /* ── apply_grant: apply an 'apply'-style capability grant ──────────
  * Extracted from resolve_approval so both the in-window path and the
  * post-window inbox path apply grants identically. Called only for an approved
- * (APPROVAL_ALWAYS) apply approval. Sets *rename_failed if a rename's disk step
- * failed (DB change rolled back); refreshes live caps on success.
+ * (APPROVAL_ALWAYS) apply approval. Sets *apply_failed if the document's apply
+ * step failed (all-or-nothing — the caller reports an error, grants nothing).
  * grant_expires_at: 0 for a permanent grant, else a future unix timestamp
  * (--auto-approve path — see resolve.h). */
-static void apply_grant(const Approval *a, const char *agent, int *rename_failed,
+static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
                         int64_t grant_expires_at, char **detail) {
-    *rename_failed = 0;
+    *apply_failed = 0;
     if (detail) *detail = NULL;
     if (strcmp(a->action, "request_changes") == 0) {
         /* One savepoint applies the whole document — grants, config values,
@@ -52,14 +51,14 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
                                          grant_expires_at, a->session_id,
                                          detail) != 0) {
             LOG_WARN_("request_changes apply failed");
-            *rename_failed = 1; /* generic apply-failed: error result, no grant */
+            *apply_failed = 1; /* generic apply-failed: error result, no grant */
         }
     } else if (strcmp(a->action, "extension_promote") == 0) {
         char *bundle = tool_args_str(proc_db(), a->args_json, "bundle");
         char *ierr = NULL;
         if (!bundle || extension_install(proc_db(), bundle, agent, &ierr) != 0) {
             LOG_WARN_("extension_promote apply failed: %s", ierr ? ierr : "no bundle");
-            *rename_failed = 1;
+            *apply_failed = 1;
         }
         free(ierr);
         free(bundle);
@@ -68,14 +67,14 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         const char *adir = proc_tool_setup() ? proc_tool_setup()->req_cfg_ctx.agents_dir : NULL;
         if (agent_definition_apply(proc_db(), a->args_json, agent, adir, &cerr) != 0) {
             LOG_WARN_("create_agent apply failed: %s", cerr ? cerr : "?");
-            *rename_failed = 1; /* generic apply-failed: error result, no grant */
+            *apply_failed = 1; /* generic apply-failed: error result, no grant */
         }
         free(cerr);
     } else if (strcmp(a->action, "update_agent") == 0) {
         char *cerr = NULL;
         if (agent_definition_update_apply(proc_db(), a->args_json, agent, &cerr) != 0) {
             LOG_WARN_("update_agent apply failed: %s", cerr ? cerr : "?");
-            *rename_failed = 1; /* generic apply-failed: error result, no grant */
+            *apply_failed = 1; /* generic apply-failed: error result, no grant */
         }
         free(cerr);
     } else if (strcmp(a->action, "cron_set") == 0) {
@@ -85,48 +84,9 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         if (cron_upsert(proc_db(), agent, a->session_id, a->args_json,
                         NULL, &cerr) < 0) {
             LOG_WARN_("cron_set apply failed: %s", cerr ? cerr : "?");
-            *rename_failed = 1; /* generic apply-failed: error result, no job */
+            *apply_failed = 1; /* generic apply-failed: error result, no job */
         }
         free(cerr);
-    } else if (strcmp(a->action, "rename_agent") == 0) {
-        char *nn = tool_args_str(proc_db(), a->args_json, "name");
-        char *pr = tool_args_str(proc_db(), a->args_json, "preamble");
-        if (nn) {
-            int rc = agent_rename(proc_db(), agent, nn, a->session_id);
-            if (rc == 0 && proc_tool_setup()) {
-                /* Disk rename */
-                RequestConfigCtx *rctx = &proc_tool_setup()->req_cfg_ctx;
-                if (rctx->agents_dir) {
-                    char old_path[512], new_path[512];
-                    snprintf(old_path, sizeof(old_path), "%s/%s", rctx->agents_dir, agent);
-                    snprintf(new_path, sizeof(new_path), "%s/%s", rctx->agents_dir, nn);
-                    struct stat st;
-                    if (stat(old_path, &st) == 0) {
-                        if (rename(old_path, new_path) != 0) {
-                            /* Rollback DB rename on disk failure */
-                            agent_rename(proc_db(), nn, agent, a->session_id);
-                            *rename_failed = 1;
-                            goto rename_done;
-                        }
-                    }
-                }
-                /* Optional preamble update */
-                if (pr && pr[0]) {
-                    const char *sql = "UPDATE agents SET system_prompt=? WHERE name=?";
-                    sqlite3_stmt *s;
-                    if (sqlite3_prepare_v2(proc_db(), sql, -1, &s, NULL) == SQLITE_OK) {
-                        sqlite3_bind_text(s, 1, pr, -1, SQLITE_STATIC);
-                        sqlite3_bind_text(s, 2, nn, -1, SQLITE_STATIC);
-                        sqlite3_step(s); sqlite3_finalize(s);
-                    }
-                }
-                /* Update live agent name */
-                snprintf((char *)rctx->agent_name, 64, "%s", nn);
-                setenv("CCLAW_AGENT_NAME", nn, 1);
-            }
-        }
-rename_done:
-        free(nn); free(pr);
     }
     /* No caps rebind here: the dispatch loop reloads caps from grants before
      * every tool batch, so the applied grants take effect on the next dispatch. */
@@ -172,11 +132,11 @@ static void resolve_approval_post_window(const Approval *a, const char *agent,
     int expired = decided_via && strcmp(decided_via, "auto:expired") == 0;
     if (is_apply) {
         if (approved && decision == APPROVAL_ALWAYS) {
-            int rename_failed = 0;
+            int apply_failed = 0;
             char *detail = NULL;
-            apply_grant(a, agent, &rename_failed, grant_expires_at, &detail);
+            apply_grant(a, agent, &apply_failed, grant_expires_at, &detail);
             approval_deliver_postwindow(proc_db(), a,
-                rename_failed ? APPROVAL_PW_APPLY_FAILED : APPROVAL_PW_APPLY_GRANTED,
+                apply_failed ? APPROVAL_PW_APPLY_FAILED : APPROVAL_PW_APPLY_GRANTED,
                 detail);
             free(detail);
         } else {
@@ -298,16 +258,16 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
         return;
     }
 
-    int rename_failed = 0;
+    int apply_failed = 0;
     char *apply_detail = NULL;
     if (decision == APPROVAL_ALWAYS)
-        apply_grant(a, agent, &rename_failed, grant_expires_at, &apply_detail);
+        apply_grant(a, agent, &apply_failed, grant_expires_at, &apply_detail);
 
     /* Build tool result message. Receipts over intent: on apply the detail is
      * what is now in effect (re-read from the DB); on failure it names the
      * failing step — approved-then-failed must never read as a denial. */
     char result_buf[1024];
-    if (rename_failed)
+    if (apply_failed)
         snprintf(result_buf, sizeof(result_buf),
                  "error: %s was approved but applying it failed (%s) — "
                  "everything rolled back. System error, not a denial: "
@@ -336,7 +296,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
         ToolResult tr = { .tool_call_id = a->tool_call_id, .content = result_buf };
         Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                         .tool_name = a->tool_name,
-                        .is_error = (decision == APPROVAL_DENY || rename_failed) };
+                        .is_error = (decision == APPROVAL_DENY || apply_failed) };
         entry_append_with_iteration(proc_db(), session_id, &msg, 0);
         db_tool_call_set_status(proc_db(), session_id, a->tool_call_id, "done", decided_via);
     }

@@ -310,8 +310,12 @@ The model acquires new capabilities at runtime via `request_config` (`src/tool_r
 
 | Action | Payload | Effect on approval |
 |--------|---------|--------------------|
-| `request_changes` | `changes` JSON document (any subset of `grants`, `agent`, `routes`, `config`, `provider`) | Parks → on approve, applies the whole document in a savepoint (all-or-nothing) |
-| `rename_agent` | new name (+ optional preamble) | Parks → on approve, renames agent |
+| `request_changes` | `changes` JSON document (any subset of `grants`, `agent`, `routes`, `config`, `provider`, `models`, `secret_bindings`) | Parks → on approve, applies the whole document in a savepoint (all-or-nothing) |
+
+`request_config` takes `{changes, reason}` — there is no model-facing action
+field, and no rename surface (rename is operator identity surgery). Section
+names, patch verbs, and the `grants.remove` exception are in
+[config-doc.md](config-doc.md).
 
 The `request_changes` document batches everything an agent needs into one approval:
 

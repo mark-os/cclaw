@@ -331,7 +331,7 @@ static void test_hint_outside_granted(void) {
     char *r = test_file_tool_run("file_read", "{\"path\":\"/definitely/not/granted/file.txt\"}", &hctx);
     assert(r != NULL);
     assert(strstr(r, "outside your granted areas") != NULL);
-    assert(strstr(r, "\"action\":\"request_changes\"") != NULL);
+    assert(strstr(r, "request_config {\"changes\"") != NULL);
     assert(strstr(r, "\"read_paths\"") != NULL);
     free(r);
     printf("  PASS test_hint_outside_granted\n");

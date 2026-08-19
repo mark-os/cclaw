@@ -267,7 +267,7 @@ Audit log for tool-call approvals. When a tool call is parked (`sessions.state` 
 
 Index: `approvals_pending ON approvals(session_id, state) WHERE state='pending'`.
 
-`approvals.action` values beyond tool names: `sensitive` (sensitivity-axis park — ALWAYS is coerced to ONCE at resolve) and the `request_config` document actions (`request_changes`, `rename_agent`). The former `secret_bind` action was deleted with the bind park (D17) — an unbound secret denies inline and the agent requests the binding via `request_config` `secret_bindings`.
+`approvals.action` values beyond tool names: `sensitive` (sensitivity-axis park — ALWAYS is coerced to ONCE at resolve) and the `request_config` document action (`request_changes`). The former `secret_bind` action was deleted with the bind park (D17) — an unbound secret denies inline and the agent requests the binding via `request_config` `secret_bindings`.
 
 ---
 

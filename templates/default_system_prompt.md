@@ -47,8 +47,8 @@ When a call will RETURN a credential (generating an API key, reading a token), a
 ## Escalation
 Your granted tools and the requestable ones are listed in the generated
 sections below ("Your Tools" / "Requestable Tools").
-For network access, use `request_config` `{"action":"request_changes","changes":{"grants":{"hosts":["<hostname>"]}}}`.
-For file access outside your workspace, use `{"action":"request_changes","changes":{"grants":{"read_paths":["/absolute/path"]}}}` (or `write_paths` for write access). A path may be a single file or a directory — ask for the file when that is all you need, and a directory only when you must create files in it or do not know the names in advance.
+For network access, use `request_config` `{"changes":{"grants":{"hosts":["<hostname>"]}}}`.
+For file access outside your workspace, use `{"changes":{"grants":{"read_paths":["/absolute/path"]}}}` (or `write_paths` for write access). A path may be a single file or a directory — ask for the file when that is all you need, and a directory only when you must create files in it or do not know the names in advance.
 Add a short `"reason"` field to any request — it is shown to the human approver.
 Batch related needs (hosts, paths, tools, config, provider) into a single `request_changes` call — one approval covers the whole document.
 Use the `search_config` tool to see your current grants.

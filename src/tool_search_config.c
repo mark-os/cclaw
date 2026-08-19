@@ -1,6 +1,15 @@
-/* search_config tool — read-only introspection of agent config and available tools. */
+/* search_config tool — read-only introspection of agent config and available
+ * tools, in two renderings of one query layer: prose (default) and the
+ * canonical agent document (format:json).
+ *
+ * The json rendering is the read half of the changes-doc section names
+ * (agent, grants, routes, config, provider(s), models, secret_bindings) that
+ * request_config patches — read-shape ≈ write-shape on purpose. The other
+ * three consumers are park/validate + apply (src/tool_request_config.c) and
+ * the approval card (src/approval.c). Contract: specs/config-doc.md. */
 #define _POSIX_C_SOURCE 200809L
 #include "tool_search_config.h"
+#include "approval.h"
 #include "tool_args.h"
 #include "buf.h"
 #include <stdio.h>
@@ -9,18 +18,190 @@
 
 static const char *PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"query\":{\"type\":\"string\",\"description\":\"Optional substring to filter tools by name/description\"}"
+    "\"query\":{\"type\":\"string\",\"description\":\"Optional substring to filter tools by name/description\"},"
+    "\"format\":{\"type\":\"string\",\"enum\":[\"text\",\"json\"],"
+    "\"description\":\"'text' (default, prose) or 'json' — the canonical agent "
+    "document, whose section names are the ones request_config patches\"}"
     "}}";
 
-static char *handler(const char *arguments, void *user_data, int *is_error) {
-    SearchConfigCtx *ctx = (SearchConfigCtx *)user_data;
-    if (!ctx || !ctx->db || !ctx->agent_name)
-        return tool_fail(is_error, "error: search_config unavailable");
+/* Open approvals on this session as a JSON array of
+ * {id, age_seconds, age, summary} — built once and rendered by BOTH formats,
+ * so the two views cannot drift. Pending-only, matching the <open_approvals>
+ * context block (src/llm_payload.c): "waiting on a human" is the one approval
+ * state the model can act on. Never NULL on success; '[]' when there are none. */
+static char *pending_approvals_json(sqlite3 *db, int64_t session_id) {
+    char *arr = strdup("[]");
+    sqlite3_stmt *st;
+    if (!arr) return NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT id, tool_call_id, tool_name, action, args_json, resolve,"
+            "       MAX(unixepoch() - requested_at, 0)"
+            "  FROM approvals WHERE session_id=?1 AND state='pending'"
+            " ORDER BY id", -1, &st, NULL) != SQLITE_OK)
+        return arr;
+    sqlite3_bind_int64(st, 1, session_id);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        /* Borrowed column pointers, valid until the next step — the summary
+         * renderer only reads, so no copy is warranted. */
+        Approval a = {0};
+        a.id = sqlite3_column_int64(st, 0);
+        a.session_id = session_id;
+        a.tool_call_id = (char *)sqlite3_column_text(st, 1);
+        a.tool_name = (char *)sqlite3_column_text(st, 2);
+        a.action = (char *)sqlite3_column_text(st, 3);
+        a.args_json = (char *)sqlite3_column_text(st, 4);
+        a.resolve = (char *)sqlite3_column_text(st, 5);
+        int64_t age = sqlite3_column_int64(st, 6);
+        char *summary = approval_format_summary(db, &a);
+        sqlite3_stmt *ap;
+        if (sqlite3_prepare_v2(db,
+                "SELECT json_insert(?1,'$[#]', json_object("
+                "  'id', ?2, 'age_seconds', ?3,"
+                "  'age', CASE WHEN ?3 < 60 THEN ?3 || 's'"
+                "              WHEN ?3 < 3600 THEN (?3/60) || 'm'"
+                "              ELSE (?3/3600) || 'h' END,"
+                "  'summary', ?4))", -1, &ap, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(ap, 1, arr, -1, SQLITE_STATIC);
+            sqlite3_bind_int64(ap, 2, a.id);
+            sqlite3_bind_int64(ap, 3, age);
+            sqlite3_bind_text(ap, 4, summary ? summary : "(no summary)", -1,
+                              SQLITE_STATIC);
+            if (sqlite3_step(ap) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(ap, 0);
+                if (v) { char *n = strdup(v); if (n) { free(arr); arr = n; } }
+            }
+            sqlite3_finalize(ap);
+        }
+        free(summary);
+    }
+    sqlite3_finalize(st);
+    return arr;
+}
 
-    char *query = tool_args_str(ctx->db, arguments, "query");
-    /* Treat empty string as no filter */
-    if (query && !query[0]) { free(query); query = NULL; }
+/* The canonical agent document, assembled by SQL (the repo's serializer — see
+ * src/llm_payload.c). Binds: ?1 agent, ?2 session id, ?3 shell-path env
+ * override, ?4 filter substring (NULL = none), ?5 pending-approvals array.
+ * Every scalar subquery is json()-wrapped: a subquery result loses SQLite's
+ * JSON subtype, and an unwrapped one would embed as a quoted string. */
+static const char SQL_CONFIG_DOC[] =
+    "SELECT json_object("
+    " 'agent', json_object("
+    "   'name', ?1,"
+    "   'sandbox_profile', (SELECT sandbox_profile FROM agents WHERE name=?1),"
+    "   'models', json((SELECT json_group_array(model_id) FROM"
+    "     (SELECT model_id FROM agent_models WHERE agent_name=?1 ORDER BY pos))),"
+    "   'max_iterations', (SELECT max_iterations FROM agents WHERE name=?1),"
+    "   'shell_timeout', (SELECT shell_timeout FROM agents WHERE name=?1),"
+    "   'shell_path', (SELECT COALESCE(NULLIF(?3,''),NULLIF(shell_path,''),"
+    "                                  '/bin/sh') FROM agents WHERE name=?1)),"
+    " 'grants', json_object("
+    "   'tools', json((SELECT json_group_array(value) FROM grants"
+    "     WHERE agent_name=?1 AND kind='tool'"
+    "       AND (expires_at IS NULL OR expires_at>unixepoch()))),"
+    "   'hosts', json((SELECT json_group_array(value) FROM grants"
+    "     WHERE agent_name=?1 AND kind='host'"
+    "       AND (expires_at IS NULL OR expires_at>unixepoch()))),"
+    "   'read_paths', json((SELECT json_group_array(value) FROM grants"
+    "     WHERE agent_name=?1 AND kind='read_path'"
+    "       AND (expires_at IS NULL OR expires_at>unixepoch()))),"
+    "   'write_paths', json((SELECT json_group_array(value) FROM grants"
+    "     WHERE agent_name=?1 AND kind='write_path'"
+    "       AND (expires_at IS NULL OR expires_at>unixepoch())))),"
+    " 'session', json_object('id', ?2,"
+    "   'tool_filter', json((SELECT COALESCE(tool_filter,'null') FROM sessions"
+    "                        WHERE id=?2))),"
+    " 'sensitive_hosts', json((SELECT json_group_array(value)"
+    "   FROM sensitive_targets WHERE kind='host')),"
+    " 'secret_bindings', json((SELECT COALESCE(json_group_object(secret_name,"
+    "     json(hosts)),'{}') FROM (SELECT secret_name,"
+    "       json_group_array(host) AS hosts FROM secret_hosts"
+    "       GROUP BY secret_name))),"
+    " 'providers', json((SELECT json_group_array(json_object("
+    "     'name', name, 'endpoint_type', endpoint_type, 'base_url', base_url,"
+    "     'api_key_env', api_key_env)) FROM (SELECT * FROM providers"
+    "     ORDER BY name))),"
+    " 'models', json((SELECT json_group_array(json_object("
+    "     'id', id, 'status', status, 'context_window', context_window,"
+    "     'your_position', pos)) FROM ("
+    "   SELECT m.id, m.status, m.context_window,"
+    "          (SELECT am.pos+1 FROM agent_models am"
+    "            WHERE am.agent_name=?1 AND am.model_id=m.id) AS pos"
+    "     FROM models m WHERE (?4 IS NULL OR m.id LIKE '%'||?4||'%')"
+    "    ORDER BY m.created_at, m.id))),"
+    " 'tools', json((SELECT json_group_array(json_object("
+    "     'name', name, 'granted', granted, 'approval_mode', approval_mode))"
+    "   FROM (SELECT t.name AS name,"
+    "                (g.agent_name IS NOT NULL) AS granted,"
+    "                g.approval_mode AS approval_mode"
+    "           FROM tools t"
+    "           LEFT JOIN grants g ON g.agent_name=?1 AND g.kind='tool'"
+    "                AND g.value=t.name"
+    "                AND (g.expires_at IS NULL OR g.expires_at>unixepoch())"
+    "          WHERE t.enabled=1 AND (t.agent_name IS NULL OR t.agent_name=?1)"
+    "            AND (?4 IS NULL OR t.name LIKE '%'||?4||'%'"
+    "                 OR t.description LIKE '%'||?4||'%')"
+    "          ORDER BY t.name))),"
+    " 'config', json((SELECT COALESCE(json_group_object(key, json_object("
+    "     'value', CASE WHEN COALESCE(secret,0) THEN NULL"
+    "                   ELSE COALESCE(value, default_value) END,"
+    "     'overridden', value IS NOT NULL,"
+    "     'secret', COALESCE(secret,0))),'{}') FROM config"
+    "   WHERE (?4 IS NULL OR key LIKE '%'||?4||'%'"
+    "          OR description LIKE '%'||?4||'%'))),"
+    " 'extensions', json((SELECT json_group_array(json_object("
+    "     'name', e.name, 'enabled', ae.enabled))"
+    "   FROM agent_extensions ae JOIN extensions e ON e.name=ae.extension_name"
+    "   WHERE ae.agent_name=?1)),"
+    " 'agents', json((SELECT json_group_array(json_object("
+    "     'name', name, 'sandbox_profile', sandbox_profile))"
+    "   FROM (SELECT * FROM agents ORDER BY name))),"
+    " 'pending_approvals', json(?5))";
 
+/* format:json — one document, same data the prose view renders. */
+static char *render_json(SearchConfigCtx *ctx, const char *query,
+                         const char *pending, int *is_error) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(ctx->db, SQL_CONFIG_DOC, -1, &st, NULL) != SQLITE_OK)
+        return tool_fail(is_error, "error: could not build the config document");
+    const char *env_shell = getenv("CCLAW_SHELL_PATH");
+    sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, ctx->session_id);
+    sqlite3_bind_text(st, 3, env_shell ? env_shell : "", -1, SQLITE_STATIC);
+    if (query) sqlite3_bind_text(st, 4, query, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(st, 4);
+    sqlite3_bind_text(st, 5, pending, -1, SQLITE_STATIC);
+    char *doc = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) doc = strdup(v);
+    }
+    sqlite3_finalize(st);
+    return doc ? doc
+               : tool_fail(is_error, "error: could not build the config document");
+}
+
+/* Pending approvals, prose form — rendered from the same JSON array the json
+ * format returns. Summaries are markdown paragraphs; flattened to one line and
+ * clipped so a long parked document cannot bury the rest of the output. */
+static void append_pending_text(sqlite3 *db, Buf *out, const char *pending) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT group_concat('#' || json_extract(value,'$.id') ||"
+            "  ' (' || json_extract(value,'$.age') || ' old) ' ||"
+            "  substr(replace(json_extract(value,'$.summary'),char(10),' '),1,200),"
+            "  char(10)) FROM json_each(?1)", -1, &st, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(st, 1, pending, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        buf_appendf(out, "\n## Pending approvals (this session)\n%s\n",
+                    (v && v[0]) ? v : "(none — nothing is waiting on a human)");
+    }
+    sqlite3_finalize(st);
+}
+
+static char *render_text(SearchConfigCtx *ctx, const char *query,
+                         const char *pending, int *is_error) {
     Buf out = {0};
 
     /* Section 0: the agent's own settings row — "what is my config now" must
@@ -308,24 +489,57 @@ static char *handler(const char *arguments, void *user_data, int *is_error) {
     /* Section 6: usage hint */
     buf_appendf(&out,
         "\n## Requesting changes (use the request_config tool)\n"
-        "One request_changes document batches everything — one approval covers it all:\n"
-        "  {\"action\":\"request_changes\",\"changes\":{\n"
+        "One changes document batches everything — one approval covers it all.\n"
+        "It is a PATCH against the state shown above: agent.* fields replace;\n"
+        "grants.* add; models/provider upsert; grants.remove narrows immediately\n"
+        "without approval.\n"
+        "  {\"changes\":{\n"
         "    \"grants\":{\"tools\":[\"<name>\"],\"hosts\":[\"<hostname>\"],"
-        "\"read_paths\":[\"/abs/path\"],\"write_paths\":[\"/abs/path\"]},\n"
-        "    \"agent\":{\"models\":[\"<model[@provider]>\", \"...\"],"
+        "\"read_paths\":[\"/abs/path\"],\"write_paths\":[\"/abs/path\"],\n"
+        "              \"remove\":{\"hosts\":[\"<hostname you already have>\"]}},\n"
+        "    \"agent\":{\"models\":[\"<model@provider>\", \"...\"],"
         "\"max_iterations\":<n>,\"shell_timeout\":<n>},\n"
         "    \"routes\":[\"<channel>:<chat_id>\"],\n"
         "    \"config\":{\"<key>\":\"<value>\"},\n"
         "    \"provider\":{\"provider\":\"<name>\"}}}\n"
         "(any subset; grants/agent/routes change only you, config/provider are\n"
         "system-wide; config keys must be registered keys listed above)\n"
-        "- rename agent: {\"action\":\"rename_agent\",\"name\":\"<new_name>\"}\n"
         "Add an optional \"reason\" field — it is shown to the human approver.\n"
-        "All gated actions require human approval before taking effect.\n");
+        "Everything except grants.remove requires human approval before taking"
+        " effect.\n");
 
-    free(query);
+    append_pending_text(ctx->db, &out, pending);
+
     char *result = buf_take(&out);
     return result ? result : tool_fail(is_error, "error: out of memory");
+}
+
+static char *handler(const char *arguments, void *user_data, int *is_error) {
+    SearchConfigCtx *ctx = (SearchConfigCtx *)user_data;
+    if (!ctx || !ctx->db || !ctx->agent_name)
+        return tool_fail(is_error, "error: search_config unavailable");
+
+    char *query = tool_args_str(ctx->db, arguments, "query");
+    if (query && !query[0]) { free(query); query = NULL; }  /* "" = no filter */
+    char *format = tool_args_str(ctx->db, arguments, "format");
+    int want_json = format && strcmp(format, "json") == 0;
+    char *bad = (format && format[0] && !want_json &&
+                 strcmp(format, "text") != 0)
+        ? tool_fail(is_error, "error: format must be 'text' or 'json'") : NULL;
+
+    char *result = bad;
+    if (!result) {
+        char *pending = pending_approvals_json(ctx->db, ctx->session_id);
+        if (!pending)
+            result = tool_fail(is_error, "error: out of memory");
+        else
+            result = want_json ? render_json(ctx, query, pending, is_error)
+                               : render_text(ctx, query, pending, is_error);
+        free(pending);
+    }
+    free(query);
+    free(format);
+    return result;
 }
 
 /* EXEC_THREAD shim: rebuild SearchConfigCtx around the thread's own db. */
@@ -340,8 +554,10 @@ static char *search_config_thread_run(sqlite3 *db, const char *agent_name,
 int tool_search_config_register(ToolRegistry *reg, SearchConfigCtx *ctx) {
     int rc = tools_register(reg, "search_config",
         "Discover your current configuration and what you can request: your sandbox profile, "
-        "granted tools and hosts, the full list of available tools, and how to request more "
-        "via request_config. Optional 'query' filters the tool list.",
+        "granted tools and hosts, the full list of available tools, pending approvals, and "
+        "how to request more via request_config. Optional 'query' filters the tool list; "
+        "optional 'format':'json' returns the same state as one canonical document whose "
+        "sections are the ones a request_config changes document patches.",
         PARAMS_JSON, handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "search_config",

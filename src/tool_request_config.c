@@ -1,9 +1,17 @@
 /* request_config tool — handled inline by parent process.
- * Two actions: request_changes (one JSON document batching grants, config
- * values, and a provider definition — one human approval covers it all) and
- * rename_agent. Both park an approval and return NULL; apply_grant (main.c)
- * or admin grant-from-history consumes the parked document via
- * request_config_changes_apply below. */
+ * Takes ONE changes document (grants, agent settings, routes, config values,
+ * provider, models, secret_bindings) — one human approval covers it all. The
+ * handler parks an approval and returns NULL; apply_grant (resolve.c) or admin
+ * grant-from-history consumes the parked document via
+ * request_config_changes_apply below.
+ *
+ * The changes-doc section names (grants, agent, routes, config, provider,
+ * models, secret_bindings) are interpreted in four places — keep them in step:
+ *   park/validate  src/tool_request_config.c   (here)
+ *   apply          request_config_changes_apply (here) + apply_grant, resolve.c
+ *   render         src/approval.c              (SQL_CHANGES_* card blocks)
+ *   export         src/tool_search_config.c    (format:json read shape)
+ * The contract is specs/config-doc.md. */
 #define _POSIX_C_SOURCE 200809L
 #include "tool_request_config.h"
 #include "agent_config.h"
@@ -12,7 +20,6 @@
 #include "config_registry.h"
 #include "db.h"
 #include "log.h"
-#include "validate.h"
 #include "tool_args.h"
 #include <errno.h>
 #include <stdarg.h>
@@ -20,15 +27,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 static const char *PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"action\":{\"type\":\"string\",\"enum\":[\"request_changes\",\"rename_agent\"],"
-    "\"description\":\"Type of config request\"},"
-    "\"changes\":{\"type\":\"object\",\"description\":\"For request_changes: any subset of "
-    "{grants:{tools:[names],hosts:[hostnames],read_paths:[abs paths],write_paths:[abs paths]}, "
+    "\"changes\":{\"type\":\"object\",\"description\":\"Any subset of "
+    "{grants:{tools:[names],hosts:[hostnames],read_paths:[abs paths],write_paths:[abs paths],"
+    "remove:{tools:[],hosts:[],read_paths:[],write_paths:[]}}, "
     "agent:{models?:[canonical model ids in routing order],max_iterations?,shell_timeout?}, "
     "routes:['channel:chat_id',...], "
     "config:{key:value-string,...}, provider:{provider,base_url?,api_key_env?}, "
@@ -51,11 +56,10 @@ static const char *PARAMS_JSON =
     "(the full replacement routing order — first entry is primary). "
     "secret_bindings bind a saved secret to the hosts it may be submitted to — a "
     "{{SECRET:X}} call is denied when its target isn't bound; batch every host a "
-    "denial named into one document\"},"
-    "\"name\":{\"type\":\"string\",\"description\":\"New agent name (for rename_agent)\"},"
-    "\"preamble\":{\"type\":\"string\",\"description\":\"New system prompt preamble (for rename_agent, optional)\"},"
+    "denial named into one document. grants.remove gives up grants you already "
+    "hold — it applies immediately, with no approval\"},"
     "\"reason\":{\"type\":\"string\",\"description\":\"Short justification shown to the human approver (optional, recommended)\"}"
-    "},\"required\":[\"action\"]}";
+    "},\"required\":[\"changes\"]}";
 
 /* ── small JSON1 query helpers (all fail-closed: error → non-NULL/-1) ── */
 
@@ -64,6 +68,22 @@ static char *q1_text(sqlite3 *db, const char *sql, const char *bind) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(st, 1, bind, -1, SQLITE_STATIC);
+    char *out = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) out = strdup(v);
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
+/* q1_text with a second text bind (agent name). */
+static char *q2_text(sqlite3 *db, const char *sql, const char *json,
+                     const char *agent) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, agent, -1, SQLITE_STATIC); /* RANGE ok if unused */
     char *out = NULL;
     if (sqlite3_step(st) == SQLITE_ROW) {
         const char *v = (const char *)sqlite3_column_text(st, 0);
@@ -101,6 +121,107 @@ GRANT_KINDS[] = {
 };
 #define GRANT_KIND_COUNT (sizeof(GRANT_KINDS) / sizeof(GRANT_KINDS[0]))
 
+/* ── grants.remove — self-narrowing, applied immediately ────────────────
+ * Widening parks; narrowing never does. An agent giving up authority it
+ * already holds needs nobody's permission, and making it wait behind an
+ * approval would mean the safest possible request is also the slowest.
+ * Reach is bounded to the four grant kinds by construction: this path only
+ * ever DELETEs from `grants`, so sandbox_profile (containment) and every
+ * system-wide section are structurally out of its reach. */
+
+/* Validate $.grants.remove and DELETE the named rows. On success *receipt_out
+ * is a re-read receipt of what is gone. Returns a heap error string, or NULL.
+ * Fail-closed: an unknown kind or a value that is not a live grant refuses the
+ * whole removal, naming the offender — never a partial, silent narrowing. */
+static char *grants_remove_apply(sqlite3 *db, const char *agent,
+                                 const char *changes, char **receipt_out) {
+    *receipt_out = NULL;
+    if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.grants.remove')='object'",
+                 changes))
+        return strdup("error: grants.remove must be an object of "
+                      "{tools|hosts|read_paths|write_paths: [values]}");
+    char *bad = q1_text(db,
+        "SELECT key FROM json_each(?1,'$.grants.remove')"
+        " WHERE key NOT IN ('tools','hosts','read_paths','write_paths') LIMIT 1",
+        changes);
+    if (bad) {
+        char *m = errf("error: unknown grants.remove kind '%s' (use tools, "
+                       "hosts, read_paths, write_paths) — removal touches "
+                       "grants only, never sandbox_profile or system config",
+                       bad);
+        free(bad);
+        return m;
+    }
+    for (size_t i = 0; i < GRANT_KIND_COUNT; i++) {
+        char sql[320];
+        snprintf(sql, sizeof(sql),
+                 "SELECT 1 FROM json_each(?1,'$.grants.remove.%s')"
+                 " WHERE type!='text' OR atom='' LIMIT 1", GRANT_KINDS[i].key);
+        char *t = q1_text(db, sql, changes);
+        if (t) {
+            free(t);
+            return errf("error: grants.remove.%s must be an array of "
+                        "non-empty strings", GRANT_KINDS[i].key);
+        }
+        /* Removing something you never had is a mistaken belief about your own
+         * state, not a no-op — say so rather than report a phantom removal. */
+        snprintf(sql, sizeof(sql),
+                 "SELECT j.atom FROM json_each(?1,'$.grants.remove.%s') j"
+                 " WHERE NOT EXISTS(SELECT 1 FROM grants g"
+                 "   WHERE g.agent_name=?2 AND g.kind='%s' AND g.value=j.atom"
+                 "     AND (g.expires_at IS NULL OR g.expires_at>unixepoch()))"
+                 " LIMIT 1", GRANT_KINDS[i].key, GRANT_KINDS[i].kind);
+        t = q2_text(db, sql, changes, agent);
+        if (t) {
+            char *m = errf("error: grants.remove names '%s', which is not one "
+                           "of your live grants — check search_config", t);
+            free(t);
+            return m;
+        }
+    }
+    /* Multi-statement write: take the write lock up front so contention is a
+     * retryable BUSY the busy handler absorbs, never a BUSY_SNAPSHOT. */
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
+        return strdup("error: could not open a write transaction for the removal");
+    int rc = 0;
+    for (size_t i = 0; i < GRANT_KIND_COUNT && rc == 0; i++) {
+        char sql[320];
+        snprintf(sql, sizeof(sql),
+                 "DELETE FROM grants WHERE agent_name=?2 AND kind='%s'"
+                 " AND value IN (SELECT atom FROM json_each(?1,"
+                 "               '$.grants.remove.%s'))",
+                 GRANT_KINDS[i].kind, GRANT_KINDS[i].key);
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) { rc = -1; break; }
+        sqlite3_bind_text(st, 1, changes, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, agent, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
+        sqlite3_finalize(st);
+    }
+    if (rc != 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return strdup("error: removal failed — no grants were changed");
+    }
+    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    /* Receipt from a re-read, after the commit: what is gone is what the
+     * grants table no longer has, not what the request asked for. */
+    char *gone = q2_text(db,
+        "SELECT group_concat(k.key || ' ' || v.atom, ', ')"
+        "  FROM json_each(?1,'$.grants.remove') k, json_each(k.value) v"
+        " WHERE NOT EXISTS(SELECT 1 FROM grants g WHERE g.agent_name=?2"
+        "                    AND g.value=v.atom)", changes, agent);
+    size_t n = (gone ? strlen(gone) : 1) + 160;
+    char *msg = malloc(n);
+    if (msg)
+        snprintf(msg, n, "removed (applied immediately, no approval needed): %s"
+                 " — these grants are gone now; request them again if you "
+                 "find you still need them", gone ? gone : "(nothing)");
+    free(gone);
+    if (!msg) return strdup("error: out of memory");
+    *receipt_out = msg;
+    return NULL;
+}
+
 static char *validate_grants(sqlite3 *db, const char *changes) {
     if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.grants')='object'", changes))
         return strdup("error: changes.grants must be an object");
@@ -110,7 +231,7 @@ static char *validate_grants(sqlite3 *db, const char *changes) {
         changes);
     if (bad) {
         char *m = errf("error: unknown grants key '%s' (use tools, hosts, "
-                       "read_paths, write_paths)", bad);
+                       "read_paths, write_paths, remove)", bad);
         free(bad);
         return m;
     }
@@ -957,22 +1078,6 @@ out:
  * decides what is actually new. Returns the filtered canonical document, or
  * NULL on error; *fully_out = 1 when nothing is left to request at all. */
 
-/* q1_text with a second text bind (agent name). */
-static char *q2_text(sqlite3 *db, const char *sql, const char *json,
-                     const char *agent) {
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 2, agent, -1, SQLITE_STATIC); /* RANGE ok if unused */
-    char *out = NULL;
-    if (sqlite3_step(st) == SQLITE_ROW) {
-        const char *v = (const char *)sqlite3_column_text(st, 0);
-        if (v) out = strdup(v);
-    }
-    sqlite3_finalize(st);
-    return out;
-}
-
 static char *filter_satisfied(sqlite3 *db, const char *agent,
                               const char *canon, int *fully_out) {
     *fully_out = 0;
@@ -1137,144 +1242,98 @@ static char *park_changes(RequestConfigCtx *ctx, const char *canon,
     return NULL; /* park */
 }
 
-/* Park a rename_agent approval. Same dedup contract as park_changes, keyed
- * on the requested name. */
-static char *park_rename(RequestConfigCtx *ctx, const char *name,
-                         const char *preamble, const char *reason) {
-    /* Same denial-stands rule as park_changes, keyed on the requested name. */
-    sqlite3_stmt *den;
-    if (sqlite3_prepare_v2(ctx->db,
-            "SELECT 1 FROM approvals WHERE session_id=?1"
-            " AND tool_name='request_config' AND action='rename_agent'"
-            " AND state='denied' AND decided_via != 'auto:expired'"
-            " AND json_extract(args_json,'$.name')=?2",
-            -1, &den, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(den, 1, ctx->session_id);
-        sqlite3_bind_text(den, 2, name, -1, SQLITE_STATIC);
-        if (sqlite3_step(den) == SQLITE_ROW) {
-            sqlite3_finalize(den);
-            return strdup("error: this rename was already denied in this "
-                          "session — do not re-request it; adjust, or explain "
-                          "to the operator and let them decide");
-        }
-        sqlite3_finalize(den);
-    }
-
-    sqlite3_stmt *chk;
-    if (sqlite3_prepare_v2(ctx->db,
-            "SELECT 1 FROM approvals WHERE session_id=?1"
-            " AND tool_name='request_config' AND action='rename_agent'"
-            " AND state='pending' AND json_extract(args_json,'$.name')=?2",
-            -1, &chk, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(chk, 1, ctx->session_id);
-        sqlite3_bind_text(chk, 2, name, -1, SQLITE_STATIC);
-        if (sqlite3_step(chk) == SQLITE_ROW) {
-            sqlite3_finalize(chk);
-            return strdup("error: a request for this was already sent and is "
-                          "still awaiting the user's yes/no reply — do not "
-                          "re-request; wait");
-        }
-        sqlite3_finalize(chk);
-    }
-
-    char *args = NULL;
-    char sql[192];
-    int off = snprintf(sql, sizeof(sql),
-                       "SELECT json_object('action','rename_agent','name',?1");
-    int next = 2;
-    int pre_idx = 0, rsn_idx = 0;
-    if (preamble) { pre_idx = next++; off += snprintf(sql + off, sizeof(sql) - (size_t)off, ",'preamble',?%d", pre_idx); }
-    if (reason)   { rsn_idx = next++; off += snprintf(sql + off, sizeof(sql) - (size_t)off, ",'reason',?%d", rsn_idx); }
-    snprintf(sql + off, sizeof(sql) - (size_t)off, ")");
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(ctx->db, sql, -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
-        if (pre_idx) sqlite3_bind_text(st, pre_idx, preamble, -1, SQLITE_STATIC);
-        if (rsn_idx) sqlite3_bind_text(st, rsn_idx, reason, -1, SQLITE_STATIC);
-        if (sqlite3_step(st) == SQLITE_ROW) {
-            const char *v = (const char *)sqlite3_column_text(st, 0);
-            if (v) args = strdup(v);
-        }
-        sqlite3_finalize(st);
-    }
-    if (!args) return strdup("error: failed to build args JSON");
-
-    int64_t aid = approval_create(ctx->db, ctx->session_id,
-        ctx->current_tool_call_id, "request_config", "rename_agent", args,
-        "apply");
-    free(args);
-    if (aid < 0)
-        return strdup("error: failed to create approval");
-
-    session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
-    return NULL; /* park */
-}
-
 static char *handler(const char *arguments, void *user_data, int *is_error) {
     RequestConfigCtx *ctx = (RequestConfigCtx *)user_data;
     if (!ctx || !ctx->db || !ctx->agent_name)
         return tool_fail(is_error, "error: request_config unavailable");
 
-    char *act = tool_args_str(ctx->db, arguments, "action");
-    if (!act) return tool_fail(is_error, "error: 'action' required (request_changes or rename_agent)");
-
     /* Optional reason — treat empty string as absent. */
     char *reason = tool_args_str(ctx->db, arguments, "reason");
     if (reason && !reason[0]) { free(reason); reason = NULL; }
 
-    char *result = NULL;
-
-    if (strcmp(act, "request_changes") == 0) {
-        char *changes = tool_args_json(ctx->db, arguments, "changes");
-        if (!changes) {
-            result = tool_fail(is_error, "error: 'changes' object required for "
-                            "request_changes (see the tool schema)");
-        } else {
-            char *canon = NULL;
-            /* validate_changes and the park paths return a string ONLY to
-             * refuse — one explicit flag where every refusal converges. */
-            result = validate_changes(ctx->db, changes, ctx->agent_name, &canon);
-            if (result) *is_error = 1;
-            if (!result) {
-                int fully = 0;
-                char *kept = filter_satisfied(ctx->db, ctx->agent_name,
-                                              canon, &fully);
-                if (!kept)
-                    result = tool_fail(is_error, "error: failed to check existing grants");
-                else if (fully)
-                    result = strdup("already in effect: every grant/route/"
-                                    "binding in this request is one you "
-                                    "already have — no approval needed, "
-                                    "proceed and use it");
-                else {
-                    result = park_changes(ctx, kept, reason);
-                    if (result) *is_error = 1;
-                }
-                free(kept);
-            }
-            free(canon);
-        }
-        free(changes);
-
-    } else if (strcmp(act, "rename_agent") == 0) {
-        char *new_name = tool_args_str(ctx->db, arguments, "name");
-        char *preamble = tool_args_str(ctx->db, arguments, "preamble");
-        if (!new_name || !new_name[0]) {
-            result = tool_fail(is_error, "error: 'name' required");
-        } else if (!is_valid_agent_name(new_name)) {
-            result = tool_fail(is_error, "error: agent name must be PascalCase: start with "
-                            "an uppercase letter, letters and digits only, max 63 chars");
-        } else {
-            result = park_rename(ctx, new_name, preamble, reason);
-            if (result) *is_error = 1;
-        }
-        free(new_name); free(preamble);
-
-    } else {
-        result = tool_fail(is_error, "error: action must be request_changes or rename_agent");
+    char *changes = tool_args_json(ctx->db, arguments, "changes");
+    if (!changes) {
+        free(reason);
+        return tool_fail(is_error, "error: 'changes' object required "
+                                   "(see the tool schema)");
     }
 
-    free(act); free(reason);
+    /* Narrowing first, and out of band: grants.remove applies here and now,
+     * then leaves the document. Everything that survives this step widens
+     * something, so from here down the path is the ordinary park. */
+    char *removed = NULL, *result = NULL;
+    if (q1_true(ctx->db, "SELECT 1 WHERE json_type(?1,'$.grants.remove')"
+                         " IS NOT NULL", changes)) {
+        result = grants_remove_apply(ctx->db, ctx->agent_name, changes, &removed);
+        if (result) {
+            *is_error = 1;
+            free(changes); free(reason);
+            return result;
+        }
+        /* '$.zz' is a deliberately absent path — json_remove ignores it. */
+        char *rest = q1_text(ctx->db,
+            "SELECT json_remove(json_remove(?1,'$.grants.remove'),"
+            " CASE WHEN (SELECT COUNT(*) FROM json_each(?1,'$.grants'))=1"
+            "      THEN '$.grants' ELSE '$.zz' END)", changes);
+        if (rest) { free(changes); changes = rest; }
+        if (q1_true(ctx->db, "SELECT 1 WHERE (SELECT COUNT(*)"
+                             " FROM json_each(?1))=0", changes)) {
+            free(changes); free(reason);
+            return removed;                 /* removal-only document: done */
+        }
+    }
+
+    char *canon = NULL;
+    /* validate_changes and the park paths return a string ONLY to refuse —
+     * one explicit flag where every refusal converges. */
+    result = validate_changes(ctx->db, changes, ctx->agent_name, &canon);
+    if (result) *is_error = 1;
+    if (!result) {
+        int fully = 0;
+        char *kept = filter_satisfied(ctx->db, ctx->agent_name, canon, &fully);
+        if (!kept)
+            result = tool_fail(is_error, "error: failed to check existing grants");
+        else if (fully)
+            result = strdup("already in effect: every grant/route/binding in "
+                            "this request is one you already have — no "
+                            "approval needed, proceed and use it");
+        else {
+            /* Mixed remove+widen: the park's result reaches the model only at
+             * the decision, so the removal receipt rides the approver-facing
+             * reason instead of being dropped on the floor. */
+            char *rsn = reason;
+            char *joined = NULL;
+            if (removed) {
+                size_t n = strlen(removed) + (reason ? strlen(reason) : 0) + 16;
+                joined = malloc(n);
+                if (joined) {
+                    snprintf(joined, n, "%s%s%s", reason ? reason : "",
+                             reason ? "\n" : "", removed);
+                    rsn = joined;
+                }
+            }
+            result = park_changes(ctx, kept, rsn);
+            free(joined);
+            if (result) *is_error = 1;
+        }
+        free(kept);
+    }
+    free(canon);
+    free(changes);
+    free(reason);
+
+    /* A removal already happened; never let a later refusal or a no-op hide
+     * it. (The park case handed it to the approver above.) */
+    if (removed && result) {
+        size_t n = strlen(removed) + strlen(result) + 4;
+        char *both = malloc(n);
+        if (both) {
+            snprintf(both, n, "%s\n%s", removed, result);
+            free(result);
+            result = both;
+        }
+    }
+    free(removed);
     return result;
 }
 
@@ -1686,8 +1745,8 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
 
 int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
     int rc = tools_register(reg, "request_config",
-        "Request configuration changes (requires human approval). Action "
-        "request_changes takes ONE 'changes' document batching everything you "
+        "Request configuration changes (requires human approval). Takes ONE "
+        "'changes' document batching everything you "
         "need — tool grants, host grants (prefix '.' covers subdomains), path "
         "grants (read_paths/write_paths, absolute), your own agent settings "
         "(agent: models — your full replacement routing order, first entry is "
@@ -1700,9 +1759,11 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
         "its NAME as api_key_env — never key material). One approval covers "
         "the whole document, so batch related needs into a single request — "
         "e.g. define a provider AND adopt it via agent.models "
-        "(['model@provider', ...]) in one document. Action rename_agent renames this "
-        "agent (optional preamble). All actions accept an optional 'reason' "
-        "shown to the approver.",
+        "(['model@provider', ...]) in one document. "
+        "This document is a patch against the state search_config shows you: "
+        "agent.* fields replace; grants.* add; models/provider upsert; "
+        "grants.remove narrows immediately without approval. "
+        "Accepts an optional 'reason' shown to the approver.",
         PARAMS_JSON, handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "request_config", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});

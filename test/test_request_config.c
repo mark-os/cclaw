@@ -44,6 +44,15 @@ static void apply_latest(sqlite3 *db, int64_t sid, char **receipt_out) {
     free(args);
 }
 
+/* 1 iff sql yields at least one row. */
+static int row_exists(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
+    int hit = sqlite3_step(s) == SQLITE_ROW;
+    sqlite3_finalize(s);
+    return hit;
+}
+
 /* Seed a registered config key so the handler allows it. */
 static void seed_config_key(sqlite3 *db, const char *key) {
     char sql[256];
@@ -78,7 +87,7 @@ static void test_handler_unavailable(void) {
     tool_request_config_register(&reg, NULL);
 
     char *result = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}");
+        "{\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}");
     assert(result != NULL);
     assert(strstr(result, "error") != NULL);
     free(result);
@@ -108,7 +117,7 @@ static void test_park_tools_grant(void) {
      * the dispatcher holds tool_running while the handler parks. */
     assert(session_set_state(db, sid, "tool_running") == 0);
     char *result = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}");
+        "{\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}");
     assert(result == NULL); /* parked */
 
     /* Verify approvals row. */
@@ -158,48 +167,48 @@ static void test_error_missing_changes(void) {
     tool_request_config_register(&reg, &ctx);
 
     /* No 'changes' field at all. */
-    char *err = call_handler(&reg, "{\"action\":\"request_changes\"}");
+    char *err = call_handler(&reg, "{}");
     assert(err != NULL && strstr(err, "changes") != NULL);
     free(err);
 
     /* Empty changes document (no sections). */
     ctx.current_tool_call_id = "e2";
-    err = call_handler(&reg, "{\"action\":\"request_changes\",\"changes\":{}}");
+    err = call_handler(&reg, "{\"changes\":{}}");
     assert(err != NULL && strstr(err, "nothing to request") != NULL);
     free(err);
 
     /* Unknown section name. */
     ctx.current_tool_call_id = "e3";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"tokens\":{\"a\":1}}}");
+        "{\"changes\":{\"tokens\":{\"a\":1}}}");
     assert(err != NULL && strstr(err, "unknown changes section") != NULL);
     free(err);
 
     /* Unknown grants key. */
     ctx.current_tool_call_id = "e4";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"networks\":[\"x\"]}}}");
+        "{\"changes\":{\"grants\":{\"networks\":[\"x\"]}}}");
     assert(err != NULL && strstr(err, "unknown grants key") != NULL);
     free(err);
 
     /* Grants value not an array. */
     ctx.current_tool_call_id = "e5";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"tools\":\"shell_exec\"}}}");
+        "{\"changes\":{\"grants\":{\"tools\":\"shell_exec\"}}}");
     assert(err != NULL && strstr(err, "array") != NULL);
     free(err);
 
     /* Array entry empty string. */
     ctx.current_tool_call_id = "e6";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"tools\":[\"\"]}}}");
+        "{\"changes\":{\"grants\":{\"tools\":[\"\"]}}}");
     assert(err != NULL && strstr(err, "non-empty") != NULL);
     free(err);
 
     /* Relative path grant. */
     ctx.current_tool_call_id = "e7";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"read_paths\":[\"relative/dir\"]}}}");
+        "{\"changes\":{\"grants\":{\"read_paths\":[\"relative/dir\"]}}}");
     assert(err != NULL && strstr(err, "absolute") != NULL);
     free(err);
 
@@ -226,7 +235,7 @@ static void test_error_config_keys(void) {
 
     /* Unknown config key. */
     char *err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"config\":{\"no_such_key\":\"1\"}}}");
+        "{\"changes\":{\"config\":{\"no_such_key\":\"1\"}}}");
     assert(err != NULL && strstr(err, "unknown config key") != NULL);
     assert(strstr(err, "search_config") != NULL);
     free(err);
@@ -234,7 +243,7 @@ static void test_error_config_keys(void) {
     /* Config value not a string. */
     ctx.current_tool_call_id = "ck2";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"config\":{\"web_port\":123}}}");
+        "{\"changes\":{\"config\":{\"web_port\":123}}}");
     assert(err != NULL && strstr(err, "string") != NULL);
     free(err);
 
@@ -244,7 +253,7 @@ static void test_error_config_keys(void) {
         " VALUES('my_secret_key','','a secret',1)", NULL, NULL, NULL) == SQLITE_OK);
     ctx.current_tool_call_id = "ck3";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"config\":{\"my_secret_key\":\"x\"}}}");
+        "{\"changes\":{\"config\":{\"my_secret_key\":\"x\"}}}");
     assert(err != NULL && strstr(err, "secret") != NULL);
     free(err);
 
@@ -270,21 +279,21 @@ static void test_error_provider(void) {
 
     /* Provider name missing. */
     char *err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"provider\":{}}}");
+        "{\"changes\":{\"provider\":{}}}");
     assert(err != NULL && strstr(err, "provider") != NULL && strstr(err, "required") != NULL);
     free(err);
 
     /* Unknown provider without base_url. */
     ctx.current_tool_call_id = "pv2";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"provider\":{\"provider\":\"myllm\"}}}");
+        "{\"changes\":{\"provider\":{\"provider\":\"myllm\"}}}");
     assert(err != NULL && strstr(err, "base_url") != NULL);
     free(err);
 
     /* Non-http base_url (ftp://). */
     ctx.current_tool_call_id = "pv3";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"provider\":"
+        "{\"changes\":{\"provider\":"
         "{\"provider\":\"myllm\",\"base_url\":\"ftp://x.com/v1\"}}}");
     assert(err != NULL && strstr(err, "http") != NULL);
     free(err);
@@ -292,7 +301,7 @@ static void test_error_provider(void) {
     /* Bad api_key_env — contains lowercase / looks like key material. */
     ctx.current_tool_call_id = "pv4";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"provider\":"
+        "{\"changes\":{\"provider\":"
         "{\"provider\":\"openrouter\",\"api_key_env\":\"sk-or-v1-secret\"}}}");
     assert(err != NULL && strstr(err, "api_key_env") != NULL);
     free(err);
@@ -302,7 +311,7 @@ static void test_error_provider(void) {
      * took prod's gateway down.) */
     ctx.current_tool_call_id = "pv5";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"provider\":"
+        "{\"changes\":{\"provider\":"
         "{\"provider\":\"openrouter\",\"model\":\"some/model\"}}}");
     assert(err != NULL && strstr(err, "models") != NULL);
     free(err);
@@ -312,7 +321,7 @@ static void test_error_provider(void) {
      * still fix it — not silently at request time (A8). */
     ctx.current_tool_call_id = "pv6";
     err = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"provider\":"
+        "{\"changes\":{\"provider\":"
         "{\"provider\":\"nokey\",\"base_url\":\"https://n.example/v1\"}}}");
     assert(err != NULL && strstr(err, "NOKEY_API_KEY") != NULL
                        && strstr(err, "save_secret") != NULL);
@@ -321,7 +330,7 @@ static void test_error_provider(void) {
     /* Keyless is legal, but it has to be said out loud. */
     ctx.current_tool_call_id = "pv7";
     char *ok = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"provider\":"
+        "{\"changes\":{\"provider\":"
         "{\"provider\":\"nokey\",\"base_url\":\"https://n.example/v1\","
         "\"api_key_env\":\"\"}}}");
     assert(ok == NULL);
@@ -349,7 +358,7 @@ static void test_reason_propagates(void) {
     tool_request_config_register(&reg, &ctx);
 
     char *result = call_handler(&reg,
-        "{\"action\":\"request_changes\","
+        "{"
         "\"changes\":{\"grants\":{\"hosts\":[\"api.example.com\"]}},"
         "\"reason\":\"need the API\"}");
     assert(result == NULL);
@@ -389,7 +398,7 @@ static void test_provider_defaults(void) {
     seed_key(db, "OPENROUTER_API_KEY");
 
     char *result = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"provider\":{\"provider\":\"openrouter\"}}}");
+        "{\"changes\":{\"provider\":{\"provider\":\"openrouter\"}}}");
     assert(result == NULL);
 
     sqlite3_stmt *s;
@@ -417,7 +426,7 @@ static void test_provider_defaults(void) {
         NULL, NULL, NULL) == SQLITE_OK);
     ctx.current_tool_call_id = "pd2";
     result = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"provider\":"
+        "{\"changes\":{\"provider\":"
         "{\"provider\":\"gateway\",\"base_url\":\"http://127.0.0.1:9090/v1\"}}}");
     assert(result == NULL);
     assert(sqlite3_prepare_v2(db,
@@ -476,7 +485,7 @@ static void test_models_section(void) {
 
     /* The inverted dependency: a model needs its provider to exist first. */
     char *r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "{\"changes\":{\"models\":"
         "[{\"id\":\"m1@ghostprov\"}]}}");
     assert(r && strstr(r, "provider 'ghostprov' is not registered"));
     free(r);
@@ -484,7 +493,7 @@ static void test_models_section(void) {
     /* A bare id is refused with the canonical form spelled out. */
     ctx.current_tool_call_id = "ms2";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "{\"changes\":{\"models\":"
         "[{\"id\":\"just-a-name\"}]}}");
     assert(r && strstr(r, "model@provider"));
     free(r);
@@ -492,7 +501,7 @@ static void test_models_section(void) {
     /* Register with metadata onto the seeded provider, then apply. */
     ctx.current_tool_call_id = "ms3";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "{\"changes\":{\"models\":"
         "[{\"id\":\"newmodel@openrouter\",\"context_window\":200000,"
         "\"max_output_tokens\":8192,\"capabilities\":[\"text\",\"image\"]}]}}");
     assert(r == NULL);
@@ -519,7 +528,7 @@ static void test_models_section(void) {
     /* Update: only the fields present move; the rest keep their values. */
     ctx.current_tool_call_id = "ms4";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "{\"changes\":{\"models\":"
         "[{\"id\":\"newmodel@openrouter\",\"context_window\":64000}]}}");
     assert(r == NULL);
     apply_latest(db, sid, NULL);
@@ -535,7 +544,7 @@ static void test_models_section(void) {
     /* Disable — a first-class verb now, not a DELETE nobody could request. */
     ctx.current_tool_call_id = "ms5";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "{\"changes\":{\"models\":"
         "[{\"id\":\"newmodel@openrouter\",\"status\":\"disabled\"}]}}");
     assert(r == NULL);
     apply_latest(db, sid, NULL);
@@ -550,13 +559,13 @@ static void test_models_section(void) {
     /* Typo-hostile like every other section. */
     ctx.current_tool_call_id = "ms6";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "{\"changes\":{\"models\":"
         "[{\"id\":\"newmodel@openrouter\",\"ctx\":1}]}}");
     assert(r && strstr(r, "unknown models key 'ctx'"));
     free(r);
     ctx.current_tool_call_id = "ms7";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"models\":"
+        "{\"changes\":{\"models\":"
         "[{\"id\":\"newmodel@openrouter\",\"status\":\"retired\"}]}}");
     assert(r && strstr(r, "'healthy' or 'disabled'"));
     free(r);
@@ -585,7 +594,7 @@ static void test_bare_model_name_teaching(void) {
 
     /* 'deepseek/deepseek-v4-flash' is seeded, under a canonical id. */
     char *r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"agent\":"
+        "{\"changes\":{\"agent\":"
         "{\"models\":[\"deepseek/deepseek-v4-flash\"]}}}");
     assert(r && strstr(r, "bare model name"));
     assert(r && strstr(r, "openrouter/deepseek/deepseek-v4-flash"));
@@ -594,7 +603,7 @@ static void test_bare_model_name_teaching(void) {
     /* Nothing like it registered → no invented suggestion. */
     ctx.current_tool_call_id = "bn2";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"agent\":"
+        "{\"changes\":{\"agent\":"
         "{\"models\":[\"ghost\"]}}}");
     assert(r && strstr(r, "unknown model 'ghost'"));
     assert(r && !strstr(r, "Did you mean"));
@@ -624,7 +633,7 @@ static void test_dedup(void) {
     tools_init(&reg);
     tool_request_config_register(&reg, &ctx);
 
-    const char *doc = "{\"action\":\"request_changes\","
+    const char *doc = "{"
         "\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}";
 
     /* First request parks. */
@@ -640,7 +649,7 @@ static void test_dedup(void) {
     /* A DIFFERENT doc parks fine while first is pending. */
     ctx.current_tool_call_id = "dd3";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\","
+        "{"
         "\"changes\":{\"grants\":{\"hosts\":[\"example.com\"]}}}");
     assert(r == NULL);
 
@@ -667,7 +676,7 @@ static void test_dedup(void) {
      * reason (the guard matches the changes doc, not the commentary). */
     ctx.current_tool_call_id = "dd5";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\","
+        "{"
         "\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}},"
         "\"reason\":\"different wording, same ask\"}");
     assert(r != NULL && strstr(r, "already denied") != NULL);
@@ -702,7 +711,7 @@ static void test_batch_apply(void) {
 
     seed_key(db, "OPENROUTER_API_KEY");
     char *r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{"
+        "{\"changes\":{"
         "\"grants\":{\"tools\":[\"shell_exec\"],\"hosts\":[\"api.example.com\"],"
         "\"read_paths\":[\"/opt/data\"],\"write_paths\":[\"/tmp/out\"]},"
         "\"config\":{\"myext.knob\":\"42\"},"
@@ -815,36 +824,36 @@ static void test_agent_routes_sections(void) {
 
     /* agent section: whitelist, integer bounds, model existence. */
     char *r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"changes\":"
         "{\"agent\":{\"sandbox_profile\":\"host\"}}}");
     assert(r && strstr(r, "unknown agent key"));
     free(r);
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"changes\":"
         "{\"agent\":{\"max_iterations\":0}}}");
     assert(r && strstr(r, "positive integer"));
     free(r);
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"changes\":"
         "{\"agent\":{\"models\":[\"ghost-model\"]}}}");
     assert(r && strstr(r, "unknown model"));
     free(r);
 
     /* routes section: shape, unknown channel, wildcard, foreign owner. */
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"routes\":[\"tg\"]}}");
+        "{\"changes\":{\"routes\":[\"tg\"]}}");
     assert(r && strstr(r, "'channel:chat_id'"));
     free(r);
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"routes\":[\"nochan:1\"]}}");
+        "{\"changes\":{\"routes\":[\"nochan:1\"]}}");
     assert(r && strstr(r, "unknown channel"));
     free(r);
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"routes\":[\"tg:*\"]}}");
+        "{\"changes\":{\"routes\":[\"tg:*\"]}}");
     assert(r && strstr(r, "no wildcard routes"));
     free(r);
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{\"routes\":[\"tg:-500\"]}}");
+        "{\"changes\":{\"routes\":[\"tg:-500\"]}}");
     assert(r && strstr(r, "already owned"));
     free(r);
 
@@ -852,7 +861,7 @@ static void test_agent_routes_sections(void) {
      * on it, adopt that model, take a route. */
     seed_key(db, "GEMINI_API_KEY");
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{"
+        "{\"changes\":{"
         "\"provider\":{\"provider\":\"gemini\"},"
         "\"models\":[{\"id\":\"gemini-3.5-flash-lite@gemini\","
         "\"context_window\":1000000}],"
@@ -911,7 +920,7 @@ static void test_agent_routes_sections(void) {
     /* Route captured by another agent between park and apply → the whole
      * document rolls back (savepoint), including the agent section. */
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{"
+        "{\"changes\":{"
         "\"agent\":{\"max_iterations\":99},\"routes\":[\"tg:888\"]}}");
     assert(r == NULL);
     assert(sqlite3_exec(db,
@@ -953,7 +962,7 @@ static void test_apply_rollback(void) {
     /* Hand-crafted args_json that has a valid tool grant AND an invalid
      * config key (bypass handler validation by constructing the literal). */
     const char *bad_args =
-        "{\"action\":\"request_changes\",\"changes\":{"
+        "{\"changes\":{"
         "\"grants\":{\"tools\":[\"web_fetch\"]},"
         "\"config\":{\"nonexistent_key_xyz\":\"boom\"}}}";
 
@@ -971,92 +980,6 @@ static void test_apply_rollback(void) {
 }
 
 
-/* 8. rename_agent tests (kept from old suite). */
-static void test_rename_agent(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "rn1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
-    /* Missing name field. */
-    char *err = call_handler(&reg, "{\"action\":\"rename_agent\"}");
-    assert(err != NULL && strstr(err, "name") != NULL);
-    free(err);
-
-    /* Invalid name (not PascalCase). */
-    ctx.current_tool_call_id = "rn2";
-    err = call_handler(&reg, "{\"action\":\"rename_agent\",\"name\":\"bad_name\"}");
-    assert(err != NULL && strstr(err, "PascalCase") != NULL);
-    free(err);
-
-    /* Valid rename parks. */
-    ctx.current_tool_call_id = "rn3";
-    char *r = call_handler(&reg,
-        "{\"action\":\"rename_agent\",\"name\":\"NewAgent\",\"preamble\":\"You are a helper.\","
-        "\"reason\":\"better name\"}");
-    assert(r == NULL);
-
-    /* Verify parked approval. */
-    sqlite3_stmt *s;
-    int rc = sqlite3_prepare_v2(db,
-        "SELECT json_extract(args_json,'$.name'),"
-        "       json_extract(args_json,'$.preamble'),"
-        "       json_extract(args_json,'$.reason')"
-        " FROM approvals WHERE session_id=?1 AND action='rename_agent'",
-        -1, &s, NULL);
-    assert(rc == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "NewAgent") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1), "You are a helper.") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 2), "better name") == 0);
-    sqlite3_finalize(s);
-
-    /* Dedup: same rename while pending. */
-    ctx.current_tool_call_id = "rn4";
-    err = call_handler(&reg,
-        "{\"action\":\"rename_agent\",\"name\":\"NewAgent\"}");
-    assert(err != NULL && strstr(err, "already sent") != NULL);
-    free(err);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_rename_agent\n");
-}
-
-/* Unknown action value. */
-static void test_unknown_action(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "ua1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
-    char *err = call_handler(&reg, "{\"action\":\"grant_tool\",\"tool\":\"x\"}");
-    assert(err != NULL && strstr(err, "request_changes") != NULL);
-    free(err);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_unknown_action\n");
-}
 
 /* Direct agent_config_grant still works (low-level API). */
 static void test_add_tool_to_config(void) {
@@ -1101,14 +1024,14 @@ static void test_db_path_grant_refused(void) {
 
     /* Positive control: an unrelated path parks (NULL = parked, not an error). */
     char *r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"changes\":"
         "{\"grants\":{\"read_paths\":[\"/usr/share\"]}}}");
     assert(r == NULL || strstr(r, "error:") == NULL);
     free(r);
 
     ctx.current_tool_call_id = "d2";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"changes\":"
         "{\"grants\":{\"read_paths\":[\"/tmp/cclaw_reqcfg_grantdb/cclaw.db\"]}}}");
     assert(r != NULL && strstr(r, "cclaw.db") != NULL);
     free(r);
@@ -1116,7 +1039,7 @@ static void test_db_path_grant_refused(void) {
     /* The containing directory is the realistic ask, and is refused too. */
     ctx.current_tool_call_id = "d3";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"changes\":"
         "{\"grants\":{\"write_paths\":[\"/tmp/cclaw_reqcfg_grantdb\"]}}}");
     assert(r != NULL && strstr(r, "cclaw.db") != NULL);
     free(r);
@@ -1151,7 +1074,7 @@ static void test_redundant_filtered(void) {
 
     /* Fully redundant: no approval parked, session state untouched. */
     char *result = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"changes\":"
         "{\"grants\":{\"hosts\":[\"api.tiingo.com\"],\"tools\":[\"js_eval\"]}}}");
     assert(result != NULL && strstr(result, "already in effect") != NULL);
     free(result);
@@ -1172,7 +1095,7 @@ static void test_redundant_filtered(void) {
     /* Partially redundant: parked document keeps only the new host. */
     ctx.current_tool_call_id = "r2";
     result = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"changes\":"
         "{\"grants\":{\"hosts\":[\"api.tiingo.com\",\"example.com\"]}}}");
     assert(result == NULL); /* parked */
     assert(sqlite3_prepare_v2(db,
@@ -1189,7 +1112,7 @@ static void test_redundant_filtered(void) {
      * section still parks. */
     ctx.current_tool_call_id = "r3";
     result = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"changes\":"
         "{\"grants\":{\"tools\":[\"js_eval\"]},\"agent\":{\"max_iterations\":9}}}");
     assert(result == NULL); /* parked */
     assert(sqlite3_prepare_v2(db,
@@ -1233,14 +1156,14 @@ static void test_secret_bindings_section(void) {
     /* Unknown secret name is refused — a binding request is not where a
      * secret is born. */
     char *r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{"
+        "{\"changes\":{"
         "\"secret_bindings\":{\"NOPE\":[\"api.example.com\"]}}}");
     assert(r && strstr(r, "unknown secret 'NOPE'"));
     free(r);
 
     /* System-scoped secrets never interpolate — binding one is refused. */
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{"
+        "{\"changes\":{"
         "\"secret_bindings\":{\"SYS_KEY\":[\"api.example.com\"]}}}");
     assert(r && strstr(r, "unknown secret 'SYS_KEY'"));
     free(r);
@@ -1250,7 +1173,7 @@ static void test_secret_bindings_section(void) {
     for (size_t i = 0; i < 3; i++) {
         char args[192];
         snprintf(args, sizeof(args),
-            "{\"action\":\"request_changes\",\"changes\":{"
+            "{\"changes\":{"
             "\"secret_bindings\":{\"ALPACA_KEY\":[\"%s\"]}}}", bad_hosts[i]);
         r = call_handler(&reg, args);
         assert(r && strstr(r, "not a valid hostname"));
@@ -1259,14 +1182,14 @@ static void test_secret_bindings_section(void) {
 
     /* Value must be an array. */
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{"
+        "{\"changes\":{"
         "\"secret_bindings\":{\"ALPACA_KEY\":\"api.example.com\"}}}");
     assert(r && strstr(r, "must be an array"));
     free(r);
 
     /* Valid document parks exactly one approval carrying the section. */
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{"
+        "{\"changes\":{"
         "\"secret_bindings\":{\"ALPACA_KEY\":"
         "[\"api.alpaca.markets\",\".example.com\"]}}}");
     assert(r == NULL); /* parked */
@@ -1301,7 +1224,7 @@ static void test_secret_bindings_section(void) {
     ctx.current_tool_call_id = "sb2";
     assert(session_set_state(db, sid, "tool_running") == 0);
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{"
+        "{\"changes\":{"
         "\"secret_bindings\":{\"ALPACA_KEY\":[\"api.alpaca.markets\"]}}}");
     assert(r && strstr(r, "already in effect"));
     free(r);
@@ -1309,7 +1232,7 @@ static void test_secret_bindings_section(void) {
     /* Partially redundant: parked document keeps only the new host. */
     ctx.current_tool_call_id = "sb3";
     r = call_handler(&reg,
-        "{\"action\":\"request_changes\",\"changes\":{"
+        "{\"changes\":{"
         "\"secret_bindings\":{\"ALPACA_KEY\":"
         "[\"api.alpaca.markets\",\"api.tiingo.com\"]}}}");
     assert(r == NULL); /* parked */
@@ -1326,6 +1249,75 @@ static void test_secret_bindings_section(void) {
     tools_free(&reg);
     db_close(db);
     printf("  PASS test_secret_bindings_section\n");
+}
+
+/* grants.remove — narrowing applies immediately and never parks. */
+static void test_grants_remove(void) {
+    sqlite3 *db = test_db_open_seeded(":memory:");
+    assert(db);
+    config_registry_sync(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+    assert(agent_config_grant(db, "test", "host", "api.example.com", 0) == 0);
+    assert(agent_config_grant(db, "test", "tool", "shell_exec", 0) == 0);
+
+    RequestConfigCtx ctx = {
+        .db = db, .agent_name = "test", .session_id = sid,
+        .agents_dir = NULL, .current_tool_call_id = "rm1"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+
+    /* Happy path: applied here and now, no approval row, receipt names it. */
+    char *r = call_handler(&reg,
+        "{\"changes\":{\"grants\":{\"remove\":{\"hosts\":[\"api.example.com\"]}}}}");
+    assert(r != NULL && strstr(r, "api.example.com") && strstr(r, "removed"));
+    free(r);
+    assert(!row_exists(db, "SELECT 1 FROM grants WHERE agent_name='test'"
+                           " AND kind='host' AND value='api.example.com'"));
+    assert(!row_exists(db, "SELECT 1 FROM approvals WHERE session_id > 0"));
+    /* Untouched kinds stay. */
+    assert(row_exists(db, "SELECT 1 FROM grants WHERE kind='tool'"
+                          " AND value='shell_exec'"));
+
+    /* Unknown kind refuses — and cannot reach containment settings. */
+    ctx.current_tool_call_id = "rm2";
+    r = call_handler(&reg,
+        "{\"changes\":{\"grants\":{\"remove\":{\"sandbox_profile\":[\"host\"]}}}}");
+    assert(r != NULL && strstr(r, "sandbox_profile") && strstr(r, "error"));
+    free(r);
+
+    /* A value that is not a live grant refuses, naming it. */
+    ctx.current_tool_call_id = "rm3";
+    r = call_handler(&reg,
+        "{\"changes\":{\"grants\":{\"remove\":{\"hosts\":[\"nope.example\"]}}}}");
+    assert(r != NULL && strstr(r, "nope.example") && strstr(r, "not one of"));
+    free(r);
+    assert(row_exists(db, "SELECT 1 FROM grants WHERE kind='tool'"
+                          " AND value='shell_exec'"));
+
+    /* Mixed remove + widen: the removal lands now, the rest parks. */
+    ctx.current_tool_call_id = "rm4";
+    assert(session_set_state(db, sid, "tool_running") == 0);
+    r = call_handler(&reg,
+        "{\"changes\":{\"grants\":{\"hosts\":[\"new.example.com\"],"
+        "\"remove\":{\"tools\":[\"shell_exec\"]}}}}");
+    assert(r == NULL);                     /* parked */
+    assert(!row_exists(db, "SELECT 1 FROM grants WHERE kind='tool'"
+                           " AND value='shell_exec'"));
+    /* The parked document carries the widening only; the removal already
+     * happened and rides the approver-facing reason. */
+    assert(row_exists(db,
+        "SELECT 1 FROM approvals WHERE state='pending'"
+        "   AND json_extract(args_json,'$.changes.grants.hosts[0]')"
+        "       ='new.example.com'"
+        "   AND json_extract(args_json,'$.changes.grants.remove') IS NULL"
+        "   AND json_extract(args_json,'$.reason') LIKE '%shell_exec%'"));
+
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_grants_remove\n");
 }
 
 int main(void) {
@@ -1346,11 +1338,10 @@ int main(void) {
     test_batch_apply();
     test_agent_routes_sections();
     test_apply_rollback();
-    test_rename_agent();
-    test_unknown_action();
     test_add_tool_to_config();
     test_redundant_filtered();
     test_secret_bindings_section();
+    test_grants_remove();
     printf("\nAll request_config tests passed.\n");
     return 0;
 }

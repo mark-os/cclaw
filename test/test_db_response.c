@@ -200,6 +200,101 @@ static void test_archive_retention(void) {
     printf(" OK\n");
 }
 
+/* One scalar out of the reasoning entry's meta blob, or NULL. */
+static const char *meta_str(sqlite3 *db, const char *path, sqlite3_stmt **out) {
+    char sql[192];
+    snprintf(sql, sizeof(sql),
+             "SELECT json_extract(reasoning_meta,'%s') FROM entries"
+             " WHERE type='reasoning' ORDER BY id DESC LIMIT 1", path);
+    sqlite3_prepare_v2(db, sql, -1, out, NULL);
+    if (sqlite3_step(*out) == SQLITE_ROW)
+        return (const char *)sqlite3_column_text(*out, 0);
+    return NULL;
+}
+
+/* Capture: OpenRouter reasoning_details is stored verbatim and tagged with the
+ * producing provider+model — even with save_reasoning off, because the replay
+ * requirement is the provider's, not the operator's. */
+static void test_capture_reasoning_details(void) {
+    printf("  test_capture_reasoning_details...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    const char *body =
+        "{\"choices\":[{\"message\":{\"content\":\"listing\",\"reasoning\":\"because\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"because\","
+        "\"format\":\"google-gemini-v1\",\"signature\":\"SIG123\"}],"
+        "\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+        "\"function\":{\"name\":\"shell_exec\",\"arguments\":\"{}\"}}]},"
+        "\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
+    assert(db_ingest_response(db, sid, 1, "gemini-3-flash", ENDPOINT_OPENAI,
+                              body, NULL, 0, NULL) == LLM_RESP_OK);
+
+    sqlite3_stmt *s;
+    assert(strcmp(meta_str(db, "$.format", &s), "reasoning_details") == 0);
+    sqlite3_finalize(s);
+    assert(strcmp(meta_str(db, "$.model", &s), "gemini-3-flash") == 0);
+    sqlite3_finalize(s);
+    assert(strcmp(meta_str(db, "$.provider", &s), "openai") == 0);
+    sqlite3_finalize(s);
+    assert(strcmp(meta_str(db, "$.blob[0].signature", &s), "SIG123") == 0);
+    sqlite3_finalize(s);
+    /* save_reasoning=0: the text is discarded, the blob is not. */
+    assert(count_rows(db,
+        "SELECT COUNT(*) FROM entries WHERE type='reasoning' AND content IS NULL") == 1);
+
+    /* Bare-string shape (DeepSeek): the string itself is the blob. */
+    const char *ds =
+        "{\"choices\":[{\"message\":{\"content\":\"ok\","
+        "\"reasoning_content\":\"deep thought\"},\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
+    assert(db_ingest_response(db, sid, 2, "deepseek-v4", ENDPOINT_OPENAI,
+                              ds, NULL, 1, NULL) == LLM_RESP_OK);
+    assert(strcmp(meta_str(db, "$.format", &s), "reasoning_content") == 0);
+    sqlite3_finalize(s);
+    assert(strcmp(meta_str(db, "$.blob", &s), "deep thought") == 0);
+    sqlite3_finalize(s);
+
+    db_close(db);
+    printf(" OK\n");
+}
+
+/* Capture: Gemini-native thoughtSignature, keyed by the functionCall it rode. */
+static void test_capture_gemini_signature(void) {
+    printf("  test_capture_gemini_signature...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    const char *body =
+        "{\"candidates\":[{\"content\":{\"parts\":["
+        "{\"text\":\"ok\"},"
+        "{\"functionCall\":{\"name\":\"shell_exec\",\"args\":{\"cmd\":\"ls\"}},"
+        " \"thoughtSignature\":\"GSIG\"}]},\"finishReason\":\"STOP\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}";
+    assert(db_ingest_response(db, sid, 1, "gemini-3-pro", ENDPOINT_GEMINI,
+                              body, NULL, 0, NULL) == LLM_RESP_OK);
+
+    sqlite3_stmt *s;
+    assert(strcmp(meta_str(db, "$.format", &s), "gemini_parts") == 0);
+    sqlite3_finalize(s);
+    assert(strcmp(meta_str(db, "$.blob[0].fn", &s), "shell_exec") == 0);
+    sqlite3_finalize(s);
+    assert(strcmp(meta_str(db, "$.blob[0].sig", &s), "GSIG") == 0);
+    sqlite3_finalize(s);
+
+    /* No signature anywhere → no reasoning entry at all. */
+    const char *plain =
+        "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},"
+        "\"finishReason\":\"STOP\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}";
+    assert(db_ingest_response(db, sid, 2, "gemini-3-pro", ENDPOINT_GEMINI,
+                              plain, NULL, 1, NULL) == LLM_RESP_OK);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE type='reasoning'") == 1);
+
+    db_close(db);
+    printf(" OK\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_db_response:\n");
@@ -207,6 +302,8 @@ int main(void) {
     test_ingest_malformed();
     test_ingest_archive();
     test_archive_retention();
+    test_capture_reasoning_details();
+    test_capture_gemini_signature();
     printf("  ALL PASSED\n");
     return 0;
 }

@@ -37,7 +37,8 @@ typedef struct {
 /* Parse an LLM response body (OpenAI or Gemini, selected by ep) straight into
  * entries + tool_calls rows. Zero-copy: the JSON body is bound once and the
  * extracted column pointers bind directly into the inserts — no intermediate
- * heap copies. Creates: reasoning (only if save_reasoning) + assistant_message
+ * heap copies. Creates: reasoning (text only if save_reasoning; the entry itself
+ * whenever the response carries a replayable reasoning blob) + assistant_message
  * + N tool_call entries, all sharing iteration_id. On LLM_RESP_OK, *out carries
  * usage/cost. request_body (may be NULL) is archived alongside the body on the
  * failure paths (empty/malformed/ingest_error) so `cclaw resp <id> req` can

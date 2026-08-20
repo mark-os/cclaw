@@ -31,7 +31,14 @@ int db_tool_call_complete_with_result(sqlite3 *db, int64_t entry_id,
 
 /* Scalar columns, identical order for both providers:
  *   0 content   1 finish_reason   2 reasoning   3 prompt_tokens
- *   4 completion_tokens   5 total_tokens   6 cost(real)   7 array_length */
+ *   4 completion_tokens   5 total_tokens   6 cost(real)   7 array_length
+ *   8 reasoning replay blob (JSON text, NULL when the response carries none)
+ *
+ * Column 8 is the verbatim wire artifact the provider requires back on the
+ * next request (specs: OpenRouter reasoning_details — order and every field
+ * matter, it is how Gemini's thoughtSignature round-trips through the
+ * OpenAI-compat envelope; Gemini-native thoughtSignature per part). Stored
+ * unmodified in entries.reasoning_meta.blob; see replay in llm_payload.c. */
 static const char SCALAR_OPENAI[] =
     "SELECT"
     " json_extract(?1,'$.choices[0].message.content'),"
@@ -43,7 +50,9 @@ static const char SCALAR_OPENAI[] =
     " json_extract(?1,'$.usage.completion_tokens'),"
     " json_extract(?1,'$.usage.total_tokens'),"
     " COALESCE(json_extract(?1,'$.usage.cost'), json_extract(?1,'$.usage.total_cost')),"
-    " json_array_length(?1,'$.choices')";
+    " json_array_length(?1,'$.choices'),"
+    " CASE WHEN json_array_length(?1,'$.choices[0].message.reasoning_details') > 0"
+    "   THEN json_extract(?1,'$.choices[0].message.reasoning_details') END";
 
 static const char SCALAR_GEMINI[] =
     "SELECT"
@@ -59,7 +68,15 @@ static const char SCALAR_GEMINI[] =
     " json_extract(?1,'$.usageMetadata.candidatesTokenCount'),"
     " json_extract(?1,'$.usageMetadata.totalTokenCount'),"
     " NULL,"
-    " json_array_length(?1,'$.candidates')";
+    " json_array_length(?1,'$.candidates'),"
+    /* One row per part that carried a thoughtSignature, tagged with the
+     * functionCall name it rode on — that name is what replay matches, since
+     * part_index in entries counts only the parts we kept. */
+    " (SELECT NULLIF(json_group_array(json_object("
+    "     'fn', json_extract(value,'$.functionCall.name'),"
+    "     'sig', json_extract(value,'$.thoughtSignature'))), '[]')"
+    "    FROM json_each(?1,'$.candidates[0].content.parts')"
+    "    WHERE json_extract(value,'$.thoughtSignature') IS NOT NULL)";
 
 /* Tool-call rows, columns: 0 id (NULL for Gemini), 1 name, 2 arguments. */
 static const char TC_OPENAI[] =
@@ -74,6 +91,42 @@ static const char TC_GEMINI[] =
     " json_extract(value,'$.functionCall.args')"
     " FROM json_each(?1,'$.candidates[0].content.parts')"
     " WHERE json_extract(value,'$.functionCall') IS NOT NULL";
+
+/* Tag a freshly inserted type='reasoning' entry with everything replay needs:
+ * who produced it (provider+model — a model switch strips the replay, pi's
+ * rule) and the verbatim wire artifact under $.blob. The blob is always where
+ * replay reads from, never entries.content: the content half is display-only
+ * and the save_reasoning config discards it by default, while the wire
+ * requirement holds regardless of what an operator wants to *see*.
+ *   gemini_parts      blob = [{fn, sig}, …]  (native thoughtSignature)
+ *   reasoning_details blob = the provider's array, byte-for-byte
+ *   reasoning_content blob = the bare string (DeepSeek-style)
+ * Best-effort: the entry is already durable, a failure here just means no
+ * replay for that iteration. */
+static void reasoning_meta_set(sqlite3 *db, int64_t entry_id, int gemini,
+                               const char *model, const char *blob_json,
+                               const char *text) {
+    const char *fmt = gemini ? "gemini_parts"
+                             : (blob_json ? "reasoning_details" : "reasoning_content");
+    if (gemini && !blob_json) return;   /* nothing replayable on this path */
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE entries SET reasoning_meta = json_object("
+            "  'provider', ?2, 'model', ?3, 'format', ?4,"
+            "  'blob', CASE WHEN ?5 IS NOT NULL THEN json(?5) ELSE ?6 END)"
+            " WHERE id = ?1", -1, &s, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_int64(s, 1, entry_id);
+    sqlite3_bind_text(s, 2, gemini ? "gemini" : "openai", -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, model ? model : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 4, fmt, -1, SQLITE_STATIC);
+    if (blob_json) sqlite3_bind_text(s, 5, blob_json, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(s, 5);
+    if (text) sqlite3_bind_text(s, 6, text, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(s, 6);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+}
 
 /* Archive one raw response for forensics. When is_jsonb, body/blen is the
  * parsed JSONB blob (and we can pull the provider's $.id out of it); otherwise
@@ -255,11 +308,24 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
 
     int part = 0;
 
-    /* Reasoning entry (scalar pointers still valid — s untouched). Stored
-     * for inspection only — payload builders never replay it to the model. */
-    if (save_reasoning && reasoning && reasoning[0])
-        entry_append_typed(db, session_id, iteration_id, "reasoning", part++,
-                           reasoning, NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
+    /* Reasoning entry (scalar pointers still valid — s untouched). Two things
+     * live here: the display text (kept only when save_reasoning, as before)
+     * and the replay blob, which is captured unconditionally — the provider
+     * requires it back verbatim on the next request, so dropping it because
+     * an operator turned off reasoning *display* would break the wire (a
+     * Gemini 400 / a silently invalidated prompt-cache prefix). The entry is
+     * created whenever either half has something to say. */
+    const char *replay_blob = (sqlite3_column_type(s, 8) != SQLITE_NULL)
+                                  ? (const char *)sqlite3_column_text(s, 8) : NULL;
+    const char *replay_text = (reasoning && reasoning[0]) ? reasoning : NULL;
+    if (replay_blob || replay_text) {
+        int64_t r_id = entry_append_typed(db, session_id, iteration_id, "reasoning", part++,
+                                          save_reasoning ? replay_text : NULL,
+                                          NULL, NULL, 0,
+                                          STOP_REASON_NONE, model, 0, 0, 0);
+        if (r_id > 0)
+            reasoning_meta_set(db, r_id, gemini, model, replay_blob, replay_text);
+    }
 
     int64_t asst_id = entry_append_typed(db, session_id, iteration_id, "assistant_message", part++,
                                          content, NULL, NULL, 0, stop, model,

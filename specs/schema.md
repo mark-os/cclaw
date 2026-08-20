@@ -497,6 +497,7 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `tool_call_count` | INTEGER NOT NULL DEFAULT 0 | denormalized for plan pass |
 | `data` | TEXT | JSON side-channel, merged not overwritten (`json_patch`), nullable. `$.pin` — a hook's durable context pin; `$.source` / `$.source_ref` — provenance stamped by the inbox drain (the cron auto-pause streak reads it); `$.job` on a `cron_result` — the job that produced it; plus whatever an `annotate` hook merges in |
 | `network_hosts` | TEXT | JSON array of hosts the tool run contacted (proxy-observed) |
+| `reasoning_meta` | TEXT | `type='reasoning'` rows only — replay tag+blob, see below |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 ### entries.content by type
@@ -511,6 +512,25 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `reasoning` | Model reasoning/thinking text |
 | `compaction` | Compressed summary text |
 | `cron_result` | A scheduled script's output, posted with no LLM call behind it. `role=2` so ordinary delivery finds it and `iteration_id=0` because it spent no iteration; `data.job` names the job and `is_error` records how the run went. The payload serializer labels it (`[scheduled script <job> output]`) rather than passing it through bare — the model must not read a machine's stdout back as its own words |
+
+### entries.reasoning_meta
+
+`{provider, model, format, blob}` on `type='reasoning'` entries. `provider`
+(`openai`/`gemini`) and `model` name who produced the reasoning; the payload
+builder replays it only when the requesting model matches, so a model switch
+strips it (reasoning is model-bound). `format` says what `blob` is and how it
+goes back on the wire:
+
+| format | blob | replayed as |
+|--------|------|-------------|
+| `reasoning_details` | OpenRouter's `reasoning_details` array, verbatim | `reasoning_details` on the assistant message — order and every field preserved; this is how Gemini's `thoughtSignature` survives the OpenAI-compat envelope |
+| `reasoning_content` | the bare reasoning string | `reasoning_content` on the assistant message (DeepSeek's rule after a tool-call turn) |
+| `gemini_parts` | `[{fn, sig}, …]` | `thoughtSignature` on the matching replayed `functionCall` part |
+
+The blob — not `entries.content` — is what replay reads: `save_reasoning`
+governs whether the *display* text is kept, while the wire requirement holds
+either way. No blob (pre-v48 rows, or a provider that sent none) → nothing is
+emitted; a reasoning field is never invented.
 
 ### entries.network_hosts
 

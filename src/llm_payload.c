@@ -62,6 +62,32 @@ static int populate_plan(sqlite3 *db, const ContextPlan *plan) {
     " CASE WHEN e.is_error THEN ' failed]' ELSE ' output]' END ||" \
     " char(10) || COALESCE(e.content,'')"
 
+/* Reasoning replay (OpenAI-compat). The provider wants its own reasoning
+ * artifact back on the assistant message that carried the tool calls —
+ * OpenRouter's reasoning_details array verbatim (order and every field matter:
+ * it is how Gemini's thoughtSignature survives the OpenAI-shaped envelope),
+ * or DeepSeek's bare reasoning_content string (documented 400 / a silently
+ * invalidated cache prefix when it goes missing after a tool-call turn).
+ * Reasoning is a *field of* the assistant message, never a message of its own,
+ * so the WHERE clause below still drops reasoning entries as rows.
+ * ?3 = the requesting model: a mismatch yields no row, so switching models
+ * strips the replay for free (pi's rule — reasoning is model-bound). Entries
+ * with no captured blob (pre-v48, or a provider that sent none) likewise yield
+ * nothing: never invent a reasoning field. */
+#define SQL_OPENAI_REASONING \
+    "(SELECT CASE json_extract(r.reasoning_meta,'$.format')" \
+    "   WHEN 'reasoning_details' THEN" \
+    "     json_object('reasoning_details'," \
+    "       json(json_extract(r.reasoning_meta,'$.blob')))" \
+    "   WHEN 'reasoning_content' THEN" \
+    "     json_object('reasoning_content'," \
+    "       json_extract(r.reasoning_meta,'$.blob'))" \
+    "   ELSE NULL END" \
+    "  FROM entries r WHERE r.session_id=e.session_id" \
+    "    AND r.iteration_id=e.iteration_id AND r.type='reasoning'" \
+    "    AND json_extract(r.reasoning_meta,'$.model')=?3" \
+    "  LIMIT 1)"
+
 static const char SQL_OPENAI_MESSAGES[] =
     "SELECT json_group_array(json(msg) ORDER BY pos) FROM ("
     "  SELECT p.pos,"
@@ -74,6 +100,7 @@ static const char SQL_OPENAI_MESSAGES[] =
     "      WHEN 'user_message' THEN"
     "        json_object('role','user','content',COALESCE(e.content,''))"
     "      WHEN 'assistant_message' THEN"
+    "        json_patch("
     "        CASE WHEN EXISTS("
     "          SELECT 1 FROM entries tc WHERE tc.session_id=e.session_id"
     "            AND tc.iteration_id=e.iteration_id AND tc.type='tool_call')"
@@ -88,7 +115,8 @@ static const char SQL_OPENAI_MESSAGES[] =
     "               AND tc2.iteration_id=e.iteration_id AND tc2.type='tool_call'"
     "             ORDER BY tc2.part_index)))"
     "        ELSE json_object('role','assistant','content',e.content)"
-    "        END"
+    "        END,"
+    "        COALESCE(" SQL_OPENAI_REASONING ",'{}'))"
     "      WHEN 'tool_result' THEN"
     "        json_object('role','tool','tool_call_id',e.tool_call_id,"
     "                    'content'," SQL_WRAP_TOOL_CONTENT ")"
@@ -186,9 +214,27 @@ static const char SQL_GEMINI_CONTENTS[] =
     "                  CASE WHEN e2.content IS NOT NULL AND e2.content != ''"
     "                  THEN json_object('text',e2.content) ELSE NULL END"
     "                WHEN 'tool_call' THEN"
-    "                  json_object('functionCall',json_object('name',e2.tool_name,"
-    "                    'args',CASE WHEN json_valid(e2.content) THEN json(e2.content)"
-    "                             ELSE json('{}') END))"
+    /* Google requires the thoughtSignature it issued back on the replayed
+     * functionCall part; without it a thinking model 400s the request. The
+     * signature is matched by tool name (part_index counts only the parts we
+     * kept, so it can't index back into the wire parts array), and only when
+     * the producing model is the one we're calling now. No captured
+     * signature → the part goes out exactly as it does today. */
+    "                  json_patch("
+    "                    json_object('functionCall',json_object('name',e2.tool_name,"
+    "                      'args',CASE WHEN json_valid(e2.content) THEN json(e2.content)"
+    "                               ELSE json('{}') END)),"
+    "                    COALESCE((SELECT json_object('thoughtSignature',"
+    "                                json_extract(sg.value,'$.sig'))"
+    "                       FROM entries r,"
+    "                            json_each(json_extract(r.reasoning_meta,'$.blob')) sg"
+    "                       WHERE r.session_id=e2.session_id"
+    "                         AND r.iteration_id=e2.iteration_id"
+    "                         AND r.type='reasoning'"
+    "                         AND json_extract(r.reasoning_meta,'$.format')='gemini_parts'"
+    "                         AND json_extract(r.reasoning_meta,'$.model')=?3"
+    "                         AND json_extract(sg.value,'$.fn')=e2.tool_name"
+    "                       LIMIT 1),'{}'))"
     "                ELSE NULL"
     "              END AS part"
     "            FROM _plan p2 JOIN entries e2 ON e2.id=p2.entry_id AND e2.session_id=?1"
@@ -349,15 +395,18 @@ static char *json_intersect(sqlite3 *db, const char *a, const char *b) {
 }
 
 /* context_text: session context (recall + live state), or NULL. Used by the
- * messages/contents builders, which bind it at ?2 alongside session_id (?1). */
+ * messages/contents builders, which bind it at ?2 alongside session_id (?1)
+ * and the requesting model at ?3 (reasoning replay matches on it). */
 static char *query_text(sqlite3 *db, const char *sql, int64_t session_id,
-                        const char *context_text) {
+                        const char *context_text, const char *model) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_int64(s, 1, session_id);
     if (context_text && context_text[0])
         sqlite3_bind_text(s, 2, context_text, -1, SQLITE_STATIC);
     else sqlite3_bind_null(s, 2);
+    if (model && model[0]) sqlite3_bind_text(s, 3, model, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(s, 3);
     char *r = NULL;
     if (sqlite3_step(s) == SQLITE_ROW) {
         const char *t = (const char *)sqlite3_column_text(s, 0);
@@ -518,7 +567,8 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     }
 
     if (gemini) {
-        char *contents = query_text(db, SQL_GEMINI_CONTENTS, session_id, context_text);
+        char *contents = query_text(db, SQL_GEMINI_CONTENTS, session_id, context_text,
+                                    cfg->provider.model);
         char *tools_json = query_tools(db, SQL_GEMINI_TOOLS, agent_name,
                                        allowed_tools, worker_tools);
 
@@ -548,7 +598,8 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
             return -1;
         }
     } else {
-        char *messages = query_text(db, SQL_OPENAI_MESSAGES, session_id, context_text);
+        char *messages = query_text(db, SQL_OPENAI_MESSAGES, session_id, context_text,
+                                    cfg->provider.model);
         if (!messages) messages = strdup("[]");
         char *tools_json = query_tools(db, SQL_OPENAI_TOOLS, agent_name,
                                        allowed_tools, worker_tools);

@@ -602,6 +602,9 @@ static void test_schema_patch_v47(void) {
      * dual-purpose approvals.action. */
     assert(sqlite3_exec(db,
         "PRAGMA foreign_keys=OFF;"
+        /* v48 is above this step: shed its column too, or the upgrade run
+         * below re-adds one that already exists. */
+        "ALTER TABLE entries DROP COLUMN reasoning_meta;"
         "ALTER TABLE approvals RENAME COLUMN park_reason TO action;"
         "ALTER TABLE agents DROP COLUMN hold_until;"
         "ALTER TABLE agents DROP COLUMN hold_holder;"
@@ -665,6 +668,39 @@ static void test_schema_patch_v47(void) {
     printf("  PASS test_schema_patch_v47\n");
 }
 
+/* The v47->v48 step in isolation: reasoning replay's one column lands on
+ * entries, nullable and empty (no backfill is possible — old reasoning rows
+ * have no captured blob and are simply never replayed). */
+static void test_schema_patch_v48(void) {
+    const char *path = "/tmp/test_cclaw_schema_v48.sqlite";
+    char junk[192];
+    const char *suffixes[] = { "", "-wal", "-shm" };
+    for (size_t i = 0; i < 3; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+
+    assert(sqlite3_exec(db, "ALTER TABLE entries DROP COLUMN reasoning_meta;",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 47);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT);
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(*) FROM pragma_table_info('entries')"
+        " WHERE name='reasoning_meta';", 0, -1) == 1);
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(*) FROM entries WHERE reasoning_meta IS NOT NULL;", 0, -1) == 0);
+
+    db_close(db);
+    for (size_t i = 0; i < 3; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    printf("  PASS test_schema_patch_v48\n");
+}
+
 static void test_rate_limit_and_cost(void) {
     const char *path = "/tmp/test_cclaw_db_budget.sqlite";
     test_db_clean(path);
@@ -715,6 +751,7 @@ int main(void) {
     test_schema_state();
     test_schema_patch_application();
     test_schema_patch_v47();
+    test_schema_patch_v48();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");
     return 0;

@@ -601,6 +601,18 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "  CASE WHEN park_reason='sensitive' THEN 'sensitive_target'"
       "       ELSE 'approval_required' END;",
       NULL },
+
+    /* v48: reasoning replay (plan/projects/provider-wire-format-refactor.md
+     * M2). One nullable JSON column on entries, written only on
+     * type='reasoning' rows: {provider, model, format, blob}. Lands empty —
+     * pre-existing reasoning entries have no captured blob and are simply
+     * never replayed (do-not-emit-without-a-blob is the replay rule), so no
+     * backfill is possible or needed.
+     * NOTE for the integrator: self-contained single ALTER — renumber the
+     * version freely, nothing else in this patch depends on the number. */
+    { 48,
+      "ALTER TABLE entries ADD COLUMN reasoning_meta TEXT;",
+      NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */

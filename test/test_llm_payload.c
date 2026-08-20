@@ -3,6 +3,7 @@
 #include "test_util.h"
 #include "hook_dispatch.h"
 #include "llm_payload.h"
+#include "db_response.h"
 #include "config.h"
 #include "config_registry.h"
 #include "context.h"
@@ -1076,6 +1077,165 @@ static void test_chat_location_line(void) {
     printf("  PASS test_chat_location_line\n");
 }
 
+/* ── Reasoning replay (provider-wire-format M2) ─────────────────── */
+
+static const char REASONING_DETAILS[] =
+    "[{\"type\":\"reasoning.text\",\"text\":\"because\","
+    "\"format\":\"google-gemini-v1\",\"signature\":\"SIG123\"}]";
+
+/* Seed one tool-call iteration: user turn, an ingested response carrying
+ * reasoning, and the tool result that answers it. */
+static int64_t seed_tool_iteration(sqlite3 *db, char *model, EndpointType ep,
+                                   const char *body) {
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+    assert(sid > 0);
+    Message user = {.role = ROLE_USER, .content = "list the files"};
+    entry_append_with_iteration(db, sid, &user, 1);
+    assert(db_ingest_response(db, sid, 2, model, ep, body, NULL, 0, NULL) == LLM_RESP_OK);
+    entry_append_typed(db, sid, 2, "tool_result", 9, "file1", "c1", "shell_exec",
+                       0, STOP_REASON_NONE, NULL, 0, 0, 0);
+    return sid;
+}
+
+static void build_body(sqlite3 *db, int64_t sid, char *model, EndpointType ep,
+                       LlmPayload *payload) {
+    Config cfg = {0};
+    cfg.provider.model = model;
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ep;
+    cfg.context_window = 128000;
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", payload) == 0);
+    context_plan_free(&plan);
+}
+
+/* The array goes back verbatim on the assistant message that carried the tool
+ * calls, and a model switch strips it without disturbing anything else. */
+static void test_reasoning_details_replay(void) {
+    sqlite3 *db = open_seeded();
+    const char *body =
+        "{\"choices\":[{\"message\":{\"content\":\"listing\",\"reasoning\":\"because\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"because\","
+        "\"format\":\"google-gemini-v1\",\"signature\":\"SIG123\"}],"
+        "\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+        "\"function\":{\"name\":\"shell_exec\",\"arguments\":\"{}\"}}]},"
+        "\"finish_reason\":\"tool_calls\"}],"
+        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
+    int64_t sid = seed_tool_iteration(db, (char *)"gemini-3-flash", ENDPOINT_OPENAI, body);
+
+    LlmPayload p;
+    build_body(db, sid, (char *)"gemini-3-flash", ENDPOINT_OPENAI, &p);
+    sqlite3_stmt *s;
+
+    /* Verbatim: same fields, same order, nothing added or dropped. */
+    const char *got = json_get_str(db, p.body, "$.messages[2].reasoning_details", &s);
+    assert(got && strcmp(got, REASONING_DETAILS) == 0);
+    sqlite3_finalize(s);
+    /* Still the assistant message with its tool_calls — reasoning is a field
+     * on it, never a message of its own. */
+    json_get_str(db, p.body, "$.messages[2].tool_calls[0].id", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "c1") == 0);
+    sqlite3_finalize(s);
+    json_get_str(db, p.body, "$.messages[3].role", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "tool") == 0);
+    sqlite3_finalize(s);
+
+    char *with_reasoning = strdup(p.body);
+    llm_payload_release(&p);
+
+    /* Model switch: reasoning gone (it is model-bound), prefix untouched. */
+    build_body(db, sid, (char *)"other-model", ENDPOINT_OPENAI, &p);
+    json_get_str(db, p.body, "$.messages[2].reasoning_details", &s);
+    assert(sqlite3_column_type(s, 0) == SQLITE_NULL);
+    sqlite3_finalize(s);
+    json_get_str(db, p.body, "$.messages[2].tool_calls[0].id", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "c1") == 0);
+    sqlite3_finalize(s);
+
+    /* Byte-stability of the cache prefix: replay must not perturb any earlier
+     * message. Compare the system+user prefix across both builds. */
+    for (int i = 0; i < 2; i++) {
+        char path[32];
+        snprintf(path, sizeof(path), "$.messages[%d]", i);
+        sqlite3_stmt *a, *b;
+        const char *ta = json_get_str(db, with_reasoning, path, &a);
+        const char *tb = json_get_str(db, p.body, path, &b);
+        assert(ta && tb && strcmp(ta, tb) == 0);
+        sqlite3_finalize(a); sqlite3_finalize(b);
+    }
+    llm_payload_release(&p);
+    free(with_reasoning);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_reasoning_details_replay\n");
+}
+
+/* DeepSeek's shape: a bare reasoning_content string on the assistant message
+ * (documented 400 when it goes missing after a tool-call turn). */
+static void test_reasoning_content_replay(void) {
+    sqlite3 *db = open_seeded();
+    const char *body =
+        "{\"choices\":[{\"message\":{\"content\":\"listing\","
+        "\"reasoning_content\":\"deep thought\","
+        "\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+        "\"function\":{\"name\":\"shell_exec\",\"arguments\":\"{}\"}}]},"
+        "\"finish_reason\":\"tool_calls\"}],"
+        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
+    int64_t sid = seed_tool_iteration(db, (char *)"deepseek-v4", ENDPOINT_OPENAI, body);
+
+    LlmPayload p;
+    build_body(db, sid, (char *)"deepseek-v4", ENDPOINT_OPENAI, &p);
+    sqlite3_stmt *s;
+    const char *got = json_get_str(db, p.body, "$.messages[2].reasoning_content", &s);
+    assert(got && strcmp(got, "deep thought") == 0);
+    sqlite3_finalize(s);
+    /* Only the string shape — no invented array. */
+    json_get_str(db, p.body, "$.messages[2].reasoning_details", &s);
+    assert(sqlite3_column_type(s, 0) == SQLITE_NULL);
+    sqlite3_finalize(s);
+    llm_payload_release(&p);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_reasoning_content_replay\n");
+}
+
+/* Gemini-native: the signature rides back on the replayed functionCall part. */
+static void test_gemini_thought_signature_replay(void) {
+    sqlite3 *db = open_seeded();
+    const char *body =
+        "{\"candidates\":[{\"content\":{\"parts\":["
+        "{\"text\":\"listing\"},"
+        "{\"functionCall\":{\"name\":\"shell_exec\",\"args\":{\"cmd\":\"ls\"}},"
+        " \"thoughtSignature\":\"GSIG\"}]},\"finishReason\":\"STOP\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}";
+    int64_t sid = seed_tool_iteration(db, (char *)"gemini-3-pro", ENDPOINT_GEMINI, body);
+
+    LlmPayload p;
+    build_body(db, sid, (char *)"gemini-3-pro", ENDPOINT_GEMINI, &p);
+    sqlite3_stmt *s;
+    json_get_str(db, p.body, "$.contents[1].parts[1].functionCall.name", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "shell_exec") == 0);
+    sqlite3_finalize(s);
+    const char *sig = json_get_str(db, p.body, "$.contents[1].parts[1].thoughtSignature", &s);
+    assert(sig && strcmp(sig, "GSIG") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&p);
+
+    /* Model switch strips it; the functionCall part itself is unchanged. */
+    build_body(db, sid, (char *)"gemini-2.5-pro", ENDPOINT_GEMINI, &p);
+    json_get_str(db, p.body, "$.contents[1].parts[1].thoughtSignature", &s);
+    assert(sqlite3_column_type(s, 0) == SQLITE_NULL);
+    sqlite3_finalize(s);
+    json_get_str(db, p.body, "$.contents[1].parts[1].functionCall.args.cmd", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "ls") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&p);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_gemini_thought_signature_replay\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_llm_payload:\n");
@@ -1094,6 +1254,9 @@ int main(void) {
     test_launch_agent_description_embeds_roster_and_worker_tools();
     test_route_prompt_suffix();
     test_chat_location_line();
+    test_reasoning_details_replay();
+    test_reasoning_content_replay();
+    test_gemini_thought_signature_replay();
     printf("All payload tests passed.\n");
     return 0;
 }

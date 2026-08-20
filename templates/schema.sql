@@ -304,6 +304,16 @@ CREATE TABLE IF NOT EXISTS entries (
   tool_call_count INTEGER NOT NULL DEFAULT 0,
   data TEXT,
   network_hosts TEXT,  -- NULL or JSON array of hosts the tool run contacted
+  -- Reasoning replay blob, set on type='reasoning' entries only:
+  -- {provider, model, format, blob}. provider/model tag who produced it
+  -- (replay strips on model switch); format is the wire shape —
+  -- 'reasoning_details' (OpenRouter array, replayed verbatim: this is how
+  -- Gemini thoughtSignature round-trips on the OpenAI-compat path),
+  -- 'reasoning_content' (DeepSeek-style bare string), or 'gemini_parts'
+  -- ([{fn,sig}] — native thoughtSignature, per functionCall). Replay always
+  -- reads $.blob, never entries.content: save_reasoning governs the display
+  -- text only, while the wire requirement holds either way.
+  reasoning_meta TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 -- Three indexes only, one per access shape: per-session scans, the payload

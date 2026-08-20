@@ -200,6 +200,145 @@ static void test_archive_retention(void) {
     printf(" OK\n");
 }
 
+
+/* ── M4: usage parity ── */
+
+static int64_t usage_col_i(sqlite3 *db, const char *col, int64_t iteration) {
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+             "SELECT COALESCE(%s,-1) FROM llm_responses WHERE iteration_id=%lld;",
+             col, (long long)iteration);
+    return count_rows(db, sql);
+}
+
+/* Test: the full OpenRouter usage block lands in llm_responses + entries */
+static void test_usage_openrouter(void) {
+    printf("  test_usage_openrouter...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    const char *body =
+        "{\"choices\":[{\"message\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":46153,\"completion_tokens\":65,"
+        " \"cost\":0.0040173644,"
+        " \"prompt_tokens_details\":{\"cached_tokens\":40000,\"cache_write_tokens\":128},"
+        " \"completion_tokens_details\":{\"reasoning_tokens\":64}}}";
+    TypedIngestResult ir;
+    assert(db_ingest_response(db, sid, 11, "m", ENDPOINT_OPENAI, body, NULL, 1, &ir) == LLM_RESP_OK);
+    assert(ir.prompt_tokens == 46153 && ir.completion_tokens == 65);
+
+    assert(usage_col_i(db, "cached_tokens", 11) == 40000);
+    assert(usage_col_i(db, "cache_write_tokens", 11) == 128);
+    assert(usage_col_i(db, "reasoning_tokens", 11) == 64);
+    assert(usage_col_i(db, "CAST(cost*1e9 AS INTEGER)", 11) == 4017364);
+
+    /* cache-read count is mirrored onto the assistant entry (limiter input) */
+    assert(count_rows(db,
+        "SELECT COALESCE(cached_tokens,-1) FROM entries WHERE type='assistant_message';") == 40000);
+
+    db_close(db);
+    printf(" OK\n");
+}
+
+/* Test: a bare three-field usage block leaves every new column NULL */
+static void test_usage_bare_block(void) {
+    printf("  test_usage_bare_block...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    const char *body =
+        "{\"choices\":[{\"message\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3,\"total_tokens\":13}}";
+    TypedIngestResult ir;
+    assert(db_ingest_response(db, sid, 12, "m", ENDPOINT_OPENAI, body, NULL, 1, &ir) == LLM_RESP_OK);
+    assert(ir.prompt_tokens == 10 && ir.completion_tokens == 3 && ir.cost_nano == 0);
+    assert(count_rows(db,
+        "SELECT COUNT(*) FROM llm_responses WHERE iteration_id=12"
+        " AND cached_tokens IS NULL AND cache_write_tokens IS NULL"
+        " AND reasoning_tokens IS NULL AND cost IS NULL;") == 1);
+    assert(count_rows(db,
+        "SELECT COUNT(*) FROM entries WHERE type='assistant_message'"
+        " AND cached_tokens IS NULL;") == 1);
+
+    db_close(db);
+    printf(" OK\n");
+}
+
+/* Test: DeepSeek-direct spells the cache hit prompt_cache_hit_tokens */
+static void test_usage_deepseek_spelling(void) {
+    printf("  test_usage_deepseek_spelling...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    const char *body =
+        "{\"choices\":[{\"message\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":7,"
+        " \"prompt_cache_hit_tokens\":768,\"prompt_cache_miss_tokens\":132}}";
+    TypedIngestResult ir;
+    assert(db_ingest_response(db, sid, 13, "m", ENDPOINT_OPENAI, body, NULL, 1, &ir) == LLM_RESP_OK);
+    assert(usage_col_i(db, "cached_tokens", 13) == 768);
+    assert(count_rows(db,
+        "SELECT COALESCE(cached_tokens,-1) FROM entries WHERE type='assistant_message';") == 768);
+
+    db_close(db);
+    printf(" OK\n");
+}
+
+/* Test: Gemini — thoughts are added to the completion count (was undercounted),
+ * cachedContentTokenCount is the cache-read subset. */
+static void test_usage_gemini(void) {
+    printf("  test_usage_gemini...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    const char *body =
+        "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},"
+        "\"finishReason\":\"STOP\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":5000,\"candidatesTokenCount\":20,"
+        " \"thoughtsTokenCount\":180,\"cachedContentTokenCount\":4096,"
+        " \"totalTokenCount\":5200}}";
+    TypedIngestResult ir;
+    assert(db_ingest_response(db, sid, 14, "gemini", ENDPOINT_GEMINI, body, NULL, 1, &ir) == LLM_RESP_OK);
+    assert(ir.prompt_tokens == 5000);
+    assert(ir.completion_tokens == 200);   /* 20 candidates + 180 thoughts */
+    assert(usage_col_i(db, "cached_tokens", 14) == 4096);
+    assert(usage_col_i(db, "reasoning_tokens", 14) == 180);
+    assert(count_rows(db,
+        "SELECT COALESCE(usage_out,-1) FROM entries WHERE type='assistant_message';") == 200);
+
+    db_close(db);
+    printf(" OK\n");
+}
+
+/* Test: rate_limit_check weights cache reads at 0.25; absent => full weight */
+static void test_rate_limit_cache_discount(void) {
+    printf("  test_rate_limit_cache_discount...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    /* No cached_tokens: 1000 in + 100 out = 1100 counted (pre-M4 behavior). */
+    entry_append_typed(db, sid, 1, "assistant_message", 0, "a", NULL, NULL, 0,
+                       STOP_REASON_STOP, "m", 1000, 100, 0);
+    assert(rate_limit_check(db, 1101) == 1);
+    assert(rate_limit_check(db, 1100) == 0);
+
+    /* 800 of the next 1000 input tokens were cache reads: 1000+100-600 = 500.
+     * Running total 1600, not the cache-blind 2200. */
+    int64_t e2 = entry_append_typed(db, sid, 2, "assistant_message", 0, "b", NULL, NULL, 0,
+                                    STOP_REASON_STOP, "m", 1000, 100, 0);
+    char up[128];
+    snprintf(up, sizeof(up), "UPDATE entries SET cached_tokens=800 WHERE id=%lld;", (long long)e2);
+    sqlite3_exec(db, up, NULL, NULL, NULL);
+    assert(rate_limit_check(db, 1601) == 1);
+    assert(rate_limit_check(db, 1600) == 0);
+
+    /* limit <= 0 is unlimited regardless. */
+    assert(rate_limit_check(db, 0) == 1);
+
+    db_close(db);
+    printf(" OK\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_db_response:\n");
@@ -207,6 +346,11 @@ int main(void) {
     test_ingest_malformed();
     test_ingest_archive();
     test_archive_retention();
+    test_usage_openrouter();
+    test_usage_bare_block();
+    test_usage_deepseek_spelling();
+    test_usage_gemini();
+    test_rate_limit_cache_discount();
     printf("  ALL PASSED\n");
     return 0;
 }

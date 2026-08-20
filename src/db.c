@@ -404,6 +404,22 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "    AND tc.status IN ('pending','running');"
       "ALTER TABLE sessions DROP COLUMN parent_notified_at;",
       NULL },
+
+    /* v43: usage parity (M4 of the provider wire-format project). The response
+     * archive keeps the richer usage fields providers already send —
+     * cached/cache-write prompt tokens, reasoning tokens, real cost — and
+     * entries keeps the cache-read count next to usage_in so rate_limit_check
+     * can discount it. All nullable: absent fields degrade to exactly the
+     * pre-patch behavior (no consumer depends on any usage field).
+     * NOTE for the integrator: this patch is self-contained — renumber the
+     * version here, in schema_patches order, and CCLAW_SCHEMA_VERSION. */
+    { 43,
+      "ALTER TABLE entries ADD COLUMN cached_tokens INTEGER;"
+      "ALTER TABLE llm_responses ADD COLUMN cached_tokens INTEGER;"
+      "ALTER TABLE llm_responses ADD COLUMN cache_write_tokens INTEGER;"
+      "ALTER TABLE llm_responses ADD COLUMN reasoning_tokens INTEGER;"
+      "ALTER TABLE llm_responses ADD COLUMN cost REAL;",
+      NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */
@@ -2584,13 +2600,27 @@ int memory_entries_delete(sqlite3 *db, const char *agent_name,
 
 int rate_limit_check(sqlite3 *db, int limit) {
     if (!db || limit <= 0) return 1; /* unlimited */
+    /* Cache reads count at 0.25 weight: a cached prefix token is real traffic
+     * (so the brake still engages on runaway loops) but costs a fraction of a
+     * fresh one, and the old cache-blind sum stalled long sessions on tokens
+     * the provider was billing at a discount. cached_tokens is a SUBSET of
+     * usage_in on every provider we support, so subtracting 75% of it is the
+     * reweighting. COALESCE(...,0) makes an absent field exactly the pre-M4
+     * number — no consumer depends on the provider reporting it. */
     int64_t used = db_scalar_i64(db,
-        "SELECT COALESCE(SUM(usage_in+usage_out),0) FROM entries"
+        "SELECT COALESCE(SUM(usage_in+usage_out)"
+        "                - 0.75*SUM(COALESCE(cached_tokens,0)),0) FROM entries"
         " WHERE created_at > unixepoch()-3600;", 0, 0);
     return used < limit ? 1 : 0;
 }
 
 int64_t db_cost_last_24h(sqlite3 *db) {
+    /* entries.cost_nano is already the provider's real $.usage.cost where it
+     * sends one (db_ingest_response), estimated/zero otherwise — so the
+     * cost-based cap needs no change here. TODO: the same figure is now also
+     * persisted per-response as llm_responses.cost (REAL dollars) alongside
+     * cached/cache-write/reasoning counts, if a future cost model wants the
+     * unrounded value or a per-response breakdown. */
     if (!db) return 0;
     return db_scalar_i64(db,
         "SELECT COALESCE(SUM(cost_nano),0) FROM entries"

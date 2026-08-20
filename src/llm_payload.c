@@ -66,10 +66,18 @@ static const char SQL_OPENAI_MESSAGES[] =
     "SELECT json_group_array(json(msg) ORDER BY pos) FROM ("
     "  SELECT p.pos,"
     "    CASE e.type"
+    /* No builder emits a non-leading role:system message: no provider
+     * documents mid-array system messages (OpenRouter rewrites them
+     * per-upstream, Anthropic/Gemini structurally can't carry them), and a
+     * tail-append is cache-safe whatever role it wears. Mid-turn system
+     * entries therefore ride as '[system] '-prefixed user messages on every
+     * path — same convention as the hook_directives injects below and the
+     * Gemini builder. Only the leading system prompt (SQL_OPENAI_FULL) keeps
+     * the system role. */
     "      WHEN 'system' THEN"
-    "        json_object('role','system','content',COALESCE(e.content,''))"
+    "        json_object('role','user','content','[system] ' || COALESCE(e.content,''))"
     "      WHEN 'compaction' THEN"
-    "        json_object('role','system','content',"
+    "        json_object('role','user','content',"
     "          '[Summary of earlier conversation]' || char(10) || COALESCE(e.content,''))"
     "      WHEN 'user_message' THEN"
     "        json_object('role','user','content',COALESCE(e.content,''))"
@@ -118,7 +126,12 @@ static const char SQL_OPENAI_MESSAGES[] =
      * newest entry — orthogonal to session context, unaffected by it. */
     "  UNION ALL"
     "  SELECT 1000000+hd.id AS pos,"
-    "    json_object('role', hd.role, 'content', hd.content) AS msg"
+    /* A 'system' inject converts to a '[system] '-prefixed user message —
+     * same universal convention as the Gemini builder and mid-turn system
+     * entries; only the leading prompt wears the system role. */
+    "    json_object('role', CASE WHEN hd.role='system' THEN 'user' ELSE hd.role END,"
+    "                'content', CASE WHEN hd.role='system'"
+    "                  THEN '[system] ' || hd.content ELSE hd.content END) AS msg"
     "  FROM hook_directives hd WHERE hd.session_id = ?1 AND hd.kind = 'inject'"
     ") sub WHERE msg IS NOT NULL;";
 
@@ -204,6 +217,12 @@ static const char SQL_GEMINI_CONTENTS[] =
     "      WHEN e.type = 'user_message' THEN"
     "        json_object('role','user','parts',"
     "          json_array(json_object('text',COALESCE(e.content,''))))"
+    /* Same universal convention as SQL_OPENAI_MESSAGES: a mid-turn system
+     * entry becomes a '[system] '-prefixed user turn rather than being
+     * dropped (it used to be, silently losing the content here). */
+    "      WHEN e.type = 'system' THEN"
+    "        json_object('role','user','parts',"
+    "          json_array(json_object('text','[system] ' || COALESCE(e.content,''))))"
     "      WHEN e.type = 'compaction' THEN"
     "        json_object('role','user','parts',"
     "          json_array(json_object('text',"
@@ -214,7 +233,6 @@ static const char SQL_GEMINI_CONTENTS[] =
     "      ELSE NULL"
     "    END AS content_obj"
     "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
-    "  WHERE e.type != 'system'"
     /* -iteration_id vs id: both are always positive, so negating iteration_id
      * puts the two group-key domains in disjoint ranges. Without this, a
      * user_message with id=N and an assistant/tool_call/reasoning entry with

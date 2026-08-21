@@ -95,6 +95,7 @@ here orders candidates.
 | `context_window` | INTEGER | |
 | `max_output_tokens` | INTEGER | |
 | `capabilities` | TEXT DEFAULT '[]' | JSON array of capability tags |
+| `effort_map` | TEXT | JSON: how this model spells reasoning effort on the wire — `{"format": "openrouter\|openai\|deepseek\|gemini-level\|gemini-budget", "levels": {level: wire value}}`. A missing/null level is unsupported and clamps to the nearest supported one. NULL = the endpoint default. See [providers.md](providers.md#reasoning-effort) |
 | `status` | TEXT NOT NULL DEFAULT 'healthy' | healthy / degraded / disabled |
 | `degraded_until` | INTEGER | unixepoch cooldown; NULL while degraded = config-degraded (missing key) |
 | `total_requests` | INTEGER DEFAULT 0 | lifetime counter |
@@ -121,6 +122,7 @@ here can't be deleted — fix lists first; `disabled` is the soft option.
 | `agent_name` | TEXT NOT NULL | FK agents(name), ON UPDATE CASCADE ON DELETE CASCADE |
 | `model_id` | TEXT NOT NULL | FK models(id) |
 | `pos` | INTEGER NOT NULL | 0 = primary; PK (agent_name, pos) |
+| `reasoning_effort` | TEXT | `off\|minimal\|low\|medium\|high` (CHECK-enforced), or NULL = send nothing. Translated per model through `models.effort_map` at request-build time — see [providers.md](providers.md#reasoning-effort) |
 
 ---
 

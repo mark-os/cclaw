@@ -64,6 +64,66 @@ message on every provider. No builder ever emits a non-leading `role: system`.
 Key: OpenAI is the odd one out — `arguments` is a string. Everyone else uses objects.
 CClaw stores `args` as object in `tool_calls` column (provider-neutral). OpenAI emitter stringifies at wire time.
 
+## Reasoning Effort
+
+How hard a model is asked to think is a **routing** decision, so the level
+lives on the routing entry: `agent_models.reasoning_effort` ∈
+`off | minimal | low | medium | high`. NULL — the default, and what every
+upgraded DB starts with — sends nothing at all, byte for byte the payload
+CClaw built before the knob existed.
+
+How that level is *spelled* is a **per-model** property, so it lives on
+`models.effort_map`. Per-provider would be wrong: Cerebras' gpt-oss takes
+low/medium/high while its qwen3 takes neither, and Gemini 2.5 wants a token
+budget where 3.x wants a level.
+
+```json
+{"format": "openrouter",
+ "levels": {"off": "off", "low": "low", "medium": "medium", "high": "high"}}
+```
+
+Level values are **wire values** — strings for effort enums, integers for
+budgets. A level that is missing or `null` is *unsupported by this model*.
+
+| `format` | Emits |
+|----------|-------|
+| `openrouter` | `{"reasoning": {"effort": <value>}}` — `off` becomes `{"reasoning": {"enabled": false}}`, since OpenRouter has no `"off"` effort |
+| `openai` | `{"reasoning_effort": <value>}` (flat; also the Cerebras shape) |
+| `deepseek` | `{"thinking": {"type": "enabled"\|"disabled"}}` — driven by the level *name* after clamping (`off` → disabled, anything else → enabled); the map's values only mark which levels exist |
+| `gemini-level` | `generationConfig.thinkingConfig.thinkingLevel` (string) |
+| `gemini-budget` | `generationConfig.thinkingConfig.thinkingBudget` (integer) |
+
+An unrecognized `format` falls back to `openrouter`.
+
+**Clamp to nearest supported** (pi's rule). If the requested level has no
+value in the map, CClaw walks the ladder `off < minimal < low < medium < high`
+**upward first**, then downward, and uses the nearest level that does — more
+thinking beats silently less, and ties break upward. Requesting `high` from a
+map that tops out at `medium` sends medium; requesting `low` from a map that
+only supports `high` sends high. A map that supports **no** level sends
+nothing.
+
+**No `effort_map`** on the model: the endpoint's own vocabulary, identity-
+mapped. OpenAI-compat gets `openrouter` format (that traffic is overwhelmingly
+OpenRouter, which converts its unified `reasoning.effort` to whatever the
+backend wants); the Gemini endpoint gets `gemini-level` with the uppercased
+level name.
+
+**Precedence.** The mapped fragment is merged into the request body *before*
+`providers.request_extra`, so a provider's `request_extra` still overrides or
+suppresses it — that column remains the last word on the wire.
+
+**Setting it.** There is no `request_config` surface for either column yet;
+operators write them directly (`db_query` / SQL):
+
+```sql
+UPDATE agent_models SET reasoning_effort='high'
+ WHERE agent_name='Charles' AND pos=0;
+UPDATE models SET effort_map='{"format":"gemini-budget",
+  "levels":{"low":1024,"medium":8192,"high":24576}}'
+ WHERE id='gemini-2.5-pro@openrouter';
+```
+
 ## Security Model
 
 - Provider API keys stored encrypted in the `secrets` table with scope `system` (ChaCha20-Poly1305 AEAD). System scope is excluded from the agent-facing snapshot: `{{SECRET:OPENROUTER_API_KEY}}` does not resolve, and the key is never injected into tool children.

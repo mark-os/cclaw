@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS models (
   context_window INTEGER,
   max_output_tokens INTEGER,
   capabilities TEXT DEFAULT '[]',
+  -- How this model spells reasoning effort on the wire, as JSON:
+  --   {"format": "openrouter|openai|deepseek|gemini-level|gemini-budget",
+  --    "levels": {"off":..,"minimal":..,"low":..,"medium":..,"high":..}}
+  -- Level values are wire values (strings for effort enums, integers for
+  -- budgets); a missing or null level means this model does not support it,
+  -- and a request for it clamps to the nearest level that does. NULL column =
+  -- use the endpoint's default map (see specs/providers.md).
+  effort_map TEXT,
   status TEXT NOT NULL DEFAULT 'healthy',
   degraded_until INTEGER,
   total_requests INTEGER DEFAULT 0,
@@ -63,6 +71,12 @@ CREATE TABLE IF NOT EXISTS agent_models (
   agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,
   model_id TEXT NOT NULL REFERENCES models(id),
   pos INTEGER NOT NULL,
+  -- How hard this agent wants this model to think: off|minimal|low|medium|high.
+  -- NULL (the default) sends nothing, which is what every model did before the
+  -- knob existed. The level is translated to wire form at build time through
+  -- models.effort_map, clamping to the nearest supported level.
+  reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN
+    ('off','minimal','low','medium','high')),
   PRIMARY KEY (agent_name, pos)
 );
 

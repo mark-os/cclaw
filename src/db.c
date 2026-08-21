@@ -641,6 +641,18 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "UPDATE providers SET request_extra='{\"provider\":{\"ignore\":[\"StreamLake\"]}}'"
       " WHERE name='openrouter' AND request_extra IS NULL;",
       NULL },
+
+    /* v51: reasoning-effort knob (provider wire-format M5). The level is a
+     * routing decision — how hard THIS agent wants THIS candidate to think —
+     * so it rides on agent_models, next to pos. The wire spelling is a model
+     * property, so it rides on models. Both land NULL, which is exactly the
+     * pre-patch behavior: no effort set means no effort field is sent. */
+    { 51,
+      "ALTER TABLE agent_models ADD COLUMN reasoning_effort TEXT"
+      "  CHECK (reasoning_effort IS NULL OR reasoning_effort IN"
+      "         ('off','minimal','low','medium','high'));"
+      "ALTER TABLE models ADD COLUMN effort_map TEXT;",
+      NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */

@@ -1322,6 +1322,246 @@ static void test_request_extra_merge(void) {
     printf("  request_extra_merge... PASS\n");
 }
 
+/* ── Reasoning effort (M5) ─────────────────────────────────────────────── */
+
+/* Build one body with an effort level set on the route, and read one JSON
+ * path out of it. Returns a malloc'd string, or NULL when the path is absent. */
+static char *effort_probe(sqlite3 *db, int64_t sid, const ContextPlan *plan,
+                          EndpointType ep, const char *model_id,
+                          const char *level, const char *path) {
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.model_id = (char *)model_id;
+    cfg.provider.reasoning_effort = (char *)level;
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ep;
+    cfg.context_window = 128000;
+
+    LlmPayload p;
+    assert(llm_build_payload(db, sid, &cfg, plan, NULL, "You are helpful.", &p) == 0);
+    sqlite3_stmt *s;
+    const char *v = json_get_str(db, p.body, path, &s);
+    char *r = v ? strdup(v) : NULL;
+    sqlite3_finalize(s);
+    llm_payload_release(&p);
+    return r;
+}
+
+static void put_effort_map(sqlite3 *db, const char *id, const char *map) {
+    char *sql = sqlite3_mprintf(
+        "INSERT INTO models(id, provider_name, model, effort_map)"
+        " VALUES(%Q,'wire_test','test-model',%Q)"
+        " ON CONFLICT(id) DO UPDATE SET effort_map=excluded.effort_map;", id, map);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3_free(sql);
+}
+
+/* Every wire format the map can name, plus the two endpoint defaults that
+ * apply when a model carries no map at all. */
+static void test_effort_formats(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid;
+    setup_session(db, &sid);
+    Config base = {0};
+    base.provider.model = "test-model";
+    base.provider.max_tokens = 1024;
+    base.context_window = 128000;
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &base, 0, &plan) == 0);
+
+    static const char *ALL_LEVELS =
+        "\"off\":\"off\",\"minimal\":\"minimal\",\"low\":\"low\","
+        "\"medium\":\"medium\",\"high\":\"high\"";
+    char map[512];
+
+    /* openrouter: nested reasoning.effort. */
+    snprintf(map, sizeof(map), "{\"format\":\"openrouter\",\"levels\":{%s}}", ALL_LEVELS);
+    put_effort_map(db, "m-or", map);
+    char *v = effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-or", "high",
+                           "$.reasoning.effort");
+    assert(v && strcmp(v, "high") == 0); free(v);
+
+    /* openrouter 'off' is enabled:false, not effort:"off". */
+    v = effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-or", "off",
+                     "$.reasoning.enabled");
+    assert(v && strcmp(v, "0") == 0); free(v);
+
+    /* openai: flat reasoning_effort (also the Cerebras shape). */
+    snprintf(map, sizeof(map), "{\"format\":\"openai\",\"levels\":{%s}}", ALL_LEVELS);
+    put_effort_map(db, "m-oa", map);
+    v = effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-oa", "medium",
+                     "$.reasoning_effort");
+    assert(v && strcmp(v, "medium") == 0); free(v);
+    assert(effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-oa", "medium",
+                        "$.reasoning") == NULL);
+
+    /* deepseek: one bit, driven by the clamped level NAME, not its value. */
+    put_effort_map(db, "m-ds",
+        "{\"format\":\"deepseek\",\"levels\":{\"off\":1,\"low\":1,\"high\":1}}");
+    v = effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-ds", "high",
+                     "$.thinking.type");
+    assert(v && strcmp(v, "enabled") == 0); free(v);
+    v = effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-ds", "off",
+                     "$.thinking.type");
+    assert(v && strcmp(v, "disabled") == 0); free(v);
+
+    /* gemini-level: a string under generationConfig.thinkingConfig — and the
+     * maxOutputTokens the builder already put there SURVIVES the merge. */
+    put_effort_map(db, "m-gl",
+        "{\"format\":\"gemini-level\",\"levels\":{\"low\":\"LOW\",\"high\":\"HIGH\"}}");
+    v = effort_probe(db, sid, &plan, ENDPOINT_GEMINI, "m-gl", "high",
+                     "$.generationConfig.thinkingConfig.thinkingLevel");
+    assert(v && strcmp(v, "HIGH") == 0); free(v);
+    v = effort_probe(db, sid, &plan, ENDPOINT_GEMINI, "m-gl", "high",
+                     "$.generationConfig.maxOutputTokens");
+    assert(v && strcmp(v, "1024") == 0); free(v);
+
+    /* gemini-budget: an integer, and it must stay a JSON number. */
+    put_effort_map(db, "m-gb",
+        "{\"format\":\"gemini-budget\",\"levels\":{\"low\":1024,\"high\":24576}}");
+    v = effort_probe(db, sid, &plan, ENDPOINT_GEMINI, "m-gb", "high",
+                     "$.generationConfig.thinkingConfig.thinkingBudget");
+    assert(v && strcmp(v, "24576") == 0); free(v);
+    v = effort_probe(db, sid, &plan, ENDPOINT_GEMINI, "m-gb", "high",
+                     "$.generationConfig.thinkingConfig");
+    assert(v && strstr(v, "24576") && !strstr(v, "\"24576\"")); free(v);
+
+    /* No effort_map: the endpoint's default. OpenAI-compat = openrouter with
+     * identity levels; Gemini = uppercase thinkingLevel. */
+    put_effort_map(db, "m-bare", NULL);
+    v = effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-bare", "low",
+                     "$.reasoning.effort");
+    assert(v && strcmp(v, "low") == 0); free(v);
+    v = effort_probe(db, sid, &plan, ENDPOINT_GEMINI, "m-bare", "low",
+                     "$.generationConfig.thinkingConfig.thinkingLevel");
+    assert(v && strcmp(v, "LOW") == 0); free(v);
+    /* An unknown model id behaves exactly like a mapless one. */
+    v = effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "no-such-model", "low",
+                     "$.reasoning.effort");
+    assert(v && strcmp(v, "low") == 0); free(v);
+
+    context_plan_free(&plan);
+    db_close(db);
+    printf("  effort_formats... PASS\n");
+}
+
+/* Clamp-to-nearest-supported: up first, then down. A map that supports
+ * nothing sends nothing. */
+static void test_effort_clamp(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid;
+    setup_session(db, &sid);
+    Config base = {0};
+    base.provider.model = "test-model";
+    base.provider.max_tokens = 1024;
+    base.context_window = 128000;
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &base, 0, &plan) == 0);
+
+    /* Tops out at medium: a request for high clamps DOWN to medium. */
+    put_effort_map(db, "m-cap",
+        "{\"format\":\"openai\",\"levels\":{\"low\":\"low\",\"medium\":\"medium\","
+        "\"high\":null}}");
+    char *v = effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-cap", "high",
+                           "$.reasoning_effort");
+    assert(v && strcmp(v, "medium") == 0); free(v);
+
+    /* Only high exists: a request for low walks UP, not down to off. */
+    put_effort_map(db, "m-hi",
+        "{\"format\":\"openai\",\"levels\":{\"off\":\"off\",\"high\":\"high\"}}");
+    v = effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-hi", "low",
+                     "$.reasoning_effort");
+    assert(v && strcmp(v, "high") == 0); free(v);
+    /* ...but an exactly-supported level is never clamped. */
+    v = effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-hi", "off",
+                     "$.reasoning_effort");
+    assert(v && strcmp(v, "off") == 0); free(v);
+
+    /* Ties break upward: minimal is equidistant from off and low. */
+    put_effort_map(db, "m-tie",
+        "{\"format\":\"openai\",\"levels\":{\"off\":\"off\",\"low\":\"low\"}}");
+    v = effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-tie", "minimal",
+                     "$.reasoning_effort");
+    assert(v && strcmp(v, "low") == 0); free(v);
+
+    /* Supports nothing: no field at all, on either endpoint. */
+    put_effort_map(db, "m-none", "{\"format\":\"openai\",\"levels\":{}}");
+    assert(effort_probe(db, sid, &plan, ENDPOINT_OPENAI, "m-none", "high",
+                        "$.reasoning_effort") == NULL);
+    put_effort_map(db, "m-none-g", "{\"format\":\"gemini-level\",\"levels\":{}}");
+    assert(effort_probe(db, sid, &plan, ENDPOINT_GEMINI, "m-none-g", "high",
+                        "$.generationConfig.thinkingConfig") == NULL);
+
+    context_plan_free(&plan);
+    db_close(db);
+    printf("  effort_clamp... PASS\n");
+}
+
+/* The two properties that keep the knob safe to ship: unset changes nothing
+ * at all, and request_extra still has the last word (it merges AFTER). */
+static void test_effort_unset_and_override(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid;
+    setup_session(db, &sid);
+    assert(sqlite3_exec(db,
+        "INSERT INTO providers(name, base_url) VALUES('wire_test','http://x');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    put_effort_map(db, "m-x",
+        "{\"format\":\"openai\",\"levels\":{\"high\":\"high\"}}");
+
+    Config cfg = {0};
+    cfg.provider.name = "wire_test";
+    cfg.provider.model = "test-model";
+    cfg.provider.model_id = "m-x";
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.context_window = 128000;
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+
+    /* NULL effort: byte-identical to a body built with no knob in the schema. */
+    LlmPayload p;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &p) == 0);
+    char *baseline = strdup(p.body);
+    llm_payload_release(&p);
+    assert(strstr(baseline, "reasoning") == NULL);
+
+    cfg.provider.reasoning_effort = "high";
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &p) == 0);
+    assert(strstr(p.body, "\"reasoning_effort\":\"high\"") != NULL);
+    llm_payload_release(&p);
+
+    cfg.provider.reasoning_effort = NULL;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &p) == 0);
+    assert(strcmp(baseline, p.body) == 0);
+    llm_payload_release(&p);
+    free(baseline);
+
+    /* request_extra merges last, so it overrides the mapped field. */
+    assert(sqlite3_exec(db,
+        "UPDATE providers SET request_extra='{\"reasoning_effort\":\"minimal\"}'"
+        " WHERE name='wire_test';", NULL, NULL, NULL) == SQLITE_OK);
+    cfg.provider.reasoning_effort = "high";
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &p) == 0);
+    sqlite3_stmt *s;
+    const char *v = json_get_str(db, p.body, "$.reasoning_effort", &s);
+    assert(v && strcmp(v, "minimal") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&p);
+
+    /* ...including suppressing it outright. */
+    assert(sqlite3_exec(db,
+        "UPDATE providers SET request_extra='{\"reasoning_effort\":null}'"
+        " WHERE name='wire_test';", NULL, NULL, NULL) == SQLITE_OK);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &p) == 0);
+    assert(strstr(p.body, "reasoning_effort") == NULL);
+    llm_payload_release(&p);
+
+    context_plan_free(&plan);
+    db_close(db);
+    printf("  effort_unset_and_override... PASS\n");
+}
+
 /* A mid-turn system entry (approval notices, model-change notices) must reach
  * the model on BOTH endpoints as a '[system] '-prefixed USER message: no
  * builder emits a non-leading system role, and Gemini used to drop these
@@ -1391,6 +1631,9 @@ int main(void) {
     printf("test_llm_payload:\n");
     test_openai_payload();
     test_request_extra_merge();
+    test_effort_formats();
+    test_effort_clamp();
+    test_effort_unset_and_override();
     test_openai_payload_no_stream_omits_nulls();
     test_gemini_payload();
     test_recall_in_session_context();

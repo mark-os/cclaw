@@ -120,6 +120,12 @@ typedef struct {
     int max_tokens;         /* max response tokens */
     CacheHints cache_hints; /* prompt cache control */
     EndpointType endpoint_type; /* wire format (openai or gemini) */
+    /* Reasoning-effort knob for the candidate being built, as routed:
+     * model_id keys models.effort_map, reasoning_effort is the requested
+     * level. Both NULL on the synthetic/default candidate — and a NULL
+     * reasoning_effort means no effort field goes on the wire at all. */
+    char *model_id;
+    char *reasoning_effort;
 } ProviderConfig;
 
 /* Top-level config */

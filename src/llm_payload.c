@@ -205,7 +205,7 @@ static const char SQL_OPENAI_TOOLS[] =
  * merge drops top-level NULL-valued keys, which json_object would otherwise
  * emit as JSON null ("max_tokens":null etc.) — strict providers 400 on those. */
 static const char SQL_OPENAI_FULL[] =
-    "SELECT json_patch(json_patch('{}', json_object("
+    "SELECT json_patch(json_patch(json_patch('{}', json_object("
     "  'model', ?1,"
     "  'messages', (SELECT json_group_array(json(m)) FROM ("
     /* ?6 = this session's prompt suffix: location line + the pinned route's
@@ -222,7 +222,9 @@ static const char SQL_OPENAI_FULL[] =
     "    ORDER BY ord, sub)),"
     "  'max_tokens', CASE WHEN ?4 > 0 THEN ?4 ELSE NULL END,"
     "  'tools', CASE WHEN json_array_length(?5) > 0 THEN json(?5) ELSE NULL END"
-    ")), " SQL_REQUEST_EXTRA("?7") ");";
+    /* ?8 = the reasoning-effort fragment ('{}' when nothing to say), merged
+     * BEFORE request_extra so the provider escape hatch still wins. */
+    ")), json(?8)), " SQL_REQUEST_EXTRA("?7") ");";
 
 static const char SQL_GEMINI_CONTENTS[] =
     "SELECT json_group_array(json(content_obj) ORDER BY min_pos) FROM ("
@@ -336,7 +338,7 @@ static const char SQL_GEMINI_TOOLS[] =
     "));";
 
 static const char SQL_GEMINI_FULL[] =
-    "SELECT json_patch(json_patch('{}', json_object("
+    "SELECT json_patch(json_patch(json_patch('{}', json_object("
     /* ?5 = this session's prompt suffix — see SQL_OPENAI_FULL. */
     "  'systemInstruction', CASE WHEN COALESCE(?1,'') ||"
     "      COALESCE(char(10) || char(10) || ?5, '') != ''"
@@ -350,7 +352,91 @@ static const char SQL_GEMINI_FULL[] =
     "    THEN json(?3) ELSE NULL END,"
     "  'generationConfig', CASE WHEN ?4 > 0"
     "    THEN json_object('maxOutputTokens',?4) ELSE NULL END"
-    ")), " SQL_REQUEST_EXTRA("?6") ");";
+    /* ?7 = the reasoning-effort fragment — its own generationConfig subtree,
+     * which RFC 7386 merges into the one above rather than replacing it. */
+    ")), json(?7)), " SQL_REQUEST_EXTRA("?6") ");";
+
+/* ── Reasoning effort (M5) ─────────────────────────────────────────
+ *
+ * The knob is a level name on the routing entry (agent_models.reasoning_effort);
+ * the wire spelling is a per-MODEL property (models.effort_map), because two
+ * models behind one provider disagree — Cerebras gpt-oss takes low/medium/high
+ * while its qwen3 takes neither, Gemini 2.5 wants a budget where 3.x wants a
+ * level. The map is {"format": kind, "levels": {level: wire value}}; a missing
+ * or null level means unsupported.
+ *
+ * Clamp-to-nearest-supported is pi's rule: an unsupported request walks the
+ * ladder UP first (more thinking beats silently less), then down. Expressed as
+ * the ORDER BY below — supported levels at or above the request sort first, and
+ * within each direction the nearest wins. A map with no supported level at all
+ * yields no row, hence no fragment, hence today's payload byte for byte. */
+#define EFFORT_LADDER \
+    "ladder(name, ord) AS (VALUES ('off',0),('minimal',1),('low',2)," \
+    "                             ('medium',3),('high',4))"
+
+static const char SQL_EFFORT_FRAGMENT[] =
+    /* ?1 = models.id, ?2 = requested level, ?3 = endpoint default map. */
+    "WITH " EFFORT_LADDER ","
+    " map(m) AS (SELECT COALESCE((SELECT effort_map FROM models"
+    "                              WHERE id=?1 AND json_valid(effort_map)), ?3)),"
+    " req(ord) AS (SELECT ord FROM ladder WHERE name=?2),"
+    " pick(lvl, val) AS ("
+    "   SELECT l.name, json_extract((SELECT m FROM map), '$.levels.' || l.name)"
+    "     FROM ladder l"
+    "    WHERE json_extract((SELECT m FROM map), '$.levels.' || l.name) IS NOT NULL"
+    "    ORDER BY (l.ord < (SELECT ord FROM req)),"
+    "             abs(l.ord - (SELECT ord FROM req))"
+    "    LIMIT 1)"
+    "SELECT CASE json_extract((SELECT m FROM map), '$.format')"
+    "  WHEN 'openai' THEN json_object('reasoning_effort', val)"
+    /* DeepSeek has one bit, not a ladder: any level that survives the clamp
+     * other than 'off' means thinking on. Its map's values only mark which
+     * levels exist; the type string comes from the level name. */
+    "  WHEN 'deepseek' THEN json_object('thinking', json_object('type',"
+    "      CASE WHEN lvl='off' THEN 'disabled' ELSE 'enabled' END))"
+    "  WHEN 'gemini-level' THEN json_object('generationConfig',"
+    "      json_object('thinkingConfig', json_object('thinkingLevel', val)))"
+    "  WHEN 'gemini-budget' THEN json_object('generationConfig',"
+    "      json_object('thinkingConfig', json_object('thinkingBudget', val)))"
+    /* 'openrouter' and anything unrecognized: the unified nested object.
+     * OpenRouter spells "don't think" as enabled:false, not effort:'off'. */
+    "  ELSE CASE WHEN lvl='off' THEN json_object('reasoning', json_object('enabled', json('false')))"
+    "            ELSE json_object('reasoning', json_object('effort', val)) END"
+    " END FROM pick;";
+
+/* No effort_map on the model: assume the endpoint's own vocabulary, mapping
+ * each level to itself. OpenAI-compat traffic is overwhelmingly OpenRouter,
+ * whose unified reasoning.effort it converts to whatever the backend wants;
+ * the Gemini endpoint takes an uppercase thinkingLevel. */
+static const char EFFORT_DEFAULT_OPENAI[] =
+    "{\"format\":\"openrouter\",\"levels\":{\"off\":\"off\",\"minimal\":\"minimal\","
+    "\"low\":\"low\",\"medium\":\"medium\",\"high\":\"high\"}}";
+static const char EFFORT_DEFAULT_GEMINI[] =
+    "{\"format\":\"gemini-level\",\"levels\":{\"off\":\"OFF\",\"minimal\":\"MINIMAL\","
+    "\"low\":\"LOW\",\"medium\":\"MEDIUM\",\"high\":\"HIGH\"}}";
+
+/* The JSON object to merge into the request body for this route's effort
+ * level, or NULL when nothing should be sent (no level set, or the model
+ * supports no level at all). Caller frees. */
+static char *effort_fragment(sqlite3 *db, const ProviderConfig *prov) {
+    if (!prov->reasoning_effort || !prov->reasoning_effort[0]) return NULL;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, SQL_EFFORT_FRAGMENT, -1, &s, NULL) != SQLITE_OK)
+        return NULL;
+    if (prov->model_id) sqlite3_bind_text(s, 1, prov->model_id, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(s, 1);
+    sqlite3_bind_text(s, 2, prov->reasoning_effort, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, prov->endpoint_type == ENDPOINT_GEMINI
+                              ? EFFORT_DEFAULT_GEMINI : EFFORT_DEFAULT_OPENAI,
+                      -1, SQLITE_STATIC);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_type(s, 0) != SQLITE_NULL) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t) r = strdup(t);
+    }
+    sqlite3_finalize(s);
+    return r;
+}
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -582,6 +668,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     char *tool_filter = session_tool_filter(db, session_id);
     char *suffix = route_prompt_suffix(db, session_id);
     char *worker_tools = worker_tools_list(db);
+    char *effort = effort_fragment(db, &cfg->provider);
     if (tool_filter) {
         if (allowed_tools) {
             char *isect = json_intersect(db, allowed_tools, tool_filter);
@@ -603,7 +690,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         sqlite3_stmt *full;
         if (sqlite3_prepare_v2(db, SQL_GEMINI_FULL, -1, &full, NULL) != SQLITE_OK) {
             free(contents); free(tools_json);
-            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools);
+            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools); free(effort);
             return -1;
         }
         if (system_prompt && system_prompt[0])
@@ -616,6 +703,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         else sqlite3_bind_null(full, 5);
         if (cfg->provider.name) sqlite3_bind_text(full, 6, cfg->provider.name, -1, SQLITE_TRANSIENT);
         else sqlite3_bind_null(full, 6);
+        sqlite3_bind_text(full, 7, effort ? effort : "{}", -1, SQLITE_TRANSIENT);
 
         free(contents); free(tools_json);
 
@@ -624,7 +712,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
             out->body = (const char *)sqlite3_column_text(full, 0);
         } else {
             sqlite3_finalize(full);
-            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools);
+            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools); free(effort);
             return -1;
         }
     } else {
@@ -637,7 +725,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         sqlite3_stmt *full;
         if (sqlite3_prepare_v2(db, SQL_OPENAI_FULL, -1, &full, NULL) != SQLITE_OK) {
             free(messages); free(tools_json);
-            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools);
+            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools); free(effort);
             return -1;
         }
         sqlite3_bind_text(full, 1, cfg->provider.model ? cfg->provider.model : "unknown",
@@ -652,6 +740,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         else sqlite3_bind_null(full, 6);
         if (cfg->provider.name) sqlite3_bind_text(full, 7, cfg->provider.name, -1, SQLITE_TRANSIENT);
         else sqlite3_bind_null(full, 7);
+        sqlite3_bind_text(full, 8, effort ? effort : "{}", -1, SQLITE_TRANSIENT);
 
         free(messages); free(tools_json);
 
@@ -660,12 +749,12 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
             out->body = (const char *)sqlite3_column_text(full, 0);
         } else {
             sqlite3_finalize(full);
-            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools);
+            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools); free(effort);
             return -1;
         }
     }
 
-    free(agent_name); free(allowed_tools); free(suffix); free(worker_tools);
+    free(agent_name); free(allowed_tools); free(suffix); free(worker_tools); free(effort);
     return 0;
 }
 

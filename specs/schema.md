@@ -78,6 +78,7 @@ LLM API endpoints. Multiple providers enable fallback routing.
 | `default_model` | TEXT | fresh-install seed sugar only — models are registered in `models` |
 | `priority` | INTEGER NOT NULL DEFAULT 0 | lower = preferred |
 | `status` | TEXT NOT NULL DEFAULT 'healthy' | healthy / degraded / down |
+| `request_extra` | TEXT | JSON merged (`json_patch`, RFC 7386) into every outgoing request body for this provider, last — so it overrides anything cclaw built. NULL = no-op. Seeded on `openrouter` with `{"provider":{"ignore":["StreamLake"]}}` |
 
 ---
 
@@ -173,8 +174,9 @@ Raw LLM response archive for forensics and debugging. One row per HTTP response 
 | `session_id` | INTEGER NOT NULL | |
 | `iteration_id` | INTEGER NOT NULL | the `entries.iteration_id` this request belongs to |
 | `model` | TEXT | |
-| `status` | TEXT NOT NULL | ok / empty / malformed / http_<code> / timeout / network_error |
+| `status` | TEXT NOT NULL | ok / empty / malformed / tool_markup / http_<code> / timeout / network_error |
 | `provider_id` | TEXT | provider's own response id (`$.id`), NULL if absent |
+| `upstream_provider` | TEXT | upstream backend that served it (`$.provider`, e.g. OpenRouter's `StreamLake`), NULL if absent — a different field from `provider_id` |
 | `body` | BLOB | JSONB when parseable, raw text otherwise |
 | `request_body` | BLOB | JSONB of sent payload (failures only); NULL on success |
 | `cached_tokens` | INTEGER | prompt tokens served from cache; NULL when unreported |

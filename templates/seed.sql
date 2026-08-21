@@ -7,8 +7,12 @@
 -- (providers, models, tool descriptions).
 
 -- ═══ Default provider ═══
-INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)
-  VALUES('openrouter', 'https://openrouter.ai/api/v1', 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4-flash', 0);
+-- request_extra: StreamLake keeps returning DeepSeek tool calls as raw DSML
+-- markup inside `reasoning` (two prod incidents, 2026-08-10 / 2026-08-19), so
+-- the seed routes around it with OpenRouter's documented provider params.
+INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority, request_extra)
+  VALUES('openrouter', 'https://openrouter.ai/api/v1', 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4-flash', 0,
+         '{"provider":{"ignore":["StreamLake"]}}');
 
 -- ═══ Default model ═══
 INSERT OR IGNORE INTO models(id, provider_name, model)

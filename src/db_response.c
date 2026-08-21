@@ -179,11 +179,17 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t iteration_id,
     if (cap == 0) return;   /* archiving disabled — skip the insert entirely */
 
     const char *sql =
-        "INSERT INTO llm_responses(session_id,iteration_id,model,status,provider_id,body,"
-        "  request_body,cached_tokens,cache_write_tokens,reasoning_tokens,cost)"
+        "INSERT INTO llm_responses(session_id,iteration_id,model,status,provider_id,"
+        "  upstream_provider,body,request_body,"
+        "  cached_tokens,cache_write_tokens,reasoning_tokens,cost)"
         " VALUES(?1,?2,?3,?4,"
         "  CASE WHEN ?5 THEN COALESCE(json_extract(?6,'$.id'),"
-        "                             json_extract(?6,'$.responseId')) END, ?6,"
+        "                             json_extract(?6,'$.responseId')) END,"
+        /* $.provider is the upstream backend that actually served the request
+         * (OpenRouter), a different field from $.id — see provider_id above.
+         * Recorded on every response, not just failures: it is the audit trail
+         * that turns "exclude this backend" into an evidence-backed call. */
+        "  CASE WHEN ?5 THEN json_extract(?6,'$.provider') END, ?6,"
         "  CASE WHEN ?7 IS NOT NULL THEN jsonb(?7) END,?8,?9,?10,?11);";
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
@@ -246,6 +252,35 @@ void db_archive_response(sqlite3 *db, int64_t session_id, int64_t iteration_id,
         sqlite3_finalize(j);
     }
     archive_store(db, session_id, iteration_id, model, status, body, -1, 0, request_body, NULL);
+}
+
+/* Tool-call markup leaking into `reasoning` as plain text.
+ *
+ * DeepSeek tokenizes its tool calls as DSML markup
+ * (`<｜DSML｜tool_calls><｜DSML｜invoke name="js_eval">...`); some OpenRouter
+ * upstreams fail to parse it back into a structured tool_calls array and hand
+ * the raw text back inside `reasoning` with `content: null` and
+ * `finish_reason: stop`. Wire-legal, so nothing else fires — the turn used to
+ * end in silence (prod resps #336 and #644, both StreamLake).
+ *
+ * Conservative on purpose: only an opening marker (ASCII `<|` or its fullwidth
+ * U+FF5C twin) immediately followed by tool-call markup counts. A model merely
+ * *discussing* tool calls in prose has no marker, and the caller only consults
+ * this when there is no content and no tool_calls at all. */
+static int reasoning_has_tool_markup(const char *r) {
+    static const char *kWords[] = { "DSML", "tool_call", "tool\xe2\x96\x81" "call",  /* U+2581 ▁ variant */
+                                    "invoke name", "function_call", NULL };
+    static const char kFullwidthBar[] = "\xef\xbd\x9c";   /* U+FF5C */
+    if (!r) return 0;
+    for (const char *p = r; (p = strchr(p, '<')) != NULL; p++) {
+        const char *after = NULL;
+        if (p[1] == '|') after = p + 2;
+        else if (strncmp(p + 1, kFullwidthBar, 3) == 0) after = p + 4;
+        if (!after) continue;
+        for (int i = 0; kWords[i]; i++)
+            if (strncmp(after, kWords[i], strlen(kWords[i])) == 0) return 1;
+    }
+    return 0;
 }
 
 LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iteration_id,
@@ -330,6 +365,17 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
         sqlite3_bind_blob(tc, 1, blob, blen, SQLITE_STATIC);
         while (sqlite3_step(tc) == SQLITE_ROW) tc_count++;
         sqlite3_reset(tc);
+    }
+
+    /* Tool call that arrived as unparsed markup in `reasoning` (E7): nothing
+     * to flatten into entries, and the answer is a retry — not a silent turn. */
+    if (tc_count == 0 && (!content || !content[0]) &&
+        reasoning_has_tool_markup(reasoning)) {
+        sqlite3_finalize(s);
+        if (tc) sqlite3_finalize(tc);
+        archive_store(db, session_id, iteration_id, model, "tool_markup", blob, blen, 1, request_body, NULL);
+        sqlite3_finalize(j);
+        return LLM_RESP_TOOL_MARKUP;
     }
 
     /* Zero-usage empty stop (provider glitch): no entries, retry next model. */

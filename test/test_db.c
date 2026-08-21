@@ -602,14 +602,16 @@ static void test_schema_patch_v47(void) {
      * dual-purpose approvals.action. */
     assert(sqlite3_exec(db,
         "PRAGMA foreign_keys=OFF;"
-        /* v48/v49 are above this step: shed their columns too, or the upgrade
-         * run below re-adds ones that already exist. */
+        /* v48/v49/v50 are above this step: shed their columns too, or the
+         * upgrade run below re-adds ones that already exist. */
         "ALTER TABLE entries DROP COLUMN reasoning_meta;"
         "ALTER TABLE entries DROP COLUMN cached_tokens;"
         "ALTER TABLE llm_responses DROP COLUMN cached_tokens;"
         "ALTER TABLE llm_responses DROP COLUMN cache_write_tokens;"
         "ALTER TABLE llm_responses DROP COLUMN reasoning_tokens;"
         "ALTER TABLE llm_responses DROP COLUMN cost;"
+        "ALTER TABLE providers DROP COLUMN request_extra;"
+        "ALTER TABLE llm_responses DROP COLUMN upstream_provider;"
         "ALTER TABLE approvals RENAME COLUMN park_reason TO action;"
         "ALTER TABLE agents DROP COLUMN hold_until;"
         "ALTER TABLE agents DROP COLUMN hold_holder;"
@@ -688,12 +690,14 @@ static void test_schema_patch_v48(void) {
 
     assert(sqlite3_exec(db,
         "ALTER TABLE entries DROP COLUMN reasoning_meta;"
-        /* v49 sits above this step: shed its columns too. */
+        /* v49/v50 sit above this step: shed their columns too. */
         "ALTER TABLE entries DROP COLUMN cached_tokens;"
         "ALTER TABLE llm_responses DROP COLUMN cached_tokens;"
         "ALTER TABLE llm_responses DROP COLUMN cache_write_tokens;"
         "ALTER TABLE llm_responses DROP COLUMN reasoning_tokens;"
-        "ALTER TABLE llm_responses DROP COLUMN cost;",
+        "ALTER TABLE llm_responses DROP COLUMN cost;"
+        "ALTER TABLE providers DROP COLUMN request_extra;"
+        "ALTER TABLE llm_responses DROP COLUMN upstream_provider;",
         NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 47);
 
@@ -711,6 +715,44 @@ static void test_schema_patch_v48(void) {
         snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
     }
     printf("  PASS test_schema_patch_v48\n");
+}
+
+/* v50 (provider wire-format M1): the two observability/config columns land,
+ * and the seed provider gets the StreamLake exclusion — but only when the
+ * operator hasn't already written a request_extra of their own. */
+static void test_schema_patch_v50(void) {
+    const char *path = "/tmp/test_cclaw_db_v50.sqlite";
+    test_db_clean(path);
+    sqlite3 *db = test_db_open(path);
+    assert(db != NULL);
+
+    assert(sqlite3_exec(db,
+        "ALTER TABLE providers DROP COLUMN request_extra;"
+        "ALTER TABLE llm_responses DROP COLUMN upstream_provider;"
+        "INSERT OR IGNORE INTO providers(name, base_url)"
+        " VALUES('openrouter','https://openrouter.ai/api/v1'),('custom','http://x');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 49);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT);
+
+    assert(db_scalar_i64(db,
+        "SELECT json_extract(request_extra,'$.provider.ignore[0]')='StreamLake'"
+        " FROM providers WHERE name='openrouter';", 0, -1) == 1);
+    /* Every other provider stays unopinionated. */
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(*) FROM providers WHERE name='custom'"
+        " AND request_extra IS NULL;", 0, -1) == 1);
+    /* Column exists and is writable on the archive table. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO llm_responses(session_id,iteration_id,status,upstream_provider)"
+        " VALUES(1,1,'ok','StreamLake');", NULL, NULL, NULL) == SQLITE_OK);
+
+    db_close(db);
+    test_db_clean(path);
+    printf("  PASS test_schema_patch_v50\n");
 }
 
 static void test_rate_limit_and_cost(void) {
@@ -764,6 +806,7 @@ int main(void) {
     test_schema_patch_application();
     test_schema_patch_v47();
     test_schema_patch_v48();
+    test_schema_patch_v50();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");
     return 0;

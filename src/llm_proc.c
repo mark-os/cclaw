@@ -83,7 +83,7 @@ static int load_candidates(sqlite3 *db, const char *agent_name,
 
     const char *sql =
         "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type,"
-        "       m.context_window"
+        "       m.context_window, p.name"
         " FROM agent_models am"
         " JOIN models m ON m.id = am.model_id"
         " JOIN providers p ON p.name = m.provider_name"
@@ -104,6 +104,8 @@ static int load_candidates(sqlite3 *db, const char *agent_name,
         c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
         c->context_window = sqlite3_column_int(s, 5);
         if (c->context_window <= 0) c->context_window = 128000;
+        v = (const char *)sqlite3_column_text(s, 6);
+        snprintf(c->provider_name, sizeof(c->provider_name), "%s", v ? v : "");
         /* A named candidate dropped for a missing key is the 2026-08-10
          * silent-reroute: it never reached the request, so nothing recorded
          * it. Record it through the degrade machinery instead (A8). */
@@ -126,7 +128,8 @@ int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, 
     if (max <= 0) return 0;
     int n = 0;
     const char *sql =
-        "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type, m.context_window"
+        "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type, m.context_window,"
+        "       p.name"
         " FROM models m JOIN providers p ON m.provider_name = p.name"
         " WHERE m.status != 'disabled'"
         " AND (m.degraded_until IS NULL OR m.degraded_until < unixepoch())"
@@ -148,6 +151,8 @@ int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, 
         c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
         c->context_window = sqlite3_column_int(s, 5);
         if (c->context_window <= 0) c->context_window = 128000;
+        v = (const char *)sqlite3_column_text(s, 6);
+        snprintf(c->provider_name, sizeof(c->provider_name), "%s", v ? v : "");
         /* Deliberately NOT key-filtered like chat routing: this picker's
          * contract is health (degraded/disabled/capability), and a media job
          * has its own attempt budget and failure entry. Applying
@@ -560,6 +565,8 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         snprintf(m->id, sizeof(m->id), "config/%s", cfg->provider.model ? cfg->provider.model : "unknown");
         snprintf(m->model, sizeof(m->model), "%s", cfg->provider.model ? cfg->provider.model : "unknown");
         snprintf(m->base_url, sizeof(m->base_url), "%s", cfg->provider.base_url ? cfg->provider.base_url : "");
+        snprintf(m->provider_name, sizeof(m->provider_name), "%s",
+                 cfg->provider.name ? cfg->provider.name : "");
         m->api_key_env[0] = '\0'; /* key already in cfg */
         m->use_cfg_key = 1;       /* ...and this is the one row allowed to use it */
         m->endpoint_type = cfg->provider.endpoint_type;
@@ -627,6 +634,9 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         Config route_cfg = *cfg;
         ProviderConfig route_prov = cfg->provider;
         route_prov.base_url = m->base_url;
+        /* The candidate's own provider row, not cfg's primary — request_extra
+         * is per provider, and a fallback candidate may come from another. */
+        route_prov.name = m->provider_name[0] ? m->provider_name : NULL;
         route_prov.model = m->model;
         route_prov.endpoint_type = m->endpoint_type;
         /* env → encrypted kv → cfg. Re-reading kv here (not mutating cfg,
@@ -789,14 +799,18 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                  * already logged by db_ingest_response. */
                 had_dberr = 1;
             } else {
-                /* EMPTY (zero-usage stop, archived 'empty') and MALFORMED
-                 * (bad body, archived 'malformed') are provider glitches
-                 * wrapped in a 2xx: transient. */
+                /* EMPTY (zero-usage stop, archived 'empty'), MALFORMED (bad
+                 * body, archived 'malformed') and TOOL_MARKUP (tool call left
+                 * as raw markup in reasoning, archived 'tool_markup') are all
+                 * provider glitches wrapped in a 2xx: transient. */
                 LOG_INFO_("llm_req %s model=%s attempt=%d",
-                          st == LLM_RESP_EMPTY ? "empty_completion" : "malformed_body",
+                          st == LLM_RESP_EMPTY      ? "empty_completion" :
+                          st == LLM_RESP_TOOL_MARKUP ? "tool_markup" : "malformed_body",
                           m->model, attempts[mi]);
                 fail_text = st == LLM_RESP_EMPTY
                     ? "error: provider returned an empty response"
+                    : st == LLM_RESP_TOOL_MARKUP
+                    ? "error: provider returned a tool call as unparsed markup"
                     : "error: provider returned a malformed response";
                 model_stat_error(db, m->id, status);
             }

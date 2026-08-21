@@ -178,11 +178,21 @@ static const char SQL_OPENAI_TOOLS[] =
      * OR-branch is needed here. */
     "   AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2)));";
 
+/* Provider escape hatch: providers.request_extra (JSON) is merged into the
+ * finished body as the very last step, so it can override anything cclaw
+ * built — that's the point (decision 6). NULL column / unknown provider =
+ * merge of '{}', which RFC 7386 defines as leaving the target untouched, so
+ * the default payload stays byte-identical. Bound at ?7 (OpenAI) / ?6
+ * (Gemini) as the provider name; the lookup itself is a subquery. */
+#define SQL_REQUEST_EXTRA(param) \
+    "COALESCE((SELECT request_extra FROM providers WHERE name=" param \
+    "          AND json_valid(request_extra)), '{}')"
+
 /* Both FULL templates wrap json_object in json_patch('{}', ...): RFC 7386
  * merge drops top-level NULL-valued keys, which json_object would otherwise
  * emit as JSON null ("max_tokens":null etc.) — strict providers 400 on those. */
 static const char SQL_OPENAI_FULL[] =
-    "SELECT json_patch('{}', json_object("
+    "SELECT json_patch(json_patch('{}', json_object("
     "  'model', ?1,"
     "  'messages', (SELECT json_group_array(json(m)) FROM ("
     /* ?6 = this session's prompt suffix: location line + the pinned route's
@@ -199,7 +209,7 @@ static const char SQL_OPENAI_FULL[] =
     "    ORDER BY ord, sub)),"
     "  'max_tokens', CASE WHEN ?4 > 0 THEN ?4 ELSE NULL END,"
     "  'tools', CASE WHEN json_array_length(?5) > 0 THEN json(?5) ELSE NULL END"
-    "));";
+    ")), " SQL_REQUEST_EXTRA("?7") ");";
 
 static const char SQL_GEMINI_CONTENTS[] =
     "SELECT json_group_array(json(content_obj) ORDER BY min_pos) FROM ("
@@ -308,7 +318,7 @@ static const char SQL_GEMINI_TOOLS[] =
     "));";
 
 static const char SQL_GEMINI_FULL[] =
-    "SELECT json_patch('{}', json_object("
+    "SELECT json_patch(json_patch('{}', json_object("
     /* ?5 = this session's prompt suffix — see SQL_OPENAI_FULL. */
     "  'systemInstruction', CASE WHEN COALESCE(?1,'') ||"
     "      COALESCE(char(10) || char(10) || ?5, '') != ''"
@@ -322,7 +332,7 @@ static const char SQL_GEMINI_FULL[] =
     "    THEN json(?3) ELSE NULL END,"
     "  'generationConfig', CASE WHEN ?4 > 0"
     "    THEN json_object('maxOutputTokens',?4) ELSE NULL END"
-    "));";
+    ")), " SQL_REQUEST_EXTRA("?6") ");";
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -586,6 +596,8 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         sqlite3_bind_int(full, 4, cfg->provider.max_tokens);
         if (suffix) sqlite3_bind_text(full, 5, suffix, -1, SQLITE_TRANSIENT);
         else sqlite3_bind_null(full, 5);
+        if (cfg->provider.name) sqlite3_bind_text(full, 6, cfg->provider.name, -1, SQLITE_TRANSIENT);
+        else sqlite3_bind_null(full, 6);
 
         free(contents); free(tools_json);
 
@@ -620,6 +632,8 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         sqlite3_bind_text(full, 5, tools_json ? tools_json : "[]", -1, SQLITE_TRANSIENT);
         if (suffix) sqlite3_bind_text(full, 6, suffix, -1, SQLITE_TRANSIENT);
         else sqlite3_bind_null(full, 6);
+        if (cfg->provider.name) sqlite3_bind_text(full, 7, cfg->provider.name, -1, SQLITE_TRANSIENT);
+        else sqlite3_bind_null(full, 7);
 
         free(messages); free(tools_json);
 

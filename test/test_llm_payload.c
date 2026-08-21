@@ -1236,10 +1236,96 @@ static void test_gemini_thought_signature_replay(void) {
     printf("  PASS test_gemini_thought_signature_replay\n");
 }
 
+/* providers.request_extra is merged last, so it can override anything the
+ * builders produced — and a NULL column must leave the body byte-identical. */
+static void test_request_extra_merge(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid;
+    setup_session(db, &sid);
+
+    Config cfg = {0};
+    cfg.provider.name = "wire_test";
+    cfg.provider.model = "test-model";
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.context_window = 128000;
+
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+
+    /* Baseline: provider row exists, request_extra NULL. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO providers(name, base_url) VALUES('wire_test','http://x');",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    LlmPayload payload;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    char *baseline = strdup(payload.body);
+    llm_payload_release(&payload);
+
+    /* Non-null: adds a key AND overrides a colliding one (max_tokens). */
+    assert(sqlite3_exec(db,
+        "UPDATE providers SET request_extra="
+        "'{\"provider\":{\"ignore\":[\"StreamLake\"]},\"max_tokens\":77}'"
+        " WHERE name='wire_test';", NULL, NULL, NULL) == SQLITE_OK);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+
+    sqlite3_stmt *s;
+    const char *v = json_get_str(db, payload.body, "$.provider.ignore[0]", &s);
+    assert(v && strcmp(v, "StreamLake") == 0);
+    sqlite3_finalize(s);
+    v = json_get_str(db, payload.body, "$.max_tokens", &s);
+    assert(v && strcmp(v, "77") == 0);   /* overrode cfg's 1024 */
+    sqlite3_finalize(s);
+    /* Everything else survives the merge. */
+    v = json_get_str(db, payload.body, "$.model", &s);
+    assert(v && strcmp(v, "test-model") == 0);
+    sqlite3_finalize(s);
+    v = json_get_str(db, payload.body, "$.messages[0].role", &s);
+    assert(v && strcmp(v, "system") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+
+    /* Back to NULL — byte-identical to the pre-column payload. */
+    assert(sqlite3_exec(db, "UPDATE providers SET request_extra=NULL"
+                            " WHERE name='wire_test';", NULL, NULL, NULL) == SQLITE_OK);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    assert(strcmp(baseline, payload.body) == 0);
+    llm_payload_release(&payload);
+
+    /* An unknown provider name is the same no-op (synthetic candidates). */
+    cfg.provider.name = "no_such_provider";
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    assert(strcmp(baseline, payload.body) == 0);
+    llm_payload_release(&payload);
+
+    /* Gemini path merges the same way. */
+    Config gcfg = cfg;
+    gcfg.provider.name = "wire_test";
+    gcfg.provider.endpoint_type = ENDPOINT_GEMINI;
+    assert(sqlite3_exec(db,
+        "UPDATE providers SET request_extra='{\"safetySettings\":[]}'"
+        " WHERE name='wire_test';", NULL, NULL, NULL) == SQLITE_OK);
+    assert(llm_build_payload(db, sid, &gcfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    v = json_get_str(db, payload.body, "$.safetySettings", &s);
+    assert(v && strcmp(v, "[]") == 0);
+    sqlite3_finalize(s);
+    v = json_get_str(db, payload.body, "$.contents[0].role", &s);
+    assert(v);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+
+    free(baseline);
+    context_plan_free(&plan);
+    db_close(db);
+    printf("  request_extra_merge... PASS\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_llm_payload:\n");
     test_openai_payload();
+    test_request_extra_merge();
     test_openai_payload_no_stream_omits_nulls();
     test_gemini_payload();
     test_recall_in_session_context();

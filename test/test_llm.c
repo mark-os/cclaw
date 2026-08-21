@@ -129,6 +129,136 @@ static void test_cost_field(void) {
     PASS();
 }
 
+/* Bug 9: $.provider (the upstream backend) is a different field from $.id
+ * (the request id) — both must land, each in its own column. */
+static void test_upstream_provider_archived(void) {
+    TEST(upstream_provider_archived);
+    int64_t sid; sqlite3 *db = fresh_db(&sid);
+    const char *json =
+        "{\"id\":\"gen-1787171421-abc\",\"provider\":\"StreamLake\","
+        "\"choices\":[{\"message\":{\"content\":\"hi\",\"role\":\"assistant\"},"
+        "\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
+    TypedIngestResult ir;
+    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, json, NULL, 1, &ir) != LLM_RESP_OK)
+        FAIL("ingest failed");
+
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db, "SELECT provider_id, upstream_provider FROM llm_responses"
+                           " ORDER BY id DESC LIMIT 1", -1, &s, NULL);
+    if (sqlite3_step(s) != SQLITE_ROW) { sqlite3_finalize(s); FAIL("no archive row"); }
+    const char *pid = (const char *)sqlite3_column_text(s, 0);
+    const char *up  = (const char *)sqlite3_column_text(s, 1);
+    int ok = pid && up && strcmp(pid, "gen-1787171421-abc") == 0 &&
+             strcmp(up, "StreamLake") == 0;
+    sqlite3_finalize(s);
+    if (!ok) FAIL("provider_id/upstream_provider wrong");
+
+    /* No $.provider (most providers) → NULL, not an empty string. */
+    const char *plain =
+        "{\"choices\":[{\"message\":{\"content\":\"hi\",\"role\":\"assistant\"},"
+        "\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}";
+    if (db_ingest_response(db, sid, 2, "m", ENDPOINT_OPENAI, plain, NULL, 1, &ir) != LLM_RESP_OK)
+        FAIL("second ingest failed");
+    sqlite3_prepare_v2(db, "SELECT upstream_provider IS NULL FROM llm_responses"
+                           " ORDER BY id DESC LIMIT 1", -1, &s, NULL);
+    ok = (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
+    if (!ok) FAIL("absent $.provider should be NULL");
+    db_close(db);
+    PASS();
+}
+
+/* Bug 4: the tool call came back as raw DSML markup inside `reasoning`, with
+ * content null and no tool_calls — retryable, never a silent empty turn. */
+static void test_dsml_in_reasoning_classified(void) {
+    TEST(dsml_in_reasoning_classified);
+    int64_t sid; sqlite3 *db = fresh_db(&sid);
+    const char *json =
+        "{\"provider\":\"StreamLake\","
+        "\"choices\":[{\"message\":{\"content\":null,\"role\":\"assistant\","
+        "\"reasoning\":\"I should run this. <｜DSML｜tool_calls>"
+        "<｜DSML｜invoke name=js_eval>1+1\"},"
+        "\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":367,\"total_tokens\":467}}";
+    TypedIngestResult ir;
+    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, json, NULL, 1, &ir) != LLM_RESP_TOOL_MARKUP)
+        FAIL("DSML-in-reasoning should classify as tool markup");
+
+    /* No entries written — the turn must not absorb a half-response. */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db, "SELECT count(*) FROM entries WHERE session_id=?", -1, &s, NULL);
+    sqlite3_bind_int64(s, 1, sid);
+    int n = (sqlite3_step(s) == SQLITE_ROW) ? sqlite3_column_int(s, 0) : -1;
+    sqlite3_finalize(s);
+    if (n != 0) FAIL("no entries expected");
+
+    /* Archived under its own status, with the upstream that did it. */
+    sqlite3_prepare_v2(db, "SELECT status, upstream_provider FROM llm_responses"
+                           " ORDER BY id DESC LIMIT 1", -1, &s, NULL);
+    int ok = 0;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *st_ = (const char *)sqlite3_column_text(s, 0);
+        const char *up  = (const char *)sqlite3_column_text(s, 1);
+        ok = st_ && up && strcmp(st_, "tool_markup") == 0 && strcmp(up, "StreamLake") == 0;
+    }
+    sqlite3_finalize(s);
+    if (!ok) FAIL("archive row wrong");
+
+    /* The ASCII-marker variant of the same failure. */
+    int64_t sid2; sqlite3 *db2 = fresh_db(&sid2);
+    const char *ascii =
+        "{\"choices\":[{\"message\":{\"content\":\"\",\"role\":\"assistant\","
+        "\"reasoning\":\"plan: <|tool_call|>{\\\"name\\\":\\\"js_eval\\\"}\"},"
+        "\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":40,\"total_tokens\":49}}";
+    LlmRespStatus st2 = db_ingest_response(db2, sid2, 1, "m", ENDPOINT_OPENAI, ascii, NULL, 1, &ir);
+    db_close(db2);
+    if (st2 != LLM_RESP_TOOL_MARKUP) FAIL("ASCII <| marker should classify too");
+
+    db_close(db);
+    PASS();
+}
+
+/* The negative half: ordinary reasoning — including reasoning that merely
+ * *talks* about tool calls, or contains stray angle brackets — must ingest
+ * normally. Markup alongside a real tool call is not the failure either. */
+static void test_reasoning_without_markup_is_normal(void) {
+    TEST(reasoning_without_markup_is_normal);
+    int64_t sid; sqlite3 *db = fresh_db(&sid);
+    TypedIngestResult ir;
+
+    const char *prose =
+        "{\"choices\":[{\"message\":{\"content\":\"Two.\",\"role\":\"assistant\","
+        "\"reasoning\":\"I could use the js_eval tool_call here, or invoke name lookup, "
+        "but 1+1 is 2. Comparing a<b and b>c too.\"},"
+        "\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":9,\"total_tokens\":14}}";
+    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, prose, NULL, 1, &ir) != LLM_RESP_OK)
+        FAIL("prose reasoning must not classify");
+
+    const char *empty_reason =
+        "{\"choices\":[{\"message\":{\"content\":null,\"role\":\"assistant\","
+        "\"reasoning\":\"thinking about <html> tags and 3 < 4\"},"
+        "\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}";
+    if (db_ingest_response(db, sid, 2, "m", ENDPOINT_OPENAI, empty_reason, NULL, 1, &ir) != LLM_RESP_OK)
+        FAIL("markup-free empty content must not classify");
+
+    const char *with_calls =
+        "{\"choices\":[{\"message\":{\"content\":null,\"role\":\"assistant\","
+        "\"reasoning\":\"<｜DSML｜tool_calls>\","
+        "\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\","
+        "\"function\":{\"name\":\"js_eval\",\"arguments\":\"{}\"}}]},"
+        "\"finish_reason\":\"tool_calls\"}],"
+        "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7}}";
+    if (db_ingest_response(db, sid, 3, "m", ENDPOINT_OPENAI, with_calls, NULL, 1, &ir) != LLM_RESP_OK)
+        FAIL("a real tool call must win over stray markup");
+    db_close(db);
+    PASS();
+}
+
 int main(void) {
     TEST_INIT();
     printf("--- test_llm ---\n");
@@ -136,6 +266,9 @@ int main(void) {
     test_tool_calls_response();
     test_malformed();
     test_cost_field();
+    test_upstream_provider_archived();
+    test_dsml_in_reasoning_classified();
+    test_reasoning_without_markup_is_normal();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

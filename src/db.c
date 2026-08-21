@@ -627,6 +627,20 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "ALTER TABLE llm_responses ADD COLUMN reasoning_tokens INTEGER;"
       "ALTER TABLE llm_responses ADD COLUMN cost REAL;",
       NULL },
+
+    /* v50: provider wire-format M1 (plan/projects/provider-wire-format-refactor.md).
+     * llm_responses.upstream_provider makes "which OpenRouter backend served
+     * this?" a query instead of a hand-read of every archived body (bug 9),
+     * and providers.request_extra is the config-side escape hatch for
+     * per-provider request options — seeded to route around StreamLake, the
+     * backend behind both DSML-in-reasoning incidents. Only a NULL
+     * request_extra is filled: an operator who already set one keeps it. */
+    { 50,
+      "ALTER TABLE providers ADD COLUMN request_extra TEXT;"
+      "ALTER TABLE llm_responses ADD COLUMN upstream_provider TEXT;"
+      "UPDATE providers SET request_extra='{\"provider\":{\"ignore\":[\"StreamLake\"]}}'"
+      " WHERE name='openrouter' AND request_extra IS NULL;",
+      NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */

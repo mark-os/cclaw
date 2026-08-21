@@ -23,6 +23,7 @@ typedef enum {
     LLM_RESP_OK = 0,     /* well-formed; entries written */
     LLM_RESP_EMPTY,      /* zero-usage empty-stop provider glitch — retry next model */
     LLM_RESP_MALFORMED,  /* missing/empty choices|candidates — treat as failure */
+    LLM_RESP_TOOL_MARKUP,/* tool call arrived as raw markup inside reasoning (E7) — retry */
     LLM_RESP_DBERR       /* our-side DB error (prepare failed) — body is valid, not a provider issue */
 } LlmRespStatus;
 

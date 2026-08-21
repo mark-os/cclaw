@@ -18,6 +18,7 @@ typedef struct {
     char model[128];
     char base_url[256];
     char api_key_env[64];
+    char provider_name[64];   /* providers.name — resolves request_extra at build time */
     int endpoint_type;
     int context_window;
     /* Set only on the synthetic candidate llm_req() builds when the models

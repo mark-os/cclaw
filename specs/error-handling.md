@@ -46,6 +46,7 @@ Three outcome classes exist:
 | E4 | network failure | status == -1 (curl error) | transient | yes | "network error" |
 | E5 | context overflow | HTTP 400 + `llm_is_context_overflow()` | skip candidate (a bigger-window model may fit) | no (prompt-specific) | "prompt too large for the model's context window" |
 | E6 | malformed body | 2xx but body not valid JSON, or no/empty choices | transient | yes | "provider returned a malformed response" |
+| E7 | tool call as unparsed markup | 2xx + content null/empty + no `tool_calls` + `reasoning` contains tool-call markup (`<｜DSML｜…`, `<|tool_call…`) | transient | yes | "provider returned a tool call as unparsed markup" |
 | E8 | token limit exhaustion | `finish_reason == "length"` | terminal | no | (deliver partial content as-is) |
 | E9 | content filter | `finish_reason == "content_filter"` | terminal | no | (stop_reason mapped; content delivered) |
 | E10 | timeout | status == -2 (curl timeout) | transient | yes | "request timed out" |
@@ -137,7 +138,7 @@ Agent turn lifecycle:
 
 The agent always writes a final entry before completion. The delivery layer reads from DB. There is no in-flight state to lose — everything is persisted before advancing.
 
-Exception: transient-failure attempts (E1–E4, E6, E10) happen WITHIN llm_req (no re-dispatch). The selection loop simply moves through the agent's list internally. From the main loop's perspective, the turn just takes longer.
+Exception: transient-failure attempts (E1–E4, E6, E7, E10) happen WITHIN llm_req (no re-dispatch). The selection loop simply moves through the agent's list internally. From the main loop's perspective, the turn just takes longer.
 
 ## Log Levels & Observability
 

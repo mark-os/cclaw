@@ -25,7 +25,12 @@ CREATE TABLE IF NOT EXISTS providers (
   api_key_env TEXT NOT NULL DEFAULT '',
   default_model TEXT,
   priority INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'healthy'
+  status TEXT NOT NULL DEFAULT 'healthy',
+  -- JSON merged (json_patch, RFC 7386) into every outgoing request body for
+  -- this provider as the LAST step of payload assembly, so it can override
+  -- anything cclaw built. The escape hatch for provider-specific request
+  -- options (e.g. OpenRouter's upstream routing params) — config, never C.
+  request_extra TEXT
 );
 
 -- ═══ Models ═══
@@ -384,6 +389,7 @@ CREATE TABLE IF NOT EXISTS llm_responses (
   model TEXT,
   status TEXT NOT NULL,          -- ok | empty | malformed | http_<code> | timeout | network_error
   provider_id TEXT,              -- provider's own response id ($.id), NULL if absent
+  upstream_provider TEXT,        -- upstream backend name ($.provider, e.g. OpenRouter's 'StreamLake')
   body BLOB,                     -- JSONB when parseable, raw text otherwise
   request_body BLOB,             -- JSONB of the payload we sent (failures only); NULL on success
   created_at INTEGER NOT NULL DEFAULT (unixepoch())

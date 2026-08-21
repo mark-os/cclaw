@@ -389,7 +389,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
     }
 
     /* Well-formed — archive before flattening into entries. */
-    archive_store(db, session_id, iteration_id, model, "ok", blob, blen, 1, NULL, &usage);
+    archive_store(db, session_id, iteration_id, model, "ok", blob, blen, 1, request_body, &usage);
 
     StopReason stop = map_stop_reason(finish);
     if (tc_count > 0 && stop != STOP_REASON_TOOL_USE)

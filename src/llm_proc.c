@@ -678,6 +678,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
          * before any DB write, and archiving a failed attempt writes. */
         char *req_body = payload.body ? strdup(payload.body) : NULL;
         llm_payload_release(&payload);
+        if (req_body) LOG_TRACE_("REQ %s", req_body);
 
         /* Build URL + auth */
         char *url = llm_build_url(&route_cfg);

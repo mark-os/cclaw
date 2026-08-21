@@ -417,7 +417,7 @@ CREATE TABLE IF NOT EXISTS llm_responses (
   provider_id TEXT,              -- provider's own response id ($.id), NULL if absent
   upstream_provider TEXT,        -- upstream backend name ($.provider, e.g. OpenRouter's 'StreamLake')
   body BLOB,                     -- JSONB when parseable, raw text otherwise
-  request_body BLOB,             -- JSONB of the payload we sent (failures only); NULL on success
+  request_body BLOB,             -- the payload we sent, every archived row (subject to llm_response_archive_max pruning)
   -- Usage parity (M4): richer usage fields when the provider reports them,
   -- NULL otherwise. cached_tokens/cache_write_tokens are SUBSETS of the
   -- prompt token count on every provider we support today (cache-inclusive

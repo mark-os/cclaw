@@ -17,7 +17,8 @@ Agents ⊥ store provider keys. Keys decrypted at runtime, injected to worker th
 | Gemini | `GEMINI_API_KEY` | Direct. Sent as `x-goog-api-key` header. |
 | DeepSeek | `DEEPSEEK_API_KEY` | Direct. Cheapest for DeepSeek models. |
 | OpenAI | `OPENAI_API_KEY` | Direct. |
-| Anthropic | `ANTHROPIC_API_KEY` | Direct. Different wire format (content blocks). |
+| Cerebras | `CEREBRAS_API_KEY` | Direct, OpenAI-compat. Wants `max_tokens` (not `max_completion_tokens`) — which is already what CClaw sends. `reasoning_effort` values differ per model family, so the effort mapping is per-model, not global. |
+| Anthropic | `ANTHROPIC_API_KEY` | **Not implemented.** Anthropic's native API is a different wire format (top-level `system`, content blocks, `tool_use`/`tool_result`) and would need a third builder in `llm_payload.c`. Scoped out 2026-08-20; reach Claude models via OpenRouter until then. |
 
 Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows themselves change only via the approval-gated `request_config` action `request_changes` (the `provider` section of the changes document) or operator SQL. A provider document is **transport only**; models are registered separately through the `models` section by canonical `model@provider` id, and the provider must already exist. Per-request routing joins `models → providers`, so a provider row without a models row is unreachable outside the empty-table fallback — one document can define the provider, register a model on it, and adopt it via `agent.models: ["model@provider", ...]` (the full replacement routing order). `providers.default_model` is fresh-install seed sugar only (`templates/seed.sql`), never a registration path.
 
@@ -42,13 +43,23 @@ The `providers` table rows ordered by `priority` — row 0 is primary, the rest 
 
 ## Wire Format Differences
 
-CClaw speaks OpenAI Completions format. OpenRouter normalizes everything.
+CClaw implements **two** request builders (`src/llm_payload.c`): OpenAI-compat
+chat completions (OpenRouter, OpenAI, DeepSeek, Cerebras, …) and Gemini-native
+(`generateContent`). Anthropic's native format is **not** implemented — it is
+future work requiring a third builder. Everything else reaches CClaw through
+OpenRouter's normalization.
 
 | Provider | Format | Tool Call Style | Tool Result Style |
 |----------|--------|----------------|-------------------|
 | OpenAI/OR | `choices[0].message` | `tool_calls[].function.arguments` (stringified) | `role: "tool"` |
-| Anthropic | Content blocks | `type: "tool_use", input: {}` (object) | Wrapped in user message |
 | Google | `Content[].parts` | `functionCall.args: {}` (object) | `functionResponse` in user |
+| Anthropic *(not implemented)* | Content blocks | `type: "tool_use", input: {}` (object) | Wrapped in user message |
+
+**System-role convention (both builders)**: only the leading system prompt
+carries the system role (`messages[0]` / `systemInstruction`). All other
+system-originated content — mid-turn `type='system'` entries, compaction
+summaries, hook injects — is emitted as a `'[system] '`-prefixed **user**
+message on every provider. No builder ever emits a non-leading `role: system`.
 
 Key: OpenAI is the odd one out — `arguments` is a string. Everyone else uses objects.
 CClaw stores `args` as object in `tool_calls` column (provider-neutral). OpenAI emitter stringifies at wire time.

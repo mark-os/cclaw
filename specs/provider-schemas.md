@@ -47,6 +47,11 @@ Authorization: Bearer <key>
 }
 ```
 
+> **`stream_options.include_usage` (and OpenRouter's `usage: {include: true}`)
+> are deprecated no-ops on OpenRouter** — usage is now returned
+> unconditionally on every response, streamed or not. Harmless to send, but
+> nothing depends on sending it; don't add it for the sake of usage data.
+
 **Thinking configuration variants:**
 | Provider | Format |
 |----------|--------|
@@ -165,7 +170,14 @@ cacheWrite = prompt_tokens_details.cache_write_tokens
   many chunks. Accumulate by `tool_calls[].index`. `id` and `name` appear once.
 - **Reasoning priority**: Check `reasoning_content`, `reasoning`, `reasoning_text`
   in order; use first non-empty (some providers duplicate across fields).
-- **DeepSeek**: Requires `reasoning_content: ""` on assistant messages in history.
+- **DeepSeek reasoning replay (thinking mode)**: the assistant message's
+  `reasoning_content` **must be passed back** on subsequent requests **iff a
+  tool call occurred on that turn** — DeepSeek documents a 400 when the
+  reasoning is dropped from a tool-calling assistant turn. When the turn made
+  no tool call, `reasoning_content` is optional and ignored on input. This is
+  a replay rule about the *actual* reasoning text, not a field-presence
+  formality: sending an empty string in place of real reasoning does not
+  satisfy it.
 - **`max_tokens` vs `max_completion_tokens`**: Older/compat providers use
   `max_tokens`; standard OpenAI uses `max_completion_tokens`.
 - **Usage placement (streaming)**: Standard is top-level `chunk.usage` in final
@@ -188,10 +200,24 @@ cacheWrite = prompt_tokens_details.cache_write_tokens
   serialized first in the prefix (`tools → system → messages`). Any byte
   change there invalidates the entire cache for that request. Tool changes
   mid-session are a one-turn cache miss.
-- **Multiple system messages**: Supported anywhere in the messages array.
-  All are treated as system-level instructions regardless of position.
-- **Cache-safe injection**: Append new system/developer messages at the *end*
-  of the messages array (after all prior turns). The cached prefix is preserved.
+- **Multiple system messages**: tolerated by the OpenAI-compat schema, but no
+  major provider documents mid-array system messages — OpenRouter rewrites
+  them per-upstream, and Anthropic/Gemini have no place to put them. CClaw
+  therefore never emits one (see *System-role convention* below).
+- **Cache-safe injection**: append at the *end* of the messages array (after
+  all prior turns) — the cached prefix is preserved. The property that matters
+  is the tail position, not the role, so a user-role append is exactly as
+  cache-safe as a system-role one.
+
+#### System-role convention (CClaw, all providers)
+
+Only the **leading** system prompt wears the system role — `messages[0]` on
+OpenAI-compat, `systemInstruction` on Gemini. Every other piece of
+system-originated content (mid-turn `type='system'` entries such as approval
+and model-change notices, compaction summaries, ephemeral hook injects) is
+rendered as a **user** message prefixed `'[system] '`, on every provider.
+This is universal in `src/llm_payload.c` — both builders, no per-provider
+asymmetry — and it is why Gemini no longer silently drops system entries.
 - **DeepSeek**: Follows OpenAI prefix rules. Reports `prompt_cache_hit_tokens`.
 - **OpenRouter sticky routing**: Routes subsequent requests in the same
   conversation to the same physical backend. Use `session_id` for explicit
@@ -339,11 +365,11 @@ cacheWrite = 0  (automatic caching, no write metric)
   already handles the prefix.
 - **`systemInstruction` is top-level only**: Cannot place system messages in
   `contents[]`. Changing `systemInstruction` invalidates any cached prefix.
-- **No mid-conversation system role**: Unlike OpenAI/Anthropic, Gemini has no
-  `role: "system"` in the contents array. System-level instructions after session
-  start must go as user messages.
-- **Implication for CClaw**: System entries added mid-session should be emitted
-  as user messages in the Gemini wire format (not aggregated into systemInstruction)
+- **No mid-conversation system role**: Gemini has no `role: "system"` in the
+  contents array (neither does Anthropic). System-level instructions after
+  session start must go as user messages.
+- **Implication for CClaw**: system entries added mid-session are emitted as
+  `'[system] '`-prefixed user messages in the Gemini wire format (not aggregated into systemInstruction)
   to preserve the cached prefix. Only the *initial* system prompt goes in
   systemInstruction. Recall text should also go as a trailing user message
   for Gemini (not in systemInstruction) to avoid cache-busting.
@@ -527,9 +553,10 @@ total = input + output + cacheRead + cacheWrite  (computed)
   available at 2× base cost for infrequent requests.
 - **Top-level `system` field is cached prefix**: Changing it invalidates
   the entire cache for everything that follows.
-- **Mid-conversation `{"role": "system"}` messages**: Supported in the messages
-  array (Claude Opus 4.8+). These are appended after the cached prefix and
-  treated as operator-level instructions without breaking the cache.
+- **No system role in `messages[]`, at any tier**: Anthropic's Messages API
+  has only `user` and `assistant` roles; system content lives exclusively in
+  the top-level `system` field. Mid-conversation system instructions must be
+  carried as user-role content (CClaw's `'[system] '` prefix convention).
 - **Cache hash order**: tools → system → messages (prefix-based, like OpenAI).
 - **Implication for CClaw**: Add top-level `"cache_control": {"type": "ephemeral"}`
   to Anthropic requests. The payload builder already produces a deterministic

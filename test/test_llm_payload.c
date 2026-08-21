@@ -524,9 +524,8 @@ static void test_payload_with_tools(void) {
     printf("  PASS test_payload_with_tools\n");
 }
 
-/* Compaction summaries must reach the model on BOTH endpoints: as a system
- * message in OpenAI format, and as a user text part in Gemini format (which
- * filters type='system' because the prompt rides in systemInstruction). */
+/* Compaction summaries must reach the model on BOTH endpoints, as a labelled
+ * user message either way: no builder emits a non-leading system role. */
 static void test_compaction_entry_in_payload(void) {
     sqlite3 *db = open_seeded();
 
@@ -557,11 +556,11 @@ static void test_compaction_entry_in_payload(void) {
     LlmPayload payload;
     assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
     assert(strstr(payload.body, "Earlier: user greeted") != NULL);
-    /* rendered as system, not user */
+    /* rendered as a labelled user message, never a non-leading system role */
     sqlite3_stmt *s;
     sqlite3_prepare_v2(db,
         "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.messages'))"
-        " WHERE json_extract(value,'$.role')='system'"
+        " WHERE json_extract(value,'$.role')='user'"
         "   AND json_extract(value,'$.content') LIKE '%Earlier: user greeted%'",
         -1, &s, NULL);
     sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
@@ -570,7 +569,7 @@ static void test_compaction_entry_in_payload(void) {
     llm_payload_release(&payload);
     context_plan_free(&plan);
 
-    /* Gemini: summary must survive the type!='system' filter as user text */
+    /* Gemini: summary rides as user text */
     cfg.provider.endpoint_type = ENDPOINT_GEMINI;
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
     assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
@@ -736,7 +735,8 @@ static void test_hook_inject_directive(void) {
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
-    /* OpenAI: inject is the LAST message (after all history entries) */
+    /* OpenAI: inject is the LAST message (after all history entries), and a
+     * system inject converts to a '[system] '-prefixed user message */
     LlmPayload payload;
     assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
     sqlite3_stmt *s;
@@ -745,7 +745,8 @@ static void test_hook_inject_directive(void) {
         " json_extract(?1,'$.messages[#-1].content')", -1, &s, NULL);
     sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "system") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "user") == 0);
+    assert(strncmp((const char *)sqlite3_column_text(s, 1), "[system] ", 9) == 0);
     assert(strstr((const char *)sqlite3_column_text(s, 1), "America/Chicago"));
     sqlite3_finalize(s);
     llm_payload_release(&payload);
@@ -1321,6 +1322,70 @@ static void test_request_extra_merge(void) {
     printf("  request_extra_merge... PASS\n");
 }
 
+/* A mid-turn system entry (approval notices, model-change notices) must reach
+ * the model on BOTH endpoints as a '[system] '-prefixed USER message: no
+ * builder emits a non-leading system role, and Gemini used to drop these
+ * entries outright (WHERE e.type != 'system'), silently losing the content. */
+static void test_midturn_system_entry_converts_to_user(void) {
+    sqlite3 *db = open_seeded();
+
+    int64_t sid;
+    setup_session(db, &sid);
+    Message sys = {.role = ROLE_SYSTEM, .content = "Approval #7 expired."};
+    assert(entry_append_with_iteration(db, sid, &sys, 2) > 0);
+    Message u2 = {.role = ROLE_USER, .content = "carry on"};
+    assert(entry_append_with_iteration(db, sid, &u2, 2) > 0);
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.context_window = 128000;
+
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+
+    LlmPayload payload;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    sqlite3_stmt *s;
+    /* present, as a prefixed user message */
+    sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.messages'))"
+        " WHERE json_extract(value,'$.role')='user'"
+        "   AND json_extract(value,'$.content')='[system] Approval #7 expired.'",
+        -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
+    /* ...and the only system role left is the leading prompt */
+    sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.messages'))"
+        " WHERE json_extract(value,'$.role')='system' AND key > 0",
+        -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    /* Gemini: no longer dropped, same prefixed user turn */
+    cfg.provider.endpoint_type = ENDPOINT_GEMINI;
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.contents'))"
+        " WHERE json_extract(value,'$.role')='user'"
+        "   AND json_extract(value,'$.parts[0].text')='[system] Approval #7 expired.'",
+        -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_midturn_system_entry_converts_to_user\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_llm_payload:\n");
@@ -1333,6 +1398,7 @@ int main(void) {
     test_session_context_tool_loop();
     test_payload_with_tools();
     test_compaction_entry_in_payload();
+    test_midturn_system_entry_converts_to_user();
     test_cron_result_in_payload();
     test_network_hosts_query_time_wrap();
     test_hook_inject_directive();

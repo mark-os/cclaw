@@ -483,8 +483,10 @@ void approval_state_restatement(sqlite3 *db, const Approval *a,
     if (sqlite3_prepare_v2(db,
             "SELECT json_type(?1,'$.changes.agent') IS NOT NULL,"
             "       json_type(?1,'$.changes.grants') IS NOT NULL,"
-            "       COALESCE((SELECT group_concat(model_id, ', ')"
-            "         FROM (SELECT model_id FROM agent_models"
+            "       COALESCE((SELECT group_concat(m, ', ')"
+            "         FROM (SELECT model_id"
+            "                 ||COALESCE('('||reasoning_effort||')','') m"
+            "               FROM agent_models"
             "                WHERE agent_name=(SELECT agent_name FROM sessions"
             "                                   WHERE id=?2) ORDER BY pos)),"
             "        '(none)')",
@@ -653,13 +655,23 @@ static const char *SQL_CHANGES_AGENT_SETTINGS =
     "   CASE WHEN cur IS NOT NULL AND cur <> req"
     "        THEN '   (now: '||cur||')' ELSE '' END)"
     " FROM (SELECT j.key AS key,"
+    /* models entries may be bare id strings or {id, effort} objects — render
+     * the object form as id(effort) so the approver sees the effort ask, and
+     * mirror the spelling on the current side so an effort-only change diffs
+     * as a change instead of a no-op. */
     "   CASE WHEN j.type IN ('array','object')"
-    "     THEN COALESCE((SELECT group_concat(atom, ', ') FROM json_each(j.value)),"
+    "     THEN COALESCE((SELECT group_concat("
+    "            CASE WHEN type='object'"
+    "              THEN json_extract(value,'$.id')"
+    "                   ||COALESCE('('||json_extract(value,'$.effort')||')','')"
+    "              ELSE atom END, ', ') FROM json_each(j.value)),"
     "                   '(empty)')"
     "     ELSE COALESCE(j.atom,'(empty)') END AS req,"
     "   CASE j.key"
-    "     WHEN 'models' THEN (SELECT group_concat(model_id, ', ')"
-    "       FROM (SELECT model_id FROM agent_models"
+    "     WHEN 'models' THEN (SELECT group_concat(m, ', ')"
+    "       FROM (SELECT model_id"
+    "               ||COALESCE('('||reasoning_effort||')','') m"
+    "             FROM agent_models"
     "              WHERE agent_name=" SQL_CUR_AGENT " ORDER BY pos))"
     "     WHEN 'max_iterations' THEN (SELECT CAST(max_iterations AS TEXT)"
     "       FROM agents WHERE name=" SQL_CUR_AGENT ")"

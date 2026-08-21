@@ -34,7 +34,8 @@ static const char *PARAMS_JSON =
     "\"changes\":{\"type\":\"object\",\"description\":\"Any subset of "
     "{grants:{tools:[names],hosts:[hostnames],read_paths:[abs paths],write_paths:[abs paths],"
     "remove:{tools:[],hosts:[],read_paths:[],write_paths:[]}}, "
-    "agent:{models?:[canonical model ids in routing order],max_iterations?,shell_timeout?}, "
+    "agent:{models?:[canonical model id or {id,effort?:off|minimal|low|medium|high}, "
+    "in routing order],max_iterations?,shell_timeout?}, "
     "routes:['channel:chat_id',...], "
     "config:{key:value-string,...}, provider:{provider,base_url?,api_key_env?}, "
     "models:[{id:'model@provider',context_window?,max_output_tokens?,capabilities?,"
@@ -470,6 +471,13 @@ static char *unknown_model_err(sqlite3 *db, const char *ref) {
     return strdup(buf);
 }
 
+/* Normalized model id of one agent.models entry: the entry itself when it is
+ * a bare string, $.id when it is an {id, effort} object. A is the json_each
+ * alias prefix ("a." or "" for the bare table). */
+#define AM_ENTRY_ID(A) \
+    "CASE WHEN " A "type='text' THEN " A "atom" \
+    " ELSE json_extract(" A "value,'$.id') END"
+
 /* Validate $.agent — self-scoped settings on the calling agent's own row.
  * Whitelisted keys only; model references must be a canonical models.id (no
  * bare names — see model-id migration, schema v44), either already registered
@@ -489,16 +497,48 @@ static char *validate_agent(sqlite3 *db, const char *changes,
         free(bad);
         return m;
     }
-    /* models: the full replacement routing order — non-empty, dupe-free. */
+    /* models: the full replacement routing order — non-empty, dupe-free.
+     * Each entry is a bare canonical id string, or {id, effort} where effort
+     * is the reasoning level for that model (AM_ENTRY_ID normalizes both). */
     if (q1_true(db, "SELECT 1 WHERE json_extract(?1,'$.agent.models') IS NOT NULL"
                     " AND json_type(?1,'$.agent.models')!='array'", changes))
         return strdup("error: agent.models must be a JSON array of canonical "
-                      "model ids, in routing order (first = primary)");
+                      "model ids (or {id,effort} objects), in routing order "
+                      "(first = primary)");
     if (q1_true(db, "SELECT 1 WHERE json_type(?1,'$.agent.models')='array'"
                     " AND json_array_length(?1,'$.agent.models')=0", changes))
         return strdup("error: agent.models must not be empty — an agent with "
                       "no routing list cannot serve a single request");
-    if (q1_true(db, "SELECT 1 FROM (SELECT COUNT(*) c, COUNT(DISTINCT value) d"
+    if (q1_true(db, "SELECT 1 FROM json_each(?1,'$.agent.models')"
+                    " WHERE type NOT IN ('text','object')", changes))
+        return strdup("error: each agent.models entry must be a canonical "
+                      "model id string or an {id, effort} object");
+    bad = q1_text(db,
+        "SELECT k.key FROM json_each(?1,'$.agent.models') e, json_each(e.value) k"
+        " WHERE e.type='object' AND k.key NOT IN ('id','effort') LIMIT 1",
+        changes);
+    if (bad) {
+        char *m = errf("error: unknown agent.models key '%s' (use id, effort)",
+                       bad);
+        free(bad);
+        return m;
+    }
+    bad = q1_text(db,
+        "SELECT json_extract(e.value,'$.effort')"
+        " FROM json_each(?1,'$.agent.models') e"
+        " WHERE e.type='object' AND json_extract(e.value,'$.effort') IS NOT NULL"
+        "   AND json_extract(e.value,'$.effort') NOT IN"
+        "       ('off','minimal','low','medium','high') LIMIT 1", changes);
+    if (bad) {
+        char *m = errf("error: agent.models effort '%s' must be one of "
+                       "off, minimal, low, medium, high", bad);
+        free(bad);
+        return m;
+    }
+    /* COALESCE: a missing id must not vanish from COUNT(DISTINCT) — it would
+     * read as a duplicate here instead of reaching the id check below. */
+    if (q1_true(db, "SELECT 1 FROM (SELECT COUNT(*) c, COUNT(DISTINCT "
+                    "COALESCE(" AM_ENTRY_ID("") ",'')) d"
                     " FROM json_each(?1,'$.agent.models')) WHERE c!=d", changes))
         return strdup("error: agent.models contains a duplicate entry");
     bad = q1_text(db,
@@ -517,11 +557,13 @@ static char *validate_agent(sqlite3 *db, const char *changes,
     if (sqlite3_prepare_v2(db,
             /* The outer row must be aliased: an unqualified 'atom' inside the
              * json_each(?2) subquery would bind to that table's own column. */
-            "SELECT a.atom FROM json_each(?1,'$.agent.models') a"
-            " WHERE a.type!='text' OR a.atom=''"
-            "    OR (NOT EXISTS(SELECT 1 FROM models m WHERE m.id=a.atom)"
+            "SELECT " AM_ENTRY_ID("a.") " FROM json_each(?1,'$.agent.models') a"
+            " WHERE COALESCE(" AM_ENTRY_ID("a.") ",'')=''"
+            "    OR (NOT EXISTS(SELECT 1 FROM models m"
+            "                   WHERE m.id=" AM_ENTRY_ID("a.") ")"
             "        AND NOT EXISTS(SELECT 1 FROM json_each(?2) j"
-            "                       WHERE json_extract(j.value,'$.id')=a.atom))"
+            "                       WHERE json_extract(j.value,'$.id')="
+            AM_ENTRY_ID("a.") "))"
             " LIMIT 1", -1, &st, NULL) != SQLITE_OK)
         return strdup("error: agent validation failed");
     sqlite3_bind_text(st, 1, changes, -1, SQLITE_STATIC);
@@ -1393,8 +1435,10 @@ static const char *RECEIPT_SQL =
     /* agent — the whole self-scoped state, since any of it may have moved. */
     "  UNION ALL"
     "  SELECT 'your settings now: models='"
-    "         ||COALESCE((SELECT group_concat(model_id,' > ')"
-    "             FROM (SELECT model_id FROM agent_models"
+    "         ||COALESCE((SELECT group_concat(m,' > ')"
+    "             FROM (SELECT model_id"
+    "                   ||COALESCE(' (effort '||reasoning_effort||')','') m"
+    "                   FROM agent_models"
     "                   WHERE agent_name=?2 ORDER BY pos)),'(none)')"
     "         ||', max_iterations='||a.max_iterations"
     "         ||', shell_timeout='||a.shell_timeout"
@@ -1579,8 +1623,11 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             } else rc = -1;
             if (rc == 0) {
                 if (sqlite3_prepare_v2(db,
-                        "INSERT INTO agent_models(agent_name, model_id, pos)"
-                        " SELECT ?1, value, key"
+                        "INSERT INTO agent_models(agent_name, model_id, pos,"
+                        " reasoning_effort)"
+                        " SELECT ?1, " AM_ENTRY_ID("") ", key,"
+                        " CASE WHEN type='object'"
+                        " THEN json_extract(value,'$.effort') END"
                         " FROM json_each(?2,'$.changes.agent.models')",
                         -1, &ms, NULL) == SQLITE_OK) {
                     sqlite3_bind_text(ms, 1, agent, -1, SQLITE_STATIC);
@@ -1750,7 +1797,9 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
         "need — tool grants, host grants (prefix '.' covers subdomains), path "
         "grants (read_paths/write_paths, absolute), your own agent settings "
         "(agent: models — your full replacement routing order, first entry is "
-        "primary — max_iterations/shell_timeout), "
+        "primary; an entry is a canonical id or {id,effort} to set that "
+        "model's reasoning effort (off|minimal|low|medium|high, omit for the "
+        "provider default) — max_iterations/shell_timeout), "
         "channel send routes (routes: ['channel:chat_id']), config values "
         "(registered keys — discover with search_config), and/or an LLM "
         "provider definition (openrouter, gemini, openai, deepseek, groq, "

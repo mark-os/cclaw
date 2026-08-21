@@ -950,6 +950,105 @@ static void test_agent_routes_sections(void) {
 }
 
 
+/* agent.models entries as {id, effort} objects: validation of the union
+ * shape, effort landing in agent_models.reasoning_effort, and the whole-list
+ * replace clearing effort when a later doc reverts to the bare-string form. */
+static void test_agent_models_effort(void) {
+    sqlite3 *db = test_db_open_seeded(":memory:");
+    assert(db);
+    config_registry_sync(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+
+    RequestConfigCtx ctx = {
+        .db = db, .agent_name = "test", .session_id = sid,
+        .agents_dir = NULL, .current_tool_call_id = "ef1"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+    assert(session_set_state(db, sid, "tool_running") == 0);
+
+    /* Shape errors: bad effort level, unknown object key, non-entry type,
+     * object without an id, duplicate id across the two spellings. */
+    char *r = call_handler(&reg,
+        "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"effort\":\"max\"}]}}}");
+    assert(r && strstr(r, "effort 'max' must be one of"));
+    free(r);
+    r = call_handler(&reg,
+        "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"reasoning\":\"high\"}]}}}");
+    assert(r && strstr(r, "unknown agent.models key 'reasoning'"));
+    free(r);
+    r = call_handler(&reg,
+        "{\"changes\":{\"agent\":{\"models\":[7]}}}");
+    assert(r && strstr(r, "model id string or an {id, effort} object"));
+    free(r);
+    r = call_handler(&reg,
+        "{\"changes\":{\"agent\":{\"models\":[{\"effort\":\"high\"}]}}}");
+    assert(r && strstr(r, "non-empty canonical model id"));
+    free(r);
+    r = call_handler(&reg,
+        "{\"changes\":{\"agent\":{\"models\":"
+        "[\"openrouter/deepseek/deepseek-v4-flash\","
+        "{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"effort\":\"low\"}]}}}");
+    assert(r && strstr(r, "duplicate entry"));
+    free(r);
+
+    /* Object form parks and applies: effort lands on the routing row. */
+    r = call_handler(&reg,
+        "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"effort\":\"high\"}]}}}");
+    assert(r == NULL); /* parked */
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT args_json FROM approvals WHERE session_id=?1"
+        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    char *args_copy = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, NULL) == 0);
+    free(args_copy);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT model_id, reasoning_effort FROM agent_models"
+        " WHERE agent_name='test' ORDER BY pos", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0),
+                  "openrouter/deepseek/deepseek-v4-flash") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "high") == 0);
+    assert(sqlite3_step(s) == SQLITE_DONE);
+    sqlite3_finalize(s);
+
+    /* Bare-string replacement clears the effort (whole-list replace). */
+    ctx.current_tool_call_id = "ef2";
+    r = call_handler(&reg,
+        "{\"changes\":{\"agent\":{\"models\":"
+        "[\"openrouter/deepseek/deepseek-v4-flash\"]}}}");
+    assert(r == NULL);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT args_json FROM approvals WHERE session_id=?1"
+        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    args_copy = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, NULL) == 0);
+    free(args_copy);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT reasoning_effort IS NULL FROM agent_models"
+        " WHERE agent_name='test'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
+
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_agent_models_effort\n");
+}
+
+
 /* 7. Rollback: hand-craft args_json with an unregistered config key, call
  *    request_config_changes_apply, assert -1 AND none of the doc's grants
  *    landed. */
@@ -1337,6 +1436,7 @@ int main(void) {
     test_dedup();
     test_batch_apply();
     test_agent_routes_sections();
+    test_agent_models_effort();
     test_apply_rollback();
     test_add_tool_to_config();
     test_redundant_filtered();

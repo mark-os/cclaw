@@ -113,12 +113,14 @@ level name.
 `providers.request_extra`, so a provider's `request_extra` still overrides or
 suppresses it — that column remains the last word on the wire.
 
-**Setting it.** There is no `request_config` surface for either column yet;
-operators write them directly (`db_query` / SQL):
+**Setting it.** `reasoning_effort` is agent-settable through the approval-gated
+`request_config` document: an `agent.models` entry may be an `{id, effort}`
+object instead of a bare id string (see
+[config-doc.md](config-doc.md)). `models.effort_map` is deliberately NOT on
+that surface — how a level spells on the wire is a fact about the model, not an
+agent preference — so operators write it directly (`db_query` / SQL):
 
 ```sql
-UPDATE agent_models SET reasoning_effort='high'
- WHERE agent_name='Charles' AND pos=0;
 UPDATE models SET effort_map='{"format":"gemini-budget",
   "levels":{"low":1024,"medium":8192,"high":24576}}'
  WHERE id='gemini-2.5-pro@openrouter';

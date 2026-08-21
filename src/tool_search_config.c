@@ -88,8 +88,13 @@ static const char SQL_CONFIG_DOC[] =
     " 'agent', json_object("
     "   'name', ?1,"
     "   'sandbox_profile', (SELECT sandbox_profile FROM agents WHERE name=?1),"
-    "   'models', json((SELECT json_group_array(model_id) FROM"
-    "     (SELECT model_id FROM agent_models WHERE agent_name=?1 ORDER BY pos))),"
+    /* An entry with a reasoning effort shows as {id, effort} — the same union
+     * shape request_config accepts, so the doc round-trips as a patch base. */
+    "   'models', json((SELECT json_group_array(json("
+    "     CASE WHEN reasoning_effort IS NULL THEN json_quote(model_id)"
+    "          ELSE json_object('id', model_id, 'effort', reasoning_effort)"
+    "     END)) FROM (SELECT model_id, reasoning_effort FROM agent_models"
+    "                  WHERE agent_name=?1 ORDER BY pos))),"
     "   'max_iterations', (SELECT max_iterations FROM agents WHERE name=?1),"
     "   'shell_timeout', (SELECT shell_timeout FROM agents WHERE name=?1),"
     "   'shell_path', (SELECT COALESCE(NULLIF(?3,''),NULLIF(shell_path,''),"
@@ -211,8 +216,10 @@ static char *render_text(SearchConfigCtx *ctx, const char *query,
      * override, when set, applies to every agent equally, so show it. */
     sqlite3_stmt *st = NULL;
     int rc = sqlite3_prepare_v2(ctx->db,
-        "SELECT COALESCE((SELECT group_concat(model_id, ' > ')"
-        "                 FROM (SELECT model_id FROM agent_models"
+        "SELECT COALESCE((SELECT group_concat(m, ' > ')"
+        "                 FROM (SELECT model_id"
+        "                         ||COALESCE(' (effort '||reasoning_effort||')','') m"
+        "                       FROM agent_models"
         "                       WHERE agent_name=?1 ORDER BY pos)),"
         "                '(none — unroutable)'),"
         "       max_iterations, shell_timeout,"

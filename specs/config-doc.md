@@ -27,7 +27,7 @@ never happened and a receipt that says it did).
 
 | Section | Shape | Scope | Kind |
 |---------|-------|-------|------|
-| `agent` | `{models?: [id], max_iterations?: n, shell_timeout?: n}` | this agent | settings |
+| `agent` | `{models?: [id \| {id, effort?}], max_iterations?: n, shell_timeout?: n}` | this agent | settings |
 | `grants` | `{tools?, hosts?, read_paths?, write_paths?: [value], remove?: {…same kinds}}` | this agent | authority |
 | `routes` | `["channel:chat_id"]` | this agent | authority |
 | `secret_bindings` | `{SECRET_NAME: [host]}` | this agent | authority |
@@ -58,7 +58,7 @@ description states it in one line so the model does not have to guess:
 
 | Section | Verb | Meaning |
 |---------|------|---------|
-| `agent.*` | **replace** | Each named field replaces its current value. `agent.models` is the *whole* routing list, in order, first = primary; unnamed fields keep their values. |
+| `agent.*` | **replace** | Each named field replaces its current value. `agent.models` is the *whole* routing list, in order, first = primary; unnamed fields keep their values. An entry is a canonical id string or `{id, effort}`, where `effort` (`off\|minimal\|low\|medium\|high`) sets `agent_models.reasoning_effort` for that model — omitted means NULL, i.e. send nothing and take the provider default. `models.effort_map` (how a level spells on the wire) is operator-only, never part of this document. |
 | `grants.*` | **add** | Values are added to what the agent already holds. Values it already has are filtered out before parking, so an approver only decides what is new. |
 | `grants.remove` | **remove, immediately** | See below. |
 | `routes` | **add** | First-come; a route owned by another agent is refused. |

@@ -612,6 +612,8 @@ static void test_schema_patch_v47(void) {
         "ALTER TABLE llm_responses DROP COLUMN cost;"
         "ALTER TABLE providers DROP COLUMN request_extra;"
         "ALTER TABLE llm_responses DROP COLUMN upstream_provider;"
+        "ALTER TABLE agent_models DROP COLUMN reasoning_effort;"
+        "ALTER TABLE models DROP COLUMN effort_map;"
         "ALTER TABLE approvals RENAME COLUMN park_reason TO action;"
         "ALTER TABLE agents DROP COLUMN hold_until;"
         "ALTER TABLE agents DROP COLUMN hold_holder;"
@@ -690,7 +692,9 @@ static void test_schema_patch_v48(void) {
 
     assert(sqlite3_exec(db,
         "ALTER TABLE entries DROP COLUMN reasoning_meta;"
-        /* v49/v50 sit above this step: shed their columns too. */
+        /* v49/v50/v51 sit above this step: shed their columns too. */
+        "ALTER TABLE agent_models DROP COLUMN reasoning_effort;"
+        "ALTER TABLE models DROP COLUMN effort_map;"
         "ALTER TABLE entries DROP COLUMN cached_tokens;"
         "ALTER TABLE llm_responses DROP COLUMN cached_tokens;"
         "ALTER TABLE llm_responses DROP COLUMN cache_write_tokens;"
@@ -729,6 +733,9 @@ static void test_schema_patch_v50(void) {
     assert(sqlite3_exec(db,
         "ALTER TABLE providers DROP COLUMN request_extra;"
         "ALTER TABLE llm_responses DROP COLUMN upstream_provider;"
+        /* v51 sits above this step: shed its columns too. */
+        "ALTER TABLE agent_models DROP COLUMN reasoning_effort;"
+        "ALTER TABLE models DROP COLUMN effort_map;"
         "INSERT OR IGNORE INTO providers(name, base_url)"
         " VALUES('openrouter','https://openrouter.ai/api/v1'),('custom','http://x');",
         NULL, NULL, NULL) == SQLITE_OK);
@@ -753,6 +760,55 @@ static void test_schema_patch_v50(void) {
     db_close(db);
     test_db_clean(path);
     printf("  PASS test_schema_patch_v50\n");
+}
+
+/* v51 (provider wire-format M5): the reasoning-effort knob lands on the
+ * routing entry and its wire spelling on the model, both NULL — so an
+ * upgraded DB sends exactly what it sent before. */
+static void test_schema_patch_v51(void) {
+    const char *path = "/tmp/test_cclaw_db_v51.sqlite";
+    test_db_clean(path);
+    sqlite3 *db = test_db_open(path);
+    assert(db != NULL);
+
+    assert(sqlite3_exec(db,
+        "ALTER TABLE agent_models DROP COLUMN reasoning_effort;"
+        "ALTER TABLE models DROP COLUMN effort_map;"
+        "INSERT INTO agents(name) VALUES('Router');"
+        "INSERT INTO models(id, provider_name, model)"
+        " VALUES('m@p','p','m');"
+        "INSERT INTO agent_models(agent_name, model_id, pos)"
+        " VALUES('Router','m@p',0);", NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 50);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT);
+
+    /* Both columns exist, and the pre-existing routing entry is untouched. */
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(*) FROM pragma_table_info('agent_models')"
+        " WHERE name='reasoning_effort';", 0, -1) == 1);
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(*) FROM pragma_table_info('models')"
+        " WHERE name='effort_map';", 0, -1) == 1);
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(*) FROM agent_models WHERE reasoning_effort IS NULL;",
+        0, -1) == 1);
+
+    /* The level vocabulary is enforced by the patched-in CHECK, not just by
+     * whoever writes the row. */
+    assert(sqlite3_exec(db, "UPDATE agent_models SET reasoning_effort='high';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE agent_models SET reasoning_effort='ludicrous';",
+                        NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db,
+        "UPDATE models SET effort_map='{\"format\":\"openai\",\"levels\":{}}';",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    db_close(db);
+    test_db_clean(path);
+    printf("  PASS test_schema_patch_v51\n");
 }
 
 static void test_rate_limit_and_cost(void) {
@@ -807,6 +863,7 @@ int main(void) {
     test_schema_patch_v47();
     test_schema_patch_v48();
     test_schema_patch_v50();
+    test_schema_patch_v51();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");
     return 0;

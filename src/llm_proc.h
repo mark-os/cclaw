@@ -21,6 +21,10 @@ typedef struct {
     char provider_name[64];   /* providers.name — resolves request_extra at build time */
     int endpoint_type;
     int context_window;
+    /* agent_models.reasoning_effort for this routing entry — "" when unset
+     * (send nothing). Translated to wire form at payload-build time through
+     * models.effort_map, keyed by `id`. */
+    char reasoning_effort[16];
     /* Set only on the synthetic candidate llm_req() builds when the models
      * table yields nothing — that one carries no api_key_env because its key
      * is already resolved in cfg->provider. A real DB row must NEVER borrow

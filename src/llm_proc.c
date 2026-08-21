@@ -83,7 +83,7 @@ static int load_candidates(sqlite3 *db, const char *agent_name,
 
     const char *sql =
         "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type,"
-        "       m.context_window, p.name"
+        "       m.context_window, p.name, am.reasoning_effort"
         " FROM agent_models am"
         " JOIN models m ON m.id = am.model_id"
         " JOIN providers p ON p.name = m.provider_name"
@@ -106,6 +106,8 @@ static int load_candidates(sqlite3 *db, const char *agent_name,
         if (c->context_window <= 0) c->context_window = 128000;
         v = (const char *)sqlite3_column_text(s, 6);
         snprintf(c->provider_name, sizeof(c->provider_name), "%s", v ? v : "");
+        v = (const char *)sqlite3_column_text(s, 7);
+        snprintf(c->reasoning_effort, sizeof(c->reasoning_effort), "%s", v ? v : "");
         /* A named candidate dropped for a missing key is the 2026-08-10
          * silent-reroute: it never reached the request, so nothing recorded
          * it. Record it through the degrade machinery instead (A8). */
@@ -639,6 +641,10 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         route_prov.name = m->provider_name[0] ? m->provider_name : NULL;
         route_prov.model = m->model;
         route_prov.endpoint_type = m->endpoint_type;
+        /* The routing entry's effort level, and the models row that spells it
+         * on the wire. Unset level = no effort field in the body (M5). */
+        route_prov.model_id = m->id[0] ? m->id : NULL;
+        route_prov.reasoning_effort = m->reasoning_effort[0] ? m->reasoning_effort : NULL;
         /* env → encrypted kv → cfg. Re-reading kv here (not mutating cfg,
          * which worker threads share) picks up keys set after startup.
          * cfg->provider.api_key is only reachable for the synthetic candidate

@@ -177,7 +177,28 @@ Raw LLM response archive for forensics and debugging. One row per HTTP response 
 | `provider_id` | TEXT | provider's own response id (`$.id`), NULL if absent |
 | `body` | BLOB | JSONB when parseable, raw text otherwise |
 | `request_body` | BLOB | JSONB of sent payload (failures only); NULL on success |
+| `cached_tokens` | INTEGER | prompt tokens served from cache; NULL when unreported |
+| `cache_write_tokens` | INTEGER | prompt tokens written to cache; NULL when unreported |
+| `reasoning_tokens` | INTEGER | subset of completion tokens spent thinking |
+| `cost` | REAL | provider-reported cost in dollars; NULL when unreported |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+**Usage semantics.** `prompt_tokens` (stored on `entries.usage_in`) is the
+wire's **cache-inclusive** input total on every provider currently supported —
+OpenAI-compat (OpenRouter, DeepSeek), and Gemini-native — and `cached_tokens` is
+a **subset** of it, never an addend. Reported spellings, all COALESCEd at
+ingestion: `usage.prompt_tokens_details.cached_tokens` /
+`usage.prompt_cache_hit_tokens` (DeepSeek-direct) /
+`usageMetadata.cachedContentTokenCount` (Gemini). Anthropic-native, if it ever
+lands, is **cache-exclusive** (`cache_read_input_tokens` is *additional* to
+`input_tokens`) and must be normalized to the inclusive convention at ingestion
+rather than stored raw. Gemini completion tokens are stored as
+`candidatesTokenCount + thoughtsTokenCount` (thoughts is a sibling, not
+included in candidates).
+
+No consumer may *depend* on any of these fields: absent or zero must degrade to
+the pre-existing behavior exactly. Today's only consumer is `rate_limit_check`,
+which weights cache reads at 0.25 via `COALESCE(cached_tokens,0)`.
 
 Retention controlled by config key `llm_response_archive_max`: >0 keeps the most
 recent N 'ok' rows **plus** the most recent N failures (so `[resp #N]` citations in
@@ -491,6 +512,7 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `model` | TEXT | which model produced this |
 | `usage_in` | INTEGER | input tokens |
 | `usage_out` | INTEGER | output tokens |
+| `cached_tokens` | INTEGER | cache-read subset of `usage_in`; NULL when the provider doesn't report it. Discounted to 0.25 weight by `rate_limit_check` |
 | `cost_nano` | INTEGER | nanodollars |
 | `token_estimate` | INTEGER | chars/4 heuristic |
 | `content_bytes` | INTEGER | byte length of content + tool_calls |

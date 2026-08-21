@@ -298,6 +298,8 @@ CREATE TABLE IF NOT EXISTS entries (
   model TEXT,
   usage_in INTEGER,
   usage_out INTEGER,
+  cached_tokens INTEGER,   -- subset of usage_in the provider served from cache
+                           -- (NULL when the provider doesn't report it)
   cost_nano INTEGER,
   token_estimate INTEGER,
   content_bytes INTEGER,
@@ -396,6 +398,14 @@ CREATE TABLE IF NOT EXISTS llm_responses (
   provider_id TEXT,              -- provider's own response id ($.id), NULL if absent
   body BLOB,                     -- JSONB when parseable, raw text otherwise
   request_body BLOB,             -- JSONB of the payload we sent (failures only); NULL on success
+  -- Usage parity (M4): richer usage fields when the provider reports them,
+  -- NULL otherwise. cached_tokens/cache_write_tokens are SUBSETS of the
+  -- prompt token count on every provider we support today (cache-inclusive
+  -- wire semantics); a cache-exclusive provider would need normalizing here.
+  cached_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  reasoning_tokens INTEGER,      -- subset of completion tokens
+  cost REAL,                     -- provider-reported cost in dollars
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_llm_responses_iteration ON llm_responses(session_id, iteration_id);

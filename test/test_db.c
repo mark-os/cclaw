@@ -602,9 +602,14 @@ static void test_schema_patch_v47(void) {
      * dual-purpose approvals.action. */
     assert(sqlite3_exec(db,
         "PRAGMA foreign_keys=OFF;"
-        /* v48 is above this step: shed its column too, or the upgrade run
-         * below re-adds one that already exists. */
+        /* v48/v49 are above this step: shed their columns too, or the upgrade
+         * run below re-adds ones that already exist. */
         "ALTER TABLE entries DROP COLUMN reasoning_meta;"
+        "ALTER TABLE entries DROP COLUMN cached_tokens;"
+        "ALTER TABLE llm_responses DROP COLUMN cached_tokens;"
+        "ALTER TABLE llm_responses DROP COLUMN cache_write_tokens;"
+        "ALTER TABLE llm_responses DROP COLUMN reasoning_tokens;"
+        "ALTER TABLE llm_responses DROP COLUMN cost;"
         "ALTER TABLE approvals RENAME COLUMN park_reason TO action;"
         "ALTER TABLE agents DROP COLUMN hold_until;"
         "ALTER TABLE agents DROP COLUMN hold_holder;"
@@ -681,8 +686,15 @@ static void test_schema_patch_v48(void) {
     sqlite3 *db = db_open(path);
     assert(db != NULL && db_ensure_schema(db) == 0);
 
-    assert(sqlite3_exec(db, "ALTER TABLE entries DROP COLUMN reasoning_meta;",
-                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(db,
+        "ALTER TABLE entries DROP COLUMN reasoning_meta;"
+        /* v49 sits above this step: shed its columns too. */
+        "ALTER TABLE entries DROP COLUMN cached_tokens;"
+        "ALTER TABLE llm_responses DROP COLUMN cached_tokens;"
+        "ALTER TABLE llm_responses DROP COLUMN cache_write_tokens;"
+        "ALTER TABLE llm_responses DROP COLUMN reasoning_tokens;"
+        "ALTER TABLE llm_responses DROP COLUMN cost;",
+        NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 47);
 
     assert(db_schema_compat(db) == 1);

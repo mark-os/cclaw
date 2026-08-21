@@ -33,12 +33,17 @@ int db_tool_call_complete_with_result(sqlite3 *db, int64_t entry_id,
  *   0 content   1 finish_reason   2 reasoning   3 prompt_tokens
  *   4 completion_tokens   5 total_tokens   6 cost(real)   7 array_length
  *   8 reasoning replay blob (JSON text, NULL when the response carries none)
+ *   9 cached_tokens   10 cache_write_tokens   11 reasoning_tokens
  *
  * Column 8 is the verbatim wire artifact the provider requires back on the
  * next request (specs: OpenRouter reasoning_details — order and every field
  * matter, it is how Gemini's thoughtSignature round-trips through the
  * OpenAI-compat envelope; Gemini-native thoughtSignature per part). Stored
- * unmodified in entries.reasoning_meta.blob; see replay in llm_payload.c. */
+ * unmodified in entries.reasoning_meta.blob; see replay in llm_payload.c.
+ * Columns 9-11 are NULL on providers that don't report them; nothing depends
+ * on them (absent == pre-M4 behavior everywhere). cached_tokens is a SUBSET of
+ * prompt_tokens on every provider supported today (cache-inclusive wire
+ * semantics) — a cache-exclusive provider would have to be normalized here. */
 static const char SCALAR_OPENAI[] =
     "SELECT"
     " json_extract(?1,'$.choices[0].message.content'),"
@@ -52,7 +57,13 @@ static const char SCALAR_OPENAI[] =
     " COALESCE(json_extract(?1,'$.usage.cost'), json_extract(?1,'$.usage.total_cost')),"
     " json_array_length(?1,'$.choices'),"
     " CASE WHEN json_array_length(?1,'$.choices[0].message.reasoning_details') > 0"
-    "   THEN json_extract(?1,'$.choices[0].message.reasoning_details') END";
+    "   THEN json_extract(?1,'$.choices[0].message.reasoning_details') END,"
+    /* DeepSeek-direct spells the cache-read count prompt_cache_hit_tokens;
+     * OpenAI/OpenRouter nest it under prompt_tokens_details. */
+    " COALESCE(json_extract(?1,'$.usage.prompt_tokens_details.cached_tokens'),"
+    "          json_extract(?1,'$.usage.prompt_cache_hit_tokens')),"
+    " json_extract(?1,'$.usage.prompt_tokens_details.cache_write_tokens'),"
+    " json_extract(?1,'$.usage.completion_tokens_details.reasoning_tokens')";
 
 static const char SCALAR_GEMINI[] =
     "SELECT"
@@ -65,7 +76,12 @@ static const char SCALAR_GEMINI[] =
     "   ELSE json_extract(?1,'$.candidates[0].finishReason') END,"
     " NULL,"
     " json_extract(?1,'$.usageMetadata.promptTokenCount'),"
-    " json_extract(?1,'$.usageMetadata.candidatesTokenCount'),"
+    /* thoughtsTokenCount is a sibling of candidatesTokenCount, not a part of
+     * it — summing them is what makes Gemini's completion count comparable to
+     * the OpenAI-compat one (pre-M4 we stored only candidates and undercounted
+     * every thinking response). */
+    " COALESCE(json_extract(?1,'$.usageMetadata.candidatesTokenCount'),0)"
+    "   + COALESCE(json_extract(?1,'$.usageMetadata.thoughtsTokenCount'),0),"
     " json_extract(?1,'$.usageMetadata.totalTokenCount'),"
     " NULL,"
     " json_array_length(?1,'$.candidates'),"
@@ -76,7 +92,10 @@ static const char SCALAR_GEMINI[] =
     "     'fn', json_extract(value,'$.functionCall.name'),"
     "     'sig', json_extract(value,'$.thoughtSignature'))), '[]')"
     "    FROM json_each(?1,'$.candidates[0].content.parts')"
-    "    WHERE json_extract(value,'$.thoughtSignature') IS NOT NULL)";
+    "    WHERE json_extract(value,'$.thoughtSignature') IS NOT NULL),"
+    " json_extract(?1,'$.usageMetadata.cachedContentTokenCount'),"
+    " NULL,"
+    " json_extract(?1,'$.usageMetadata.thoughtsTokenCount')";
 
 /* Tool-call rows, columns: 0 id (NULL for Gemini), 1 name, 2 arguments. */
 static const char TC_OPENAI[] =
@@ -131,11 +150,18 @@ static void reasoning_meta_set(sqlite3 *db, int64_t entry_id, int gemini,
 /* Archive one raw response for forensics. When is_jsonb, body/blen is the
  * parsed JSONB blob (and we can pull the provider's $.id out of it); otherwise
  * body is NUL-terminated text that wasn't valid JSON. Best-effort: errors here
- * never affect ingest. */
+ * never affect ingest. usage (may be NULL) carries the extracted usage block —
+ * only the success path has one; failures archive with NULL usage columns. */
+typedef struct {
+    int prompt_tokens, completion_tokens;
+    int cached_tokens, cache_write_tokens, reasoning_tokens;  /* <0 = absent */
+    double cost; int has_cost;
+} RespUsage;
+
 static void archive_store(sqlite3 *db, int64_t session_id, int64_t iteration_id,
                           const char *model, const char *status,
                           const void *body, int blen, int is_jsonb,
-                          const char *request_body) {
+                          const char *request_body, const RespUsage *usage) {
     /* Retention cap (config 'llm_response_archive_max'):
      *   > 0  keep the most recent N 'ok' rows and the most recent N failures
      *   == 0 archiving off — write nothing
@@ -153,11 +179,12 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t iteration_id,
     if (cap == 0) return;   /* archiving disabled — skip the insert entirely */
 
     const char *sql =
-        "INSERT INTO llm_responses(session_id,iteration_id,model,status,provider_id,body,request_body)"
+        "INSERT INTO llm_responses(session_id,iteration_id,model,status,provider_id,body,"
+        "  request_body,cached_tokens,cache_write_tokens,reasoning_tokens,cost)"
         " VALUES(?1,?2,?3,?4,"
         "  CASE WHEN ?5 THEN COALESCE(json_extract(?6,'$.id'),"
         "                             json_extract(?6,'$.responseId')) END, ?6,"
-        "  CASE WHEN ?7 IS NOT NULL THEN jsonb(?7) END);";
+        "  CASE WHEN ?7 IS NOT NULL THEN jsonb(?7) END,?8,?9,?10,?11);";
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(s, 1, session_id);
@@ -169,6 +196,15 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t iteration_id,
         else sqlite3_bind_text(s, 6, (const char *)body, -1, SQLITE_STATIC);
         if (request_body) sqlite3_bind_text(s, 7, request_body, -1, SQLITE_STATIC);
         else sqlite3_bind_null(s, 7);
+        int u[3] = { usage ? usage->cached_tokens : -1,
+                     usage ? usage->cache_write_tokens : -1,
+                     usage ? usage->reasoning_tokens : -1 };
+        for (int i = 0; i < 3; i++) {
+            if (u[i] >= 0) sqlite3_bind_int(s, 8 + i, u[i]);
+            else sqlite3_bind_null(s, 8 + i);
+        }
+        if (usage && usage->has_cost) sqlite3_bind_double(s, 11, usage->cost);
+        else sqlite3_bind_null(s, 11);
         sqlite3_step(s);
         sqlite3_finalize(s);
     }
@@ -203,13 +239,13 @@ void db_archive_response(sqlite3 *db, int64_t session_id, int64_t iteration_id,
         if (sqlite3_step(j) == SQLITE_ROW) {
             archive_store(db, session_id, iteration_id, model, status,
                           sqlite3_column_blob(j, 0), sqlite3_column_bytes(j, 0), 1,
-                          request_body);
+                          request_body, NULL);
             sqlite3_finalize(j);
             return;
         }
         sqlite3_finalize(j);
     }
-    archive_store(db, session_id, iteration_id, model, status, body, -1, 0, request_body);
+    archive_store(db, session_id, iteration_id, model, status, body, -1, 0, request_body, NULL);
 }
 
 LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iteration_id,
@@ -228,14 +264,14 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
     if (sqlite3_prepare_v2(db, "SELECT jsonb(?1)", -1, &j, NULL) != SQLITE_OK) {
         /* Our-side failure (e.g. SQLITE_BUSY), not a bad response — archive the
          * raw body so a valid reply lost to DB contention is still recoverable. */
-        archive_store(db, session_id, iteration_id, model, "ingest_error", body, -1, 0, request_body);
+        archive_store(db, session_id, iteration_id, model, "ingest_error", body, -1, 0, request_body, NULL);
         return LLM_RESP_DBERR;
     }
     sqlite3_bind_text(j, 1, body, -1, SQLITE_STATIC);
     if (sqlite3_step(j) != SQLITE_ROW) {
         /* Not valid JSON at all — archive the raw text for forensics. */
         sqlite3_finalize(j);
-        archive_store(db, session_id, iteration_id, model, "malformed", body, -1, 0, request_body);
+        archive_store(db, session_id, iteration_id, model, "malformed", body, -1, 0, request_body, NULL);
         return LLM_RESP_MALFORMED;
     }
     const void *blob = sqlite3_column_blob(j, 0);
@@ -246,14 +282,14 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, gemini ? SCALAR_GEMINI : SCALAR_OPENAI, -1, &s, NULL) != SQLITE_OK) {
         /* Our-side failure — archive the (valid) body for forensics + recovery. */
-        archive_store(db, session_id, iteration_id, model, "ingest_error", blob, blen, 1, request_body);
+        archive_store(db, session_id, iteration_id, model, "ingest_error", blob, blen, 1, request_body, NULL);
         sqlite3_finalize(j);
         return LLM_RESP_DBERR;
     }
     sqlite3_bind_blob(s, 1, blob, blen, SQLITE_STATIC);
     if (sqlite3_step(s) != SQLITE_ROW) {
         sqlite3_finalize(s);
-        archive_store(db, session_id, iteration_id, model, "malformed", blob, blen, 1, request_body);
+        archive_store(db, session_id, iteration_id, model, "malformed", blob, blen, 1, request_body, NULL);
         sqlite3_finalize(j);
         return LLM_RESP_MALFORMED;
     }
@@ -261,7 +297,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
     /* Shape check: choices/candidates array present and non-empty. */
     if (sqlite3_column_type(s, 7) == SQLITE_NULL || sqlite3_column_int(s, 7) == 0) {
         sqlite3_finalize(s);
-        archive_store(db, session_id, iteration_id, model, "malformed", blob, blen, 1, request_body);
+        archive_store(db, session_id, iteration_id, model, "malformed", blob, blen, 1, request_body, NULL);
         sqlite3_finalize(j);
         return LLM_RESP_MALFORMED;
     }
@@ -275,8 +311,15 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
                                 ? sqlite3_column_int(s, 5)
                                 : prompt_tokens + completion_tokens;
     int64_t cost_nano = 0;
-    if (sqlite3_column_type(s, 6) != SQLITE_NULL)
-        cost_nano = (int64_t)(sqlite3_column_double(s, 6) * 1e9 + 0.5);
+    RespUsage usage = { prompt_tokens, completion_tokens, -1, -1, -1, 0.0, 0 };
+    if (sqlite3_column_type(s, 6) != SQLITE_NULL) {
+        usage.cost = sqlite3_column_double(s, 6);
+        usage.has_cost = 1;
+        cost_nano = (int64_t)(usage.cost * 1e9 + 0.5);
+    }
+    if (sqlite3_column_type(s, 9) == SQLITE_INTEGER)  usage.cached_tokens = sqlite3_column_int(s, 9);
+    if (sqlite3_column_type(s, 10) == SQLITE_INTEGER) usage.cache_write_tokens = sqlite3_column_int(s, 10);
+    if (sqlite3_column_type(s, 11) == SQLITE_INTEGER) usage.reasoning_tokens = sqlite3_column_int(s, 11);
 
     /* ── Count tool calls first (need the count to set the assistant stop
      * reason before inserting it, and to keep a tool-call response off the
@@ -294,13 +337,13 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
         finish && strcmp(finish, "stop") == 0) {
         sqlite3_finalize(s);
         if (tc) sqlite3_finalize(tc);
-        archive_store(db, session_id, iteration_id, model, "empty", blob, blen, 1, request_body);
+        archive_store(db, session_id, iteration_id, model, "empty", blob, blen, 1, request_body, NULL);
         sqlite3_finalize(j);
         return LLM_RESP_EMPTY;
     }
 
     /* Well-formed — archive before flattening into entries. */
-    archive_store(db, session_id, iteration_id, model, "ok", blob, blen, 1, NULL);
+    archive_store(db, session_id, iteration_id, model, "ok", blob, blen, 1, NULL, &usage);
 
     StopReason stop = map_stop_reason(finish);
     if (tc_count > 0 && stop != STOP_REASON_TOOL_USE)
@@ -331,6 +374,22 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
                                          content, NULL, NULL, 0, stop, model,
                                          prompt_tokens, completion_tokens, cost_nano);
     sqlite3_finalize(s);   /* done with content/reasoning pointers */
+
+    /* Cache-read count lands next to usage_in on the assistant entry — that is
+     * the row rate_limit_check aggregates, and the archive row it also appears
+     * on may be pruned or disabled entirely. Written only when the provider
+     * reported a non-zero count, so a silent provider leaves the column NULL
+     * and the limiter falls back to full weight. */
+    if (asst_id > 0 && usage.cached_tokens > 0) {
+        sqlite3_stmt *cu;
+        if (sqlite3_prepare_v2(db, "UPDATE entries SET cached_tokens=?1 WHERE id=?2",
+                               -1, &cu, NULL) == SQLITE_OK) {
+            sqlite3_bind_int(cu, 1, usage.cached_tokens);
+            sqlite3_bind_int64(cu, 2, asst_id);
+            sqlite3_step(cu);
+            sqlite3_finalize(cu);
+        }
+    }
     if (asst_id < 0) {
         if (tc) sqlite3_finalize(tc);
         sqlite3_finalize(j);

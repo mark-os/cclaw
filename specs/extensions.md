@@ -344,8 +344,12 @@ context (no `Promise`). Globals available to tool handlers (the
 | `XML.parse(str)` (alias `xml.parse`) | XML → JS tree in the fast-xml-parser shape: element names as keys, attributes as `@_name`, repeated siblings as arrays (a single occurrence is **not** an array), text-only elements collapsed to strings, mixed content under `#text`. Vendored yxml (`src/qjs_xml.c`); also bound in the channel runner. Nodes are NULL-prototype, so element names cannot collide with `Object.prototype` members. Entities are lenient by design — built-ins and numeric refs decode, common HTML names decode, unknown names and bare `&` survive as literal text, CDATA/comments untouched — because a conforming parser loses the whole document to one stray `&nbsp;`. Throws `SyntaxError` (per yxml failure code) or `InternalError: out of memory`; the tree costs ~3× the document against `js_heap_mb`, and nesting is capped at `XML_MAX_DEPTH` (128). Deliberate departures from fast-xml-parser, verified against 5.10.1: values stay **strings** (fxp coerces numerics), and entity leniency decodes the common HTML names where fxp leaves them literal. Matching fxp: last-wins on a duplicate attribute, namespace prefixes kept verbatim (no `xmlns` resolution), and mixed content concatenated under `#text` — so `<p>a<b>B</b>c</p>` loses the position of `<b>` (fxp needs `preserveOrder` for that, the option behind CVE-2026-27942; not worth adopting for feed work). |
 | `console.log/warn/error`, `print` | Buffered; emitted as the result when the handler returns `undefined`. |
 
-Secrets are referenced as `{{SECRET:NAME}}` in handler arguments and interpolated
-by C before execution — never visible to the model or written to the handler.
+Secrets are referenced as `{{SECRET:NAME}}` — in handler *arguments* and
+extension *config* they are interpolated by the daemon before execution; in
+the handler *file body* (or any string the handler builds) they resolve at
+the `http_request()` boundary in the child, with the secret's host binding
+enforced there (see specs/security.md, JS-Tier Secret Resolution). Either
+way the value is never visible to the model or written to disk.
 
 ## Hook Handler Contract
 

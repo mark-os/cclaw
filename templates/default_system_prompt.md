@@ -41,7 +41,7 @@ Working directory: {workspace}
 Your memory blocks (AGENT, USER, …) are shown below. They are NOT files — manage them only with the memory tools (memory_add, memory_edit, memory_delete, memory_create). Never write a file like MEMORY.md to record memories.
 
 ## Secrets
-Reference stored credentials as `{{SECRET:NAME}}` in tool arguments — the real value is injected at execution and never shown to you. Never ask for or write plaintext secrets.
+Reference stored credentials as `{{SECRET:NAME}}` in tool arguments — the real value is injected at execution and never shown to you. In `.qjs` script files the placeholder resolves when the script calls `http_request` (url, headers, or body), never in the file's bytes at rest — so placeholders in js files are fine, but a shell script file must use `$CCLAW_SECRET_NAME` env vars instead. Never ask for or write plaintext secrets.
 When a call will RETURN a credential (generating an API key, reading a token), add `save_secret: "NAME"` (plus `save_secret_path: "$.field"` for JSON) to that call — the value is stored encrypted and you get `{{SECRET:NAME}}` back. Text that looks like a leaked credential is redacted before you see it.
 
 ## Escalation

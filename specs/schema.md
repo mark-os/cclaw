@@ -894,8 +894,9 @@ chat now routes to a **different** agent does not fire, and says so.
 
 The script child is a `--run-tool` fork on the JS tier, identical to a
 `js_eval` call under the target agent's `sandbox_profile` and grants;
-`{{SECRET:name}}` is *not* interpolated (a cron script is a file, not a
-model-written argument). `cron.c` decides that a script must run and hands the
+`{{SECRET:name}}` in the script file is never rewritten on disk — it resolves
+in the child at the `http_request()` boundary, like any js dispatch (see
+specs/security.md, JS-Tier Secret Resolution). `cron.c` decides that a script must run and hands the
 decision to the daemon through the `cron_set_script_runner()` function pointer
 — the child table lives in `main.c`, and this keeps the schedule with one
 home instead of a queue table between them. Outside the daemon (CLI, tests)

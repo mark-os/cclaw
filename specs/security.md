@@ -539,7 +539,7 @@ Values are held in process memory for the duration of the turn, then freed. They
 
 Before a tool handler runs, `secret_interpolate()` replaces `{{SECRET:name}}` in the tool arguments with the real value. The interpolated string is a transient local passed to the handler and freed immediately; the persisted tool-call arguments (`tc->arguments`) keep the placeholder, so context/history never holds the value.
 
-Injection is restricted to tools that actually exec with credentials (`tool_needs_interpolation()` — `shell_exec`, `web_fetch`, `js_eval`). Tools that only read files or query the DB don't need it and don't get it.
+Injection is restricted to tools that actually exec with credentials (`tool_needs_interpolation()` — `shell_exec`, `web_fetch`, `js_eval`). Tools that only read files or query the DB don't need it and don't get it. The js tier has a second, child-side resolution site for placeholders the parent can't see (file bodies, runtime-built strings) — see [JS-Tier Secret Resolution](#js-tier-secret-resolution-fetch-boundary).
 
 **Two delivery channels into a shell child** (both available; pick by quoting context):
 
@@ -600,7 +600,7 @@ All three credential tools run via the `--run-tool` broker (re-exec'd child, nam
 |------|--------------|-------------|-------------------|-------------------|------------------|
 | `shell_exec` | SBX_SHELL | broker child | `{{SECRET:name}}` | yes | yes |
 | `web_fetch` | SBX_WEB | broker child | `{{SECRET:name}}` | yes | yes |
-| `js_eval` | SBX_JS | broker child | `{{SECRET:name}}` | yes | yes |
+| `js_eval` | SBX_JS | parent (args) + fetch boundary (file bodies) | `{{SECRET:name}}` | yes | yes |
 
 ### Chokepoints
 
@@ -613,6 +613,7 @@ All three credential tools run via the `--run-tool` broker (re-exec'd child, nam
 | JS eval output | — | — | yes | yes |
 | inbox message (channel inbound) | — | — | yes | yes |
 | Hook inject (persistent + ephemeral) | — | — | yes | yes |
+| JS http_request (url/headers/body, child-side) | yes | yes | — | — |
 
 The rule: **anything heading into entries goes through both mask passes (`tool_result_postprocess`, `src/secret_interp.c`); anything heading into a tool exec goes through inject.** Sanitize-on-write is the invariant — the LLM payload is assembled straight from `entries` with no outbound scan, so every write path into entries must either run the mask passes or be derived from content that already did (model output, compaction summaries, sub-agent results are clean by induction).
 
@@ -674,57 +675,24 @@ Tell the LLM about operator-provisioned secrets in the system prompt:
 
 User-provided credentials don't need to be listed in the system prompt — the user will tell the model the name when they ask it to perform a task ("log in using GMAIL_PASSWORD"). The model then writes `{{SECRET:GMAIL_PASSWORD}}` in the tool argument exactly as it would for any other secret.
 
-## JS Secret Handles (design — not yet implemented)
+## JS-Tier Secret Resolution (fetch boundary)
 
-**Today**, `js_eval` is in `tool_needs_interpolation()`, so `{{SECRET:X}}` is substituted into the **JS source text** before `eval`. The plaintext then lives in the QuickJS heap for the whole run — the one place a secret value still enters an interpreter's memory. `web_fetch` avoids this (it resolves in C and hands the value to libcurl; the value never touches an interpreter), and `shell_exec` can't avoid it (cclaw isn't the HTTP client there — see [the Inject section](#inject)). `js_eval` is the case where a real isolation win is cheaply available, because cclaw owns the JS `fetch()` implementation and the engine bindings.
+The js tier has **two resolution sites**, one rule:
 
-### The model: inject the accessor, not the value
+- **Tool arguments** (a `js_eval` call's `code`/`args`, an extension tool's arguments, extension `config` values) — interpolated by the daemon parent before the child is spawned, exactly like `shell_exec` and `web_fetch`. Persisted args keep the placeholder.
+- **Everything else** — placeholders in a `.qjs` **file body** (workspace scripts, promoted extension handlers, cron scripts), or in strings the script builds at runtime — resolve in the child **at the `http_request()` boundary**: url, headers, and body are scanned just before the request is handed to curl. File bytes are never rewritten on disk, and the resolved string exists only in the C call that sends it.
 
-`SECRET` is a **native binding** — a C callback on the JS global, like `fetch` or `console.log`. It is *code, not data*. Calling `SECRET("X")` returns an **opaque handle that carries only the name**, never the plaintext:
+Fail-loud, both sites: a placeholder naming no loaded secret is a hard error (parent gate for args; a thrown JS `TypeError` at the fetch call site for everything else) — never a literal pass-through, which is how a placeholder used to reach a remote API as the credential and misdiagnose as "invalid key" (the Aug 2026 Tiingo 403 / Alpaca 401 class).
 
-```
-JS context (QuickJS heap)          C side (trusted)
-─────────────────────────          ─────────────────────────
-SECRET            ──native──►       callback: wrap name → handle
-SECRET("X")  →  <opaque ref "X">    (name only, no value)
-crypto.hmac(h, d) ──native──►       resolve "X" in AgentSetup.secrets,
-                  ◄── digest        HMAC in C, return only the digest
-```
+**Binding enforcement travels with the value.** Every secret resolved into a request must be bound (`secret_hosts`) to the request's host — the same rule the daemon enforces for `web_fetch`. The parent ships each secret's bound-host list in the `--run-tool` blob (the child has no DB); an unbound secret or an unmatched host throws before anything is sent, pointing at `request_config` (`secret_bindings`). A loaded-but-unused secret constrains nothing.
 
-The values already live in C (`AgentSetup.secrets`, loaded at resolve time). Native primitives resolve `name → value` *internally*, do the work, and return only a non-sensitive result. The plaintext is never marshalled into a JS value. This deletes the source-interpolation path: the JS source contains `SECRET("X")` calls, never the value.
+Writing a placeholder **into** a file (`file_write`) is always legal — a file is a document, not a resolution site; the placeholder resolves (or errors) later, when the script fetches. Shell script files are deliberately NOT covered: a `{{SECRET:x}}` inside a `.sh` file executed by `shell_exec` does not resolve — shell files use `$CCLAW_SECRET_X` env injection or the proxy's header injection instead.
 
-A nice consequence: primitive outputs (a digest, a signed token, a TOTP code) reveal nothing about the key, so there is **nothing to mask** on the way back out of these calls.
+### Trust-model rationale (and a rejected design)
 
-### Why this is robust (and what forgery does/doesn't buy)
+Keeping values out of the QuickJS heap is **not a goal**. The trust model's hard boundaries are (1) values never enter the context window or DB (the mask chokepoint) and (2) values never travel to unapproved hosts (netns + proxy + bindings). The child — shell or js — is model-authored code running *with* the credential; it is trusted to see what it uses, the same way `shell_exec` holds plaintext in argv today. Parent-side interpolation of args (value in the JS source/heap) is therefore fine; the fetch-boundary resolver exists for **uniform placeholder ergonomics** (files, cron, built strings), not heap hygiene.
 
-Containment is a property of *which bindings exist*, not of hiding a field. The value stays out of JS because **no native function returns it** — `SECRET` returns a handle, the primitives return outputs. The only binding that would marshal plaintext back into JS is the explicit escape hatch:
-
-- `SECRET("X").reveal() → string` — materializes the plaintext into the JS heap, for the genuine long tail (a bespoke protocol, a library that wants raw bytes, passing the value to a subprocess). One grep-able, **grant-gated** call (requires a `grants` row with `kind='tool'`, `value='secret_reveal'` for the calling agent; denied by default) instead of today's silent always-on source interpolation.
-
-The handle should be a tagged native object (QuickJS class id + opaque), not a plain `{__secretRef:"X"}` literal, so a primitive can confirm it came from `SECRET()` and so `.reveal()` is a real method rather than a forgeable property. But note: **forging a name-handle grants nothing.** A forged `{name:"DEPLOY_KEY"}` passed to `hmac` resolves the same secret a real `SECRET("DEPLOY_KEY")` would — the model can name any *scoped* secret anyway, and resolution still fails for anything outside the agent's scope. The tag is hygiene and the anchor for `reveal()`, not the security boundary.
-
-### Primitive set, by priority
-
-Each takes a handle, consumes the secret in C, returns a maskingsafe output.
-
-**Tier 1 (~80% of real auth):**
-
-| Primitive | JS shape | Covers |
-|-----------|----------|--------|
-| fetch header inject | `fetch(url, {headers:{Authorization:"Bearer "+SECRET("X")}})` | bearer tokens, API keys, Basic auth |
-| HMAC | `crypto.hmac("sha256", SECRET("X"), data) → hex/b64` | webhook signing, custom HMAC auth; building block for the rest |
-
-HMAC is load-bearing: HS256-JWT and TOTP become thin wrappers, and AWS SigV4 is a JS recipe where only the first HMAC takes the root handle (`hmac(SECRET("AWS"), date)` → `kDate` in C; the chain continues on derived keys, root never enters JS).
-
-**Tier 2 (cheap once HMAC exists):** `totp(SECRET("X")) → code`; `crypto.signJwt(SECRET("X"), {claims}) → token` (HS256).
-
-**Tier 3 (deferred — bigger lift):** asymmetric signing (JWT RS256/ES256) needs RSA/ECDSA, which vendored monocypher does not provide (it has Ed25519/X25519/ChaCha/BLAKE2/SHA-512, not RSA or SHA-256). Defer until demanded.
-
-**Implementation cost:** HMAC-SHA256 needs SHA-256, absent from monocypher — ~150 lines of vendored public-domain SHA-256 plus a thin HMAC wrapper. Small but net-new crypto; everything in Tier 1/2 sits on that one addition. Building just **fetch-inject + `crypto.hmac`** covers bearer/API-key, webhook signing, SigV4, HS256-JWT and TOTP with the root secret staying in C.
-
-### When the value genuinely belongs in JS
-
-Some auth fundamentally needs the raw key in the compute context — the algorithm consuming the secret lives in the JS, not in a header-interpolator (HMAC/SigV4/JWT signing, TOTP), or the use isn't a request at all (local decryption, a JS DB driver, deriving a child key). The handle + C-primitive model covers the common members of that set without revealing the root; `.reveal()` covers the rest, deliberately and visibly. The goal is not "secrets never touch JS" — it is "value-in-JS is opt-in and audited, not the default."
+A `SECRET("name")` opaque-handle design (native binding returning a name-only handle, C-side `crypto.hmac` primitives, a grant-gated `.reveal()`) was fully specced and **rejected** (2026-08-22): it existed to serve a heap-avoidance goal the trust model does not have, at the cost of new API surface and vendored crypto. If a signing scheme (SigV4, webhook HMAC) ever needs a raw key inside a computation, interpolate it via args — sanctioned — or extend the proxy to sign at the network boundary, which is the one mechanism that genuinely denies the child the plaintext.
 
 ## Sandbox Profile Policy Bundles
 

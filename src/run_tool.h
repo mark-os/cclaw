@@ -55,10 +55,15 @@
 #define RUNTOOL_TIER_WEB   2
 #define RUNTOOL_TIER_JS    3
 
-/* A name/value secret for env injection (pre-filtered/resolved in parent). */
+/* A name/value secret for env injection (pre-filtered/resolved in parent).
+ * `hosts` — space-joined bound-host rules (secret_hosts, resolved in the
+ * parent: the child has no DB) — gates fetch-boundary {{SECRET}} resolution
+ * in the JS tier; NULL/empty means unbound (fail-closed at use). Shell tier
+ * ignores it (its enforcement is the proxy's credential narrowing). */
 typedef struct {
     const char *name;
     const char *value;
+    const char *hosts;
 } RunToolSecret;
 
 /* Superset request — one struct for every sandbox tier. Fields a tier does not
@@ -125,7 +130,7 @@ typedef struct {
     char *command;
     char *shell_path;
     int   timeout;
-    struct { char *name; char *value; } *secrets;
+    struct { char *name; char *value; char *hosts; } *secrets;
     size_t secret_count;
     struct RunToolParam { char *key; int kind; char *value;
                           char **list; size_t list_n; } *params;

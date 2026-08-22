@@ -7,6 +7,7 @@
 #include "qjs_xml.h"
 #include "js_http_fetch.h"
 #include "external_content.h"
+#include "host_match.h"
 #include "tool_web_fetch.h"
 #include "tool_js.h"
 #include <dirent.h>
@@ -16,6 +17,154 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* ── Fetch-boundary {{SECRET:name}} resolution ─────────────────── */
+
+/* Set by tool_js_tier_run from the wire blob before eval. Placeholders in
+ * tool ARGUMENTS were already interpolated by the daemon parent; this table
+ * serves everything the parent can't see — file bodies, extension code,
+ * strings the script builds at runtime — at the one native sink where
+ * secrets travel: http_request. The value stays out of the JS heap unless
+ * the script itself received it via args; what JS holds is the placeholder. */
+static const JsHostSecret *g_js_secrets;
+static size_t g_js_secret_count;
+
+void qjs_host_set_secrets(const JsHostSecret *secrets, size_t count) {
+    g_js_secrets = secrets;
+    g_js_secret_count = secrets ? count : 0;
+}
+
+#define JS_SECRET_PREFIX "{{SECRET:"
+#define JS_SECRET_PREFIX_LEN 9
+
+/* Resolve {{SECRET:name}} in s. Returns a malloc'd resolved copy, or NULL
+ * when s carries no placeholder (caller uses s as-is) or on failure (errbuf
+ * non-empty). Marks used[i] per substituted secret. An unknown name is a
+ * hard error, never a literal pass-through — a placeholder on the wire *is*
+ * the misdiagnosed-401 class this resolver exists to kill. */
+static char *js_resolve_secrets(const char *s, unsigned char *used,
+                                char *errbuf, size_t errcap) {
+    if (!s || !strstr(s, JS_SECRET_PREFIX)) return NULL;
+    size_t cap = strlen(s) + 128, len = 0;
+    char *out = malloc(cap);
+    if (!out) { snprintf(errbuf, errcap, "out of memory"); return NULL; }
+    const char *p = s;
+    while (*p) {
+        const char *end;
+        if (strncmp(p, JS_SECRET_PREFIX, JS_SECRET_PREFIX_LEN) == 0 &&
+            (end = strstr(p + JS_SECRET_PREFIX_LEN, "}}")) != NULL) {
+            const char *name = p + JS_SECRET_PREFIX_LEN;
+            size_t name_len = (size_t)(end - name);
+            const char *value = NULL;
+            for (size_t i = 0; i < g_js_secret_count; i++) {
+                if (strlen(g_js_secrets[i].name) == name_len &&
+                    strncmp(g_js_secrets[i].name, name, name_len) == 0) {
+                    value = g_js_secrets[i].value;
+                    if (used) used[i] = 1;
+                    break;
+                }
+            }
+            if (!value) {
+                snprintf(errbuf, errcap,
+                         "{{SECRET:%.*s}} names no known secret — check the "
+                         "spelling; search_config's secret_bindings section "
+                         "lists the known names",
+                         (int)(name_len < 128 ? name_len : 128), name);
+                free(out);
+                return NULL;
+            }
+            size_t vlen = strlen(value);
+            if (len + vlen + 1 > cap) {
+                cap = (len + vlen + 1) * 2;
+                char *tmp = realloc(out, cap);
+                if (!tmp) { snprintf(errbuf, errcap, "out of memory"); free(out); return NULL; }
+                out = tmp;
+            }
+            memcpy(out + len, value, vlen);
+            len += vlen;
+            p = end + 2;
+            continue;
+        }
+        if (len + 2 > cap) {
+            cap *= 2;
+            char *tmp = realloc(out, cap);
+            if (!tmp) { snprintf(errbuf, errcap, "out of memory"); free(out); return NULL; }
+            out = tmp;
+        }
+        out[len++] = *p++;
+    }
+    out[len] = '\0';
+    return out;
+}
+
+/* Host part of url: after "://", after any userinfo '@', before
+ * '/', '?', '#', or ':port'; IPv6 brackets stripped. */
+static int url_host_of(const char *url, char *out, size_t cap) {
+    const char *p = strstr(url, "://");
+    if (!p) return -1;
+    p += 3;
+    const char *end = p + strcspn(p, "/?#");
+    const char *at = memchr(p, '@', (size_t)(end - p));
+    if (at) p = at + 1;
+    if (*p == '[') {
+        const char *rb = memchr(p, ']', (size_t)(end - p));
+        if (!rb) return -1;
+        p++; end = rb;
+    } else {
+        const char *colon = memchr(p, ':', (size_t)(end - p));
+        if (colon) end = colon;
+    }
+    size_t n = (size_t)(end - p);
+    if (n == 0 || n >= cap) return -1;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return 0;
+}
+
+/* Every secret resolved into this request must be bound to the request's
+ * host (secret_hosts, resolved parent-side into the wire blob) — same rule
+ * the daemon enforces for web_fetch, so the js tier can't carry a bound
+ * secret somewhere its binding doesn't allow. Fail-closed on unbound. */
+static void js_secret_binding_check(const char *url, const unsigned char *used,
+                                    char *errbuf, size_t errcap) {
+    int any = 0;
+    for (size_t i = 0; i < g_js_secret_count; i++)
+        if (used && used[i]) { any = 1; break; }
+    if (!any) return;
+    char host[254];
+    if (url_host_of(url, host, sizeof(host)) != 0) {
+        snprintf(errbuf, errcap,
+                 "cannot determine the request host for the secret binding check");
+        return;
+    }
+    for (size_t i = 0; i < g_js_secret_count; i++) {
+        if (!used[i]) continue;
+        const JsHostSecret *sec = &g_js_secrets[i];
+        if (!sec->hosts || !sec->hosts[0]) {
+            snprintf(errbuf, errcap,
+                     "secret %s has no bound hosts — request the (secret, "
+                     "host) pair via request_config (secret_bindings)",
+                     sec->name);
+            return;
+        }
+        char *rules_buf = strdup(sec->hosts);
+        if (!rules_buf) { snprintf(errbuf, errcap, "out of memory"); return; }
+        char *rules[64];
+        size_t rn = 0;
+        for (char *tok = strtok(rules_buf, " "); tok && rn < 64;
+             tok = strtok(NULL, " "))
+            rules[rn++] = tok;
+        int ok = host_match(rules, rn, host);
+        free(rules_buf);
+        if (!ok) {
+            snprintf(errbuf, errcap,
+                     "secret %s is not bound to host %s — request the "
+                     "(secret, host) pair via request_config (secret_bindings)",
+                     sec->name, host);
+            return;
+        }
+    }
+}
 
 /* ── http_request(url[, opts]) ─────────────────────────────────── */
 
@@ -81,7 +230,37 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, h);
     }
 
-    JsHttpResult r = js_http_fetch_exec(url, method, body, hdr_ptrs);
+    /* Resolve {{SECRET:name}} in url/body/headers at the boundary, then
+     * enforce each used secret's host binding. Errors throw before anything
+     * is sent, naming the actual cause at the JS call site. */
+    char errbuf[512] = "";
+    unsigned char *used = g_js_secret_count
+        ? calloc(g_js_secret_count, 1) : NULL;
+    char *r_url = js_resolve_secrets(url, used, errbuf, sizeof(errbuf));
+    char *r_body = errbuf[0] ? NULL
+        : js_resolve_secrets(body, used, errbuf, sizeof(errbuf));
+    for (size_t i = 0; i < hdr_n && !errbuf[0]; i++) {
+        char *rh = js_resolve_secrets(hdr_lines[i], used, errbuf, sizeof(errbuf));
+        if (rh) { free(hdr_lines[i]); hdr_lines[i] = rh; hdr_ptrs[i] = rh; }
+    }
+    if (!errbuf[0])
+        js_secret_binding_check(r_url ? r_url : url, used, errbuf, sizeof(errbuf));
+    if (errbuf[0]) {
+        free(r_url); free(r_body); free(used);
+        JS_FreeCString(ctx, url);
+        if (method) JS_FreeCString(ctx, method);
+        if (body) JS_FreeCString(ctx, body);
+        for (size_t i = 0; i < hdr_n; i++) free(hdr_lines[i]);
+        free(hdr_lines);
+        free(hdr_ptrs);
+        return JS_ThrowTypeError(ctx, "http_request: %s", errbuf);
+    }
+
+    JsHttpResult r = js_http_fetch_exec(r_url ? r_url : url, method,
+                                        r_body ? r_body : body, hdr_ptrs);
+    free(r_url);
+    free(r_body);
+    free(used);
     JS_FreeCString(ctx, url);
     if (method) JS_FreeCString(ctx, method);
     if (body) JS_FreeCString(ctx, body);

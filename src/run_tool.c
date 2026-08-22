@@ -104,6 +104,7 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     for (size_t i = 0; i < req->secret_count; i++) {
         w_str(&b, req->secrets[i].name);
         w_str(&b, req->secrets[i].value);
+        w_str(&b, req->secrets[i].hosts);
     }
     w_u32(&b, (uint32_t)req->param_count);
     for (size_t i = 0; i < req->param_count; i++) {
@@ -225,6 +226,7 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
             for (uint32_t i = 0; i < sc; i++) {
                 q->secrets[i].name  = r_str(r);
                 q->secrets[i].value = r_str(r);
+                q->secrets[i].hosts = r_str(r);
             }
             q->secret_count = sc;
         }

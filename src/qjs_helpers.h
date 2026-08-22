@@ -61,6 +61,18 @@ char *qjs_get_exception_string(JSContext *ctx);
  * (NULL/empty/unparseable → getConfig always returns null). */
 void qjs_register_eval_host_functions(JSContext *ctx, const char *config_json);
 
+/* Secrets available to http_request's fetch-boundary {{SECRET:name}}
+ * resolution (borrowed pointers; caller keeps them alive across eval).
+ * `hosts` is the secret's space-joined bound-host rules (NULL/empty =
+ * unbound → any use fails closed). Set before qjs_eval_run; (NULL, 0)
+ * clears. */
+typedef struct {
+    const char *name;
+    const char *value;
+    const char *hosts;
+} JsHostSecret;
+void qjs_host_set_secrets(const JsHostSecret *secrets, size_t count);
+
 /* In-process JS evaluator (SBX_JS run_fn + unit-test entry). Runs the eval
  * profile with host functions in THIS process — the caller is responsible for
  * any sandbox/namespace setup beforehand (the broker child does it; unit tests

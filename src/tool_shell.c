@@ -137,6 +137,7 @@ RunToolSecret *shell_filter_secrets(const char *cmd, const ShellSecret *all,
         if (found) {
             min[count].name = all[i].name;
             min[count].value = all[i].value;
+            min[count].hosts = NULL;   /* shell env injection: no binding gate here */
             count++;
         }
     }

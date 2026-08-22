@@ -193,6 +193,21 @@ char *tool_js_tier_run(const RunToolParsed *q, int *is_error) {
     /* The owning extension's config, resolved parent-side (this child has no
      * DB) — absent for a plain js_eval call, which then sees an empty one. */
     const char *ext_config = run_tool_param_json(q, "config");
+    /* Hand the blob's secrets to http_request's fetch-boundary resolver
+     * (placeholders in file bodies / built strings; args were already
+     * interpolated in the parent). Borrowed pointers — q outlives eval. */
+    JsHostSecret *js_secrets = NULL;
+    if (q->secret_count > 0 &&
+        (js_secrets = calloc(q->secret_count, sizeof(*js_secrets)))) {
+        for (size_t i = 0; i < q->secret_count; i++) {
+            js_secrets[i].name  = q->secrets[i].name;
+            js_secrets[i].value = q->secrets[i].value;
+            js_secrets[i].hosts = q->secrets[i].hosts;
+        }
+        qjs_host_set_secrets(js_secrets, q->secret_count);
+    }
     char *r = qjs_eval_run(code, filename, args, ext_config, is_error);
+    qjs_host_set_secrets(NULL, 0);
+    free(js_secrets);
     return r ? r : tool_fail(is_error, "error: js_eval returned null");
 }

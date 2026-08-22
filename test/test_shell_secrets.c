@@ -187,7 +187,7 @@ static void cleanup_workspace(void) {
 /* Injection still works (env reaches the child), and the raw value never
  * survives the parent masking chokepoint — it becomes {{SECRET:MYKEY}}. */
 static void test_shell_inject_then_mask(void) {
-    RunToolSecret secrets[] = {{"MYKEY", "hunter2xyz"}};
+    RunToolSecret secrets[] = {{"MYKEY", "hunter2xyz", NULL}};
 
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.command = "echo $CCLAW_SECRET_MYKEY";
@@ -229,7 +229,7 @@ static void test_env_injection_scoped(void) {
     /* The parent pre-filters: only secrets whose $CCLAW_SECRET_<NAME> appears
      * in the command get passed to the broker. The command below references
      * USEDKEY only, so the parent would pass only that one. */
-    RunToolSecret used_only[] = {{"USEDKEY", "value_used_123"}};
+    RunToolSecret used_only[] = {{"USEDKEY", "value_used_123", NULL}};
 
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     /* References USEDKEY only; the parent would have excluded UNUSEDKEY.

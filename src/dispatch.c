@@ -1005,6 +1005,40 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
                       &jc->sb, jc->workspace, jc->cwd_path, jc->db_path);
     char scratch[PATH_MAX];
     req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
+
+    /* Ship the secret snapshot (values + each secret's bound hosts) so the
+     * child can resolve {{SECRET:name}} at the fetch boundary — the one place
+     * placeholders from file bodies, extension code, or runtime-built strings
+     * become resolvable. Args/config placeholders were already interpolated
+     * parent-side; this covers everything else. The binding gate rides along
+     * because the child has no DB to ask. */
+    RunToolSecret *js_secrets = NULL;
+    char **js_hosts = NULL;
+    if (secret_count > 0) {
+        js_secrets = calloc(secret_count, sizeof(*js_secrets));
+        js_hosts = calloc(secret_count, sizeof(*js_hosts));
+    }
+    if (js_secrets && js_hosts) {
+        for (size_t i = 0; i < secret_count; i++) {
+            js_secrets[i].name  = secrets[i].name;
+            js_secrets[i].value = secrets[i].value;
+            int bn = 0;
+            char **bh = db_secret_hosts(proc_db(), secrets[i].name, &bn);
+            if (bn > 0) {
+                Buf hb = {0};
+                for (int j = 0; j < bn; j++) {
+                    if (j) buf_append_char(&hb, ' ');
+                    buf_append_str(&hb, bh[j]);
+                }
+                js_hosts[i] = buf_take(&hb);
+            }
+            for (int j = 0; j < bn; j++) free(bh[j]);
+            free(bh);
+            js_secrets[i].hosts = js_hosts[i];
+        }
+        req.secrets = js_secrets;
+        req.secret_count = secret_count;
+    }
     req.spill_path = spill_path;
     req.params = params;
     req.param_count = param_n;
@@ -1023,6 +1057,10 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
     req.timeout = timeout;
     char *blob = run_tool_serialize_request(&req, out_len);
     call_egress_free(&se);
+    if (js_hosts)
+        for (size_t i = 0; i < secret_count; i++) free(js_hosts[i]);
+    free(js_hosts);
+    free(js_secrets);
     free(read_paths);
     tool_wire_args_wipe_free(params, param_n);
     return blob;
@@ -1077,13 +1115,16 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         if (g != 0) return g;
     }
 
-    /* {{SECRET:name}} gate: every path below interpolates placeholders into
-     * this call's values (inline needs_interp tools and all sandbox tiers).
+    /* {{SECRET:name}} gate: paths that interpolate placeholders into this
+     * call's values (inline needs_interp tools; shell/web/js sandbox tiers).
      * A name that matches no loaded secret is a hard error naming the typo —
      * never an enumeration of what does exist (see search_config
-     * secret_bindings for that, through the sanctioned surface). */
+     * secret_bindings for that, through the sanctioned surface). The file
+     * tier is exempt: file_write content is a document, not a resolution
+     * site — writing a placeholder into a file is always legal; it resolves
+     * (or errors) later, at the js fetch boundary. */
     if ((tool_needs_interpolation(tc->name) ||
-         te->recipe.vehicle == EXEC_SANDBOX) &&
+         (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier != SBX_FILE)) &&
         tc->arguments && strstr(tc->arguments, "{{SECRET:")) {
         char *miss = unknown_secret_name(tc->arguments, secrets, secret_count);
         if (miss) {
@@ -1520,9 +1561,9 @@ int dispatch_tool(int64_t session_id, const char *agent_name,
  * would, and fork it. Refreshing caps to the target agent first is what makes
  * "runs under that agent's sandbox_profile and grants" true — the shared setup
  * is rebound before every tool batch anyway, so borrowing it here between
- * turns costs nothing on the single event-loop thread. {{SECRET:name}} is
- * deliberately not interpolated: a cron script is a file on disk, not a
- * model-written argument, so there is no argument to substitute into. */
+ * turns costs nothing on the single event-loop thread. {{SECRET:name}} in the
+ * script file is never rewritten on disk — it resolves in the child at the
+ * fetch boundary, same as any js dispatch. */
 CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len) {
     if (!proc_tool_setup() || !proc_db()) {
         snprintf(err, err_len, "the daemon cannot run scripts right now");
@@ -1579,10 +1620,16 @@ CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len)
 
     size_t blob_len = 0;
     /* Scheduled script: no tool_call_id to name a spill file after, so the
-     * parent's truncate_and_spill handles it as before. */
+     * parent's truncate_and_spill handles it as before. Secrets ride along
+     * like any js dispatch — a cron script's {{SECRET:name}} resolves at the
+     * fetch boundary in the child, never in the file itself. */
+    size_t snap_n = 0;
+    ShellSecret *snap = secrets_snapshot(proc_db(),
+        proc_tool_setup()->secrets, proc_tool_setup()->secret_count, &snap_n);
     char *blob = js_request_serialize(jc, f->agent_name, "js_eval", "{}",
-                                      NULL, NULL, 0, params, 1, NULL,
+                                      NULL, snap, snap_n, params, 1, NULL,
                                       JSEVAL_DEFAULT_TIMEOUT, &blob_len);
+    secrets_snapshot_free(snap, snap_n);
     if (!blob) {
         snprintf(err, err_len, "the script request exceeds the 32KB wire cap");
         return CRON_SCRIPT_FAILED;

@@ -73,6 +73,9 @@
 #include "sweep.h"
 #include "util.h"
 
+/* vendor/sqlite3/shell.c, compiled with -Dmain=sqlite3_shell_main */
+int sqlite3_shell_main(int argc, char **argv);
+
 _Static_assert(sizeof(WakeMsg) <= PIPE_BUF,
     "WakeMsg must fit in PIPE_BUF so wake-pipe writes stay atomic");
 
@@ -766,6 +769,14 @@ int main(int argc, char *argv[]) {
     /* --run-tool: early intercept for sandboxed file tool child. No DB, no key,
      * no config. The child reads its request from fd 3. */
     if (argc >= 2 && strcmp(argv[1], "--run-tool") == 0) return run_tool_main();
+
+    /* sqlite3: the upstream shell, linked against the same amalgamation the
+     * daemon uses. Deployment targets (Pogoplug, minimal containers) often
+     * have no sqlite3 package, or one too old to read our JSONB columns.
+     * Intercepted before DB/config init — it opens whatever file it is given,
+     * including none. argv is handed over verbatim from argv[1]. */
+    if (argc >= 2 && strcmp(argv[1], "sqlite3") == 0)
+        return sqlite3_shell_main(argc - 1, argv + 1);
 
     /* --doctor: one-shot diagnostic bundle. Runs its own DB/config path so a
      * broken DB open is itself a finding — never bail on failures. */

@@ -173,9 +173,11 @@ jobs:
               apt-get update
               apt-get install -y --no-install-recommends build-essential libcurl4-openssl-dev xxd git
               git config --global --add safe.directory /src
-              # ARMv5TE has no hardware CAS instruction; 8-byte atomic
-              # builtins (sqlite, quickjs) need libatomic pulled in explicitly.
-              make all LDFLAGS="-lcurl -lm -lpthread -ldl -latomic"
+              # ARMv5TE has no hardware CAS instruction, so the 8-byte atomic
+              # builtins quickjs and sqlite emit become libatomic calls. The
+              # Makefile's link probe detects that; this job is where it gets
+              # exercised, so don't paper over it with an explicit LDFLAGS.
+              make all
               strip build/cclaw
               ./build/cclaw --version
               ./build/cclaw --doctor

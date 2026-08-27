@@ -8,6 +8,12 @@ hold uncheckpointed state, so query the live DB, don't copy just the `.db` file.
 DB=~/.cclaw/cclaw.db   # used below
 ```
 
+Every `sqlite3` below can be `cclaw sqlite3` instead — the same upstream shell,
+built from the amalgamation the daemon links against. Prefer it on deployment
+boxes: the system `sqlite3` may be missing entirely, and anything older than
+3.45 renders the JSONB columns (`llm_responses.body`, `request_body`) as binary
+garbage, which reads as corruption but is just the storage format.
+
 ## Diagnosing a failed LLM turn
 
 A failed turn shows up in chat as `error: LLM request failed [resp #N]` (or

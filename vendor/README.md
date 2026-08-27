@@ -8,9 +8,18 @@ security fixes since the pinned version — that's the main reason to bump.
 ## SQLite 3.53.1
 
 - Source: https://www.sqlite.org/2026/sqlite-amalgamation-3530100.zip
+- Files: `sqlite3.c`, `sqlite3.h`, `shell.c`
 - Docs: https://www.sqlite.org/
 - License: Public domain
-- Last checked: 2026-07-17
+- Last checked: 2026-08-27
+
+`shell.c` is the upstream CLI, exposed as the `cclaw sqlite3` verb so a
+deployment target never needs an `sqlite3` package — and never reads our JSONB
+columns through a pre-3.45 shell that renders them as binary garbage. It is
+compiled with `-Dmain=sqlite3_shell_main` to coexist with our own `main()`, and
+must stay on `-std=gnu11 -D_GNU_SOURCE` (see the Makefile rule for why). Take
+it from the same zip as the amalgamation on every refresh — a shell built
+against a different version than it links to is not a supported combination.
 
 ## Civetweb 1.16
 

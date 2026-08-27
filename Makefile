@@ -2,6 +2,13 @@ CC      ?= cc
 CFLAGS  := -std=c11 -Wall -Wextra -Werror -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn -Ivendor/yxml
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
+# ARMv5TE (and other pre-v6 ARM, RISC-V rv32) has no hardware CAS wide enough
+# for the 8-byte atomic builtins quickjs and sqlite emit, so the compiler leaves
+# them as calls into libatomic. Probe rather than hardcode: the library is
+# absent on some musl toolchains where the builtins are inlined instead.
+ATOMIC_PROBE := 'int main(void){long long v=0;return(int)__atomic_fetch_add(&v,1,5);}'
+LDFLAGS += $(shell echo $(ATOMIC_PROBE) | $(CC) -x c - -o /dev/null 2>/dev/null || echo -latomic)
+
 VERSION_COMMIT := $(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_DATE     := $(shell date -u +%Y-%m-%d)
 CFLAGS += -DVERSION_COMMIT='"$(VERSION_COMMIT)"' -DBUILD_DATE='"$(BUILD_DATE)"'
@@ -43,12 +50,12 @@ OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 # edit (test_util.h) leaves stale test binaries.
 DEP      = $(OBJ:.o=.d) $(TEST_BIN:=.d) $(INTEG_BIN:=.d) $(E2E_BIN:=.d)
 
-VENDOR_SRC := vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c \
+VENDOR_SRC := vendor/sqlite3/sqlite3.c vendor/sqlite3/shell.c vendor/civetweb/civetweb.c \
               vendor/quickjs/quickjs.c vendor/quickjs/cutils.c \
               vendor/quickjs/dtoa.c vendor/quickjs/libunicode.c \
               vendor/quickjs/libregexp.c \
               vendor/monocypher/monocypher.c vendor/yxml/yxml.c
-VENDOR_OBJ := $(BUILDDIR)/sqlite3.o $(BUILDDIR)/civetweb.o \
+VENDOR_OBJ := $(BUILDDIR)/sqlite3.o $(BUILDDIR)/sqlite3_shell.o $(BUILDDIR)/civetweb.o \
               $(BUILDDIR)/quickjs.o $(BUILDDIR)/qjs_cutils.o \
               $(BUILDDIR)/qjs_dtoa.o $(BUILDDIR)/qjs_libunicode.o \
               $(BUILDDIR)/qjs_libregexp.o \
@@ -110,6 +117,18 @@ $(BUILDDIR)/sandbox.o: $(BUILDDIR)/preload_blob.h $(BUILDDIR)/net_shim_blob.h
 
 $(BUILDDIR)/sqlite3.o: vendor/sqlite3/sqlite3.c | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -c -o $@ $<
+
+# The upstream CLI shell, renamed so it can sit next to our own main().
+# SQLITE_OMIT_READLINE keeps it dependency-free (no libreadline/libedit on a
+# Pogoplug); it still reads piped stdin and -cmd arguments, which is what the
+# `cclaw sqlite3` verb is for.
+$(BUILDDIR)/sqlite3_shell.o: vendor/sqlite3/shell.c | $(BUILDDIR)/
+# gnu11 + _GNU_SOURCE are load-bearing, not cosmetic: under strict -std=c11 the
+# POSIX prototypes (strdup, realpath, readlink) stay hidden, so the shell's
+# calls become implicit int and silently truncate returned pointers on 64-bit.
+	$(CC) -std=gnu11 -D_GNU_SOURCE -O2 -Ivendor/sqlite3 -Dmain=sqlite3_shell_main \
+	      -DSQLITE_OMIT_READLINE -DSQLITE_SHELL_IS_UTF8 \
+	      -Wno-unused-parameter -Wno-sign-compare -c -o $@ $<
 
 $(BUILDDIR)/civetweb.o: vendor/civetweb/civetweb.c | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -DNO_SSL -DNO_CGI -DUSE_IPV6 -DNO_CACHING -Ivendor/civetweb -Wno-unused-parameter -c -o $@ $<

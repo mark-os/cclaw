@@ -62,6 +62,58 @@ These look odd at a glance but are deliberate. Understand them before touching t
 - **No config files in agent logic, no compat shims.** Config comes from env at startup; delete old code instead of versioning it. The one sanctioned versioning mechanism is the DB schema patch list (`schema_patches[]` in `src/db.c`).
 - **One binary for every process mode — no per-subsystem "thin" child.** The re-exec'd `cclaw --run-tool` broker (all sandboxed tool tiers, including JS) and the `cclaw --channel` runner reuse the full image. COW fork + demand paging already keep the subsystems a child never calls (civetweb, most of SQLite) out of its resident set; `--run-tool` is intercepted at the top of `main()` before any DB/config/key init, so the child never even starts them. Splitting out a minimal child binary would buy nothing and is not worth the build/maintenance cost.
 
+### Code that touches the world outside the process
+
+Most of CClaw is self-contained and its invariants hold because the code
+enforces them. The exceptions are the places that depend on something we do not
+control — the init system, the OS user model, the compiler's warning defaults,
+SQLite's visibility rules across connections, a remote API's latency and
+response shape. That is where the bugs live, and they share a shape: an
+assumption that was reasonable, never checked, and wrong.
+
+- **Write the assumption down, then check it in code.** "The supervisor will
+  restart it", "the health check passes when healthy", "the response has one
+  text part" are all contracts with something external. If a contract matters,
+  assert it at runtime and handle the violation; if it is only documented in
+  your head, it is not a contract, it is a hope.
+- **Prove the detector before you wire a remedy.** A detector that cannot
+  distinguish success from failure, attached to an automatic recovery action,
+  is *worse* than no detector: it destroys healthy systems on a schedule. Two
+  real examples, both caught only on a real deployment — a health check run as
+  the wrong user failed for everything, and a liveness poll on a connection
+  opened before the restart could never observe the restart (WAL readers can
+  sit on the snapshot they started with; reopen, do not reuse). Before adding
+  automatic recovery, demonstrate the detector firing correctly in *both*
+  directions.
+- **Failure paths degrade to "nothing happened", never to "something was
+  half-undone".** Recovery code runs only during an incident, which is exactly
+  when a second bug is least affordable, and it is the least-exercised code you
+  have. Prefer designs where the passive option is the safe one: do not stop a
+  service you have no verified way to start; do not overwrite a database file
+  another process may hold open; do not signal processes on the way out of a
+  failure, because whatever is still alive is the part that survived. This is
+  the fail-closed rule from the security model applied to lifecycle work.
+- **A hardcoded timeout or size limit is a latent portability bug.** It encodes
+  the speed of the machine it was written on. The same call that takes two
+  seconds from a cloud VM can take fifty on a small ARM box on a domestic
+  connection — and a fixed ceiling makes that feature simply impossible there,
+  with no configuration that helps. Give the caller a way to raise it, and keep
+  a bound so it stays a ceiling rather than a hang.
+- **Keep the local build at least as strict as the strictest CI target.**
+  Distributions differ in what their toolchain enables by default (Debian and
+  Ubuntu turn on `-Wformat-security` through hardening; others do not, and it
+  is in neither `-Wall` nor `-Wextra`). A warning CI enforces and the local
+  build does not is a bug you cannot see while writing it. Ask for the flag
+  explicitly rather than inheriting it by accident.
+
+Two habits follow from the above, and both are cheap. **Reproduce the risky
+path against a real instance before shipping it** — a throwaway `cclaw --daemon`
+on a temp DB in a scratch directory takes seconds to stand up, and exercises
+supervisor interaction, the `processes` table, and cross-process visibility that
+no unit test in this tree currently covers. And **do not use releases as a
+debugging vehicle**: cut the tag once the risky path is proven, not as the means
+of finding out.
+
 ## Target Platforms
 
 - **Primary dev**: EC2 t4g.small (ARM64, Amazon Linux 2023)

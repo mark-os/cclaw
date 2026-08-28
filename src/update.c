@@ -220,13 +220,30 @@ static int schema_compatible(const char *candidate, sqlite3 *db, char *why, size
 /* Wait for the supervisor to bring a daemon up that is not the one we killed.
  * Identity is started_at from the daemon's own processes row, so this cannot
  * be fooled by a recycled pid. */
-static int await_restart(sqlite3 *db, int64_t old_started_at) {
+static int await_restart(const char *db_path, int64_t old_started_at,
+                         pid_t old_pid) {
     for (int waited = 0; waited < RESTART_TIMEOUT_S; waited++) {
         struct timespec ts = { .tv_sec = 0, .tv_nsec = RESTART_POLL_MS * 1000000L };
         nanosleep(&ts, NULL);
+
+        /* A fresh connection per poll, deliberately. Our own handle was opened
+         * before the restart and can sit on a WAL read snapshot from then,
+         * which makes the new daemon's row invisible no matter how long we
+         * wait — the failure this loop is supposed to detect and the failure
+         * it would report look identical from here. Reopening costs
+         * microseconds once a second and removes the question. */
+        sqlite3 *poll_db = NULL;
+        if (sqlite3_open_v2(db_path, &poll_db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+            sqlite3_close(poll_db);
+            continue;
+        }
         int64_t started = 0;
-        pid_t pid = running_daemon_pid(db, &started);
-        if (pid > 0 && started > old_started_at) return 0;
+        pid_t pid = running_daemon_pid(poll_db, &started);
+        sqlite3_close(poll_db);
+        /* Either signal is proof of a restart. started_at alone is not enough:
+         * it has one-second resolution, so a quick stop/start can land in the
+         * same second the old daemon reported. */
+        if (pid > 0 && (pid != old_pid || started > old_started_at)) return 0;
     }
     return -1;
 }
@@ -287,6 +304,10 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
     /* Backstop for the failure the handshake cannot see: a build that migrates
      * the database fine and then dies for an unrelated reason. */
     const char *dbfile = sqlite3_db_filename(db, "main");
+    /* Own the path: the revert below closes db, and sqlite3_db_filename's
+     * pointer dies with the connection. */
+    char dbpath_copy[4096] = "";
+    if (dbfile) snprintf(dbpath_copy, sizeof(dbpath_copy), "%s", dbfile);
     char snap[4096] = "";
     if (dbfile && dbfile[0]) {
         snprintf(snap, sizeof(snap), "%s.preupdate", dbfile);
@@ -355,7 +376,7 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
         fprintf(stderr, "warning: restart command exited %d — checking anyway\n",
                 cmd_rc);
 
-    if (await_restart(db, old_started) == 0) {
+    if (await_restart(dbpath_copy, old_started, pid) == 0) {
         printf("daemon is back up on %s\n", tag);
         config_set(db, "update.installed_tag", tag);
         return 0;
@@ -363,21 +384,31 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
 
     fprintf(stderr, "error: daemon did not come back within %ds — reverting\n",
             RESTART_TIMEOUT_S);
-    pid = running_daemon_pid(db, NULL);
-    if (pid > 0) kill(pid, SIGTERM);
     if (copy_file(prevpath, self, 0755) != 0)
         fprintf(stderr, "CRITICAL: could not restore %s from %s — do it by hand\n",
                 self, prevpath);
-    if (snap[0] && dbfile) {
-        char wal[4096], shm[4096];
-        snprintf(wal, sizeof(wal), "%s-wal", dbfile);
-        snprintf(shm, sizeof(shm), "%s-shm", dbfile);
-        sqlite3_close(db);
-        if (copy_file(snap, dbfile, 0600) == 0) {
-            unlink(wal); unlink(shm);
-            fprintf(stderr, "database restored from %s\n", snap);
+    /* Restoring means writing over the database file wholesale, which is only
+     * safe with nothing attached to it. A daemon *did* come up, just not one we
+     * could confirm — clobbering its file underneath it would turn a failed
+     * update into a corrupted database, which is far worse than a stale one.
+     * The binary is already back; leave the snapshot for a human. */
+    if (snap[0] && dbpath_copy[0]) {
+        pid_t live = running_daemon_pid(db, NULL);
+        if (live > 0) {
+            fprintf(stderr, "a daemon (pid %d) is attached to the database, so it "
+                            "was left as is.\n  snapshot kept at %s\n",
+                    (int)live, snap);
         } else {
-            fprintf(stderr, "CRITICAL: could not restore the database from %s\n", snap);
+            char wal[4160], shm[4160];
+            snprintf(wal, sizeof(wal), "%s-wal", dbpath_copy);
+            snprintf(shm, sizeof(shm), "%s-shm", dbpath_copy);
+            sqlite3_close(db);
+            if (copy_file(snap, dbpath_copy, 0600) == 0) {
+                unlink(wal); unlink(shm);
+                fprintf(stderr, "database restored from %s\n", snap);
+            } else {
+                fprintf(stderr, "CRITICAL: could not restore the database from %s\n", snap);
+            }
         }
     }
     fprintf(stderr, "reverted to the previous build — start the daemon "

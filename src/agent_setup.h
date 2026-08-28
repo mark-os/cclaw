@@ -21,6 +21,7 @@
 #include "tool_web_fetch.h"
 #include "tool_secret_create.h"
 #include "tool_channel_send.h"
+#include "tool_session_condense.h"
 #include "proxy.h"
 #include "extension.h"
 #include "config.h"
@@ -67,6 +68,7 @@ typedef struct {
     ToolCronCtx cron_ctx;
     ToolSecretCreateCtx secret_create_ctx;
     ToolChannelSendCtx chan_send_ctx;
+    ToolCondenseCtx condense_ctx;
     /* secrets for shell injection + masking */
     ShellSecret *secrets;
     size_t secret_count;

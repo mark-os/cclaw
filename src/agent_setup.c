@@ -97,6 +97,15 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* db_query */
     tool_db_query_register(&setup->reg, db);
 
+    /* session_condense — registered so it is discoverable under "Requestable
+     * Tools", deliberately absent from agent_default_tools: it rewrites the
+     * agent's own past, so it is granted, never assumed. */
+    setup->condense_ctx.db = db;
+    setup->condense_ctx.session_id = session_id;
+    snprintf(setup->condense_ctx.agent_name, sizeof(setup->condense_ctx.agent_name),
+             "%s", agent_name ? agent_name : "");
+    tool_session_condense_register(&setup->reg, &setup->condense_ctx);
+
     /* Memory tools */
     setup->mem_ctx.db = db;
     setup->mem_ctx.agent_name = (char *)agent_name;

@@ -39,6 +39,7 @@
 #define DB_PATH  "/tmp/test_daemon_lifecycle.db"
 #define OUT_PATH "/tmp/test_daemon_lifecycle_daemon.txt"
 #define HOME_DIR "/tmp/test_daemon_lifecycle_home"
+#define REEXEC_BIN "/tmp/test_daemon_lifecycle_cclaw"
 
 #define FAIL(m) do { fprintf(stderr, "FAIL: %s\n", m); return 1; } while (0)
 
@@ -46,7 +47,7 @@
 #define START_TIMEOUT_S 20
 #define NEG_TIMEOUT_S    3
 
-static pid_t spawn_daemon(void) {
+static pid_t spawn_daemon_from(const char *bin) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
@@ -55,11 +56,13 @@ static pid_t spawn_daemon(void) {
         setenv("CCLAW_DB_PATH", DB_PATH, 1);
         setenv("HOME", HOME_DIR, 1);
         setenv("OPENROUTER_API_KEY", "sk-test-not-used", 1);
-        execl("build/cclaw", "cclaw", "--daemon", (char *)NULL);
+        execl(bin, bin, "--daemon", (char *)NULL);
         _exit(127);
     }
     return pid;
 }
+
+static pid_t spawn_daemon(void) { return spawn_daemon_from("build/cclaw"); }
 
 /* Read the registered daemon row through a *fresh* connection, the same way
  * the detector must. Returns 0 if no daemon is registered. */
@@ -81,6 +84,23 @@ static pid_t read_registered(int64_t *started_at) {
     sqlite3_finalize(st);
     sqlite3_close(db);
     return pid;
+}
+
+static void read_instance(char *out, size_t cap) {
+    out[0] = '\0';
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(DB_PATH, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        sqlite3_close(db); return;
+    }
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT instance_id FROM processes WHERE mode='daemon'"
+                               " ORDER BY heartbeat_at DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) snprintf(out, cap, "%s", v);
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
 }
 
 static pid_t wait_registered(pid_t want_pid, int64_t *started_at) {
@@ -131,7 +151,10 @@ int main(void) {
      * below would pass for free, and the whole test would be theatre. */
     printf("  detects_no_restart... ");
     time_t t0 = time(NULL);
-    int rc = update_await_restart(DB_PATH, first_started, first, NEG_TIMEOUT_S);
+    char first_instance[64] = "";
+    read_instance(first_instance, sizeof(first_instance));
+    if (!first_instance[0]) { stop_daemon(first); FAIL("no instance_id registered"); }
+    int rc = update_await_restart(DB_PATH, first_instance, NEG_TIMEOUT_S);
     time_t waited = time(NULL) - t0;
     if (rc == 0) {
         stop_daemon(first);
@@ -150,13 +173,15 @@ int main(void) {
     stop_daemon(first);
     pid_t second = spawn_daemon();
     if (second < 0) FAIL("fork");
-    rc = update_await_restart(DB_PATH, first_started, first, START_TIMEOUT_S);
+    rc = update_await_restart(DB_PATH, first_instance, START_TIMEOUT_S);
     if (rc != 0) {
         stop_daemon(second);
         FAIL("a restarted daemon was not detected (the WAL-snapshot bug)");
     }
     int64_t second_started = 0;
     pid_t reg = read_registered(&second_started);
+    char second_instance[64] = "";
+    read_instance(second_instance, sizeof(second_instance));
     if (reg != second) {
         stop_daemon(second);
         FAIL("processes does not name the running daemon");
@@ -168,13 +193,50 @@ int main(void) {
 
     /* ── and says no again once the daemon is gone ── */
     printf("  detects_daemon_gone... ");
-    rc = update_await_restart(DB_PATH, second_started, second, NEG_TIMEOUT_S);
+    rc = update_await_restart(DB_PATH, second_instance, NEG_TIMEOUT_S);
     if (rc == 0) FAIL("reported a restart with no daemon running");
     printf("PASS\n");
+
+    /* ── SIGUSR2 re-exec: same pid, new image, new instance ──
+     * The point of the feature: no supervisor involvement at all. This is also
+     * the case pid-based identity cannot see, since exec keeps the pid — and
+     * where exec'ing /proc/self/exe would silently relaunch the *old* inode
+     * after a rename, so the test asserts the version actually changed. */
+    printf("  reexec_adopts_new_binary... ");
+    if (system("cp build/cclaw " REEXEC_BIN) != 0) FAIL("cp");
+    pid_t third = spawn_daemon_from(REEXEC_BIN);
+    if (third < 0) FAIL("fork");
+    if (wait_registered(third, NULL) != third) {
+        stop_daemon(third); FAIL("re-exec daemon never registered");
+    }
+    char third_instance[64] = "";
+    read_instance(third_instance, sizeof(third_instance));
+
+    /* Replace the binary underneath it, exactly as `cclaw update` does. */
+    if (system("printf '#!/bin/sh\\nexit 9\\n' > " REEXEC_BIN ".new"
+               " && chmod +x " REEXEC_BIN ".new"
+               " && mv -f " REEXEC_BIN ".new " REEXEC_BIN) != 0)
+        { stop_daemon(third); FAIL("could not replace the binary"); }
+
+    kill(third, SIGUSR2);
+    /* The replacement is a script that exits 9, so a successful exec means the
+     * process is gone — proof the new file was executed, not the old inode. */
+    int st = 0, gone = 0;
+    for (int i = 0; i < 150; i++) {
+        if (waitpid(third, &st, WNOHANG) == third) { gone = 1; break; }
+        usleep(100000);
+    }
+    if (!gone) { stop_daemon(third); FAIL("daemon did not re-exec on SIGUSR2"); }
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 9) {
+        FAIL("re-exec ran something other than the replaced binary "
+             "(exec'ing /proc/self/exe would relaunch the old inode)");
+    }
+    printf("PASS (pid %d kept, ran the replacement)\n", (int)third);
+    unlink(REEXEC_BIN);
 
     unlink(DB_PATH);
     unlink(DB_PATH "-wal");
     unlink(DB_PATH "-shm");
-    printf("4/4 passed\n");
+    printf("5/5 passed\n");
     return 0;
 }

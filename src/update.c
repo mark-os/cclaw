@@ -114,15 +114,23 @@ static int http_get_to_memory(const char *url, HttpResponse *resp, int json) {
 
 /* Find the running daemon. The processes table is the daemon's own
  * registration, so this needs no pidfile and no guessing. */
-static pid_t running_daemon_pid(sqlite3 *db, int64_t *started_at) {
+/* instance_id, not pid, is a daemon's identity. It is a fresh random token per
+ * registration, so it distinguishes a replacement from its predecessor even
+ * when the pid is identical — which is exactly the case after a re-exec, where
+ * the process keeps its pid and only the image changes. */
+static pid_t running_daemon_pid(sqlite3 *db, int64_t *started_at,
+                                char *instance_id, size_t id_cap) {
+    if (instance_id && id_cap) instance_id[0] = '\0';
     sqlite3_stmt *st = NULL;
     pid_t pid = 0;
     if (sqlite3_prepare_v2(db,
-            "SELECT pid, started_at FROM processes WHERE mode='daemon' "
+            "SELECT pid, started_at, instance_id FROM processes WHERE mode='daemon' "
             "ORDER BY heartbeat_at DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
         if (sqlite3_step(st) == SQLITE_ROW) {
             pid = (pid_t)sqlite3_column_int(st, 0);
             if (started_at) *started_at = sqlite3_column_int64(st, 1);
+            const char *id = (const char *)sqlite3_column_text(st, 2);
+            if (instance_id && id_cap && id) snprintf(instance_id, id_cap, "%s", id);
         }
     }
     sqlite3_finalize(st);
@@ -220,8 +228,8 @@ static int schema_compatible(const char *candidate, sqlite3 *db, char *why, size
 /* Wait for the supervisor to bring a daemon up that is not the one we killed.
  * Identity is started_at from the daemon's own processes row, so this cannot
  * be fooled by a recycled pid. */
-int update_await_restart(const char *db_path, int64_t old_started_at,
-                         pid_t old_pid, int timeout_s) {
+int update_await_restart(const char *db_path, const char *old_instance_id,
+                         int timeout_s) {
     /* Deadline, not a count of sleeps. nanosleep() returns early when a signal
      * arrives, and this runs right after system() has reaped a shell — so
      * counting iterations quietly turns a 90s wait into a fraction of that,
@@ -244,13 +252,10 @@ int update_await_restart(const char *db_path, int64_t old_started_at,
             sqlite3_close(poll_db);
             continue;
         }
-        int64_t started = 0;
-        pid_t pid = running_daemon_pid(poll_db, &started);
+        char id[64] = "";
+        pid_t pid = running_daemon_pid(poll_db, NULL, id, sizeof(id));
         sqlite3_close(poll_db);
-        /* Either signal is proof of a restart. started_at alone is not enough:
-         * it has one-second resolution, so a quick stop/start can land in the
-         * same second the old daemon reported. */
-        if (pid > 0 && (pid != old_pid || started > old_started_at)) return 0;
+        if (pid > 0 && id[0] && strcmp(id, old_instance_id) != 0) return 0;
     } while (time(NULL) < deadline);
     return -1;
 }
@@ -329,8 +334,8 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
         printf("database snapshot: %s (%lld bytes)\n", snap, bytes);
     }
 
-    int64_t old_started = 0;
-    pid_t pid = running_daemon_pid(db, &old_started);
+    char old_instance[64] = "";
+    pid_t pid = running_daemon_pid(db, NULL, old_instance, sizeof(old_instance));
 
     if (copy_file(self, prevpath, 0755) != 0) {
         fprintf(stderr, "error: cannot preserve the current binary\n");
@@ -364,27 +369,36 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
      * running process holds its own inode, so it keeps serving the old code
      * quite happily until the operator restarts it, and the new binary is
      * already on disk waiting. */
+    /* Two ways to get the running daemon onto the new code, and the default is
+     * the portable one: SIGUSR2 tells it to shut down normally and then exec
+     * the binary now on disk, keeping its pid. The supervisor never sees an
+     * exit, so nothing here needs to know whether this box runs systemd, an
+     * init script, or nothing at all — which is precisely the knowledge that
+     * made the first version of this fragile.
+     *
+     * update.restart_command overrides it, for the case exec cannot cover:
+     * exec inherits the current environment, so a deployment whose daemon
+     * reads a changed env file at startup needs a real restart. */
     char *restart_cmd = config_get(db, "update.restart_command");
-    if (!restart_cmd || !restart_cmd[0]) {
-        free(restart_cmd);
-        config_set(db, "update.installed_tag", tag);
-        if (snap[0]) unlink(snap);
-        printf("the running daemon (pid %d) was left alone — it keeps the old\n"
-               "code until it restarts. Restart it when convenient, or set\n"
-               "update.restart_command to have future updates do it for you.\n",
-               (int)pid);
-        return 0;
+    if (restart_cmd && restart_cmd[0]) {
+        printf("restarting daemon (pid %d): %s\n", (int)pid, restart_cmd);
+        int cmd_rc = system(restart_cmd);
+        if (cmd_rc != 0)
+            fprintf(stderr, "warning: restart command exited %d — checking anyway\n",
+                    cmd_rc);
+    } else {
+        printf("signalling daemon (pid %d) to restart into %s\n", (int)pid, tag);
+        if (kill(pid, SIGUSR2) != 0) {
+            fprintf(stderr, "error: could not signal the daemon: %s\n", strerror(errno));
+            free(restart_cmd);
+            config_set(db, "update.installed_tag", tag);
+            printf("the new binary is installed; restart the daemon to apply it\n");
+            return 0;
+        }
     }
-
-    printf("restarting daemon (pid %d): %s\n", (int)pid, restart_cmd);
-    int cmd_rc = system(restart_cmd);
     free(restart_cmd);
-    if (cmd_rc != 0)
-        fprintf(stderr, "warning: restart command exited %d — checking anyway\n",
-                cmd_rc);
 
-    if (update_await_restart(dbpath_copy, old_started, pid,
-                             RESTART_TIMEOUT_S) == 0) {
+    if (update_await_restart(dbpath_copy, old_instance, RESTART_TIMEOUT_S) == 0) {
         printf("daemon is back up on %s\n", tag);
         config_set(db, "update.installed_tag", tag);
         return 0;

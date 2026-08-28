@@ -77,6 +77,25 @@
 /* vendor/sqlite3/shell.c, compiled with -Dmain=sqlite3_shell_main */
 int sqlite3_shell_main(int argc, char **argv);
 
+/* Saved at startup for SIGUSR2 re-exec (see reexec_self). Captured *early* and
+ * on purpose: `cclaw update` replaces the binary by rename(), after which
+ * /proc/self/exe reads "<path> (deleted)" and still resolves to the old inode —
+ * exec'ing it would faithfully relaunch the code we are trying to replace. The
+ * path read here, before any replacement, is the one that opens the new file. */
+static char g_exe_path[PATH_MAX];
+static char **g_exe_argv;
+
+/* Re-exec into the binary now at g_exe_path, keeping our pid. Only returns on
+ * failure, in which case the caller exits normally and whatever supervises us
+ * decides what happens next. */
+static void reexec_self(void) {
+    if (!g_exe_path[0] || !g_exe_argv) return;
+    LOG_INFO_("re-exec: %s", g_exe_path);
+    fflush(NULL);
+    execv(g_exe_path, g_exe_argv);
+    LOG_ERROR_("re-exec failed: %s (exiting instead)", strerror(errno));
+}
+
 _Static_assert(sizeof(WakeMsg) <= PIPE_BUF,
     "WakeMsg must fit in PIPE_BUF so wake-pipe writes stay atomic");
 
@@ -409,6 +428,11 @@ static int run_daemon(char *db_path) {
     proc_set_tool_setup(NULL);
     agent_setup_destroy(&daemon_setup);
     config_free(proc_cfg()); db_close(proc_db()); free(db_path);
+
+    /* Last thing, after every subsystem is down and the DB is closed: become
+     * the new binary. Descriptors survive exec, so this must come after the
+     * teardown above, not instead of it. */
+    if (shutdown_reexec_requested()) reexec_self();
     return 0;
 }
 
@@ -770,6 +794,10 @@ done:
 }
 
 int main(int argc, char *argv[]) {
+    g_exe_argv = argv;
+    { ssize_t n = readlink("/proc/self/exe", g_exe_path, sizeof(g_exe_path) - 1);
+      if (n > 0) g_exe_path[n] = '\0'; else g_exe_path[0] = '\0'; }
+
     /* --run-tool: early intercept for sandboxed file tool child. No DB, no key,
      * no config. The child reads its request from fd 3. */
     if (argc >= 2 && strcmp(argv[1], "--run-tool") == 0) return run_tool_main();

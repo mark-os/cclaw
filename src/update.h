@@ -50,10 +50,11 @@ void update_check_tick(sqlite3 *db);
  * appears, -1 on timeout. Exposed for the lifecycle test: this is the exact
  * function `cclaw update` decides a restart by, and two of its bugs were only
  * observable against a real daemon — a connection opened before the restart
- * can sit on a WAL snapshot that hides the new row forever, and started_at
- * has one-second resolution, so a quick restart can land in the same second.
- * Takes a db *path*, not a handle, precisely because it must reopen. */
-int update_await_restart(const char *db_path, int64_t old_started_at,
-                         pid_t old_pid, int timeout_s);
+ * can sit on a WAL snapshot that hides the new row forever. Identity is
+ * instance_id, a fresh token per registration — pid is not identity, since a
+ * re-exec keeps it. Takes a db *path*, not a handle, precisely because it
+ * must reopen. */
+int update_await_restart(const char *db_path, const char *old_instance_id,
+                         int timeout_s);
 
 #endif

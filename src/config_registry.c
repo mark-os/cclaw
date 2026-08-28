@@ -129,6 +129,18 @@ static const ConfigDef s_defs[] = {
       "Seconds to keep consumed inbox rows (0 = keep forever)" },
     { "outbox_retention_sec", "604800",
       "Seconds to keep terminal channel_outbox rows (0 = keep forever)" },
+    { "update.repo", "mark-os/cclaw",
+      "GitHub owner/repo that `cclaw update` pulls tagged releases from" },
+    { "update.asset", "",
+      "Release asset to install (empty = pick by this build's architecture)" },
+    { "update.installed_tag", "",
+      "Release tag currently installed; set by `cclaw update`, empty if never run" },
+    { "update.check_interval_hours", "0",
+      "How often the daemon checks for a newer release (0 = never). A new tag "
+      "is delivered as a note in the default agent's inbox — it tells you, it "
+      "does not install anything" },
+    { "update.notified_tag", "",
+      "Last release tag an agent was told about; suppresses repeat notices" },
     { "disk_min_free_mb", "20",
       "Free-space floor in MB below which the daemon refuses new LLM dispatch (0 = disabled)" },
     { "workspace",          "",

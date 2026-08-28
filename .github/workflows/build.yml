@@ -43,12 +43,15 @@ jobs:
           mkdir -p dist
           strip -o dist/cclaw build/cclaw
           chmod +x dist/cclaw
-          (cd dist && zip -q cclaw-linux-x64.zip cclaw && rm cclaw)
+          (cd dist && zip -q cclaw-linux-x64.zip cclaw)
+          mv dist/cclaw dist/cclaw-linux-x64
 
       - uses: actions/upload-artifact@v4
         with:
           name: cclaw-linux-x64
-          path: dist/cclaw-linux-x64.zip
+          path: |
+            dist/cclaw-linux-x64.zip
+            dist/cclaw-linux-x64
 
   websocket-transport:
     name: websocket transport (libcurl with ws)
@@ -134,12 +137,15 @@ jobs:
           mkdir -p dist
           strip -o dist/cclaw build/cclaw
           chmod +x dist/cclaw
-          (cd dist && zip -q cclaw-linux-x86.zip cclaw && rm cclaw)
+          (cd dist && zip -q cclaw-linux-x86.zip cclaw)
+          mv dist/cclaw dist/cclaw-linux-x86
 
       - uses: actions/upload-artifact@v4
         with:
           name: cclaw-linux-x86
-          path: dist/cclaw-linux-x86.zip
+          path: |
+            dist/cclaw-linux-x86.zip
+            dist/cclaw-linux-x86
 
   linux-armv5te:
     name: linux-armv5te (Pogoplug, armel, libcurl4)
@@ -186,17 +192,23 @@ jobs:
               ./build/cclaw --doctor
             '
 
+      # Two shapes of the same binary. The zip is for a human following the
+      # release notes; the bare file is what `cclaw update` fetches, so the
+      # updater needs no archive decoder and no unzip on the target.
       - name: Package
         run: |
           mkdir -p dist
           cp build/cclaw dist/cclaw
           chmod +x dist/cclaw
-          (cd dist && zip -q cclaw-linux-armv5te.zip cclaw && rm cclaw)
+          (cd dist && zip -q cclaw-linux-armv5te.zip cclaw)
+          mv dist/cclaw dist/cclaw-linux-armv5te
 
       - uses: actions/upload-artifact@v4
         with:
           name: cclaw-linux-armv5te
-          path: dist/cclaw-linux-armv5te.zip
+          path: |
+            dist/cclaw-linux-armv5te.zip
+            dist/cclaw-linux-armv5te
 
   release:
     name: Publish release
@@ -233,10 +245,16 @@ jobs:
           Swap \`cclaw-linux-x64.zip\` for \`cclaw-linux-x86.zip\` (32-bit x86) or
           \`cclaw-linux-armv5te.zip\` (ARMv5TE, e.g. Pogoplug V4) as needed — same
           three commands either way.
+
+          Each target is also attached unzipped (same name without \`.zip\`) —
+          that is what \`cclaw update\` downloads.
           EOF
           gh release create "$TAG" \
             dist/cclaw-linux-x64/cclaw-linux-x64.zip \
             dist/cclaw-linux-x86/cclaw-linux-x86.zip \
             dist/cclaw-linux-armv5te/cclaw-linux-armv5te.zip \
+            dist/cclaw-linux-x64/cclaw-linux-x64 \
+            dist/cclaw-linux-x86/cclaw-linux-x86 \
+            dist/cclaw-linux-armv5te/cclaw-linux-armv5te \
             --title "$TAG" \
             --notes-file "$notes"

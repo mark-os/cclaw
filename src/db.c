@@ -655,8 +655,6 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       NULL },
 };
 
-#define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */
-
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
     int uv = 0;
     sqlite3_stmt *s;

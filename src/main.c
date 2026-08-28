@@ -71,6 +71,7 @@
 #include "loop.h"
 #include "proc.h"
 #include "sweep.h"
+#include "update.h"
 #include "util.h"
 
 /* vendor/sqlite3/shell.c, compiled with -Dmain=sqlite3_shell_main */
@@ -387,6 +388,9 @@ static int run_daemon(char *db_path) {
         time_t now = time(NULL);
         if (now >= g_next_db_poll) {
             db_periodic();
+            /* Daemon-only: notices a newer release and drops a note in the
+             * default agent's inbox. Self-gating and off by default. */
+            update_check_tick(proc_db());
             g_next_db_poll = now + POLL_DB_INTERVAL;
         }
     }
@@ -813,6 +817,10 @@ int main(int argc, char *argv[]) {
      * and target boxes ship older system CLIs. */
     if (argc >= 2 && strcmp(argv[1], "backup") == 0) return backup_main(argc, argv);
 
+    /* update: replace this binary with a newer tagged release. Own DB open,
+     * like the other verbs — it must work with the daemon up or down. */
+    if (argc >= 2 && strcmp(argv[1], "update") == 0) return update_main(argc, argv);
+
     if (argc >= 2 && strcmp(argv[1], "resp") == 0) return resp_main(argc, argv);
 
     /* models: the provider availability probe (config-ax Phase 3). Read-only
@@ -836,6 +844,13 @@ int main(int argc, char *argv[]) {
         if (strcmp(argv[i], "--help") == 0) { print_usage(); return 0; }
         else if (strcmp(argv[i], "--version") == 0) {
             printf("cclaw %s (%s)\n", VERSION_COMMIT, BUILD_DATE);
+            return 0;
+        }
+        /* Machine-readable compatibility handshake. `cclaw update` runs this
+         * on a *downloaded* binary before installing it, so the format is a
+         * contract with future builds: one line, two key=value pairs. */
+        else if (strcmp(argv[i], "--schema-range") == 0) {
+            printf("min=%d current=%d\n", CCLAW_SCHEMA_MIN, CCLAW_SCHEMA_VERSION);
             return 0;
         }
         else if (strcmp(argv[i], "--daemon") == 0) daemon_mode = 1;

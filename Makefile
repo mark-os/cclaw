@@ -1,5 +1,9 @@
 CC      ?= cc
-CFLAGS  := -std=c11 -Wall -Wextra -Werror -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn -Ivendor/yxml
+# -Wformat-security is not in -Wall/-Wextra. Debian and Ubuntu turn it on
+# through their hardening defaults, so CI enforces it whether we ask or not;
+# Amazon Linux does not, which let a genuine format-string bug sit on master
+# unbuilt by CI. Ask for it explicitly so a local build fails where CI fails.
+CFLAGS  := -std=c11 -Wall -Wextra -Werror -Wformat-security -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn -Ivendor/yxml
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
 # ARMv5TE (and other pre-v6 ARM, RISC-V rv32) has no hardware CAS wide enough

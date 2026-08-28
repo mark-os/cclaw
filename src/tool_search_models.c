@@ -35,11 +35,8 @@ static char *handler(const char *arguments, void *user_data, int *is_error) {
     int rc = models_cache_query(ctx->db, provider, query, SEARCH_MODELS_PAGE,
                                 page, 0, &listing, err, sizeof(err));
     free(query); free(provider);
-    if (rc != 0) {
-        char msg[384];
-        snprintf(msg, sizeof(msg), "error: %s", err[0] ? err : "catalog search failed");
-        return tool_fail(is_error, msg);
-    }
+    if (rc != 0)
+        return tool_fail(is_error, "error: %s", err[0] ? err : "catalog search failed");
 
     Buf out = {0};
     buf_appendf(&out, "## Models listed by the provider catalog\n%s", listing);

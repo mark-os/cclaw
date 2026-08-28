@@ -175,8 +175,11 @@ jobs:
               git config --global --add safe.directory /src
               # ARMv5TE has no hardware CAS instruction, so the 8-byte atomic
               # builtins quickjs and sqlite emit become libatomic calls. The
-              # Makefile's link probe detects that; this job is where it gets
-              # exercised, so don't paper over it with an explicit LDFLAGS.
+              # Makefile link probe detects that, and this job is where it gets
+              # exercised, so do not paper over it with an explicit LDFLAGS.
+              # (Careful: this whole script is a single-quoted argument to
+              # bash -c, so an apostrophe anywhere in it — even inside a
+              # comment — closes the quote and breaks the job.)
               make all
               strip build/cclaw
               ./build/cclaw --version

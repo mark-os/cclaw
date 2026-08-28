@@ -324,10 +324,36 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
         return 0;
     }
 
-    /* A process cannot cleanly re-exec itself mid-turn, so ask it to exit and
-     * let whatever supervises it start the replacement. */
-    printf("restarting daemon (pid %d)\n", (int)pid);
-    kill(pid, SIGTERM);
+    /* Never stop a daemon without a known way to start it again.
+     *
+     * The obvious design — signal it and let the supervisor respawn — is
+     * wrong, and testing on the Pogoplug is how that surfaced: a supervisor
+     * worth the name treats a *graceful* exit as intentional and stays down
+     * (the init script here is literally `[ $rc -eq 0 ] && break`). So a
+     * SIGTERM leaves the box with no daemon and nothing to bring it back.
+     *
+     * With no restart command configured the safe move is to do nothing: the
+     * running process holds its own inode, so it keeps serving the old code
+     * quite happily until the operator restarts it, and the new binary is
+     * already on disk waiting. */
+    char *restart_cmd = config_get(db, "update.restart_command");
+    if (!restart_cmd || !restart_cmd[0]) {
+        free(restart_cmd);
+        config_set(db, "update.installed_tag", tag);
+        if (snap[0]) unlink(snap);
+        printf("the running daemon (pid %d) was left alone — it keeps the old\n"
+               "code until it restarts. Restart it when convenient, or set\n"
+               "update.restart_command to have future updates do it for you.\n",
+               (int)pid);
+        return 0;
+    }
+
+    printf("restarting daemon (pid %d): %s\n", (int)pid, restart_cmd);
+    int cmd_rc = system(restart_cmd);
+    free(restart_cmd);
+    if (cmd_rc != 0)
+        fprintf(stderr, "warning: restart command exited %d — checking anyway\n",
+                cmd_rc);
 
     if (await_restart(db, old_started) == 0) {
         printf("daemon is back up on %s\n", tag);
@@ -354,8 +380,8 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
             fprintf(stderr, "CRITICAL: could not restore the database from %s\n", snap);
         }
     }
-    fprintf(stderr, "reverted — the supervisor should bring the previous "
-                    "build back up\n");
+    fprintf(stderr, "reverted to the previous build — start the daemon "
+                    "to confirm it is healthy\n");
     return 1;
 }
 

@@ -141,6 +141,10 @@ static const ConfigDef s_defs[] = {
       "does not install anything" },
     { "update.notified_tag", "",
       "Last release tag an agent was told about; suppresses repeat notices" },
+    { "update.restart_command", "",
+      "Shell command that restarts the daemon (e.g. '/etc/init.d/cclaw restart' "
+      "or 'systemctl restart cclaw'). Empty = `cclaw update` installs the binary "
+      "but leaves the running daemon alone, to take effect at your next restart" },
     { "disk_min_free_mb", "20",
       "Free-space floor in MB below which the daemon refuses new LLM dispatch (0 = disabled)" },
     { "workspace",          "",

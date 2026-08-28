@@ -257,8 +257,12 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   *refused* rather than attempted — schema patches are forward-only, so a
   binary that migrates the DB and then fails is not undone by swapping the
   binary back. It also snapshots the DB, keeps the old binary as `.prev`,
-  swaps atomically, and restarts by asking the daemon to exit so the
-  supervisor starts the replacement. Set `update.check_interval_hours` and the
+  swaps atomically. It restarts the daemon only when `update.restart_command`
+  is set (`/etc/init.d/cclaw restart`, `systemctl restart cclaw`, …) — with no
+  command configured it deliberately leaves the running daemon alone, because
+  a supervisor treats a graceful exit as intentional and will not respawn it;
+  the running process keeps its inode and picks up the new build at the next
+  restart. Set `update.check_interval_hours` and the
   daemon notices new releases and drops a note in the default agent's inbox —
   it tells you, it never installs on its own.
 - **The real DB is `~/.cclaw/cclaw.db`, not `./cclaw.db`.** `resolve_db_path()` returns `$HOME/.cclaw/cclaw.db` when `$HOME` is set (override with `CCLAW_DB_PATH`). "Delete the db" means that path — and its `-wal`/`-shm` siblings.

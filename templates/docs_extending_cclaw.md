@@ -63,12 +63,16 @@ evaluates to `undefined`). If nothing is returned, buffered `console.log`
 output becomes the result. No Node APIs, no `require`/`import`, no event loop;
 use the provided host bridges:
 
-- `http_request(url[, {method, body, headers:{Name:Value}, markdownify}])` —
+- `http_request(url[, {method, body, headers:{Name:Value}, markdownify, timeout}])` —
   synchronous HTTP, returns `{status, body}`; on transport failure it returns
   `{status: -1, body: "", error}` instead of throwing (`body` is always a
   string). `markdownify: true` converts an HTML
   body to markdown for readability — it is a rendering aid, not a security
   boundary (untrusted-content wrapping happens at storage time regardless).
+  `timeout` is seconds, default 30, capped at 180 — the fetch blocks the whole
+  tool child, so the cap is what stops a slow endpoint becoming a hang. Raise
+  it only for calls that are legitimately slow (an LLM-backed search that
+  grounds a query can take a minute from a small box), not as a blanket retry.
 - `fs.readFile` / `fs.writeFile` / `fs.readdir` / `fs.stat` / `fs.cwd` —
   workspace-scoped file access.
 - `XML.parse(str)` (alias `xml.parse`) — parse XML/RSS/Atom/sitemaps into a

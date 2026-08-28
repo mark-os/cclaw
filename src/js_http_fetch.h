@@ -8,6 +8,13 @@
 
 #include <stddef.h>
 
+/* Seconds. The default suits a normal API call; the ceiling exists because a
+ * JS tool blocks its whole tool child while the fetch runs, so an unbounded
+ * value would be a hang. Slow paths that legitimately need longer — an
+ * LLM-backed search grounding a query, on a slow box — pass their own. */
+#define JS_HTTP_TIMEOUT_DEFAULT 30
+#define JS_HTTP_TIMEOUT_MAX     180
+
 /* Result from js_http_fetch_exec. Caller must free body. */
 typedef struct {
     int status;       /* HTTP status code, or -1 on error */
@@ -22,7 +29,8 @@ typedef struct {
  * js_http_result_free(). */
 /* headers: NULL, or a NULL-terminated array of "Name: Value" strings. */
 JsHttpResult js_http_fetch_exec(const char *url, const char *method,
-                                const char *body, const char **headers);
+                                const char *body, const char **headers,
+                                int timeout_secs);
 
 void js_http_result_free(JsHttpResult *r);
 

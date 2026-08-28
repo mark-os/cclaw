@@ -18,7 +18,7 @@ static int tests_passed = 0;
  * The only validation left here is the scheme guard: http:// or https:// only. */
 static void test_invalid_scheme(void) {
     TEST("invalid_scheme");
-    JsHttpResult r = js_http_fetch_exec("ftp://example.com/file", "GET", NULL, NULL);
+    JsHttpResult r = js_http_fetch_exec("ftp://example.com/file", "GET", NULL, NULL, 0);
     if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
     if (!r.error || !strstr(r.error, "http://")) {
         FAIL(r.error ? r.error : "NULL"); js_http_result_free(&r); return;
@@ -29,7 +29,7 @@ static void test_invalid_scheme(void) {
 
 static void test_null_url(void) {
     TEST("null_url");
-    JsHttpResult r = js_http_fetch_exec(NULL, "GET", NULL, NULL);
+    JsHttpResult r = js_http_fetch_exec(NULL, "GET", NULL, NULL, 0);
     if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
     if (!r.error) { FAIL("expected error message"); js_http_result_free(&r); return; }
     js_http_result_free(&r);
@@ -76,6 +76,23 @@ static void test_js_eval_requires_arg(void) {
     PASS();
 }
 
+/* The timeout option is clamped, not trusted: 0/negative and anything past the
+ * ceiling fall back to a sane value, because a JS fetch blocks its tool child
+ * for its whole duration. Exercised through js_eval so the option is checked
+ * where a handler actually sets it. */
+static void test_timeout_option_is_clamped(void) {
+    TEST("timeout_option_is_clamped");
+    /* An absurd timeout on an unroutable address must still return promptly
+     * with an error rather than being honoured literally. */
+    char *r = test_js_eval_run_json(
+        "{\"code\":\"var r = http_request('http://127.0.0.1:9/x', {timeout: 999999});"
+        " r.status + ':' + (r.error ? 'err' : 'ok')\"}");
+    if (!r) { FAIL("NULL result"); return; }
+    if (!strstr(r, "-1")) { FAIL(r); free(r); return; }
+    free(r);
+    PASS();
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_js_http_fetch:\n");
@@ -85,6 +102,7 @@ int main(void) {
     test_js_eval_compute();
     test_js_eval_console();
     test_js_eval_requires_arg();
+    test_timeout_option_is_clamped();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

@@ -181,6 +181,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
 
     const char *method = NULL, *body = NULL;
     int markdownify = 0;
+    int timeout = JS_HTTP_TIMEOUT_DEFAULT;
     char **hdr_lines = NULL;       /* owned "Name: Value" strings */
     const char **hdr_ptrs = NULL;  /* NULL-terminated view handed to fetch */
     size_t hdr_n = 0;
@@ -195,6 +196,13 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         JSValue s = JS_GetPropertyStr(ctx, argv[1], "markdownify");
         if (JS_ToBool(ctx, s)) markdownify = 1;
         JS_FreeValue(ctx, s);
+        JSValue t = JS_GetPropertyStr(ctx, argv[1], "timeout");
+        if (!JS_IsUndefined(t) && !JS_IsNull(t)) {
+            int32_t secs = 0;
+            if (JS_ToInt32(ctx, &secs, t) == 0 && secs > 0)
+                timeout = secs > JS_HTTP_TIMEOUT_MAX ? JS_HTTP_TIMEOUT_MAX : secs;
+        }
+        JS_FreeValue(ctx, t);
 
         /* headers: {Name: Value, ...} → NULL-terminated "Name: Value" array */
         JSValue h = JS_GetPropertyStr(ctx, argv[1], "headers");
@@ -257,7 +265,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
     }
 
     JsHttpResult r = js_http_fetch_exec(r_url ? r_url : url, method,
-                                        r_body ? r_body : body, hdr_ptrs);
+                                        r_body ? r_body : body, hdr_ptrs, timeout);
     free(r_url);
     free(r_body);
     free(used);

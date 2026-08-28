@@ -36,11 +36,11 @@ function attempt() {
     }
 }
 
-// One retry on timeout only: llm() already walks every matching routing entry
-// per attempt, so a quota/auth failure has had its fair chance. A slow link
-// timing out has not.
+// One retry on transient failures only (timeouts, 5xx, torn streams — all
+// seen live from the free Gemini tier): llm() already walks every matching
+// routing entry per attempt, so a quota/auth failure has had its fair chance.
 var out = attempt();
-if (out.err && /timed out|timeout/i.test(out.err)) out = attempt();
+if (out.err && /timed out|timeout|http 5\d\d|stream/i.test(out.err)) out = attempt();
 if (out.err) return "search failed: " + out.err;
 
 var doc = out.r.body;

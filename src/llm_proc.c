@@ -458,6 +458,74 @@ done:
     return rc;
 }
 
+/* ── One provider attempt: the shared per-candidate step ───────────
+ *
+ * Every non-turn LLM consumer (the LLM() bridge, media transcription) needs
+ * the same four things around a request body someone else built: resolve the
+ * candidate's key, derive URL + auth for its wire format, POST, archive what
+ * came back. Only the body build and the failure policy are consumer-specific,
+ * so that is all the callers keep.
+ *
+ * `kind` names the surface in the archive status ("jsllm", "media"), `source`
+ * is an optional suffix. `archive_request` is the request body to keep beside
+ * the response — NULL when it is not worth storing (a media body is megabytes
+ * of base64). The key never outlives the call. Returns the http_do status, or
+ * LLM_ATTEMPT_UNBUILDABLE when the request could not be constructed at all
+ * (nothing was sent, nothing archived). */
+#define LLM_ATTEMPT_UNBUILDABLE (-3)
+
+static int llm_attempt(sqlite3 *db, ModelCandidate *m, const char *body,
+                       const char *archive_request, int timeout, CURL *curl,
+                       const char *kind, const char *source,
+                       int64_t session_id, int64_t iteration_id,
+                       HttpResponse *resp) {
+    const char *env = m->api_key_env[0] ? getenv(m->api_key_env) : NULL;
+    char *key_buf = (env && env[0]) ? strdup(env)
+                  : m->api_key_env[0] ? db_secret_get_system(db, m->api_key_env)
+                  : NULL;
+    if (!key_buf) key_buf = strdup("");
+
+    Config c = {0};
+    c.provider.base_url = m->base_url;
+    c.provider.model = m->model;
+    c.provider.endpoint_type = (EndpointType)m->endpoint_type;
+    c.provider.model_id = m->id[0] ? m->id : NULL;
+    c.provider.reasoning_effort =
+        m->reasoning_effort[0] ? m->reasoning_effort : NULL;
+    c.provider.api_key = key_buf;
+
+    char *url = llm_build_url(&c);
+    char *auth = llm_build_auth_header(&c);
+    int status = LLM_ATTEMPT_UNBUILDABLE;
+    if (body && url && auth) {
+        const char *headers[] = { "Content-Type: application/json", auth, NULL };
+        HttpRequestOpts opts = {
+            .url = url, .method = "POST", .headers = headers, .body = body,
+            .timeout = timeout, .curl_handle = curl,
+            .max_response_bytes = LLM_RESP_MAX,
+        };
+        status = http_do(&opts, resp);
+
+        char label[96];
+        const char *suffix = source ? source : "";
+        const char *sep = source ? " " : "";
+        if (status >= 200 && status < 300)
+            snprintf(label, sizeof(label), "%s_ok%s%s", kind, sep, suffix);
+        else if (status == -2)
+            snprintf(label, sizeof(label), "%s_timeout%s%s", kind, sep, suffix);
+        else if (status < 0)
+            snprintf(label, sizeof(label), "%s_net%s%s", kind, sep, suffix);
+        else
+            snprintf(label, sizeof(label), "%s_http_%d%s%s", kind, status, sep, suffix);
+        db_archive_response(db, session_id, iteration_id, m->id, label,
+                            resp->data ? resp->data : resp->err_detail,
+                            archive_request);
+    }
+    free(url); free(auth);
+    explicit_bzero(key_buf, strlen(key_buf)); free(key_buf);
+    return status;
+}
+
 /* ── llm_request: the LLM() bridge's parent-side core ──────────────
  *
  * One completion on behalf of a JS-tier caller (llm-core.md): the agent's
@@ -616,6 +684,8 @@ char *llm_request(sqlite3 *db, const char *agent_name,
          * matching candidate gets its attempt regardless. */
         if (model_degraded_now(db, m->id) && i + 1 < n) continue;
 
+        /* Key-less view of the candidate: all the effort fragment needs. The
+         * credential is resolved inside llm_attempt and dies there. */
         Config rc = {0};
         rc.provider.base_url = m->base_url;
         rc.provider.model = m->model;
@@ -623,11 +693,6 @@ char *llm_request(sqlite3 *db, const char *agent_name,
         rc.provider.model_id = m->id[0] ? m->id : NULL;
         rc.provider.reasoning_effort =
             m->reasoning_effort[0] ? m->reasoning_effort : NULL;
-        const char *key = m->api_key_env[0] ? getenv(m->api_key_env) : NULL;
-        char *key_buf = (key && key[0]) ? strdup(key)
-                      : m->api_key_env[0] ? db_secret_get_system(db, m->api_key_env)
-                      : NULL;
-        rc.provider.api_key = key_buf;
 
         char *effort = llm_effort_fragment(db, &rc.provider);
         /* Candidate extra: providers.request_extra then the route's effort
@@ -645,33 +710,18 @@ char *llm_request(sqlite3 *db, const char *agent_name,
         char *body = sql_text(db, m->endpoint_type == ENDPOINT_GEMINI
                                     ? SQL_JSBODY_GEMINI : SQL_JSBODY_OPENAI,
                               bb, 4);
-        char *url = llm_build_url(&rc);
-        char *auth = llm_build_auth_header(&rc);
         free(effort); free(cand_extra);
 
-        if (body && url && auth) {
-            const char *headers[] = { "Content-Type: application/json", auth, NULL };
+        {
             HttpResponse resp = {0};
-            HttpRequestOpts hopts = {
-                .url = url, .method = "POST", .headers = headers, .body = body,
-                .timeout = timeout, .max_response_bytes = LLM_RESP_MAX,
-            };
-            int status = http_do(&hopts, &resp);
+            int status = llm_attempt(db, m, body, body, timeout, NULL,
+                                     "jsllm", source ? source : "?",
+                                     session_id, iteration_id, &resp);
 
-            char label[96];
-            if (status >= 200 && status < 300)
-                snprintf(label, sizeof(label), "jsllm_ok %s", source ? source : "?");
-            else if (status == -2)
-                snprintf(label, sizeof(label), "jsllm_timeout %s", source ? source : "?");
-            else if (status < 0)
-                snprintf(label, sizeof(label), "jsllm_net %s", source ? source : "?");
-            else
-                snprintf(label, sizeof(label), "jsllm_http_%d %s", status,
-                         source ? source : "?");
-            db_archive_response(db, session_id, iteration_id, m->id, label,
-                                resp.data ? resp.data : resp.err_detail, body);
-
-            if (status >= 200 && status < 300 && resp.data) {
+            if (status == LLM_ATTEMPT_UNBUILDABLE) {
+                buf_appendf(&fails, "%s%s: could not build the request",
+                            fails.len ? "; " : "", m->id);
+            } else if (status >= 200 && status < 300 && resp.data) {
                 const char *tb[] = { resp.data };
                 char *text = sql_text(db, SQL_JSBODY_TEXT, tb, 1);
                 if (text && text[0]) {
@@ -703,12 +753,8 @@ char *llm_request(sqlite3 *db, const char *agent_name,
                                 resp.data ? resp.data : "");
             }
             http_response_free(&resp);
-        } else {
-            buf_appendf(&fails, "%s%s: could not build the request",
-                        fails.len ? "; " : "", m->id);
         }
-        free(body); free(url); free(auth);
-        if (key_buf) { explicit_bzero(key_buf, strlen(key_buf)); free(key_buf); }
+        free(body);
     }
 
     free(messages); free(opts);
@@ -1741,37 +1787,25 @@ int llm_transcribe(sqlite3 *db, CURL *curl, int64_t job_id) {
     for (int mi = 0; mi < nmodels && !transcript; mi++) {
         ModelCandidate *m = &models[mi];
 
-        const char *key = m->api_key_env[0] ? getenv(m->api_key_env) : NULL;
-        char *key_buf = (key && key[0]) ? strdup(key)
-                      : m->api_key_env[0] ? db_secret_get_system(db, m->api_key_env)
-                      : NULL;
-        if (!key_buf) key_buf = strdup("");
-
+        /* Encoded once per candidate, reused across this candidate's retries —
+         * the base64 payload is the expensive part of the request. */
         char *body = transcribe_build_body(db, (EndpointType)m->endpoint_type,
                                            m->model, job_id);
-        Config tcfg = {0};
-        tcfg.provider.base_url = m->base_url;
-        tcfg.provider.model = m->model;
-        tcfg.provider.endpoint_type = (EndpointType)m->endpoint_type;
-        tcfg.provider.api_key = key_buf;
-        char *url = llm_build_url(&tcfg);
-        char *auth = llm_build_auth_header(&tcfg);
-        if (!body || !url || !auth) {
-            free(body); free(url); free(auth); free(key_buf);
-            continue;
-        }
-        const char *headers[] = { "Content-Type: application/json", auth, NULL };
+        if (!body) continue;
 
         for (int retry = 0; retry <= TRANSCRIBE_RETRIES && !transcript; retry++) {
             HttpResponse resp = {0};
-            HttpRequestOpts opts = {
-                .url = url, .method = "POST", .headers = headers,
-                .body = body, .curl_handle = curl,
-                .max_response_bytes = LLM_RESP_MAX,
-            };
-            int status = http_do(&opts, &resp);
+            /* NULL archive_request: the response is worth keeping for
+             * `cclaw resp`, the request is megabytes of base64 media. */
+            int status = llm_attempt(db, m, body, NULL, 0, curl,
+                                     "media", mj.cap, session_id,
+                                     db_next_iteration_id(db, session_id), &resp);
             LOG_DEBUG_("transcribe: status=%d model=%s job=%lld",
                        status, m->model, (long long)job_id);
+            if (status == LLM_ATTEMPT_UNBUILDABLE) {
+                http_response_free(&resp);
+                break;               /* no URL/auth for this candidate */
+            }
 
             if (status >= 200 && status < 300) {
                 transcript = extract_content(db, (EndpointType)m->endpoint_type,
@@ -1801,7 +1835,7 @@ int llm_transcribe(sqlite3 *db, CURL *curl, int64_t job_id) {
             break;
         }
 
-        free(body); free(url); free(auth); free(key_buf);
+        free(body);
     }
 
     if (transcript) {

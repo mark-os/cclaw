@@ -418,7 +418,7 @@ static const char EFFORT_DEFAULT_GEMINI[] =
 /* The JSON object to merge into the request body for this route's effort
  * level, or NULL when nothing should be sent (no level set, or the model
  * supports no level at all). Caller frees. */
-static char *effort_fragment(sqlite3 *db, const ProviderConfig *prov) {
+char *llm_effort_fragment(sqlite3 *db, const ProviderConfig *prov) {
     if (!prov->reasoning_effort || !prov->reasoning_effort[0]) return NULL;
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, SQL_EFFORT_FRAGMENT, -1, &s, NULL) != SQLITE_OK)
@@ -668,7 +668,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     char *tool_filter = session_tool_filter(db, session_id);
     char *suffix = route_prompt_suffix(db, session_id);
     char *worker_tools = worker_tools_list(db);
-    char *effort = effort_fragment(db, &cfg->provider);
+    char *effort = llm_effort_fragment(db, &cfg->provider);
     if (tool_filter) {
         if (allowed_tools) {
             char *isect = json_intersect(db, allowed_tools, tool_filter);

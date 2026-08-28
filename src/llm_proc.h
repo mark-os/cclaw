@@ -55,6 +55,15 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall);
 int llm_probe_agent(sqlite3 *db, const char *agent_name, int64_t session_id,
                     char *served, size_t served_sz, char *reason, size_t reason_sz);
 
+/* Candidate-descriptor JSON for the sandboxed JS tier's llm() global: the
+ * agent's routing list (same loader/order as its own turns) fully resolved —
+ * URL, complete auth header (key included), wire format ("openai"/"gemini"),
+ * URL host for egress widening, and request_extra+effort pre-merged as
+ * `extra`. Malloc'd; NULL when the agent has no routable model. SECRET-BEARING:
+ * the caller must explicit_bzero the string before freeing, and bzero any
+ * serialized blob carrying it. */
+char *llm_wire_json(sqlite3 *db, const char *agent_name);
+
 /* Compact session branch: estimate tokens, decide cut point, call LLM for summary.
  * Returns 0 on success (compaction entry inserted), -1 on error (no compaction).
  * On LLM failure, returns -1 without compacting (safe fallback). */

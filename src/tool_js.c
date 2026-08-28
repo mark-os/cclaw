@@ -4,6 +4,7 @@
 #include "tool_js.h"
 #include "run_tool.h"
 #include "qjs_helpers.h"
+#include "qjs_llm.h"
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -55,6 +56,16 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
                           "is synchronous; returns {status, body, error}; "
                           "markdownify:true converts an HTML body to markdown; "
                           "timeout is seconds (default 30, max 180). "
+                          "llm(prompt[, opts]) runs one completion on YOUR configured "
+                          "models (same routing list as your own turns — no key, no URL) "
+                          "and returns the text. First arg is a prompt string or "
+                          "{messages:[{role,content},...]}. opts: {system, model "
+                          "(substring-match a routed model, e.g. 'gemini'), max_tokens, "
+                          "temperature, timeout (secs, default 120, max 180), "
+                          "extra (object merged into the provider request body, e.g. "
+                          "{tools:[{google_search:{}}]}), full:true -> {text, model, id, "
+                          "status, body}}. Falls through your routing list on failure; "
+                          "throws when no routed model matches or every candidate fails. "
                           "File globals: fs.readFile(path) returns string, "
                           "fs.writeFile(path, data) returns bytes written, "
                           "fs.readdir(path) returns [{name,type},...], "
@@ -207,7 +218,10 @@ char *tool_js_tier_run(const RunToolParsed *q, int *is_error) {
         }
         qjs_host_set_secrets(js_secrets, q->secret_count);
     }
+    /* llm() candidates (parent-resolved routing list); NULL = llm() throws. */
+    qjs_host_set_llm(q->llm_json);
     char *r = qjs_eval_run(code, filename, args, ext_config, is_error);
+    qjs_host_set_llm(NULL);
     qjs_host_set_secrets(NULL, 0);
     free(js_secrets);
     return r ? r : tool_fail(is_error, "error: js_eval returned null");

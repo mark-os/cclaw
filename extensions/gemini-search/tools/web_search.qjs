@@ -1,77 +1,49 @@
-// web_search — ask Gemini a question with Google Search grounding on, and
-// return its answer plus the sources it actually used.
+// web_search — ask a Gemini model on the agent's own routing list a question
+// with Google Search grounding on, and return its answer plus the sources it
+// actually used.
+//
+// This is the reference example for building tools on llm(): no endpoint URL,
+// no API key, no {{SECRET}} — the call rides the agent's configured models
+// (agent_models -> models -> providers), keys resolved in the trusted parent.
+// The one Gemini-specific piece left is the grounding switch, passed through
+// via opts.extra, and the grounding metadata read from the full response.
 //
 // Grounding quota on the free tier is granted per-model and is much tighter
 // than plain generation quota: as of 2026-08 only gemini-2.5-flash serves
-// grounded requests, while newer flash models accept ungrounded calls and 429
-// the moment google_search is attached. So `models` is a preference list and a
-// 429 falls through to the next entry rather than failing the call. When the
-// free tier widens, put the better model first in config and nothing else
-// changes.
+// grounded requests. opts.model narrows the walk to Gemini entries; put the
+// grounding-capable model on the agent's routing list and this tool finds it.
 
 var query = (args.query || "").trim();
 if (!query) return "error: query is required";
-
-var base = (getConfig("base_url") || "https://generativelanguage.googleapis.com").replace(/\/+$/, "");
-var models = (getConfig("models") || "gemini-2.5-flash")
-    .split(",").map(function (m) { return m.trim(); }).filter(Boolean);
-
-// getConfig() never hands back a secret value; the placeholder is resolved at
-// the fetch boundary, inside the child, per-secret host-bound to this API.
-var apiKey = "{{SECRET:GEMINI_API_KEY}}";
 
 var full = args.detail === "full";
 var instruction = full
     ? "Answer thoroughly, but in prose — no headings or bullet lists."
     : "Answer in at most three sentences. Lead with the answer itself.";
 
-var body = {
-    contents: [{ parts: [{ text: query + "\n\n" + instruction }] }],
-    tools: [{ google_search: {} }]
-};
-
-function attempt(model) {
-    var r = http_request(base + "/v1beta/models/" + model + ":generateContent", {
-        method: "POST",
-        headers: { "x-goog-api-key": apiKey, "content-type": "application/json" },
-        body: JSON.stringify(body),
-        // Measured at 48s from the Pogoplug: a grounded call runs a search and
-        // then has a model read the results, which is simply slower than the
-        // 30s default allows. Well under the 180s ceiling.
-        timeout: 90
-    });
-    // http_request has a fixed 30s ceiling, and a grounded call from a slow
-    // link genuinely takes longer than that sometimes — the search runs, then
-    // a model reads the results. Treat a timeout as worth another go rather
-    // than as a dead end.
-    if (r.error) return { retry: /timed out|timeout/i.test(r.error), err: "network error: " + r.error };
-    if (r.status === 429) return { retry: true, err: model + ": grounding quota exhausted" };
-    if (r.status !== 200) {
-        var msg = r.body.slice(0, 300);
-        try { msg = JSON.parse(r.body).error.message; } catch (e) {}
-        // 4xx other than 429 is a bad key or a bad model name — the next model
-        // in the list would fail the same way, so stop here.
-        return { retry: r.status >= 500, err: model + ": HTTP " + r.status + " — " + msg };
-    }
-    try { return { doc: JSON.parse(r.body) }; }
-    catch (e) { return { retry: true, err: model + ": unparseable response" }; }
-}
-
-// Each model gets one retry, so a single slow call does not cost the whole
-// preference list. A 429 is not slow, it is a quota answer — it moves on.
-var doc = null, tried = [];
-outer:
-for (var i = 0; i < models.length; i++) {
-    for (var a = 0; a < 2; a++) {
-        var out = attempt(models[i]);
-        if (out.doc) { doc = out.doc; break outer; }
-        tried.push(out.err);
-        if (!out.retry) break outer;
-        if (out.err.indexOf("quota") !== -1) break;   // next model, not again
+function attempt() {
+    try {
+        return { r: llm(query + "\n\n" + instruction, {
+            model: "gemini",
+            // Measured at 48s from the Pogoplug: a grounded call runs a search
+            // and then has a model read the results — slower than the default.
+            timeout: 90,
+            full: true,
+            extra: { tools: [{ google_search: {} }] }
+        }) };
+    } catch (e) {
+        return { err: String((e && e.message) || e) };
     }
 }
-if (!doc) return "search failed:\n  " + tried.join("\n  ");
 
+// One retry on timeout only: llm() already walks every matching routing entry
+// per attempt, so a quota/auth failure has had its fair chance. A slow link
+// timing out has not.
+var out = attempt();
+if (out.err && /timed out|timeout/i.test(out.err)) out = attempt();
+if (out.err) return "search failed: " + out.err;
+
+var doc = out.r.body;
 var cand = (doc.candidates || [])[0];
 if (!cand) {
     var blocked = doc.promptFeedback && doc.promptFeedback.blockReason;

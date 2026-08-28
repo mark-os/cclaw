@@ -118,6 +118,7 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     }
     w_str(&b, req->egress_note);
     w_str(&b, req->spill_path);
+    w_str(&b, req->llm_json);
 
     size_t total = w_finalize(&b);
     if (total == 0) { free(blob); return NULL; }
@@ -256,6 +257,7 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
     }
     q->egress_note = r_str(r);
     q->spill_path = r_str(r);
+    q->llm_json = r_str(r);
     return r->err ? -1 : 0;
 }
 

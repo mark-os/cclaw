@@ -1,7 +1,7 @@
 {
   "name": "gemini-search",
-  "version": "0.1.0",
-  "description": "Web search via Gemini with Google Search grounding.",
+  "version": "0.2.0",
+  "description": "Web search via Gemini with Google Search grounding, built on llm(). Reference example for llm()-based tools: needs a Gemini model on the agent's routing list, no key or host of its own.",
   "tools": [
     {
       "name": "web_search",
@@ -21,20 +21,7 @@
         },
         "required": ["query"]
       },
-      "hosts": ["generativelanguage.googleapis.com"],
       "handler": "tools/web_search.qjs"
-    }
-  ],
-  "config": [
-    {
-      "key": "models",
-      "default": "gemini-2.5-flash",
-      "description": "Comma-separated model preference list, tried in order. Grounding quota is per-model, so a 429 falls through to the next one."
-    },
-    {
-      "key": "base_url",
-      "default": "https://generativelanguage.googleapis.com",
-      "description": "Gemini API base URL (egress pin source of truth)."
     }
   ]
 }

@@ -28,6 +28,7 @@
 #include "db_response.h"
 #include "extension_manifest.h"
 #include "hook_dispatch.h"
+#include "llm_proc.h"
 #include "llm_worker.h"
 #include "log.h"
 #include "loop.h"
@@ -1055,8 +1056,46 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
     req.deny_count = se.deny_n;
     req.egress_note = se.note;
     req.timeout = timeout;
+
+    /* llm() for the child: the agent's routing list as resolved descriptors
+     * (llm_wire_json). Its provider hosts join this call's egress allowlist —
+     * that widening is deliberate and documented (specs/js-llm.md): the agent
+     * already sends its whole context to these hosts every turn, so JS-tier
+     * egress to them adds no new disclosure class. Each key still travels
+     * only in its own provider's auth header, C-side, never into JS values. */
+    char *llm_json = llm_wire_json(proc_db(), agent_name);
+    char *llm_hosts[8];
+    size_t llm_hosts_n = 0;
+    const char **merged_hosts = NULL;
+    if (llm_json) {
+        req.llm_json = llm_json;
+        sqlite3_stmt *hs;
+        if (sqlite3_prepare_v2(proc_db(),
+                "SELECT DISTINCT json_extract(value,'$.host') FROM json_each(?1)",
+                -1, &hs, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(hs, 1, llm_json, -1, SQLITE_STATIC);
+            while (llm_hosts_n < 8 && sqlite3_step(hs) == SQLITE_ROW) {
+                const char *h = (const char *)sqlite3_column_text(hs, 0);
+                if (h && h[0] && (llm_hosts[llm_hosts_n] = strdup(h)))
+                    llm_hosts_n++;
+            }
+            sqlite3_finalize(hs);
+        }
+        if (llm_hosts_n > 0 &&
+            (merged_hosts = malloc((se.hosts_n + llm_hosts_n) * sizeof(*merged_hosts)))) {
+            size_t k = 0;
+            for (size_t i = 0; i < se.hosts_n; i++) merged_hosts[k++] = se.hosts[i];
+            for (size_t i = 0; i < llm_hosts_n; i++) merged_hosts[k++] = llm_hosts[i];
+            req.host_rules = merged_hosts;
+            req.host_count = k;
+        }
+    }
+
     char *blob = run_tool_serialize_request(&req, out_len);
     call_egress_free(&se);
+    if (llm_json) { explicit_bzero(llm_json, strlen(llm_json)); free(llm_json); }
+    for (size_t i = 0; i < llm_hosts_n; i++) free(llm_hosts[i]);
+    free(merged_hosts);
     if (js_hosts)
         for (size_t i = 0; i < secret_count; i++) free(js_hosts[i]);
     free(js_hosts);

@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #endif
 #include "qjs_helpers.h"
+#include "qjs_llm.h"
 #include "qjs_xml.h"
 #include "js_http_fetch.h"
 #include "external_content.h"
@@ -581,6 +582,10 @@ void qjs_register_eval_host_functions(JSContext *ctx, const char *config_json) {
     /* http_request */
     JS_SetPropertyStr(ctx, global, "http_request",
         JS_NewCFunction(ctx, js_http_request, "http_request", 2));
+
+    /* llm() — the agent's own routing list, resolved parent-side; throws
+     * "no routable model" when the blob carried no descriptors. */
+    qjs_register_llm(ctx);
 
     /* fs object — both Node callback style and Sync style point to same impl */
     JSValue fs = JS_NewObject(ctx);

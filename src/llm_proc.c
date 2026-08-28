@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE   /* explicit_bzero */
 #include "llm_proc.h"
 #include "agent_config.h"
+#include "buf.h"
 #include "config.h"
 #include "config_registry.h"
 #include "context.h"
@@ -22,6 +24,9 @@
 #include <unistd.h>
 
 #define MAX_MODELS 16
+/* Routing entries shipped to a JS-tier child for llm(). Small on purpose: the
+ * run-tool blob is capped at 32KB and each descriptor carries a key. */
+#define LLM_WIRE_MAX_CANDIDATES 4
 /* Generous ceiling on any provider response body — a real completion is a few
  * MB at most; this only bounds daemon OOM from a malicious/buggy provider
  * (web_fetch/js_http already cap their own). */
@@ -449,6 +454,95 @@ int llm_probe_agent(sqlite3 *db, const char *agent_name, int64_t session_id,
 done:
     free(body); free(url); free(auth); free(key_buf);
     return rc;
+}
+
+/* ── llm() wire blob for the sandboxed JS tier ─────────────────────
+ *
+ * The child has no DB and never holds the master key, so everything llm()
+ * needs is resolved here in the trusted parent and shipped in the run-tool
+ * blob: the agent's OWN routing list (same loader, same order as its turns —
+ * agent_models IS the authority to spend these models), each candidate as a
+ * fully-resolved descriptor. `auth` is the complete header line, key
+ * included — the blob is secret-bearing and callers bzero it after write.
+ * `extra` pre-merges providers.request_extra with the route's effort
+ * fragment so the child does no provider-specific thinking beyond the two
+ * body shapes. `host` is what dispatch widens the call's egress to. */
+char *llm_wire_json(sqlite3 *db, const char *agent_name) {
+    ModelCandidate models[LLM_WIRE_MAX_CANDIDATES];
+    int n = load_candidates(db, agent_name, models, LLM_WIRE_MAX_CANDIDATES);
+    if (n <= 0) return NULL;
+
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_object('id',?1,'model',?2,'url',?3,'auth',?4,"
+            "'format',?5,'host',?6,'extra',"
+            "json(json_patch(COALESCE((SELECT request_extra FROM providers"
+            "                          WHERE name=?7 AND json_valid(request_extra)),'{}'),"
+            "                CASE WHEN json_valid(?8) THEN ?8 ELSE '{}' END)))",
+            -1, &s, NULL) != SQLITE_OK)
+        return NULL;
+
+    Buf out = {0};
+    buf_append_char(&out, '[');
+    int emitted = 0;
+    for (int i = 0; i < n; i++) {
+        ModelCandidate *m = &models[i];
+        Config c = {0};
+        c.provider.base_url = m->base_url;
+        c.provider.model = m->model;
+        c.provider.endpoint_type = (EndpointType)m->endpoint_type;
+        c.provider.model_id = m->id[0] ? m->id : NULL;
+        c.provider.reasoning_effort = m->reasoning_effort[0] ? m->reasoning_effort : NULL;
+
+        const char *key = m->api_key_env[0] ? getenv(m->api_key_env) : NULL;
+        char *key_buf = (key && key[0]) ? strdup(key)
+                      : m->api_key_env[0] ? db_secret_get_system(db, m->api_key_env)
+                      : NULL;
+        c.provider.api_key = key_buf;
+
+        char *url = llm_build_url(&c);
+        char *auth = llm_build_auth_header(&c);
+        char *extra = llm_effort_fragment(db, &c.provider);
+
+        /* scheme://host[:port]/... → host (the proxy matches bare hostnames) */
+        char host[256] = "";
+        if (url) {
+            const char *h = strstr(url, "://");
+            h = h ? h + 3 : url;
+            size_t j = 0;
+            while (h[j] && h[j] != '/' && h[j] != ':' && j < sizeof(host) - 1) {
+                host[j] = h[j]; j++;
+            }
+            host[j] = '\0';
+        }
+
+        if (url && auth && host[0]) {
+            sqlite3_reset(s);
+            sqlite3_bind_text(s, 1, m->id, -1, SQLITE_STATIC);
+            sqlite3_bind_text(s, 2, m->model, -1, SQLITE_STATIC);
+            sqlite3_bind_text(s, 3, url, -1, SQLITE_STATIC);
+            sqlite3_bind_text(s, 4, auth, -1, SQLITE_STATIC);
+            sqlite3_bind_text(s, 5, m->endpoint_type == ENDPOINT_GEMINI
+                                      ? "gemini" : "openai", -1, SQLITE_STATIC);
+            sqlite3_bind_text(s, 6, host, -1, SQLITE_STATIC);
+            sqlite3_bind_text(s, 7, m->provider_name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(s, 8, extra ? extra : "{}", -1, SQLITE_STATIC);
+            if (sqlite3_step(s) == SQLITE_ROW) {
+                const char *row = (const char *)sqlite3_column_text(s, 0);
+                if (row) {
+                    if (emitted) buf_append_char(&out, ',');
+                    buf_append_str(&out, row);
+                    emitted++;
+                }
+            }
+        }
+        free(url); free(auth); free(extra);
+        if (key_buf) { explicit_bzero(key_buf, strlen(key_buf)); free(key_buf); }
+    }
+    sqlite3_finalize(s);
+    buf_append_char(&out, ']');
+    if (!emitted) { buf_free(&out); return NULL; }
+    return buf_take(&out);
 }
 
 /* ── llm_req: single LLM call with DB-driven routing ──────────── */

@@ -334,6 +334,28 @@ static int validate_inner(sqlite3 *db, const char *json, const char *creator,
     if (rc == 0)
         rc = models_check(db, json, creator, err);
 
+    /* Memory block labels, at request time (Livermore audit): the seed used
+     * to skip an invalid label silently, leaving a system prompt referencing
+     * a block that never existed. Reject the whole create with a naming
+     * message instead — same posture as the grants gate above. */
+    if (rc == 0) {
+        sqlite3_stmt *ml;
+        if (sqlite3_prepare_v2(db,
+                "SELECT COALESCE(json_extract(value,'$.label'),'')"
+                " FROM json_each(?1,'$.memory_blocks')", -1, &ml, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(ml, 1, json, -1, SQLITE_STATIC);
+            while (rc == 0 && sqlite3_step(ml) == SQLITE_ROW) {
+                const char *lbl = (const char *)sqlite3_column_text(ml, 0);
+                if (!lbl || !is_valid_name(lbl))
+                    rc = failf(err, "memory block label '%.63s' is invalid — "
+                               "labels are letters, digits, _ and - only (max "
+                               "63 chars, no spaces); rename it and retry%s",
+                               lbl && lbl[0] ? lbl : "(missing)", "");
+            }
+            sqlite3_finalize(ml);
+        }
+    }
+
     if (rc == 0 && name_out) { *name_out = name; name = NULL; }
     free(name);
     return rc;
@@ -478,10 +500,24 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
         } else rc = -1;
     }
 
-    /* Baseline grants (skip for clones — the copied set is the baseline),
-     * then declared fields + grants + approval gate. */
-    if (rc == 0 && !(clone && clone[0]))
-        agent_grant_defaults(db, name);
+    /* Baseline grants — only when the definition is SILENT on tools, and
+     * never for clones (the copied set is the baseline). Specified means
+     * exhaustive (Livermore thread 5): the approval doc renders
+     * $.grants.tools as the toolset, so apply must not union unshown
+     * authority underneath — approval #38 showed 18 tools and granted 29. */
+    if (rc == 0 && !(clone && clone[0])) {
+        int declared_tools = 0;
+        if (sqlite3_prepare_v2(db,
+                "SELECT json_type(?1,'$.grants.tools') IS NOT NULL",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW)
+                declared_tools = sqlite3_column_int(st, 0);
+            sqlite3_finalize(st);
+        }
+        if (!declared_tools)
+            agent_grant_defaults(db, name);
+    }
     if (rc == 0)
         rc = apply_fields_and_grants(db, name, json, err);
 

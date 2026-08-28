@@ -2369,6 +2369,13 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
         int ro = sqlite3_column_int(stmt, 4);
         const char *placement = (const char *)sqlite3_column_text(stmt, 5);
         int64_t id = memory_block_create(db, agent_name, lbl, desc, cl, placement);
+        /* Belt to the request-time gate's suspenders (validate_inner rejects
+         * bad labels before an approval ever parks): if a block still fails
+         * here, say so — a silent skip left Livermore's prompt referencing a
+         * block that never existed. */
+        if (id <= 0)
+            LOG_WARN_("memory seed: block '%.63s' for %s was NOT created "
+                      "(invalid label or db error)", lbl, agent_name);
         /* A manifest's $.value seeds entry 1 of the new block. Blocks are pure
          * containers — entries are the only thing the render paths read — so
          * bootstrap content has to arrive as an entry to be visible at all. */

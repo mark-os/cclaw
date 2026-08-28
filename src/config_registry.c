@@ -103,14 +103,19 @@ static const ConfigDef s_defs[] = {
       " spawner's grants — it can never widen them)" },
     { "agent_default_tools",
       /* D2 widening (review-1 F12): file navigation + cron self-scheduling
-       * are baseline, not escalations. */
+       * are baseline, not escalations. Livermore haircut (thread 5):
+       * create_agent, extension_publish, secret_create are NOT birthright —
+       * an agent minting agents, publishing global tools, or minting
+       * credentials is the recursive-authority shape the guard project
+       * exists to prevent. request_config stays, so escalation remains
+       * available the sanctioned way. */
       "[\"file_read\",\"file_write\",\"file_list\",\"file_find\",\"file_grep\","
       "\"file_edit\",\"js_eval\",\"request_config\","
       "\"search_config\",\"memory_create\",\"memory_add\",\"memory_edit\","
       "\"memory_delete\",\"cron_set\",\"cron_list\",\"cron_remove\","
-      "\"create_agent\",\"update_agent\",\"extension_promote\",\"extension_publish\","
+      "\"update_agent\",\"extension_promote\","
       "\"extension_attach\",\"extension_list\",\"extension_fork\",\"launch_agent\","
-      "\"check_session\",\"secret_create\",\"channel_send\"]",
+      "\"check_session\",\"channel_send\"]",
       /* channel_send is safe as a baseline: the grant is not the authority —
        * the route allowlist is (default-deny per target, operator-managed). */
       "Baseline tool grants seeded for a newly created agent (JSON array)" },

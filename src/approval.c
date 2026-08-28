@@ -771,6 +771,49 @@ static const char *SQL_CREATE_AGENT_LINES =
     "   WHERE type NOT IN ('object','array')"
         "     AND key NOT IN ('name','sandbox_profile','clone_from')";
 
+/* The two inherited-facts blocks (Livermore thread 5/6): each renders ONLY
+ * when the definition is silent on its key, showing what apply will actually
+ * do — the baseline toolset, or the creator's routing list verbatim. The
+ * baseline block is C-side because the list must fall back to the compiled-in
+ * registry default when the config row was never seeded (config_get's
+ * contract), which a bare SQL subselect cannot do. */
+static const char *SQL_CREATE_AGENT_BASELINE_TOOLS =
+    "SELECT format('%-7s%s','tool', value) FROM json_each(?2)"
+    " WHERE json_type(?1,'$.grants.tools') IS NULL"
+    "   AND json_extract(?1,'$.clone_from') IS NULL";
+
+static void append_baseline_tools_block(sqlite3 *db, Buf *out, const char *args) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, SQL_CREATE_AGENT_BASELINE_TOOLS, -1, &st, NULL) != SQLITE_OK)
+        return;
+    char *base = config_get(db, "agent_default_tools");
+    const char *list = (base && base[0]) ? base
+                     : config_default("agent_default_tools");
+    sqlite3_bind_text(st, 1, args, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, list ? list : "[]", -1, SQLITE_STATIC);
+    int n = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (!v) continue;
+        if (n++ == 0)
+            buf_append_str(out,
+                "Baseline tools (none declared — agent_default_tools applies):\n```\n");
+        append_fence_escaped(out, v);
+        buf_append_char(out, '\n');
+    }
+    if (n) buf_append_str(out, "```\n");
+    sqlite3_finalize(st);
+    free(base);
+}
+
+static const char *SQL_CREATE_AGENT_INHERITED_MODELS =
+    "SELECT format('model  #%d %s', am.pos+1, am.model_id)"
+    " FROM agent_models am"
+    " WHERE am.agent_name = (SELECT agent_name FROM sessions WHERE id=?2)"
+    "   AND json_type(?1,'$.models') IS NULL"
+    "   AND json_extract(?1,'$.clone_from') IS NULL"
+    " ORDER BY am.pos";
+
 /* update_agent enumeration — grants add, scalar fields overwrite; long text
  * (system_prompt) is clipped per line, the whole-summary truncation below is
  * the backstop. */
@@ -893,6 +936,17 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
                     f[2] ? ", clone of " : "", f[2] ? f[2] : "");
         append_enum_block(db, &out, "Capabilities (all within the creator's own):",
                           SQL_CREATE_AGENT_LINES, args, a->session_id);
+        /* Thread 5/6 (Livermore): render what will be TRUE, not what was
+         * typed. A definition silent on tools gets the baseline — list it, so
+         * doc == DB either way (declared tools are exhaustive since the
+         * specified-means-exhaustive fix; silence means exactly this list).
+         * A definition silent on models inherits the creator's routing
+         * verbatim — the approver must see which models the new agent will
+         * spend, and 'stealth/ox-alpha@openrouter' once rode in unseen. */
+        append_baseline_tools_block(db, &out, args);
+        append_enum_block(db, &out,
+                          "Routing (none declared — inherited from the creator):",
+                          SQL_CREATE_AGENT_INHERITED_MODELS, args, a->session_id);
     } else if (a->tool_name && strcmp(a->tool_name, "update_agent") == 0) {
         f[0] = tool_args_str(db, args, "name");
         f[1] = tool_args_str(db, args, "reason");

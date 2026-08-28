@@ -57,10 +57,12 @@ static void test_operator_apply(void) {
     assert(strcmp((const char *)sqlite3_column_text(s, 2), "scouts") == 0);
     sqlite3_finalize(s);
 
-    /* Declared grants on top of the baseline defaults. */
+    /* Declared grants — and ONLY those: specified means exhaustive
+     * (Livermore thread 5). A definition naming tools gets exactly that
+     * toolset, no baseline union underneath. */
     assert(grants_contains(g_db, "Scout", "tool", "web_fetch"));
     assert(grants_contains(g_db, "Scout", "host", ".example.com"));
-    assert(grants_contains(g_db, "Scout", "tool", "file_read")); /* baseline */
+    assert(!grants_contains(g_db, "Scout", "tool", "file_read")); /* no silent baseline */
 
     /* Memory block seeded — and its $.value seeded as entry 1, since the
      * block itself stores no text. */
@@ -318,6 +320,60 @@ static void test_update_agent(void) {
     printf("  PASS test_update_agent\n");
 }
 
+/* Livermore thread 5: silence on tools = the baseline, stated; naming tools
+ * = exactly those. And the baseline itself lost its recursive-authority
+ * entries (create_agent, extension_publish, secret_create). */
+static void test_tools_exhaustive_vs_baseline(void) {
+    char *err = NULL;
+    /* Silent on tools → baseline applies... */
+    int rc = agent_definition_apply(g_db,
+        "{\"name\":\"Quiet\",\"models\":[\"p/m\"]}", NULL, NULL, &err);
+    if (rc != 0) fprintf(stderr, "err: %s\n", err ? err : "?");
+    assert(rc == 0);
+    assert(grants_contains(g_db, "Quiet", "tool", "file_read"));
+    assert(grants_contains(g_db, "Quiet", "tool", "request_config"));
+    /* ...minus the haircut: no birthright agent-minting or credential-minting. */
+    assert(!grants_contains(g_db, "Quiet", "tool", "create_agent"));
+    assert(!grants_contains(g_db, "Quiet", "tool", "extension_publish"));
+    assert(!grants_contains(g_db, "Quiet", "tool", "secret_create"));
+
+    /* Declared tools → exactly the declared set, nothing underneath. */
+    rc = agent_definition_apply(g_db,
+        "{\"name\":\"Narrow\",\"models\":[\"p/m\"],"
+        "\"grants\":{\"tools\":[\"file_read\",\"js_eval\"]}}", NULL, NULL, &err);
+    assert(rc == 0);
+    sqlite3_stmt *s;
+    int ntools = -1;
+    assert(sqlite3_prepare_v2(g_db,
+        "SELECT count(*) FROM grants WHERE agent_name='Narrow' AND kind='tool'",
+        -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    ntools = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    assert(ntools == 2);
+    printf("  PASS test_tools_exhaustive_vs_baseline\n");
+}
+
+/* Livermore audit: an invalid memory label rejects the whole create at
+ * request time — never a silently missing block behind an approved prompt. */
+static void test_memory_label_rejected(void) {
+    char *err = NULL;
+    int rc = agent_definition_validate(g_db,
+        "{\"name\":\"Taper\",\"models\":[\"p/m\"],"
+        "\"memory_blocks\":[{\"label\":\"THE NEW TAPE\",\"description\":\"d\"}]}",
+        NULL, &err);
+    assert(rc != 0);
+    assert(err && strstr(err, "THE NEW TAPE") && strstr(err, "invalid"));
+    free(err); err = NULL;
+    /* Missing label is the same refusal, not a crash or a skip. */
+    rc = agent_definition_validate(g_db,
+        "{\"name\":\"Taper\",\"models\":[\"p/m\"],"
+        "\"memory_blocks\":[{\"description\":\"d\"}]}", NULL, &err);
+    assert(rc != 0);
+    free(err);
+    printf("  PASS test_memory_label_rejected\n");
+}
+
 static void test_bad_input(void) {
     assert(agent_definition_validate(g_db, "not json", NULL, NULL) != 0);
     assert(agent_definition_validate(g_db, "{}", NULL, NULL) != 0);
@@ -338,6 +394,8 @@ int main(void) {
     test_extension_gate();
     test_clone_from();
     test_update_agent();
+    test_tools_exhaustive_vs_baseline();
+    test_memory_label_rejected();
     test_bad_input();
     db_close(g_db);
     printf("\nAll agent_define tests passed.\n");

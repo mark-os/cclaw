@@ -183,6 +183,38 @@ static void test_create_agent_discloses_scalars(void) {
     printf("  create_agent scalars: OK\n");
 }
 
+/* Livermore threads 5/6: a definition SILENT on tools/models renders what
+ * apply will actually do — the baseline toolset and the creator's inherited
+ * routing — and a definition that declares them renders no such blocks. */
+static void test_create_agent_inherited_facts(void) {
+    sqlite3 *db = fresh_db();
+    /* The creator ("bot") needs a routing list to inherit. */
+    exec_sql(db,
+        "INSERT OR IGNORE INTO providers(name,base_url) VALUES('p','http://p');"
+        "INSERT OR IGNORE INTO models(id,provider_name,model) VALUES"
+        " ('p/quiet-model','p','qm');"
+        "INSERT OR IGNORE INTO agent_models(agent_name,model_id,pos)"
+        " VALUES('bot','p/quiet-model',0);");
+    char *s = summarize(db, "create_agent", APPROVAL_PARK_REQUIRED,
+        "{\"name\":\"Silent\"}");
+    assert(strstr(s, "Baseline tools"));
+    assert(strstr(s, "tool   file_read"));
+    /* The haircut holds in the rendered baseline too. */
+    assert(!strstr(s, "tool   create_agent"));
+    assert(strstr(s, "inherited from the creator"));
+    assert(strstr(s, "model  #1 p/quiet-model"));
+    free(s);
+    /* Declared tools + models → no inherited blocks. */
+    s = summarize(db, "create_agent", APPROVAL_PARK_REQUIRED,
+        "{\"name\":\"Loud\",\"models\":[\"p/quiet-model\"],"
+        "\"grants\":{\"tools\":[\"file_read\"]}}");
+    assert(!strstr(s, "Baseline tools"));
+    assert(!strstr(s, "inherited from the creator"));
+    free(s);
+    db_close(db);
+    printf("  create_agent inherited facts: OK\n");
+}
+
 /* A provider swap changes which model answers; the DM must say which — and
  * for an EXISTING provider it must show the field-level diff, not a canonical
  * doc that reads as change even where nothing moved. */
@@ -330,6 +362,7 @@ int main(void) {
     test_request_changes_branch();
     test_secret_bindings_lines();
     test_create_agent_discloses_scalars();
+    test_create_agent_inherited_facts();
     test_provider_swap_names_model();
     test_agent_settings_array_and_diff();
     test_kind_headers_split();

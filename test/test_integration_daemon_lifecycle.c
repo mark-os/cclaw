@@ -265,23 +265,19 @@ int main(void) {
             waitpid(loop_pid, NULL, 0);
         }
     }
-    /* Third start: give the startup guard a moment to revert + re-exec.
-     * The re-exec keeps the pid, so "still registered" is the health check. */
-    {
-        int reverted = 0;
-        for (int i = 0; i < 100; i++) {
-            if (access(REEXEC_BIN ".prev", F_OK) != 0 &&
-                access(REEXEC_BIN ".bad", F_OK) == 0) { reverted = 1; break; }
-            usleep(100000);
-        }
-        if (!reverted) {
-            stop_daemon(loop_pid);
-            FAIL("third start did not revert (.prev still present or no .bad)");
-        }
-    }
+    /* Third start: wait for registration FIRST — on the loop path it happens
+     * only after revert + re-exec (the guard runs before the daemon registers),
+     * so a registered pid means the startup guard has already made its call.
+     * Polling the files on a fixed short clock instead raced slow CI runners:
+     * the daemon legitimately takes longer than 10s to reach the guard there. */
     if (wait_registered(loop_pid, NULL) != loop_pid) {
         stop_daemon(loop_pid);
         FAIL("reverted daemon did not come back (re-exec failed?)");
+    }
+    if (access(REEXEC_BIN ".prev", F_OK) == 0 ||
+        access(REEXEC_BIN ".bad", F_OK) != 0) {
+        stop_daemon(loop_pid);
+        FAIL("third start did not revert (.prev still present or no .bad)");
     }
     {
         sqlite3 *vdb = NULL;

@@ -384,33 +384,26 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
 
     fprintf(stderr, "error: daemon did not come back within %ds — reverting\n",
             RESTART_TIMEOUT_S);
-    if (copy_file(prevpath, self, 0755) != 0)
-        fprintf(stderr, "CRITICAL: could not restore %s from %s — do it by hand\n",
-                self, prevpath);
-    /* Restoring means writing over the database file wholesale, which is only
-     * safe with nothing attached to it. A daemon *did* come up, just not one we
-     * could confirm — clobbering its file underneath it would turn a failed
-     * update into a corrupted database, which is far worse than a stale one.
-     * The binary is already back; leave the snapshot for a human. */
-    if (snap[0] && dbpath_copy[0]) {
-        pid_t live = running_daemon_pid(db, NULL);
-        if (live > 0) {
-            fprintf(stderr, "a daemon (pid %d) is attached to the database, so it "
-                            "was left as is.\n  snapshot kept at %s\n",
-                    (int)live, snap);
-        } else {
-            char wal[4160], shm[4160];
-            snprintf(wal, sizeof(wal), "%s-wal", dbpath_copy);
-            snprintf(shm, sizeof(shm), "%s-shm", dbpath_copy);
-            sqlite3_close(db);
-            if (copy_file(snap, dbpath_copy, 0600) == 0) {
-                unlink(wal); unlink(shm);
-                fprintf(stderr, "database restored from %s\n", snap);
-            } else {
-                fprintf(stderr, "CRITICAL: could not restore the database from %s\n", snap);
-            }
-        }
-    }
+
+    /* rename(), not a copy: this binary is *running*, and a running executable
+     * cannot be written to (ETXTBSY) — but its directory entry can be
+     * replaced. Install got this right and the revert did not, so the restore
+     * failed at exactly the moment it existed for. */
+    if (rename(prevpath, self) != 0)
+        fprintf(stderr, "CRITICAL: could not restore %s from %s: %s — "
+                        "do it by hand\n", self, prevpath, strerror(errno));
+    else
+        fprintf(stderr, "restored the previous binary\n");
+
+    /* The database is deliberately NOT rolled back automatically. Writing over
+     * a database file is an aggressive act with no safe way to know whether
+     * something is attached to it, and the new daemon may have done real work
+     * we would silently discard. The snapshot is right there, the schema
+     * handshake already refused the migration hazard this would address, and a
+     * stale database beats a corrupted one. Failure stays passive.  */
+    if (snap[0])
+        fprintf(stderr, "the database was left as it is; a pre-update snapshot "
+                        "is at\n  %s\n", snap);
     fprintf(stderr, "reverted to the previous build — start the daemon "
                     "to confirm it is healthy\n");
     return 1;

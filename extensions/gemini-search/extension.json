@@ -1,0 +1,40 @@
+{
+  "name": "gemini-search",
+  "version": "0.1.0",
+  "description": "Web search via Gemini with Google Search grounding.",
+  "tools": [
+    {
+      "name": "web_search",
+      "description": "Search the web and get an answer with citations. Ask a real question rather than typing keywords — this searches Google and has a model read the results, so 'what did the Fed decide about rates this week' works better than 'fed rates'. Returns a short answer followed by its sources. Use it for anything that happened after your training cutoff, and for facts worth checking rather than recalling. It cannot open a specific URL: use web_fetch for that.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The question to answer, in natural language."
+          },
+          "detail": {
+            "type": "string",
+            "enum": ["brief", "full"],
+            "description": "brief (default) returns a couple of sentences; full returns a longer synthesis."
+          }
+        },
+        "required": ["query"]
+      },
+      "hosts": ["generativelanguage.googleapis.com"],
+      "handler": "tools/web_search.qjs"
+    }
+  ],
+  "config": [
+    {
+      "key": "models",
+      "default": "gemini-2.5-flash",
+      "description": "Comma-separated model preference list, tried in order. Grounding quota is per-model, so a 429 falls through to the next one."
+    },
+    {
+      "key": "base_url",
+      "default": "https://generativelanguage.googleapis.com",
+      "description": "Gemini API base URL (egress pin source of truth)."
+    }
+  ]
+}

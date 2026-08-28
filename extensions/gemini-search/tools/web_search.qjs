@@ -2,7 +2,7 @@
 // with Google Search grounding on, and return its answer plus the sources it
 // actually used.
 //
-// This is the reference example for building tools on llm(): no endpoint URL,
+// This is the reference example for building tools on LLM(): no endpoint URL,
 // no API key, no {{SECRET}} — the call rides the agent's configured models
 // (agent_models -> models -> providers), keys resolved in the trusted parent.
 // The one Gemini-specific piece left is the grounding switch, passed through
@@ -23,7 +23,7 @@ var instruction = full
 
 function attempt() {
     try {
-        return { r: llm(query + "\n\n" + instruction, {
+        return { r: LLM(query + "\n\n" + instruction, {
             model: "gemini",
             // Measured at 48s from the Pogoplug: a grounded call runs a search
             // and then has a model read the results — slower than the default.
@@ -37,7 +37,7 @@ function attempt() {
 }
 
 // One retry on transient failures only (timeouts, 5xx, torn streams — all
-// seen live from the free Gemini tier): llm() already walks every matching
+// seen live from the free Gemini tier): LLM() already walks every matching
 // routing entry per attempt, so a quota/auth failure has had its fair chance.
 var out = attempt();
 if (out.err && /timed out|timeout|http 5\d\d|stream/i.test(out.err)) out = attempt();

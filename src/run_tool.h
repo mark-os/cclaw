@@ -107,11 +107,11 @@ typedef struct {
     /* Where to write output too large for the wire (parent-resolved, dir
      * already created; NULL disables spilling for this call). */
     const char *spill_path;
-    /* JS tier: the agent's LLM routing list rendered as candidate descriptors
-     * (llm_wire_json) — resolved URL, full auth header, wire format, merged
-     * request extras. Carries provider keys, so blobs holding it are bzero'd
-     * after write like secret-bearing ones. NULL = no llm() in the child. */
-    const char *llm_json;
+    /* JS tier: the parent's per-call LLM bridge socket (llm_bridge.c) in the
+     * agent dir. The sandbox bind-mounts it and exports CCLAW_LLM_SOCK; the
+     * child's LLM() global speaks the bridge protocol over it. No key
+     * material — completions execute in the parent. NULL = no LLM(). */
+    const char *llm_sock;
 } RunToolReq;
 
 /* Child-side parsed request (owned strings). Mirrors RunToolReq's wire order.
@@ -142,7 +142,7 @@ typedef struct {
     size_t param_count;
     char *egress_note;
     char *spill_path;
-    char *llm_json;
+    char *llm_sock;
 } RunToolParsed;
 
 /* Child-side param lookup (pre-extracted by the parent). *_str returns the

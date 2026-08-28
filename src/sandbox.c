@@ -31,6 +31,7 @@
  * socket itself lives in the agent folder on the host (outside the workspace);
  * inside the netns the preload lib and net_shim reach it here. */
 #define SANDBOX_PROXY_SOCK_PATH "/tmp/.cclaw_proxy.sock"
+#define SANDBOX_LLM_SOCK_PATH   "/tmp/.cclaw_llm.sock"
 
 /* The egress interposer lives on the root tmpfs, not in /tmp. /tmp is now a
  * persistent bind of the agent's own scratch directory, so anything we drop
@@ -439,6 +440,17 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         }
     }
 
+    /* Same treatment for the parent's per-call LLM bridge socket (LLM()). */
+    if (full_cfg && full_cfg->llm_sock && full_cfg->llm_sock[0]) {
+        char ldst[PATH_MAX];
+        int ln = snprintf(ldst, sizeof(ldst), "%s%s", newroot, SANDBOX_LLM_SOCK_PATH);
+        if (ln > 0 && (size_t)ln < sizeof(ldst)) {
+            int tfd = open(ldst, O_CREAT | O_WRONLY, 0600);
+            if (tfd >= 0) close(tfd);
+            mount(full_cfg->llm_sock, ldst, NULL, MS_BIND, NULL);
+        }
+    }
+
     /* Bind-mount workspace rw */
     if (ws_resolved)
         bind_path_into(newroot, ws_resolved, 0);
@@ -766,6 +778,12 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     /* the proxy UDS is reachable at a fixed in-sandbox path (bound from the
      * broker's agent-folder socket in sandbox_apply_namespace). */
     if (psock) setenv("CCLAW_PROXY_SOCK", SANDBOX_PROXY_SOCK_PATH, 1);
+
+    /* LLM() bridge socket: fixed in-namespace path under the sandbox (the
+     * bind above), the real agent-dir path when running on the bare host. */
+    if (cfg->llm_sock && cfg->llm_sock[0])
+        setenv("CCLAW_LLM_SOCK",
+               cfg->sandbox ? SANDBOX_LLM_SOCK_PATH : cfg->llm_sock, 1);
 
     sandbox_apply_rlimits(cfg);
 

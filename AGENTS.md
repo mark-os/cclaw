@@ -169,10 +169,12 @@ This is what CClaw *is for*, not an add-on. Agents extend themselves at runtime 
 - **Definition is config, not code.** A tool is declared in an extension manifest (`extension.json`): name, description, JSON schema, and a **path to a handler file** — never inline JS. Defining a tool = write the draft bundle + `extension_promote` (which validates the manifest and ingests the `extensions`/`tools`/`agent_extensions` rows).
 - **Draft → promote lifecycle.** JS starts as a draft file in `workspace/extensions/`, usable only by that agent. Promotion registers it (`name → path` in `extensions`, linked via `agent_extensions`) so it loads at startup — and that registration is the trust boundary (a sub-agent's draft must not auto-promote to a global tool).
 - `js_eval` runs JS in the sandboxed engine for one-off evaluation.
-- `llm(prompt, opts)` is a built-in JS global: one-shot completions against the
-  agent's own model routing list, resolved parent-side — the primitive
-  self-authored tools compose on. See [specs/js-llm.md](specs/js-llm.md);
-  `extensions/gemini-search` is the reference example.
+- `LLM(prompt, opts)` is a built-in JS global: completions against the agent's
+  own model routing list, executed in the trusted parent over a per-call
+  bridge socket — the composable primitive self-authored tools build on
+  (map/filter/chain; intermediates never enter context). See
+  [specs/js-llm.md](specs/js-llm.md); `extensions/gemini-search` is the
+  reference example.
 - The JS bridge (tool registration, channel dispatch) is a first-class API surface. When changing how tools register or channels dispatch, preserve the agent's ability to self-augment — don't optimize it away as "just plugins."
 
 ## Security Model

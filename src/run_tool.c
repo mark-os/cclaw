@@ -118,7 +118,7 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     }
     w_str(&b, req->egress_note);
     w_str(&b, req->spill_path);
-    w_str(&b, req->llm_json);
+    w_str(&b, req->llm_sock);
 
     size_t total = w_finalize(&b);
     if (total == 0) { free(blob); return NULL; }
@@ -257,7 +257,7 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
     }
     q->egress_note = r_str(r);
     q->spill_path = r_str(r);
-    q->llm_json = r_str(r);
+    q->llm_sock = r_str(r);
     return r->err ? -1 : 0;
 }
 
@@ -379,6 +379,7 @@ static void build_sandbox_cfg(const RunToolParsed *q, int skip_pid_ns,
      * and ciphertext for masking. */
     cfg->db_path      = q->db_path;
     cfg->proxy_sock   = proxy_sock;
+    cfg->llm_sock     = q->llm_sock;
     cfg->sandbox      = q->sandbox;
     cfg->mount_cwd    = q->mount_cwd;
     cfg->env_mode     = q->env_mode;
@@ -461,7 +462,11 @@ static void sandbox_child_main(const TierDescriptor *desc, RunToolParsed *q,
     close(pipefd[1]);
 
     /* Host mode (sandbox=0): no namespace, no proxy (proxy_active is
-     * already gated on q->sandbox) — run_fn / exec runs on the bare host. */
+     * already gated on q->sandbox) — run_fn / exec runs on the bare host.
+     * The LLM bridge socket needs no namespace, so host mode exports the
+     * real path directly (the sandboxed path is set in sandbox_child_setup). */
+    if (!q->sandbox && q->llm_sock && q->llm_sock[0])
+        setenv("CCLAW_LLM_SOCK", q->llm_sock, 1);
     if (q->sandbox) {
         SandboxConfig cfg;
         SandboxMountReq *extra = NULL;

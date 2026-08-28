@@ -72,6 +72,9 @@ typedef struct {
     /* Deadline: 0 = no timeout, >0 = SIGKILL after this time */
     time_t deadline;
     int timeout_sec;        /* window used for `deadline`, for the timeout message */
+    /* Per-call LLM() bridge server (llm_bridge.h), owned by this child's
+     * lifetime — stopped in child_remove. NULL when the call has no LLM(). */
+    struct LlmBridge *llm_bridge;
 } ChildProc;
 
 /* ── The table ──────────────────────────────────────────────────────
@@ -118,7 +121,7 @@ ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
 
 /* spawn_run_tool_blob wrapper for a model tool call: 0 on success, -1 on
  * failure (caller writes the error result inline). */
-int spawn_run_tool_child(int64_t session_id, const char *agent_name,
+ChildProc *spawn_run_tool_child(int64_t session_id, const char *agent_name,
                          const char *tool_call_id, const char *tool_name,
                          const char *tool_args, int64_t iteration_id,
                          int64_t entry_id, const char *blob, size_t blob_len,

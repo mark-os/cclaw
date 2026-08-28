@@ -56,9 +56,12 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
                           "is synchronous; returns {status, body, error}; "
                           "markdownify:true converts an HTML body to markdown; "
                           "timeout is seconds (default 30, max 180). "
-                          "llm(prompt[, opts]) runs one completion on YOUR configured "
+                          "LLM(prompt[, opts]) runs one completion on YOUR configured "
                           "models (same routing list as your own turns — no key, no URL) "
-                          "and returns the text. First arg is a prompt string or "
+                          "and returns the text. It is a plain function — compose it: "
+                          "map it over items, use it as a filter/classifier, chain "
+                          "models; intermediate calls never enter your context, only "
+                          "what your code returns does. First arg is a prompt string or "
                           "{messages:[{role,content},...]}. opts: {system, model "
                           "(substring-match a routed model, e.g. 'gemini'), max_tokens, "
                           "temperature, timeout (secs, default 120, max 180), "
@@ -218,10 +221,9 @@ char *tool_js_tier_run(const RunToolParsed *q, int *is_error) {
         }
         qjs_host_set_secrets(js_secrets, q->secret_count);
     }
-    /* llm() candidates (parent-resolved routing list); NULL = llm() throws. */
-    qjs_host_set_llm(q->llm_json);
+    /* LLM() reaches the parent's bridge via CCLAW_LLM_SOCK (env, set during
+     * sandbox setup from q->llm_sock) — nothing to hand the engine here. */
     char *r = qjs_eval_run(code, filename, args, ext_config, is_error);
-    qjs_host_set_llm(NULL);
     qjs_host_set_secrets(NULL, 0);
     free(js_secrets);
     return r ? r : tool_fail(is_error, "error: js_eval returned null");

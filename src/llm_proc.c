@@ -24,9 +24,11 @@
 #include <unistd.h>
 
 #define MAX_MODELS 16
-/* Routing entries shipped to a JS-tier child for llm(). Small on purpose: the
- * run-tool blob is capped at 32KB and each descriptor carries a key. */
-#define LLM_WIRE_MAX_CANDIDATES 4
+/* LLM() bridge: routing entries walked per request, and per-attempt HTTP
+ * bounds (grounded/reasoning calls run ~1min on slow targets). */
+#define JSLLM_MAX_CANDIDATES 4
+#define JSLLM_TIMEOUT_DEFAULT 120
+#define JSLLM_TIMEOUT_MAX     180
 /* Generous ceiling on any provider response body — a real completion is a few
  * MB at most; this only bounds daemon OOM from a malicious/buggy provider
  * (web_fetch/js_http already cap their own). */
@@ -456,93 +458,271 @@ done:
     return rc;
 }
 
-/* ── llm() wire blob for the sandboxed JS tier ─────────────────────
+/* ── llm_request: the LLM() bridge's parent-side core ──────────────
  *
- * The child has no DB and never holds the master key, so everything llm()
- * needs is resolved here in the trusted parent and shipped in the run-tool
- * blob: the agent's OWN routing list (same loader, same order as its turns —
- * agent_models IS the authority to spend these models), each candidate as a
- * fully-resolved descriptor. `auth` is the complete header line, key
- * included — the blob is secret-bearing and callers bzero it after write.
- * `extra` pre-merges providers.request_extra with the route's effort
- * fragment so the child does no provider-specific thinking beyond the two
- * body shapes. `host` is what dispatch widens the call's egress to. */
-char *llm_wire_json(sqlite3 *db, const char *agent_name) {
-    ModelCandidate models[LLM_WIRE_MAX_CANDIDATES];
-    int n = load_candidates(db, agent_name, models, LLM_WIRE_MAX_CANDIDATES);
-    if (n <= 0) return NULL;
+ * One completion on behalf of a JS-tier caller (llm-core.md): the agent's
+ * OWN routing list (same loader, same order as its turns — agent_models IS
+ * the authority to spend these models), body built in SQL, key resolved
+ * here and never crossing into any child, every attempt archived to
+ * llm_responses, spend gated by token_rate_limit. Walks the ladder in
+ * routing order; opts.model substring-narrows within it. */
 
+/* Request body per wire format. ?1=model ?2=messages(json array, openai
+ * shape) ?3=opts(json) ?4=candidate extra (request_extra+effort merged).
+ * json_patch's RFC-7386 null-removes-key rule is what makes the optional
+ * fields disappear when opts omits them. Caller extra merges LAST. */
+static const char *SQL_JSBODY_OPENAI =
+    "SELECT json_patch(json_patch(json_patch("
+    "  json_object('model', ?1, 'messages', json(?2)),"
+    "  json_object('max_tokens',  json_extract(?3,'$.max_tokens'),"
+    "              'temperature', json_extract(?3,'$.temperature'))),"
+    "  json(?4)),"
+    "  COALESCE(json_extract(?3,'$.extra'), '{}'))";
+
+static const char *SQL_JSBODY_GEMINI =
+    "SELECT json_patch(json_patch(json_patch("
+    /* base: contents only — the always-present part */
+    "  json_object("
+    "    'contents',"
+    "    (SELECT json_group_array(json_object("
+    "       'role', CASE json_extract(value,'$.role')"
+    "                 WHEN 'assistant' THEN 'model' ELSE 'user' END,"
+    "       'parts', json_array(json_object("
+    "                  'text', json_extract(value,'$.content')))))"
+    "     FROM json_each(?2)"
+    "     WHERE json_extract(value,'$.role') <> 'system')),"
+    /* optionals ride a patch so a NULL value REMOVES the key (RFC 7386)
+     * instead of shipping a literal null the provider may reject */
+    "  json_object("
+    "    'systemInstruction',"
+    "    (SELECT json_object('parts', json_group_array("
+    "               json_object('text', json_extract(value,'$.content'))))"
+    "     FROM json_each(?2)"
+    "     WHERE json_extract(value,'$.role') = 'system'"
+    "     HAVING count(*) > 0),"
+    "    'generationConfig',"
+    "    CASE WHEN json_extract(?3,'$.max_tokens') IS NOT NULL"
+    "           OR json_extract(?3,'$.temperature') IS NOT NULL"
+    "    THEN json_patch(json_object(),"
+    "           json_object("
+    "             'maxOutputTokens', json_extract(?3,'$.max_tokens'),"
+    "             'temperature',    json_extract(?3,'$.temperature')))"
+    "    END)),"
+    "  json(?4)),"
+    "  COALESCE(json_extract(?3,'$.extra'), '{}'))";
+
+/* Completion text out of either format's 2xx body: openai
+ * choices[0].message.content, else gemini parts joined with newlines
+ * (grounded responses arrive as several parts). */
+static const char *SQL_JSBODY_TEXT =
+    "SELECT COALESCE("
+    "  json_extract(?1,'$.choices[0].message.content'),"
+    "  (SELECT group_concat(json_extract(value,'$.text'), char(10))"
+    "   FROM json_each(?1,'$.candidates[0].content.parts')"
+    "   WHERE json_extract(value,'$.text') IS NOT NULL))"
+    " WHERE json_valid(?1)";
+
+/* One-column one-row SELECT → malloc'd text (NULL when no row/NULL). */
+static char *sql_text(sqlite3 *db, const char *sql,
+                      const char **binds, int nbind) {
     sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db,
-            "SELECT json_object('id',?1,'model',?2,'url',?3,'auth',?4,"
-            "'format',?5,'host',?6,'extra',"
-            "json(json_patch(COALESCE((SELECT request_extra FROM providers"
-            "                          WHERE name=?7 AND json_valid(request_extra)),'{}'),"
-            "                CASE WHEN json_valid(?8) THEN ?8 ELSE '{}' END)))",
-            -1, &s, NULL) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) {
+        LOG_WARN_("llm_request: prepare failed: %s", sqlite3_errmsg(db));
         return NULL;
+    }
+    for (int i = 0; i < nbind; i++)
+        sqlite3_bind_text(s, i + 1, binds[i], -1, SQLITE_STATIC);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW &&
+        sqlite3_column_type(s, 0) != SQLITE_NULL) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t) r = strdup(t);
+    }
+    sqlite3_finalize(s);
+    return r;
+}
 
-    Buf out = {0};
-    buf_append_char(&out, '[');
-    int emitted = 0;
-    for (int i = 0; i < n; i++) {
+/* {"ok":false,"error":...} — always returns something the bridge can send. */
+static char *llm_request_fail(sqlite3 *db, const char *msg) {
+    const char *binds[] = { msg };
+    char *r = sql_text(db, "SELECT json_object('ok', json('false'), 'error', ?1)",
+                       binds, 1);
+    return r ? r : strdup("{\"ok\":false,\"error\":\"internal error\"}");
+}
+
+char *llm_request(sqlite3 *db, const char *agent_name,
+                  const char *request_json, const char *source,
+                  int64_t session_id, int64_t iteration_id) {
+    /* The caller is sandboxed JS: validate everything, in SQL. */
+    char *messages = NULL, *opts = NULL;
+    {
+        const char *binds[] = { request_json ? request_json : "" };
+        messages = sql_text(db,
+            "SELECT json_extract(?1,'$.messages') WHERE json_valid(?1)"
+            " AND json_type(?1,'$.messages')='array'", binds, 1);
+        opts = sql_text(db,
+            "SELECT COALESCE(json_extract(?1,'$.opts'),'{}') WHERE json_valid(?1)",
+            binds, 1);
+    }
+    if (!messages || !opts) {
+        free(messages); free(opts);
+        return llm_request_fail(db,
+            "malformed request: need {messages:[{role,content},...]}");
+    }
+
+    Config *cfg = config_load(db);
+    if (cfg && !rate_limit_check(db, cfg->token_rate_limit)) {
+        config_free(cfg); free(messages); free(opts);
+        return llm_request_fail(db, "token rate limit reached — try later");
+    }
+    if (cfg) config_free(cfg);
+
+    /* opts.model narrows the walk (substring on routing id or model name);
+     * opts.timeout bounds each attempt. */
+    char want[128] = "", *w;
+    const char *ob[] = { opts };
+    if ((w = sql_text(db, "SELECT json_extract(?1,'$.model')", ob, 1))) {
+        snprintf(want, sizeof(want), "%s", w);
+        free(w);
+    }
+    int timeout = JSLLM_TIMEOUT_DEFAULT;
+    if ((w = sql_text(db, "SELECT CAST(json_extract(?1,'$.timeout') AS INTEGER)"
+                          " WHERE json_extract(?1,'$.timeout') > 0", ob, 1))) {
+        timeout = atoi(w);
+        free(w);
+        if (timeout > JSLLM_TIMEOUT_MAX) timeout = JSLLM_TIMEOUT_MAX;
+    }
+
+    ModelCandidate models[JSLLM_MAX_CANDIDATES];
+    int n = load_candidates(db, agent_name, models, JSLLM_MAX_CANDIDATES);
+    if (n <= 0) {
+        free(messages); free(opts);
+        return llm_request_fail(db,
+            "this agent has no routable model (agent_models is empty or "
+            "every provider key is missing)");
+    }
+
+    Buf fails = {0};
+    char *response = NULL;
+    int matched = 0;
+
+    for (int i = 0; i < n && !response; i++) {
         ModelCandidate *m = &models[i];
-        Config c = {0};
-        c.provider.base_url = m->base_url;
-        c.provider.model = m->model;
-        c.provider.endpoint_type = (EndpointType)m->endpoint_type;
-        c.provider.model_id = m->id[0] ? m->id : NULL;
-        c.provider.reasoning_effort = m->reasoning_effort[0] ? m->reasoning_effort : NULL;
+        if (want[0] && !strstr(m->id, want) && !strstr(m->model, want))
+            continue;
+        matched++;
+        /* Health at selection time, same rule as the turn loop: an active
+         * error cooldown sidelines, but never empties the walk — the last
+         * matching candidate gets its attempt regardless. */
+        if (model_degraded_now(db, m->id) && i + 1 < n) continue;
 
+        Config rc = {0};
+        rc.provider.base_url = m->base_url;
+        rc.provider.model = m->model;
+        rc.provider.endpoint_type = (EndpointType)m->endpoint_type;
+        rc.provider.model_id = m->id[0] ? m->id : NULL;
+        rc.provider.reasoning_effort =
+            m->reasoning_effort[0] ? m->reasoning_effort : NULL;
         const char *key = m->api_key_env[0] ? getenv(m->api_key_env) : NULL;
         char *key_buf = (key && key[0]) ? strdup(key)
                       : m->api_key_env[0] ? db_secret_get_system(db, m->api_key_env)
                       : NULL;
-        c.provider.api_key = key_buf;
+        rc.provider.api_key = key_buf;
 
-        char *url = llm_build_url(&c);
-        char *auth = llm_build_auth_header(&c);
-        char *extra = llm_effort_fragment(db, &c.provider);
-
-        /* scheme://host[:port]/... → host (the proxy matches bare hostnames) */
-        char host[256] = "";
-        if (url) {
-            const char *h = strstr(url, "://");
-            h = h ? h + 3 : url;
-            size_t j = 0;
-            while (h[j] && h[j] != '/' && h[j] != ':' && j < sizeof(host) - 1) {
-                host[j] = h[j]; j++;
-            }
-            host[j] = '\0';
+        char *effort = llm_effort_fragment(db, &rc.provider);
+        /* Candidate extra: providers.request_extra then the route's effort
+         * fragment — pre-merged so the body statement stays one patch. */
+        char *cand_extra;
+        {
+            const char *xb[] = { m->provider_name, effort ? effort : "{}" };
+            cand_extra = sql_text(db,
+                "SELECT json_patch(COALESCE((SELECT request_extra FROM providers"
+                "  WHERE name=?1 AND json_valid(request_extra)),'{}'),"
+                "  CASE WHEN json_valid(?2) THEN ?2 ELSE '{}' END)", xb, 2);
         }
+        const char *bb[] = { m->model, messages, opts,
+                             cand_extra ? cand_extra : "{}" };
+        char *body = sql_text(db, m->endpoint_type == ENDPOINT_GEMINI
+                                    ? SQL_JSBODY_GEMINI : SQL_JSBODY_OPENAI,
+                              bb, 4);
+        char *url = llm_build_url(&rc);
+        char *auth = llm_build_auth_header(&rc);
+        free(effort); free(cand_extra);
 
-        if (url && auth && host[0]) {
-            sqlite3_reset(s);
-            sqlite3_bind_text(s, 1, m->id, -1, SQLITE_STATIC);
-            sqlite3_bind_text(s, 2, m->model, -1, SQLITE_STATIC);
-            sqlite3_bind_text(s, 3, url, -1, SQLITE_STATIC);
-            sqlite3_bind_text(s, 4, auth, -1, SQLITE_STATIC);
-            sqlite3_bind_text(s, 5, m->endpoint_type == ENDPOINT_GEMINI
-                                      ? "gemini" : "openai", -1, SQLITE_STATIC);
-            sqlite3_bind_text(s, 6, host, -1, SQLITE_STATIC);
-            sqlite3_bind_text(s, 7, m->provider_name, -1, SQLITE_STATIC);
-            sqlite3_bind_text(s, 8, extra ? extra : "{}", -1, SQLITE_STATIC);
-            if (sqlite3_step(s) == SQLITE_ROW) {
-                const char *row = (const char *)sqlite3_column_text(s, 0);
-                if (row) {
-                    if (emitted) buf_append_char(&out, ',');
-                    buf_append_str(&out, row);
-                    emitted++;
+        if (body && url && auth) {
+            const char *headers[] = { "Content-Type: application/json", auth, NULL };
+            HttpResponse resp = {0};
+            HttpRequestOpts hopts = {
+                .url = url, .method = "POST", .headers = headers, .body = body,
+                .timeout = timeout, .max_response_bytes = LLM_RESP_MAX,
+            };
+            int status = http_do(&hopts, &resp);
+
+            char label[96];
+            if (status >= 200 && status < 300)
+                snprintf(label, sizeof(label), "jsllm_ok %s", source ? source : "?");
+            else if (status == -2)
+                snprintf(label, sizeof(label), "jsllm_timeout %s", source ? source : "?");
+            else if (status < 0)
+                snprintf(label, sizeof(label), "jsllm_net %s", source ? source : "?");
+            else
+                snprintf(label, sizeof(label), "jsllm_http_%d %s", status,
+                         source ? source : "?");
+            db_archive_response(db, session_id, iteration_id, m->id, label,
+                                resp.data ? resp.data : resp.err_detail, body);
+
+            if (status >= 200 && status < 300 && resp.data) {
+                const char *tb[] = { resp.data };
+                char *text = sql_text(db, SQL_JSBODY_TEXT, tb, 1);
+                if (text && text[0]) {
+                    char sid[32];
+                    snprintf(sid, sizeof(sid), "%d", status);
+                    const char *rb[] = { text, m->model, m->id, sid, resp.data };
+                    response = sql_text(db,
+                        "SELECT json_object('ok', json('true'), 'text', ?1,"
+                        " 'model', ?2, 'id', ?3, 'status', CAST(?4 AS INTEGER),"
+                        " 'body', json(?5))", rb, 5);
+                    model_config_recover(db, m->id);
                 }
+                if (!response)
+                    buf_appendf(&fails, "%s%s: empty completion",
+                                fails.len ? "; " : "", m->id);
+                free(text);
+            } else {
+                model_stat_error(db, m->id, status);
+                if (status == -2)
+                    buf_appendf(&fails, "%s%s: timed out after %ds",
+                                fails.len ? "; " : "", m->id, timeout);
+                else if (status < 0)
+                    buf_appendf(&fails, "%s%s: %s", fails.len ? "; " : "",
+                                m->id, resp.err_detail ? resp.err_detail
+                                                       : "transport error");
+                else
+                    buf_appendf(&fails, "%s%s: http %d %.120s",
+                                fails.len ? "; " : "", m->id, status,
+                                resp.data ? resp.data : "");
             }
+            http_response_free(&resp);
+        } else {
+            buf_appendf(&fails, "%s%s: could not build the request",
+                        fails.len ? "; " : "", m->id);
         }
-        free(url); free(auth); free(extra);
+        free(body); free(url); free(auth);
         if (key_buf) { explicit_bzero(key_buf, strlen(key_buf)); free(key_buf); }
     }
-    sqlite3_finalize(s);
-    buf_append_char(&out, ']');
-    if (!emitted) { buf_free(&out); return NULL; }
-    return buf_take(&out);
+
+    free(messages); free(opts);
+    if (response) { buf_free(&fails); return response; }
+    char *trail = buf_take(&fails);
+    char msg[768];
+    if (!matched)
+        snprintf(msg, sizeof(msg), "no routed model matches '%s' — LLM() can "
+                 "only use models already on this agent's routing list", want);
+    else
+        snprintf(msg, sizeof(msg), "every candidate failed — %s",
+                 trail && trail[0] ? trail : "no usable candidate");
+    free(trail);
+    return llm_request_fail(db, msg);
 }
 
 /* ── llm_req: single LLM call with DB-driven routing ──────────── */

@@ -28,6 +28,7 @@
 #include "db_response.h"
 #include "extension_manifest.h"
 #include "hook_dispatch.h"
+#include "llm_bridge.h"
 #include "llm_proc.h"
 #include "llm_worker.h"
 #include "log.h"
@@ -967,6 +968,9 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
                                   const ShellSecret *secrets, size_t secret_count,
                                   ToolWireArg *params, size_t param_n,
                                   const char *spill_path, int timeout,
+                                  const char *llm_source,
+                                  int64_t session_id, int64_t iteration_id,
+                                  LlmBridge **out_bridge,
                                   size_t *out_len) {
     char agent_dir[PATH_MAX];
     agent_dir_resolve(jc->workspace, jc->db_path, agent_dir, sizeof(agent_dir));
@@ -1057,45 +1061,28 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
     req.egress_note = se.note;
     req.timeout = timeout;
 
-    /* llm() for the child: the agent's routing list as resolved descriptors
-     * (llm_wire_json). Its provider hosts join this call's egress allowlist —
-     * that widening is deliberate and documented (specs/js-llm.md): the agent
-     * already sends its whole context to these hosts every turn, so JS-tier
-     * egress to them adds no new disclosure class. Each key still travels
-     * only in its own provider's auth header, C-side, never into JS values. */
-    char *llm_json = llm_wire_json(proc_db(), agent_name);
-    char *llm_hosts[8];
-    size_t llm_hosts_n = 0;
-    const char **merged_hosts = NULL;
-    if (llm_json) {
-        req.llm_json = llm_json;
-        sqlite3_stmt *hs;
-        if (sqlite3_prepare_v2(proc_db(),
-                "SELECT DISTINCT json_extract(value,'$.host') FROM json_each(?1)",
-                -1, &hs, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(hs, 1, llm_json, -1, SQLITE_STATIC);
-            while (llm_hosts_n < 8 && sqlite3_step(hs) == SQLITE_ROW) {
-                const char *h = (const char *)sqlite3_column_text(hs, 0);
-                if (h && h[0] && (llm_hosts[llm_hosts_n] = strdup(h)))
-                    llm_hosts_n++;
-            }
-            sqlite3_finalize(hs);
-        }
-        if (llm_hosts_n > 0 &&
-            (merged_hosts = malloc((se.hosts_n + llm_hosts_n) * sizeof(*merged_hosts)))) {
-            size_t k = 0;
-            for (size_t i = 0; i < se.hosts_n; i++) merged_hosts[k++] = se.hosts[i];
-            for (size_t i = 0; i < llm_hosts_n; i++) merged_hosts[k++] = llm_hosts[i];
-            req.host_rules = merged_hosts;
-            req.host_count = k;
-        }
+    /* LLM() for the child (llm-core.md): completions run in THIS process via
+     * a per-call bridge socket — no key, no provider egress, no routing
+     * knowledge crosses into the child. Gated off for no-network profiles
+     * (restricted means no packets on the child's behalf, whoever sends
+     * them). The bridge outlives this call: ownership passes to the caller,
+     * who parks it on the ChildProc so reap stops it. */
+    LlmBridge *bridge = NULL;
+    if (out_bridge) {
+        *out_bridge = NULL;
+        if (!jc->sb.net_mode &&
+            (bridge = llm_bridge_start(agent_dir, jc->db_path, agent_name,
+                                       llm_source, session_id, iteration_id)))
+            req.llm_sock = llm_bridge_sock(bridge);
     }
 
     char *blob = run_tool_serialize_request(&req, out_len);
     call_egress_free(&se);
-    if (llm_json) { explicit_bzero(llm_json, strlen(llm_json)); free(llm_json); }
-    for (size_t i = 0; i < llm_hosts_n; i++) free(llm_hosts[i]);
-    free(merged_hosts);
+    if (blob) {
+        if (out_bridge) *out_bridge = bridge;
+    } else {
+        llm_bridge_stop(bridge);
+    }
     if (js_hosts)
         for (size_t i = 0; i < secret_count; i++) free(js_hosts[i]);
     free(js_hosts);
@@ -1271,11 +1258,11 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             if (!blob)
                 return tool_inline_error(session_id, tc,
                     "error: file tool request exceeds 32KB cap", NULL);
-            int rc = spawn_run_tool_child(session_id, agent_name,
+            ChildProc *cp = spawn_run_tool_child(session_id, agent_name,
                          tc->call_id, tc->name, tc->arguments,
                          tc->iteration_id, tc->entry_id, blob, blob_len, 120);
             free(blob);
-            if (rc != 0)
+            if (!cp)
                 return tool_inline_error(session_id, tc,
                     "error: spawn_run_tool_child failed", "fork_failed");
             LOG_INFO_("tool fork tool=%s", tc->name);
@@ -1363,14 +1350,14 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             /* Daemon backstop fires margin-seconds AFTER the broker's own
              * cmd_timeout, so the broker's (well-tested) teardown — which kills
              * the sandbox child's process group — wins in the normal case. */
-            int rc = spawn_run_tool_child(session_id, agent_name,
+            ChildProc *cp = spawn_run_tool_child(session_id, agent_name,
                          tc->call_id, tc->name, tc->arguments,
                          tc->iteration_id, tc->entry_id, blob, blob_len,
                          cmd_timeout + 30);
             /* Wipe blob (carries interpolated secrets) */
             explicit_bzero(blob, blob_len);
             free(blob);
-            if (rc != 0)
+            if (!cp)
                 return tool_inline_error(session_id, tc,
                     "error: spawn_run_tool_child failed", "fork_failed");
             LOG_INFO_("tool fork tool=%s", tc->name);
@@ -1436,13 +1423,13 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         if (!blob)
             return tool_inline_error(session_id, tc,
                 "error: web request exceeds 32KB cap", NULL);
-        int rc = spawn_run_tool_child(session_id, agent_name,
+        ChildProc *cp = spawn_run_tool_child(session_id, agent_name,
                      tc->call_id, tc->name, tc->arguments,
                      tc->iteration_id, tc->entry_id, blob, blob_len,
                      web_timeout + 30);
         explicit_bzero(blob, blob_len);
         free(blob);
-        if (rc != 0)
+        if (!cp)
             return tool_inline_error(session_id, tc,
                 "error: spawn_run_tool_child failed", "fork_failed");
         LOG_INFO_("tool fork tool=%s", tc->name);
@@ -1517,23 +1504,31 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         char spill[PATH_MAX + 64];
         const char *spill_p = spill_path_build(proc_db(), session_id, tc->call_id,
                                                spill, sizeof(spill)) == 0 ? spill : NULL;
+        char llm_source[80];
+        snprintf(llm_source, sizeof(llm_source), "js:%s", tc->name);
+        LlmBridge *bridge = NULL;
         char *blob = js_request_serialize(jc, agent_name, tc->name, tc->arguments,
                                           sens_once ? sens_host : NULL,
                                           secrets, secret_count,
                                           params, param_n, spill_p, js_timeout,
+                                          llm_source, session_id,
+                                          tc->iteration_id, &bridge,
                                           &blob_len);
         if (!blob)
             return tool_inline_error(session_id, tc,
                 "error: js request exceeds 32KB cap", NULL);
-        int rc = spawn_run_tool_child(session_id, agent_name,
+        ChildProc *cp = spawn_run_tool_child(session_id, agent_name,
                      tc->call_id, tc->name, tc->arguments,
                      tc->iteration_id, tc->entry_id, blob, blob_len,
                      js_timeout + 30);
         explicit_bzero(blob, blob_len);
         free(blob);
-        if (rc != 0)
+        if (!cp) {
+            llm_bridge_stop(bridge);
             return tool_inline_error(session_id, tc,
                 "error: spawn_run_tool_child failed", "fork_failed");
+        }
+        cp->llm_bridge = bridge;   /* stopped at reap (child_remove) */
         LOG_INFO_("tool fork tool=%s", tc->name);
         return 0;
     }
@@ -1665,9 +1660,15 @@ CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len)
     size_t snap_n = 0;
     ShellSecret *snap = secrets_snapshot(proc_db(),
         proc_tool_setup()->secrets, proc_tool_setup()->secret_count, &snap_n);
+    char llm_source[96];
+    snprintf(llm_source, sizeof(llm_source), "cron:%s",
+             f->job_name ? f->job_name : "?");
+    LlmBridge *bridge = NULL;
     char *blob = js_request_serialize(jc, f->agent_name, "js_eval", "{}",
                                       NULL, snap, snap_n, params, 1, NULL,
-                                      JSEVAL_DEFAULT_TIMEOUT, &blob_len);
+                                      JSEVAL_DEFAULT_TIMEOUT,
+                                      llm_source, f->session_id, 0, &bridge,
+                                      &blob_len);
     secrets_snapshot_free(snap, snap_n);
     if (!blob) {
         snprintf(err, err_len, "the script request exceeds the 32KB wire cap");
@@ -1677,7 +1678,8 @@ CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len)
                                        f->agent_name, blob, blob_len, 150);
     explicit_bzero(blob, blob_len);
     free(blob);
-    if (!c) return CRON_SCRIPT_BUSY;
+    if (!c) { llm_bridge_stop(bridge); return CRON_SCRIPT_BUSY; }
+    c->llm_bridge = bridge;
     snprintf(c->cron_job, sizeof(c->cron_job), "%s", f->job_name ? f->job_name : "");
     c->cron_prompt = f->prompt ? strdup(f->prompt) : NULL;
     LOG_INFO_("cron script fork job=%s agent=%s session=%lld",

@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "child.h"
+#include "llm_bridge.h"
 
 #include "proc.h"
 #include "run_tool.h"
@@ -57,6 +58,8 @@ void child_remove(ChildProc *c) {
     c->tool_args = NULL;
     free(c->cron_prompt);
     c->cron_prompt = NULL;
+    llm_bridge_stop(c->llm_bridge);
+    c->llm_bridge = NULL;
     g_children[idx] = g_children[g_child_count - 1];
     g_child_count--;
 }
@@ -275,20 +278,21 @@ ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
     return c;
 }
 
-/* Spawn a sandboxed tool child. Returns 0 on success (child is registered in
- * g_children), -1 on failure (caller writes the error result inline). */
-int spawn_run_tool_child(int64_t session_id, const char *agent_name,
+/* Spawn a sandboxed tool child. Returns the registered ChildProc (so the
+ * caller can attach per-call state like the LLM bridge), NULL on failure
+ * (caller writes the error result inline). */
+ChildProc *spawn_run_tool_child(int64_t session_id, const char *agent_name,
                          const char *tool_call_id, const char *tool_name,
                          const char *tool_args, int64_t iteration_id,
                          int64_t entry_id, const char *blob, size_t blob_len,
                          int timeout_sec) {
     ChildProc *c = spawn_run_tool_blob(CHILD_TOOL_EXEC, session_id, agent_name,
                                        blob, blob_len, timeout_sec);
-    if (!c) return -1;
+    if (!c) return NULL;
     c->iteration_id = iteration_id;
     c->entry_id = entry_id;
     snprintf(c->tool_call_id, sizeof(c->tool_call_id), "%s", tool_call_id);
     snprintf(c->tool_name, sizeof(c->tool_name), "%s", tool_name);
     c->tool_args = tool_args ? strdup(tool_args) : NULL;
-    return 0;
+    return c;
 }

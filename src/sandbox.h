@@ -44,6 +44,8 @@ typedef struct {
     const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key. Path only —
                                never opened; used to locate both for masking. */
     const char *proxy_sock; /* path to .proxy.sock (NULL if proxy not started) */
+    const char *llm_sock;   /* parent's LLM bridge UDS (NULL = no LLM());
+                             * bind-mounted + exported as CCLAW_LLM_SOCK */
     const char *tmp_dir;    /* host dir bind-mounted as /tmp — persistent per-agent
                              * scratch the parent created and owns. NULL = no bind;
                              * /tmp then stays a dir on the tiny root tmpfs, which

@@ -55,14 +55,17 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall);
 int llm_probe_agent(sqlite3 *db, const char *agent_name, int64_t session_id,
                     char *served, size_t served_sz, char *reason, size_t reason_sz);
 
-/* Candidate-descriptor JSON for the sandboxed JS tier's llm() global: the
- * agent's routing list (same loader/order as its own turns) fully resolved —
- * URL, complete auth header (key included), wire format ("openai"/"gemini"),
- * URL host for egress widening, and request_extra+effort pre-merged as
- * `extra`. Malloc'd; NULL when the agent has no routable model. SECRET-BEARING:
- * the caller must explicit_bzero the string before freeing, and bzero any
- * serialized blob carrying it. */
-char *llm_wire_json(sqlite3 *db, const char *agent_name);
+/* The LLM() bridge's parent-side core (llm-core.md): one completion on the
+ * agent's own routing list. request_json = {"messages":[{role,content},...],
+ * "opts":{model,system?*,max_tokens,temperature,timeout,extra}} (*system is
+ * folded into messages by the child). Body built in SQL, key resolved here —
+ * never crossing into a child — every attempt archived to llm_responses
+ * (label "jsllm_<outcome> <source>"), spend gated by token_rate_limit,
+ * per-candidate health recorded. Returns malloc'd JSON, always non-NULL on a
+ * live db: {"ok":true,text,model,id,status,body} | {"ok":false,error}. */
+char *llm_request(sqlite3 *db, const char *agent_name,
+                  const char *request_json, const char *source,
+                  int64_t session_id, int64_t iteration_id);
 
 /* Compact session branch: estimate tokens, decide cut point, call LLM for summary.
  * Returns 0 on success (compaction entry inserted), -1 on error (no compaction).

@@ -37,6 +37,9 @@ static const ConfigDef s_defs[] = {
       "Slow-query WARN threshold in ms for the SQL trace (0 = disabled)" },
     { "token_rate_limit",   "1000000",
       "Max LLM tokens per hour (0 = unlimited)" },
+    { "llm_max_calls_per_tool", "25",
+      "Max LLM() completions one JS tool call / cron fire may make"
+      " (0 = unlimited; the global ceilings still apply behind it)" },
     { "save_reasoning",     "0",
       "Store model reasoning text as entries (0 = discard). Display only:"
       " the provider-required replay blob is captured either way." },

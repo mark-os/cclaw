@@ -583,8 +583,8 @@ void qjs_register_eval_host_functions(JSContext *ctx, const char *config_json) {
     JS_SetPropertyStr(ctx, global, "http_request",
         JS_NewCFunction(ctx, js_http_request, "http_request", 2));
 
-    /* llm() — the agent's own routing list, resolved parent-side; throws
-     * "no routable model" when the blob carried no descriptors. */
+    /* LLM() — client for the parent's bridge socket; throws "not available"
+     * when the call carried no CCLAW_LLM_SOCK. */
     qjs_register_llm(ctx);
 
     /* fs object — both Node callback style and Sync style point to same impl */

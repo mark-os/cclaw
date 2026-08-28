@@ -20,6 +20,8 @@
  */
 
 #include <stddef.h>
+#include <stdint.h>
+#include <sys/types.h>
 #include "sqlite3.h"
 
 int update_main(int argc, char *argv[]);
@@ -42,5 +44,16 @@ int update_schema_ok(const char *range, int db_version, char *why, size_t cap);
  * mid-turn, and everything else lands at a turn boundary as a user entry.
  * Cheap to call often; it tracks its own due time and no-ops until then. */
 void update_check_tick(sqlite3 *db);
+
+/* Wait for a daemon that is not the one identified by (old_pid,
+ * old_started_at) to register itself in `processes`. Returns 0 once one
+ * appears, -1 on timeout. Exposed for the lifecycle test: this is the exact
+ * function `cclaw update` decides a restart by, and two of its bugs were only
+ * observable against a real daemon — a connection opened before the restart
+ * can sit on a WAL snapshot that hides the new row forever, and started_at
+ * has one-second resolution, so a quick restart can land in the same second.
+ * Takes a db *path*, not a handle, precisely because it must reopen. */
+int update_await_restart(const char *db_path, int64_t old_started_at,
+                         pid_t old_pid, int timeout_s);
 
 #endif

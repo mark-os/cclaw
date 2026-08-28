@@ -220,11 +220,18 @@ static int schema_compatible(const char *candidate, sqlite3 *db, char *why, size
 /* Wait for the supervisor to bring a daemon up that is not the one we killed.
  * Identity is started_at from the daemon's own processes row, so this cannot
  * be fooled by a recycled pid. */
-static int await_restart(const char *db_path, int64_t old_started_at,
-                         pid_t old_pid) {
-    for (int waited = 0; waited < RESTART_TIMEOUT_S; waited++) {
+int update_await_restart(const char *db_path, int64_t old_started_at,
+                         pid_t old_pid, int timeout_s) {
+    /* Deadline, not a count of sleeps. nanosleep() returns early when a signal
+     * arrives, and this runs right after system() has reaped a shell — so
+     * counting iterations quietly turns a 90s wait into a fraction of that,
+     * and the caller reverts a restart that simply had not finished yet.
+     * Resume the remaining interval on EINTR and judge by the clock. */
+    time_t deadline = time(NULL) + timeout_s;
+    do {
         struct timespec ts = { .tv_sec = 0, .tv_nsec = RESTART_POLL_MS * 1000000L };
-        nanosleep(&ts, NULL);
+        while (nanosleep(&ts, &ts) == -1 && errno == EINTR)
+            ;   /* ts now holds the remainder */
 
         /* A fresh connection per poll, deliberately. Our own handle was opened
          * before the restart and can sit on a WAL read snapshot from then,
@@ -244,7 +251,7 @@ static int await_restart(const char *db_path, int64_t old_started_at,
          * it has one-second resolution, so a quick stop/start can land in the
          * same second the old daemon reported. */
         if (pid > 0 && (pid != old_pid || started > old_started_at)) return 0;
-    }
+    } while (time(NULL) < deadline);
     return -1;
 }
 
@@ -376,7 +383,8 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
         fprintf(stderr, "warning: restart command exited %d — checking anyway\n",
                 cmd_rc);
 
-    if (await_restart(dbpath_copy, old_started, pid) == 0) {
+    if (update_await_restart(dbpath_copy, old_started, pid,
+                             RESTART_TIMEOUT_S) == 0) {
         printf("daemon is back up on %s\n", tag);
         config_set(db, "update.installed_tag", tag);
         return 0;

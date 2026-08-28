@@ -142,6 +142,9 @@ static const ConfigDef s_defs[] = {
       "How often the daemon checks for a newer release (0 = never). A new tag "
       "is delivered as a note in the default agent's inbox — it tells you, it "
       "does not install anything" },
+    { "update.verify", "",
+      "Internal: post-update crash-loop guard state (armed by `cclaw update`,"
+      " counted/cleared by the daemon — not for hand-editing)" },
     { "update.notified_tag", "",
       "Last release tag an agent was told about; suppresses repeat notices" },
     { "update.restart_command", "",

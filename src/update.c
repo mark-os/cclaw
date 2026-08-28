@@ -350,6 +350,9 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
         return 1;
     }
     printf("installed %s (previous kept at %s)\n", tag, prevpath);
+    /* Arm the crash-loop guard: the daemon counts its own starts against this
+     * until it survives the window (update_verify_startup/_tick). */
+    update_verify_arm(db, tag);
 
     if (pid <= 0) {
         printf("no daemon running — the new binary is in place\n");
@@ -416,6 +419,8 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
                         "do it by hand\n", self, prevpath, strerror(errno));
     else
         fprintf(stderr, "restored the previous binary\n");
+    /* The guard was armed for the build we just removed. */
+    config_set(db, "update.verify", "");
 
     /* The database is deliberately NOT rolled back automatically. Writing over
      * a database file is an aggressive act with no safe way to know whether
@@ -429,6 +434,164 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
     fprintf(stderr, "reverted to the previous build — start the daemon "
                     "to confirm it is healthy\n");
     return 1;
+}
+
+/* ── post-update crash-loop verification ───────────────────────────
+ *
+ * The 90s await above only proves the new build *started once*. A build that
+ * starts, migrates, then keeps dying is invisible to it — the updater has
+ * already exited, and the supervisor keeps respawning the broken build
+ * forever. Same failure shape channel_swap already solved with flap
+ * detection, so the same numbers: 3 starts inside a 5-minute window.
+ *
+ * Mechanism: update_install arms a marker (config `update.verify`); every
+ * daemon startup while it is armed counts itself (update_verify_startup);
+ * surviving the window clears it (update_verify_tick). Hitting the start
+ * limit reverts the binary — after re-checking that the previous build can
+ * still open this database, because schema patches are forward-only and a
+ * revert that strands the DB is worse than the crash loop — then re-execs
+ * into the restored build and tells the default agent what happened. A
+ * healthy deployment pays one config read per boot for this. */
+
+static char *default_agent_name(sqlite3 *db);
+static int64_t recent_session(sqlite3 *db, const char *agent);
+
+static void update_verify_notify(sqlite3 *db, const char *text) {
+    char *agent = default_agent_name(db);
+    int64_t sid = agent ? recent_session(db, agent) : 0;
+    if (sid > 0) inbox_insert(db, sid, "update", "verify", text);
+    LOG_ERROR_("%s", text);
+    fprintf(stderr, "%s\n", text);
+    free(agent);
+}
+
+void update_verify_arm(sqlite3 *db, const char *tag) {
+    char v[160];
+    /* tag is a release tag we just matched against GitHub — no escaping
+     * hazard worth a JSON builder. */
+    snprintf(v, sizeof(v), "{\"tag\":\"%.63s\",\"first_start\":0,\"starts\":0}", tag);
+    config_set(db, "update.verify", v);
+}
+
+int update_verify_startup(sqlite3 *db) {
+    char *v = config_get(db, "update.verify");
+    if (!v || !v[0]) { free(v); return 0; }
+
+    long long first = 0;
+    int starts = 0;
+    char tag[64] = "";
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COALESCE(json_extract(?1,'$.first_start'),0),"
+            "       COALESCE(json_extract(?1,'$.starts'),0),"
+            "       COALESCE(json_extract(?1,'$.tag'),'')"
+            " WHERE json_valid(?1)", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, v, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            first = sqlite3_column_int64(st, 0);
+            starts = sqlite3_column_int(st, 1);
+            const char *t = (const char *)sqlite3_column_text(st, 2);
+            if (t) snprintf(tag, sizeof(tag), "%s", t);
+        }
+    }
+    sqlite3_finalize(st);
+    free(v);
+
+    time_t now = time(NULL);
+    if (first == 0 || now - first > UPDATE_VERIFY_WINDOW) {
+        /* First start under this marker, or the previous burst aged out —
+         * open a fresh window. */
+        first = now;
+        starts = 1;
+    } else {
+        starts++;
+    }
+
+    if (starts < UPDATE_VERIFY_MAX_STARTS) {
+        char nv[160];
+        snprintf(nv, sizeof(nv),
+                 "{\"tag\":\"%.63s\",\"first_start\":%lld,\"starts\":%d}",
+                 tag, first, starts);
+        config_set(db, "update.verify", nv);
+        LOG_INFO_("update verify: start %d/%d for %s (window %llds)",
+                  starts, UPDATE_VERIFY_MAX_STARTS, tag,
+                  (long long)(now - first));
+        return 0;
+    }
+
+    /* Crash loop. Decide whether the previous build is a legal target. */
+    char self[4096];
+    ssize_t sn = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (sn <= 0) {
+        config_set(db, "update.verify", "");
+        update_verify_notify(db,
+            "cclaw update verify: this build is crash-looping but its own "
+            "path could not be resolved — no automatic revert; intervene by "
+            "hand");
+        return 0;
+    }
+    self[sn] = '\0';
+    char prevpath[4096];
+    snprintf(prevpath, sizeof(prevpath), "%.4085s.prev", self);
+
+    char note[512];
+    char why[256] = "";
+    if (access(prevpath, X_OK) != 0) {
+        config_set(db, "update.verify", "");
+        snprintf(note, sizeof(note),
+                 "cclaw %.63s is crash-looping (%d starts in %d min) and no "
+                 "previous binary is available at %.255s — no automatic "
+                 "revert; intervene by hand.", tag, starts,
+                 UPDATE_VERIFY_WINDOW / 60, prevpath);
+        update_verify_notify(db, note);
+        return 0;
+    }
+    if (!schema_compatible(prevpath, db, why, sizeof(why))) {
+        /* Forward-only schema: a revert that cannot open the migrated DB
+         * would brick the box harder than the crash loop does. Stay passive. */
+        config_set(db, "update.verify", "");
+        snprintf(note, sizeof(note),
+                 "cclaw %.63s is crash-looping (%d starts in %d min) but the "
+                 "previous build cannot take this database back (%.200s) — "
+                 "no automatic revert; intervene by hand.", tag, starts,
+                 UPDATE_VERIFY_WINDOW / 60, why);
+        update_verify_notify(db, note);
+        return 0;
+    }
+
+    /* Keep the bad build for diagnosis, then swap the directory entry —
+     * rename, never a write, because this binary is running (ETXTBSY). */
+    char badpath[4096];
+    snprintf(badpath, sizeof(badpath), "%.4086s.bad", self);
+    copy_file(self, badpath, 0755);   /* best-effort evidence */
+    if (rename(prevpath, self) != 0) {
+        config_set(db, "update.verify", "");
+        snprintf(note, sizeof(note),
+                 "cclaw %.63s is crash-looping and the revert rename failed "
+                 "(%.100s) — intervene by hand.", tag, strerror(errno));
+        update_verify_notify(db, note);
+        return 0;
+    }
+    config_set(db, "update.verify", "");
+    snprintf(note, sizeof(note),
+             "cclaw %.63s crash-looped (%d starts in %d min) and was "
+             "automatically reverted to the previous build; the bad binary "
+             "is kept at %.200s. Tell the operator.", tag, starts,
+             UPDATE_VERIFY_WINDOW / 60, badpath);
+    update_verify_notify(db, note);
+    return 1;   /* caller re-execs into the restored build */
+}
+
+void update_verify_tick(sqlite3 *db) {
+    static time_t proc_start;
+    if (proc_start == 0) proc_start = time(NULL);
+    if (time(NULL) - proc_start < UPDATE_VERIFY_WINDOW) return;
+    char *v = config_get(db, "update.verify");
+    int armed = v && v[0];
+    free(v);
+    if (!armed) return;
+    config_set(db, "update.verify", "");
+    LOG_INFO_("update verify: healthy for %ds — verified", UPDATE_VERIFY_WINDOW);
 }
 
 /* ── periodic check ────────────────────────────────────────────────

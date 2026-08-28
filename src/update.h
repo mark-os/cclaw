@@ -57,4 +57,25 @@ void update_check_tick(sqlite3 *db);
 int update_await_restart(const char *db_path, const char *old_instance_id,
                          int timeout_s);
 
+/* Post-update crash-loop guard — the failure update_await_restart cannot see
+ * (a build that starts, then keeps dying after the updater exited). Same
+ * numbers as channel flap detection. */
+#define UPDATE_VERIFY_WINDOW     300  /* seconds */
+#define UPDATE_VERIFY_MAX_STARTS 3    /* starts inside the window = crash loop */
+
+/* Arm the marker (config `update.verify`) — called by update_install after
+ * the binary swap. Exposed for tests. */
+void update_verify_arm(sqlite3 *db, const char *tag);
+
+/* Count this daemon start against an armed marker. Returns 1 when the start
+ * limit was hit and the previous binary was restored (schema-checked; the
+ * revert stays passive when the old build could not open the migrated DB) —
+ * the caller must then re-exec so the restored build actually runs. 0
+ * otherwise. Daemon-only. */
+int update_verify_startup(sqlite3 *db);
+
+/* Clear the marker after a healthy UPDATE_VERIFY_WINDOW of uptime. Cheap;
+ * called from the daemon's periodic tick. */
+void update_verify_tick(sqlite3 *db);
+
 #endif

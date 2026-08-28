@@ -33,6 +33,8 @@
 #include <time.h>
 #include <unistd.h>
 #include "db.h"
+#include "config.h"
+#include "config_registry.h"
 #include "update.h"
 #include "test_util.h"
 
@@ -234,9 +236,111 @@ int main(void) {
     printf("PASS (pid %d kept, ran the replacement)\n", (int)third);
     unlink(REEXEC_BIN);
 
+    /* ── crash-loop revert: 3 starts inside the window restore .prev ──
+     * The failure update_await_restart cannot see: the build starts (so the
+     * updater called it a success and exited), then keeps dying. Each start
+     * below is a real daemon start counted by update_verify_startup; the
+     * third must revert — rename .prev over the binary, keep the bad build
+     * as .bad, clear the marker — and re-exec into the restored build. */
+    printf("  crash_loop_reverts... ");
+    if (system("cp build/cclaw " REEXEC_BIN
+               " && cp build/cclaw " REEXEC_BIN ".prev") != 0) FAIL("cp");
+    {
+        sqlite3 *adb = NULL;
+        if (sqlite3_open(DB_PATH, &adb) != SQLITE_OK) FAIL("arm open");
+        update_verify_arm(adb, "vtest");
+        sqlite3_close(adb);
+    }
+    pid_t loop_pid = 0;
+    for (int start = 1; start <= 3; start++) {
+        loop_pid = spawn_daemon_from(REEXEC_BIN);
+        if (loop_pid < 0) FAIL("fork");
+        if (wait_registered(loop_pid, NULL) != loop_pid) {
+            stop_daemon(loop_pid);
+            FAIL("loop daemon never registered");
+        }
+        if (start < 3) {
+            /* Die the way a broken build dies — not a graceful exit. */
+            kill(loop_pid, SIGKILL);
+            waitpid(loop_pid, NULL, 0);
+        }
+    }
+    /* Third start: give the startup guard a moment to revert + re-exec.
+     * The re-exec keeps the pid, so "still registered" is the health check. */
+    {
+        int reverted = 0;
+        for (int i = 0; i < 100; i++) {
+            if (access(REEXEC_BIN ".prev", F_OK) != 0 &&
+                access(REEXEC_BIN ".bad", F_OK) == 0) { reverted = 1; break; }
+            usleep(100000);
+        }
+        if (!reverted) {
+            stop_daemon(loop_pid);
+            FAIL("third start did not revert (.prev still present or no .bad)");
+        }
+    }
+    if (wait_registered(loop_pid, NULL) != loop_pid) {
+        stop_daemon(loop_pid);
+        FAIL("reverted daemon did not come back (re-exec failed?)");
+    }
+    {
+        sqlite3 *vdb = NULL;
+        char marker[8] = "x";
+        if (sqlite3_open_v2(DB_PATH, &vdb, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+            sqlite3_stmt *ms = NULL;
+            if (sqlite3_prepare_v2(vdb, "SELECT COALESCE(value,'') FROM config"
+                                        " WHERE key='update.verify'",
+                                   -1, &ms, NULL) == SQLITE_OK &&
+                sqlite3_step(ms) == SQLITE_ROW)
+                snprintf(marker, sizeof(marker), "%.7s",
+                         (const char *)sqlite3_column_text(ms, 0));
+            else
+                marker[0] = '\0';   /* no row = cleared too */
+            sqlite3_finalize(ms);
+            sqlite3_close(vdb);
+        }
+        if (marker[0]) {
+            stop_daemon(loop_pid);
+            FAIL("marker not cleared after revert");
+        }
+    }
+    stop_daemon(loop_pid);
+    printf("PASS (reverted on start 3, daemon healthy after re-exec)\n");
+    unlink(REEXEC_BIN);
+    unlink(REEXEC_BIN ".bad");
+
+    /* ── and stays passive when there is nothing to revert to ── */
+    printf("  crash_loop_no_prev_stays_up... ");
+    if (system("cp build/cclaw " REEXEC_BIN) != 0) FAIL("cp");
+    {
+        sqlite3 *adb = NULL;
+        if (sqlite3_open(DB_PATH, &adb) != SQLITE_OK) FAIL("arm open");
+        /* Pre-aged marker: this start is the third. */
+        char v[128];
+        snprintf(v, sizeof(v),
+                 "{\"tag\":\"vtest2\",\"first_start\":%lld,\"starts\":2}",
+                 (long long)time(NULL));
+        sqlite3_stmt *st = NULL;
+        sqlite3_prepare_v2(adb, "INSERT OR REPLACE INTO config(key,value)"
+                                " VALUES('update.verify',?1)", -1, &st, NULL);
+        sqlite3_bind_text(st, 1, v, -1, SQLITE_STATIC);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+        sqlite3_close(adb);
+    }
+    pid_t solo = spawn_daemon_from(REEXEC_BIN);
+    if (solo < 0) FAIL("fork");
+    if (wait_registered(solo, NULL) != solo) {
+        stop_daemon(solo);
+        FAIL("daemon with no .prev did not stay up (revert should be passive)");
+    }
+    stop_daemon(solo);
+    printf("PASS (no .prev: notified, kept running)\n");
+    unlink(REEXEC_BIN);
+
     unlink(DB_PATH);
     unlink(DB_PATH "-wal");
     unlink(DB_PATH "-shm");
-    printf("5/5 passed\n");
+    printf("7/7 passed\n");
     return 0;
 }

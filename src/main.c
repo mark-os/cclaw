@@ -266,6 +266,12 @@ static void ensure_default_agent(const char *base_dir) {
 
 static int run_daemon(char *db_path) {
     proc_set_daemon(1);
+    /* Post-update crash-loop guard: count this start against an armed
+     * update.verify marker BEFORE any subsystem can be the thing that
+     * crashes. A revert re-execs into the restored build immediately —
+     * nothing is running yet, so there is nothing to tear down. */
+    if (update_verify_startup(proc_db()))
+        reexec_self();   /* returns only if exec itself failed */
     g_next_db_poll = time(NULL);  /* run DB checks immediately on first iter */
     workspace_init(proc_cfg());
 
@@ -410,6 +416,7 @@ static int run_daemon(char *db_path) {
             /* Daemon-only: notices a newer release and drops a note in the
              * default agent's inbox. Self-gating and off by default. */
             update_check_tick(proc_db());
+            update_verify_tick(proc_db());
             g_next_db_poll = now + POLL_DB_INTERVAL;
         }
     }

@@ -77,13 +77,22 @@ static char *run_capture(const char *path, const char *flag) {
     }
     close(fds[1]);
 
-    char buf[256] = "";
-    ssize_t n = read(fds[0], buf, sizeof(buf) - 1);
+    /* Read to EOF, not once: loader warnings land on the pipe before the
+     * binary's own line, and a single read can return just that first chunk
+     * (exactly how the CI custom-libcurl target failed after the last-line
+     * fix below went in). */
+    char buf[512] = "";
+    size_t n = 0;
+    ssize_t r;
+    while (n < sizeof(buf) - 1 &&
+           ((r = read(fds[0], buf + n, sizeof(buf) - 1 - n)) > 0 ||
+            (r < 0 && errno == EINTR)))
+        if (r > 0) n += (size_t)r;
     close(fds[0]);
 
     int status = 0;
     waitpid(pid, &status, 0);
-    if (n <= 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return NULL;
+    if (n == 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return NULL;
 
     buf[n] = '\0';
     /* The capture merges stderr, and a dynamic loader can print warnings

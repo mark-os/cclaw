@@ -239,8 +239,15 @@ static void ensure_default_agent(const char *base_dir) {
             " WHERE EXISTS (SELECT 1 FROM models"
             "               WHERE id='openrouter/deepseek/deepseek-v4-flash');",
             NULL, NULL, NULL);
-        /* Seed default tools as grants */
+        /* Seed default tools as grants — plus the operator-deputy extras the
+         * baseline deliberately lacks (Livermore haircut: created agents get
+         * no birthright agent-minting / global publishing / credential
+         * minting). The FIRST agent is the operator's interface; proposing a
+         * create/publish still parks an approval, which is the actual gate. */
         agent_grant_defaults(proc_db(), "Assistant");
+        agent_config_grant(proc_db(), "Assistant", "tool", "create_agent", 0);
+        agent_config_grant(proc_db(), "Assistant", "tool", "extension_publish", 0);
+        agent_config_grant(proc_db(), "Assistant", "tool", "secret_create", 0);
         /* Disabled 'heartbeat' bare-wake job — visible/enable-able in cron_list. */
         cron_seed_heartbeat(proc_db(), "Assistant");
         /* default_agent needs no write — 'Assistant' is the registry default */

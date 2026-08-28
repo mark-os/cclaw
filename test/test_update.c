@@ -69,6 +69,14 @@ int main(void) {
     expect("db_at_floor_accepts", "min=40 current=51", 40, 1, NULL);
     expect("db_at_ceiling_accepts", "min=40 current=51", 51, 1, NULL);
 
+    /* Loader noise before the marker must not break the handshake — a custom
+     * libcurl prints "no version information available" to stderr on every
+     * exec, and the capture merges stderr (the CI websocket target found
+     * this; a real deployment with a hand-built library would hit it too). */
+    expect("loader_noise_prefix_accepts",
+           "/opt/lib/libcurl.so.4: no version information available "
+           "min=40 current=51", 51, 1, NULL);
+
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

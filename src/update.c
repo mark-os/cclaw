@@ -86,9 +86,15 @@ static char *run_capture(const char *path, const char *flag) {
     if (n <= 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return NULL;
 
     buf[n] = '\0';
-    char *nl = strchr(buf, '\n');
-    if (nl) *nl = '\0';
-    return strdup(buf);
+    /* The capture merges stderr, and a dynamic loader can print warnings
+     * there before the binary says a word ("libcurl.so.4: no version
+     * information available" broke the handshake on a real target). Keep the
+     * LAST non-empty line — ours is the final thing the process prints —
+     * rather than trusting the first. */
+    char *last = NULL;
+    for (char *p = strtok(buf, "\n"); p; p = strtok(NULL, "\n"))
+        if (p[0]) last = p;
+    return last ? strdup(last) : NULL;
 }
 
 /* json=1 for the releases API, 0 for a release asset — GitHub serves the two
@@ -196,7 +202,10 @@ int update_schema_ok(const char *range, int db_version, char *why, size_t cap) {
         return 0;
     }
     int cand_min = 0, cand_cur = 0;
-    if (sscanf(range, "min=%d current=%d", &cand_min, &cand_cur) != 2 ||
+    /* Anchor on the marker, not the line start — loader noise can precede it
+     * even within one line on some libcs. */
+    const char *m = strstr(range, "min=");
+    if (!m || sscanf(m, "min=%d current=%d", &cand_min, &cand_cur) != 2 ||
         cand_min <= 0 || cand_cur < cand_min) {
         snprintf(why, cap, "unparseable --schema-range output: %s", range);
         return 0;

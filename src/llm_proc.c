@@ -695,8 +695,8 @@ char *llm_request(sqlite3 *db, const char *agent_name,
                                 fails.len ? "; " : "", m->id, timeout);
                 else if (status < 0)
                     buf_appendf(&fails, "%s%s: %s", fails.len ? "; " : "",
-                                m->id, resp.err_detail ? resp.err_detail
-                                                       : "transport error");
+                                m->id, resp.err_detail[0] ? resp.err_detail
+                                                          : "transport error");
                 else
                     buf_appendf(&fails, "%s%s: http %d %.120s",
                                 fails.len ? "; " : "", m->id, status,

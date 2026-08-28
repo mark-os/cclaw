@@ -277,6 +277,15 @@ int main(void) {
     if (access(REEXEC_BIN ".prev", F_OK) == 0 ||
         access(REEXEC_BIN ".bad", F_OK) != 0) {
         stop_daemon(loop_pid);
+        /* Which bail branch fired lives in the daemon's captured stderr
+         * (update_verify_notify prints there) and in the marker state. */
+        printf("\n--- daemon output ---\n");
+        fflush(stdout);
+        (void)!system("tail -40 " OUT_PATH);
+        (void)!system("printf -- '--- marker: '; "
+                      "build/cclaw sqlite3 " DB_PATH
+                      " \"SELECT COALESCE(value,'(null)') FROM config"
+                      " WHERE key='update.verify'\" 2>&1; echo");
         FAIL("third start did not revert (.prev still present or no .bad)");
     }
     {

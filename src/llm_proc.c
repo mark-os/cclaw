@@ -38,9 +38,10 @@
 /* Hard ceiling on the apply-time probe. It runs synchronously in the approval
  * path, so this is also the worst-case event-loop stall — deliberately short,
  * and a timeout counts as a failed probe (config-ax Phase 2A). */
-#define LLM_PROBE_TIMEOUT_SEC 30   /* was 15 — tight for a cold TLS handshake
-                                    * on a small ARM box; a false probe failure
-                                    * rolls back a healthy config */
+/* Default probe cap. Configurable (llm_probe_timeout): 15s is tight for a
+ * cold TLS handshake on a small ARM box, and a false probe failure rolls
+ * back a healthy config — a slow box raises the knob, not the code. */
+#define LLM_PROBE_TIMEOUT_SEC 15
 
 
 
@@ -417,9 +418,11 @@ int llm_probe_agent(sqlite3 *db, const char *agent_name, int64_t session_id,
 
     const char *headers[] = { "Content-Type: application/json", auth, NULL };
     HttpResponse resp = {0};
+    int probe_timeout = (int)config_get_int(db, "llm_probe_timeout");
+    if (probe_timeout <= 0) probe_timeout = LLM_PROBE_TIMEOUT_SEC;
     HttpRequestOpts opts = {
         .url = url, .method = "POST", .headers = headers, .body = body,
-        .timeout = LLM_PROBE_TIMEOUT_SEC,
+        .timeout = probe_timeout,
         .max_response_bytes = LLM_RESP_MAX,
     };
     int status = http_do(&opts, &resp);
@@ -442,7 +445,7 @@ int llm_probe_agent(sqlite3 *db, const char *agent_name, int64_t session_id,
                         m.id, label, resp.data ? resp.data : resp.err_detail, body);
 
     if (status == -2)
-        snprintf(reason, reason_sz, "timed out after %ds", LLM_PROBE_TIMEOUT_SEC);
+        snprintf(reason, reason_sz, "timed out after %ds", probe_timeout);
     else if (status < 0)
         snprintf(reason, reason_sz, "transport error reaching %s", m.base_url);
     else if (status < 200 || status >= 300)

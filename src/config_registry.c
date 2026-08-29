@@ -14,6 +14,9 @@ static const ConfigDef s_defs[] = {
       "Max tool-loop iterations per turn" },
     { "shell_timeout",      "30",
       "shell_exec timeout in seconds" },
+    { "llm_probe_timeout",  "15",
+      "Config-apply probe cap in seconds; raise on slow boxes/links so a"
+      " false probe failure cannot roll back a healthy config" },
     { "llm_request_timeout", "300",
       "Per-attempt cap in seconds for LLM API requests (turn requests,"
       " transcription); raise on slow links or slow providers" },

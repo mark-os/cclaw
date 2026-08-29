@@ -69,6 +69,14 @@ typedef struct {
     char cron_job[80];      /* job name — the result's source_ref / data.job */
     char *cron_prompt;      /* 'both' payload: rides one inbox row with the
                              * script output; NULL for a script-only fire */
+    /* Background job (blocking-vs-background step 4): the call was answered
+     * at dispatch with a synthetic result (tool_calls.status='background');
+     * the drain streams body bytes to log_fd (a file in the session's
+     * .tool_results home) instead of outbuf, and reap posts an inbox notice
+     * instead of a tool result. */
+    int background;
+    int cancelled;          /* cancel tool fired; reap reports 'cancelled' */
+    int log_fd;             /* -1 when not a background job */
     /* Deadline: 0 = no timeout, >0 = SIGKILL after this time */
     time_t deadline;
     int timeout_sec;        /* window used for `deadline`, for the timeout message */
@@ -121,6 +129,10 @@ ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
 
 /* spawn_run_tool_blob wrapper for a model tool call: 0 on success, -1 on
  * failure (caller writes the error result inline). */
+/* Find a live tool child by its owning session + call id (cancel's lookup).
+ * Event-loop thread only, like every accessor here. */
+ChildProc *child_find_tool_call(int64_t session_id, const char *call_id);
+
 ChildProc *spawn_run_tool_child(int64_t session_id, const char *agent_name,
                          const char *tool_call_id, const char *tool_name,
                          const char *tool_args, int64_t iteration_id,

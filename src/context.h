@@ -56,8 +56,18 @@ char *truncate_and_spill(sqlite3 *db, const char *src, int64_t session_id,
  * The sandboxed child receives the result of this over the wire rather than
  * building it itself — the model-emitted call_id is sanitised here, in the
  * trusted parent. Returns 0 on success. */
+/* Background-job live log path: the spill file's sibling with a .log suffix.
+ * Returns 0 on success (directory created). */
+int job_log_path_build(sqlite3 *db, int64_t session_id, const char *tool_call_id,
+                       char *buf, size_t bufsz);
+
 int spill_path_build(sqlite3 *db, int64_t session_id, const char *tool_call_id,
                      char *buf, size_t bufsz);
+
+/* Last `cap` bytes of a background job's log — the completion notice's and
+ * check_session's output tail. Heap; caller frees. NULL if unreadable/empty. */
+char *job_log_tail(sqlite3 *db, int64_t session_id, const char *call_id,
+                   size_t cap);
 
 /* Build the spill dir for a session: the advancing agent's workspace
  * .tool_results/<session_id> (sandbox-visible), CCLAW_WORKSPACE when the

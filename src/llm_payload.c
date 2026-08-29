@@ -593,6 +593,21 @@ static const char SQL_SESSION_CONTEXT[] =
     "    'session #' || s.id || ' (' || COALESCE(s.agent_name,'?') || ') — ' || s.state,"
     "    char(10)) AS txt"
     "  FROM sessions s WHERE s.parent_session_id=?1 AND s.state != 'idle'"
+    "), jobs AS ("
+    /* Background jobs (status='background'): id + command snippet + age +
+     * log path. Frozen with the rest of the turn context — mid-turn
+     * freshness is pull-based (read the log / check_session), and the
+     * completion arrives as its own user entry, so block and entries never
+     * disagree at turn start. */
+    "  SELECT group_concat("
+    "    'job ' || tc.id || ' (' || tc.name || ') — ' ||"
+    "    substr(replace(COALESCE(json_extract(e.content,'$.command'),"
+    "                            e.content, ''), char(10), ' '), 1, 80) ||"
+    "    ' — running ' || (unixepoch() - e.created_at) || 's — log"
+    " .tool_results/' || tc.session_id || '/' || tc.call_id || '.log',"
+    "    char(10)) AS txt"
+    "  FROM tool_calls tc JOIN entries e ON e.id=tc.entry_id"
+    "  WHERE tc.session_id=?1 AND tc.status='background'"
     "), appr AS ("
     /* Pending only — "waiting on a human" is the one approval state the model
      * can act on (work around it). Decided rows are history: apply effects
@@ -610,10 +625,15 @@ static const char SQL_SESSION_CONTEXT[] =
     "    COALESCE('<memory_blocks>' || mb.txt || '</memory_blocks>' || char(10), '') ||"
     "    COALESCE('<running_sub_agents>' || char(10) || sub.txt || char(10) ||"
     "      '</running_sub_agents>' || char(10), '') ||"
+    "    COALESCE('<background_jobs>' || char(10) || jobs.txt || char(10) ||"
+    "      '(tail the log for live output — ps cannot see jobs, each runs in"
+    " its own PID namespace; check_session {job_id} for status; cancel"
+    " {job_id} to stop. Results arrive as messages on completion.)'"
+    "      || char(10) || '</background_jobs>' || char(10), '') ||"
     "    COALESCE('<open_approvals>' || char(10) || appr.txt || char(10) ||"
     "      '</open_approvals>' || char(10), '') ||"
     "    '</RELEVANT_CONTEXT>'"
-    " FROM mb, sub, appr;";
+    " FROM mb, sub, jobs, appr;";
 
 /* ── Public API ────────────────────────────────────────────────── */
 

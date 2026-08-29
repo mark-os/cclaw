@@ -14,6 +14,9 @@ static const ConfigDef s_defs[] = {
       "Max tool-loop iterations per turn" },
     { "shell_timeout",      "30",
       "shell_exec timeout in seconds" },
+    { "job_timeout_max",    "3600",
+      "Ceiling on a background job's timeout parameter (seconds); background"
+      " calls default to 600s within it" },
     { "web_port",           "8080",
       "Embedded web server port" },
     { "web_admin_token",    "",
@@ -97,7 +100,8 @@ static const ConfigDef s_defs[] = {
        * no way to see it. The list is rendered into launch_agent's description
        * (llm_payload.c) so a spawner can read what a worker will actually get. */
       "[\"file_read\",\"file_write\",\"shell_exec\",\"web_fetch\",\"js_eval\","
-      "\"launch_agent\",\"check_session\",\"search_config\",\"secret_create\"]",
+      "\"launch_agent\",\"check_session\",\"cancel\",\"search_config\","
+      "\"secret_create\"]",
       "Tools a self-spawned worker sub-agent is filtered to when launch_agent"
       " is called without a 'tools' array (JSON array; intersected with the"
       " spawner's grants — it can never widen them)" },
@@ -115,7 +119,7 @@ static const ConfigDef s_defs[] = {
       "\"memory_delete\",\"cron_set\",\"cron_list\",\"cron_remove\","
       "\"update_agent\",\"extension_promote\","
       "\"extension_attach\",\"extension_list\",\"extension_fork\",\"launch_agent\","
-      "\"check_session\",\"channel_send\"]",
+      "\"check_session\",\"cancel\",\"channel_send\"]",
       /* channel_send is safe as a baseline: the grant is not the authority —
        * the route allowlist is (default-deny per target, operator-managed). */
       "Baseline tool grants seeded for a newly created agent (JSON array)" },

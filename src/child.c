@@ -36,6 +36,15 @@ ChildProc *child_at(int idx) {
     return &g_children[idx];
 }
 
+ChildProc *child_find_tool_call(int64_t session_id, const char *call_id) {
+    for (int i = 0; i < g_child_count; i++)
+        if (g_children[i].type == CHILD_TOOL_EXEC &&
+            g_children[i].session_id == session_id &&
+            call_id && strcmp(g_children[i].tool_call_id, call_id) == 0)
+            return &g_children[i];
+    return NULL;
+}
+
 ChildProc *child_find(pid_t pid) {
     for (int i = 0; i < g_child_count; i++)
         if (g_children[i].pid == pid) return &g_children[i];
@@ -58,6 +67,10 @@ void child_remove(ChildProc *c) {
     c->tool_args = NULL;
     free(c->cron_prompt);
     c->cron_prompt = NULL;
+    if (c->log_fd >= 0) {
+        close(c->log_fd);
+        c->log_fd = -1;
+    }
     llm_bridge_stop(c->llm_bridge);
     c->llm_bridge = NULL;
     g_children[idx] = g_children[g_child_count - 1];
@@ -159,7 +172,19 @@ void child_drain_pipe(ChildProc *c) {
         }
         if (off >= (size_t)n) continue;
 
-        /* Result body. */
+        /* Result body. A background job streams to its log file on disk —
+         * bounded by disk, not TOOL_MAX_OUTPUT — so the agent can tail the
+         * live log from inside the sandbox; the daemon keeps no copy. */
+        if (c->log_fd >= 0) {
+            size_t rem = (size_t)n - off;
+            while (rem > 0) {
+                ssize_t w = write(c->log_fd, buf + off, rem);
+                if (w <= 0) break;   /* disk error: drop chunk, keep draining */
+                off += (size_t)w;
+                rem -= (size_t)w;
+            }
+            continue;
+        }
         size_t to_copy = (size_t)n - off;
         if (c->outbuf_len + to_copy > TOOL_MAX_OUTPUT)
             to_copy = TOOL_MAX_OUTPUT - c->outbuf_len;
@@ -272,6 +297,7 @@ ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
     c->type = type;
     c->session_id = session_id;
     c->result_pipe = sp[0];
+    c->log_fd = -1;
     c->timeout_sec = timeout_sec > 0 ? timeout_sec : 120;
     c->deadline = time(NULL) + c->timeout_sec;
     snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name ? agent_name : "");

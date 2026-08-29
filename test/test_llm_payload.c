@@ -916,7 +916,8 @@ static void test_launch_agent_description_embeds_roster_and_worker_tools(void) {
     /* worker toolset, spelled out, in registry order */
     assert(strstr(d, "Default worker toolset (self-spawn with no 'tools'): "
                      "file_read, file_write, shell_exec, web_fetch, js_eval, "
-                     "launch_agent, check_session, search_config, secret_create."));
+                     "launch_agent, check_session, cancel, search_config, "
+                     "secret_create."));
     sqlite3_finalize(s);
 
     /* Any other tool's description is untouched — no roster, no toolset. */

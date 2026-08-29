@@ -188,6 +188,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     if (depth < agent_max_depth(db))
         tool_launch_agent_register(&setup->reg, &setup->launch_ctx);
     tool_check_session_register(&setup->reg, &setup->launch_ctx);
+    tool_cancel_register(&setup->reg, &setup->launch_ctx);
 
     /* Persist builtin (C tool) schemas, then materialize this agent's
      * extension tools from the DB join — order matters: the sync must see only

@@ -386,7 +386,8 @@ static void test_worker_tools_default_is_the_documented_list(void) {
     assert(def != NULL);
     assert(strcmp(def,
         "[\"file_read\",\"file_write\",\"shell_exec\",\"web_fetch\",\"js_eval\","
-        "\"launch_agent\",\"check_session\",\"search_config\",\"secret_create\"]") == 0);
+        "\"launch_agent\",\"check_session\",\"cancel\",\"search_config\","
+        "\"secret_create\"]") == 0);
 
     /* Spelled out so a rename of the constant can't quietly drop nesting. */
     assert(strstr(def, "\"launch_agent\"") != NULL);

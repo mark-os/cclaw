@@ -6,6 +6,9 @@
 #include "approval.h"
 #include "buf.h"
 #include "wake.h"
+#include "child.h"    /* child_find_tool_call (cancel) */
+#include "context.h"  /* job_log_tail */
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -223,6 +226,10 @@ int tool_launch_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
                                       /* independent, self-contained delegations
                                        * are safe to run concurrently */
                                       .parallel_safe = 1,
+                                      /* its own background arg, handled by
+                                       * the handler — the flag legalizes it
+                                       * past the dispatch background gate */
+                                      .backgroundable = 1,
                                       .null_kind = NULL_ASYNC});
     return rc;
 }
@@ -231,16 +238,151 @@ int tool_launch_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
 
 static const char *CHECK_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"session_id\":{\"type\":\"integer\",\"description\":\"Session ID of the sub-agent to check\"}"
-    "},\"required\":[\"session_id\"]}";
+    "\"session_id\":{\"type\":\"integer\",\"description\":\"Session ID of the sub-agent to check\"},"
+    "\"job_id\":{\"type\":\"integer\",\"description\":\"Background job id (from the job-started result) — state, runtime, exit code, log path, output tail\"}"
+    "},\"description\":\"Give at most one of session_id / job_id; with neither, lists your live sub-agent sessions and background jobs.\"}";
+
+/* Transcript tail of a running child: its last few completed steps, oldest
+ * first, one compacted line each. Advances per completed step — an in-flight
+ * LLM call or running tool isn't in entries yet, so the tail can idle on a
+ * slow step, like tailing a program that buffers. Heap or NULL. */
+static char *session_transcript_tail(sqlite3 *db, int64_t sid, int n) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT group_concat(line, char(10)) FROM ("
+            "  SELECT id, '[' || CASE role WHEN 0 THEN 'system' WHEN 1 THEN 'user'"
+            "    WHEN 2 THEN 'assistant' WHEN 3 THEN COALESCE(tool_name,'tool')"
+            "    ELSE 'note' END || '] ' ||"
+            "    substr(replace(COALESCE(content,''), char(10), ' '), 1, 100)"
+            "    AS line"
+            "  FROM entries WHERE session_id=?1 ORDER BY id DESC LIMIT ?2"
+            ") ORDER BY id;", -1, &st, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(st, 1, sid);
+    sqlite3_bind_int(st, 2, n);
+    char *r = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(st, 0);
+        if (t && t[0]) r = strdup(t);
+    }
+    sqlite3_finalize(st);
+    return r;
+}
+
+/* Bare check_session {}: your live children and background jobs, with the
+ * right pointer for each kind (session id vs log path). */
+static char *check_session_list(AgentLaunchCtx *ctx) {
+    sqlite3_stmt *st;
+    char *sessions = NULL, *jobs = NULL;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT group_concat('session #' || id || ' ('"
+            " || COALESCE(agent_name,'?') || ') — ' || state, char(10))"
+            " FROM sessions WHERE parent_session_id=?1 AND state != 'idle';",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, ctx->session_id);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *t = (const char *)sqlite3_column_text(st, 0);
+            if (t && t[0]) sessions = strdup(t);
+        }
+        sqlite3_finalize(st);
+    }
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT group_concat('job ' || id || ' (' || name || ') — '"
+            " || CASE status WHEN 'background' THEN 'running'"
+            "    ELSE COALESCE(resolved_by, status) END"
+            " || ' — log .tool_results/' || session_id || '/' || call_id || '.log',"
+            " char(10))"
+            " FROM tool_calls WHERE session_id=?1 AND"
+            "   (status='background' OR resolved_by LIKE 'job:%');",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, ctx->session_id);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *t = (const char *)sqlite3_column_text(st, 0);
+            if (t && t[0]) jobs = strdup(t);
+        }
+        sqlite3_finalize(st);
+    }
+    if (!sessions && !jobs)
+        return strdup("no live sub-agent sessions, no background jobs");
+    size_t n = (sessions ? strlen(sessions) : 0) + (jobs ? strlen(jobs) : 0) + 64;
+    char *out = malloc(n);
+    if (out)
+        snprintf(out, n, "%s%s%s%s%s",
+                 sessions ? "live sessions:\n" : "", sessions ? sessions : "",
+                 sessions && jobs ? "\n" : "",
+                 jobs ? "jobs:\n" : "", jobs ? jobs : "");
+    free(sessions);
+    free(jobs);
+    return out ? out : strdup("error: OOM");
+}
+
+/* check_session {job_id}: one background job's status. */
+static char *check_session_job(AgentLaunchCtx *ctx, int64_t job_id, int *is_error) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT tc.call_id, tc.name, tc.status, tc.resolved_by,"
+            "       unixepoch() - e.created_at,"
+            "       substr(COALESCE(json_extract(e.content,'$.command'),''),1,120)"
+            " FROM tool_calls tc JOIN entries e ON e.id=tc.entry_id"
+            " WHERE tc.id=?1 AND tc.session_id=?2;", -1, &st, NULL) != SQLITE_OK)
+        return tool_fail(is_error, "error: db query failed");
+    sqlite3_bind_int64(st, 1, job_id);
+    sqlite3_bind_int64(st, 2, ctx->session_id);
+    if (sqlite3_step(st) != SQLITE_ROW) {
+        sqlite3_finalize(st);
+        return tool_fail(is_error,
+            "error: job %lld not found in this session", (long long)job_id);
+    }
+    char call_id[64], name[64], status[32], resolved[48], cmd[128];
+    snprintf(call_id, sizeof(call_id), "%s",
+             (const char *)sqlite3_column_text(st, 0));
+    snprintf(name, sizeof(name), "%s", (const char *)sqlite3_column_text(st, 1));
+    snprintf(status, sizeof(status), "%s",
+             (const char *)sqlite3_column_text(st, 2));
+    const char *rb = (const char *)sqlite3_column_text(st, 3);
+    snprintf(resolved, sizeof(resolved), "%s", rb ? rb : "");
+    int64_t age = sqlite3_column_int64(st, 4);
+    const char *cm = (const char *)sqlite3_column_text(st, 5);
+    snprintf(cmd, sizeof(cmd), "%s", cm ? cm : "");
+    sqlite3_finalize(st);
+
+    int running = strcmp(status, "background") == 0;
+    if (!running && strncmp(resolved, "job:", 4) != 0)
+        return tool_fail(is_error,
+            "error: tool call %lld was not a background job", (long long)job_id);
+
+    char *tail = job_log_tail(ctx->db, ctx->session_id, call_id, 1024);
+    size_t n = 512 + strlen(cmd) + (tail ? strlen(tail) : 0);
+    char *out = malloc(n);
+    if (!out) { free(tail); return tool_fail(is_error, "error: OOM"); }
+    snprintf(out, n,
+             "job %lld (%s): %s%s%s\ncommand: %s\nrunning: %llds\n"
+             "log: .tool_results/%lld/%s.log%s%s",
+             (long long)job_id, name,
+             running ? "running" : "done (", running ? "" : resolved,
+             running ? "" : ")",
+             cmd, (long long)age,
+             (long long)ctx->session_id, call_id,
+             tail ? "\n---- output tail ----\n" : "\n(no output yet)",
+             tail ? tail : "");
+    free(tail);
+    return out;
+}
 
 char *tool_check_session_handler(const char *arguments, void *user_data, int *is_error) {
     AgentLaunchCtx *ctx = (AgentLaunchCtx *)user_data;
     if (!ctx || !ctx->db)
         return tool_fail(is_error, "error: check_session not configured");
 
+    int job_val = tool_args_int(ctx->db, arguments, "job_id", -1);
     int sid_val = tool_args_int(ctx->db, arguments, "session_id", -1);
-    if (sid_val < 0) return tool_fail(is_error, "error: missing session_id");
+    if (job_val >= 0 && sid_val >= 0)
+        return tool_fail(is_error,
+            "error: give at most one of session_id / job_id");
+    if (job_val >= 0)
+        return check_session_job(ctx, (int64_t)job_val, is_error);
+    if (sid_val < 0)
+        return check_session_list(ctx);
     int64_t child_sid = (int64_t)sid_val;
 
     /* Verify it's our child */
@@ -292,18 +434,105 @@ char *tool_check_session_handler(const char *arguments, void *user_data, int *is
     else if (strcmp(state_buf, "rate_limited") == 0)
         gloss = " (paused by a rate/budget limit — resumes on its own)";
 
-    size_t needed = 192 + (result ? strlen(result) : 0);
+    /* Progress view for a running child: a compacted transcript tail, so a
+     * parent has *some* window before the final answer (both arities rhyme:
+     * job → output tail, session → transcript tail). Entries are written
+     * post-scan, so the tail re-exposes only already-redacted content. */
+    char *tail = NULL;
+    if (!result && strcmp(state_buf, "idle") != 0)
+        tail = session_transcript_tail(ctx->db, child_sid, 5);
+
+    size_t needed = 224 + (result ? strlen(result) : 0) +
+                    (tail ? strlen(tail) : 0);
     char *out = malloc(needed);
-    if (!out) { free(result); return tool_fail(is_error, "error: OOM"); }
+    if (!out) { free(result); free(tail); return tool_fail(is_error, "error: OOM"); }
     if (result) {
         snprintf(out, needed, "session_id: %lld\nstate: %s%s\nresult: %s",
                  (long long)child_sid, state_buf, gloss, result);
         free(result);
+    } else if (tail) {
+        snprintf(out, needed,
+                 "session_id: %lld\nstate: %s%s\n---- transcript tail ----\n%s",
+                 (long long)child_sid, state_buf, gloss, tail);
     } else {
         snprintf(out, needed, "session_id: %lld\nstate: %s%s",
                  (long long)child_sid, state_buf, gloss);
     }
+    free(tail);
     return out;
+}
+
+/* --- cancel tool --- */
+
+static const char *CANCEL_PARAMS_JSON =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"job_id\":{\"type\":\"integer\",\"description\":\"Background job to stop (SIGTERM, then SIGKILL after 5s); a completion notice follows\"},"
+    "\"session_id\":{\"type\":\"integer\",\"description\":\"Sub-agent session to stop (not yet supported)\"}"
+    "},\"description\":\"Give exactly one of job_id / session_id.\"}";
+
+char *tool_cancel_handler(const char *arguments, void *user_data, int *is_error) {
+    AgentLaunchCtx *ctx = (AgentLaunchCtx *)user_data;
+    if (!ctx || !ctx->db)
+        return tool_fail(is_error, "error: cancel not configured");
+
+    int job_val = tool_args_int(ctx->db, arguments, "job_id", -1);
+    int sid_val = tool_args_int(ctx->db, arguments, "session_id", -1);
+    if (sid_val >= 0 && job_val < 0)
+        return tool_fail(is_error,
+            "error: cancelling a sub-agent session is not supported yet — "
+            "its turn bounds (max_iterations, tool timeouts) end it on their "
+            "own; cancel currently stops background jobs only");
+    if (job_val < 0)
+        return tool_fail(is_error, "error: give job_id (from the job-started "
+                                   "result or check_session {})");
+
+    /* Ownership + liveness from the DB row, then the live child table. */
+    sqlite3_stmt *st;
+    char call_id[64] = "";
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT call_id FROM tool_calls"
+            " WHERE id=?1 AND session_id=?2 AND status='background';",
+            -1, &st, NULL) != SQLITE_OK)
+        return tool_fail(is_error, "error: db query failed");
+    sqlite3_bind_int64(st, 1, job_val);
+    sqlite3_bind_int64(st, 2, ctx->session_id);
+    if (sqlite3_step(st) == SQLITE_ROW)
+        snprintf(call_id, sizeof(call_id), "%s",
+                 (const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    if (!call_id[0])
+        return tool_fail(is_error,
+            "error: job %d is not a running background job of this session "
+            "(already finished, or not yours)", job_val);
+
+    ChildProc *c = child_find_tool_call(ctx->session_id, call_id);
+    if (!c) {
+        /* Row says background but no live child (reap in flight / daemon
+         * race): close the row so nothing waits on it. */
+        db_tool_call_set_status(ctx->db, ctx->session_id, call_id,
+                                "done", "job:cancelled");
+        return strdup("job process already gone; marked cancelled");
+    }
+    kill(c->pid, SIGTERM);
+    c->cancelled = 1;
+    c->deadline = time(NULL) + 5;   /* sweep escalates to SIGKILL */
+    char out[128];
+    snprintf(out, sizeof(out),
+             "cancel requested for job %d: SIGTERM sent (SIGKILL in 5s if "
+             "ignored); a completion notice will follow", job_val);
+    return strdup(out);
+}
+
+int tool_cancel_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
+    int rc = tools_register(reg, "cancel",
+                          "Stop a background job you started (job_id from the "
+                          "job-started result or check_session {}). The job is "
+                          "SIGTERMed, then SIGKILLed after 5s; its completion "
+                          "notice arrives as a message.",
+                          CANCEL_PARAMS_JSON, tool_cancel_handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "cancel", (ToolRecipe){.vehicle = EXEC_INLINE});
+    return rc;
 }
 
 int tool_check_session_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {

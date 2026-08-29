@@ -31,6 +31,10 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data, int *is_
 /* Register check_session tool. Returns 0 on success. */
 int tool_check_session_register(ToolRegistry *reg, AgentLaunchCtx *ctx);
 
+/* Register cancel (stop a background job; session cancel arrives with M2). */
+int tool_cancel_register(ToolRegistry *reg, AgentLaunchCtx *ctx);
+char *tool_cancel_handler(const char *arguments, void *user_data, int *is_error);
+
 /* Handler: check session state + result */
 char *tool_check_session_handler(const char *arguments, void *user_data, int *is_error);
 

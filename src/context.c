@@ -356,6 +356,43 @@ int spill_path_build(sqlite3 *db, int64_t session_id, const char *tool_call_id,
     return (n > 0 && (size_t)n < bufsz) ? 0 : -1;
 }
 
+int job_log_path_build(sqlite3 *db, int64_t session_id, const char *tool_call_id,
+                       char *buf, size_t bufsz) {
+    /* Same home, same call-id sanitising as the spill file; a job's live log
+     * is just a differently-suffixed sibling ("<call>.log" vs "<call>.out"). */
+    if (spill_path_build(db, session_id, tool_call_id, buf, bufsz) != 0)
+        return -1;
+    size_t l = strlen(buf);
+    if (l < 4 || l + 1 >= bufsz) return -1;
+    memcpy(buf + l - 4, ".log", 5);
+    return 0;
+}
+
+char *job_log_tail(sqlite3 *db, int64_t session_id, const char *call_id,
+                   size_t cap) {
+    char logp[PATH_MAX + 64];
+    if (job_log_path_build(db, session_id, call_id, logp, sizeof(logp)) != 0)
+        return NULL;
+    int fd = open(logp, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return NULL;
+    off_t sz = lseek(fd, 0, SEEK_END);
+    if (sz <= 0) { close(fd); return NULL; }
+    off_t start = (size_t)sz > cap ? sz - (off_t)cap : 0;
+    lseek(fd, start, SEEK_SET);
+    size_t want = (size_t)(sz - start);
+    char *buf = malloc(want + 1);
+    if (!buf) { close(fd); return NULL; }
+    size_t got = 0;
+    while (got < want) {
+        ssize_t r = read(fd, buf + got, want - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    close(fd);
+    buf[got] = '\0';
+    return buf;
+}
+
 char *truncate_and_spill(sqlite3 *db, const char *src, int64_t session_id,
                          const char *tool_call_id) {
     if (!src) return NULL;

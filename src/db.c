@@ -3116,6 +3116,31 @@ int db_recover_stale_sessions(sqlite3 *db) {
     if (sqlite3_exec(db, orphan_jobs_sql, NULL, NULL, NULL) != SQLITE_OK)
         goto rollback;
 
+    /* b2) Orphaned background jobs: forked children die with their daemon, so
+     * a 'background' row whose dispatching instance (stamped in resolved_by
+     * at job start) is no longer registered names a process that cannot
+     * exist. Close it and tell the session — the model must never be left
+     * believing a job survived a restart. Owner-scoped by the stamp, so a
+     * live peer's running jobs are untouched on the periodic path. */
+    const char *orphan_bg_notice_sql =
+        "INSERT INTO inbox(session_id, source, source_ref, payload)"
+        " SELECT session_id, 'job_result', call_id,"
+        "        'background job '||id||' ('||name||') did not survive a"
+        " daemon restart; partial output may remain in"
+        " .tool_results/'||session_id||'/'||call_id||'.log'"
+        " FROM tool_calls WHERE status='background'"
+        "   AND (resolved_by IS NULL"
+        "        OR resolved_by NOT IN (SELECT instance_id FROM processes));";
+    if (sqlite3_exec(db, orphan_bg_notice_sql, NULL, NULL, NULL) != SQLITE_OK)
+        goto rollback;
+    const char *orphan_bg_sql =
+        "UPDATE tool_calls SET status='done', resolved_by='job:orphaned',"
+        " resolved_at=unixepoch() WHERE status='background'"
+        "   AND (resolved_by IS NULL"
+        "        OR resolved_by NOT IN (SELECT instance_id FROM processes));";
+    if (sqlite3_exec(db, orphan_bg_sql, NULL, NULL, NULL) != SQLITE_OK)
+        goto rollback;
+
     /* c) Deny pending approvals for dead-owned sessions (their approver is
      * gone). Keyed on the dead-owner predicate directly — must precede the
      * reset, which would otherwise clear the stale state this selects on. */

@@ -11,7 +11,8 @@
 static const char *SHELL_PARAMS_JSON_FMT =
     "{\"type\":\"object\",\"properties\":{"
     "\"command\":{\"type\":\"string\",\"description\":\"Shell command to execute\"},"
-    "\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds (default %d)\"},"
+    "\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds (default %d; for background jobs default 600, ceiling config job_timeout_max)\"},"
+    "\"background\":{\"type\":\"boolean\",\"description\":\"Run past this turn as a background job: returns a job handle immediately, output streams to a workspace log you can tail live, and the result arrives as a message on completion. For builds, installs, long scripts.\"},"
     "\"save_secret\":{\"type\":\"string\",\"description\":\"Capture a credential from this command's output: NAME (^[A-Z][A-Z0-9_]*$) stores it encrypted and masks it to {{SECRET:NAME}} — the raw value never enters context\"},"
     "\"save_secret_path\":{\"type\":\"string\",\"description\":\"With save_secret: JSON path (e.g. $.token) selecting the credential in JSON output; omit to capture the whole trimmed output\"}"
     "},\"required\":[\"command\"]}";

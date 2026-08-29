@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
+#include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdio.h>
@@ -915,6 +916,116 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
     return 1; /* Handled inline */
 }
 
+/* ── Background jobs (blocking-vs-background step 4) ────────────────
+ * The job IS the tool_calls row: job_id = its rowid, status 'background' —
+ * a value both the turn-join (any_running checks 'running') and re-dispatch
+ * (get_pending checks 'pending') ignore. The call is answered at dispatch
+ * with a synthetic result; the real result arrives later as an inbox notice
+ * (a user entry at the next turn boundary), never as a tool message. */
+
+static int64_t tool_call_rowid(int64_t session_id, const char *call_id) {
+    sqlite3_stmt *st;
+    int64_t id = 0;
+    if (sqlite3_prepare_v2(proc_db(),
+            "SELECT id FROM tool_calls WHERE session_id=?1 AND call_id=?2;",
+            -1, &st, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(st, 1, session_id);
+    sqlite3_bind_text(st, 2, call_id, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) id = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    return id;
+}
+
+/* Workspace-relative log path for messages to the model: the workspace is
+ * $HOME/cwd inside the sandbox, so one relative path works for file_read,
+ * shell tail, and the host daemon alike. */
+static void job_log_rel(int64_t session_id, const char *log_abs,
+                        char *buf, size_t bufsz) {
+    const char *base = log_abs ? strrchr(log_abs, '/') : NULL;
+    snprintf(buf, bufsz, ".tool_results/%lld/%s",
+             (long long)session_id, base ? base + 1 : "unknown.log");
+}
+
+/* Flip a freshly forked shell child into a background job: open the live
+ * log, answer the tool call with the synthetic handle, park the row in
+ * status 'background'. Always returns 1 (batch continues; turn not held). */
+static int job_start(int64_t session_id, PendingToolCall *tc, ChildProc *cp) {
+    char logp[PATH_MAX + 64];
+    char rel[128] = "";
+    if (job_log_path_build(proc_db(), session_id, tc->call_id,
+                           logp, sizeof(logp)) == 0) {
+        /* O_NOFOLLOW: never follow a symlink planted at the log path. */
+        int lfd = open(logp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
+        if (lfd >= 0) cp->log_fd = lfd;
+        job_log_rel(session_id, logp, rel, sizeof(rel));
+    }
+    cp->background = 1;
+    int64_t job_id = tool_call_rowid(session_id, tc->call_id);
+    char note[512];
+    snprintf(note, sizeof(note),
+             "job started (job_id=%lld, log=%s). Output streams to the log — "
+             "read or tail it for live progress (ps cannot see the job: it "
+             "runs in its own PID namespace). The result arrives as a message "
+             "when it finishes; check_session {\"job_id\":%lld} shows status, "
+             "cancel {\"job_id\":%lld} stops it.",
+             (long long)job_id, rel[0] ? rel : "(log unavailable)",
+             (long long)job_id, (long long)job_id);
+    char *body = strdup(note);
+    ToolResult tr = {.tool_call_id = tc->call_id, .content = body};
+    Message m = {.role = ROLE_TOOL, .tool_result = &tr,
+                 .tool_name = tc->name, .is_error = 0};
+    entry_append_with_iteration(proc_db(), session_id, &m, tc->iteration_id);
+    free(body);
+    /* The dispatching instance is stamped in resolved_by so restart
+     * reconciliation can tell an orphaned job from a live peer's; the
+     * completion overwrites it with the job:* outcome. */
+    db_tool_call_set_status(proc_db(), session_id, tc->call_id,
+                            "background", proc_instance_id());
+    if (!proc_is_daemon())
+        cli_print_tool_call(tc->name, tc->arguments);
+    LOG_INFO_("job start tool=%s job=%lld session=%lld", tc->name,
+              (long long)job_id, (long long)session_id);
+    return 1;
+}
+
+/* Post the completion (or timeout/cancel) notice for a background job and
+ * close its tool_calls row. The notice takes the inbox door — it becomes a
+ * role-1 user entry at the next turn boundary, exactly like a background
+ * sub-agent result. The log tail passes the shared scrub (step 3). */
+static void job_finish(ChildProc *c, const char *outcome, const char *detail) {
+    int64_t sid = c->session_id;
+    int64_t job_id = tool_call_rowid(sid, c->tool_call_id);
+    db_tool_call_set_status(proc_db(), sid, c->tool_call_id, "done", detail);
+
+    char rel[128];
+    char logp[PATH_MAX + 64] = "";
+    if (job_log_path_build(proc_db(), sid, c->tool_call_id,
+                           logp, sizeof(logp)) != 0)
+        logp[0] = '\0';
+    job_log_rel(sid, logp[0] ? logp : NULL, rel, sizeof(rel));
+
+    char *tail = job_log_tail(proc_db(), sid, c->tool_call_id, 4096);
+    char *scrubbed = tail ? tool_result_scrub(proc_db(), tail) : NULL;
+    const char *body = scrubbed ? scrubbed : (tail ? tail : "(no output)");
+
+    size_t plen = strlen(body) + 512;
+    char *payload = malloc(plen);
+    if (payload) {
+        snprintf(payload, plen,
+                 "background job %lld (%s) %s\n"
+                 "---- output tail ----\n%s\nfull log: %s",
+                 (long long)job_id, c->tool_name, outcome, body, rel);
+        inbox_insert(proc_db(), sid, "job_result", c->tool_call_id, payload);
+        free(payload);
+    }
+    free(scrubbed);
+    free(tail);
+    wake_session(sid);
+    LOG_INFO_("job done job=%lld session=%lld %s", (long long)job_id,
+              (long long)sid, detail);
+}
+
 /* Resolve+create the agent's scratch dir, bound as /tmp in the child. Done in
  * the parent so the "is this a 0700 dir we own?" check happens once in the
  * trusted process rather than in each sandboxed child. Returns NULL (and the
@@ -1137,6 +1248,16 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         }
     }
 
+    /* background:true is legal only on tools whose recipe declares it.
+     * launch_agent (EXEC_INLINE) handles its own background argument; the
+     * check keys on the recipe flag, not the vehicle, so it covers both. */
+    int background = tool_args_int(proc_db(), tc->arguments, "background", 0) != 0;
+    if (background && !te->recipe.backgroundable)
+        return tool_inline_error(session_id, tc,
+            "error: this tool cannot run in the background (background:true "
+            "is accepted only by tools that declare it, e.g. shell_exec, "
+            "launch_agent)", "bad_args");
+
     if (te->recipe.vehicle == EXEC_INLINE)
         return dispatch_inline(session_id, agent_name, tc, te,
                                secrets, secret_count);
@@ -1264,7 +1385,18 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             if (!command)
                 return tool_inline_error(session_id, tc,
                     "error: shell_exec requires a 'command' string argument", NULL);
-            int cmd_timeout = tool_call_timeout(tc->arguments, sc->timeout);
+            /* A background job outlives the turn, so its timeout answers to
+             * the job ceiling (config job_timeout_max), not the turn clamp. */
+            int cmd_timeout;
+            if (background) {
+                int ceil = (int)config_get_int(proc_db(), "job_timeout_max");
+                if (ceil <= 0) ceil = 3600;
+                int raw = tool_args_int(proc_db(), tc->arguments, "timeout", 600);
+                if (raw <= 0) raw = 600;
+                cmd_timeout = raw > ceil ? ceil : raw;
+            } else {
+                cmd_timeout = tool_call_timeout(tc->arguments, sc->timeout);
+            }
 
             /* Parent-side secret interpolation (daemon holds the key) */
             char *interp_cmd = NULL;
@@ -1333,6 +1465,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             if (!cp)
                 return tool_inline_error(session_id, tc,
                     "error: spawn_run_tool_child failed", "fork_failed");
+            if (background)
+                return job_start(session_id, tc, cp);
             LOG_INFO_("tool fork tool=%s", tc->name);
             return 0;
         }
@@ -1674,6 +1808,21 @@ void child_sweep_deadlines(void) {
         if (c->deadline == 0 || c->pid <= 0 || now < c->deadline)
             continue;
         kill(c->pid, SIGKILL);
+        if (c->type == CHILD_TOOL_EXEC && c->background) {
+            /* No tool result to write — the call was answered at dispatch.
+             * Post the timeout/cancel notice now; reap sees deadline==-1 and
+             * only removes the slot. */
+            char outcome[64];
+            if (c->cancelled)
+                snprintf(outcome, sizeof(outcome), "cancelled");
+            else
+                snprintf(outcome, sizeof(outcome), "timed out (%ds)",
+                         c->timeout_sec > 0 ? c->timeout_sec : 600);
+            job_finish(c, outcome,
+                       c->cancelled ? "job:cancelled" : "job:timeout");
+            c->deadline = -1;
+            continue;
+        }
         if (c->type == CHILD_TOOL_EXEC) {
             /* Mirror the broker's own timeout treatment: keep whatever
              * partial output already crossed the pipe, and name the tool —
@@ -1889,6 +2038,31 @@ void reap_children(void) {
             char *output = child_output_finalize(c, status, &hosts, &is_err);
             cron_script_post(c, output, hosts, is_err);
             free(output);
+            child_remove(c);
+            run_advance(session_id);
+            continue;
+        }
+
+        if (c->type == CHILD_TOOL_EXEC && c->background) {
+            int64_t session_id = c->session_id;
+            /* Swept (timeout/cancel escalation): notice already posted. */
+            if (c->deadline != -1) {
+                char outcome[64], detail[48];
+                if (c->cancelled) {
+                    snprintf(outcome, sizeof(outcome), "cancelled");
+                    snprintf(detail, sizeof(detail), "job:cancelled");
+                } else if (WIFEXITED(status)) {
+                    int code = WEXITSTATUS(status);
+                    snprintf(outcome, sizeof(outcome), "%s (exit %d)",
+                             code == 0 ? "finished" : "failed", code);
+                    snprintf(detail, sizeof(detail), "job:exit=%d", code);
+                } else {
+                    int sig = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+                    snprintf(outcome, sizeof(outcome), "killed by signal %d", sig);
+                    snprintf(detail, sizeof(detail), "job:signal=%d", sig);
+                }
+                job_finish(c, outcome, detail);
+            }
             child_remove(c);
             run_advance(session_id);
             continue;

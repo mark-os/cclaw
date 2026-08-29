@@ -278,50 +278,24 @@ int update_await_restart(const char *db_path, const char *old_instance_id,
     return -1;
 }
 
-static int update_install(sqlite3 *db, const char *self, const char *repo,
-                          const char *asset, const char *tag) {
-    char url[768], newpath[4096], prevpath[4096];
-    snprintf(url, sizeof(url), "https://github.com/%s/releases/download/%s/%s",
-             repo, tag, asset);
+/* Everything after "a candidate binary sits at <self>.new": vet, schema
+ * handshake, DB snapshot, .prev, atomic swap, verify arm, restart, await,
+ * revert. Shared between the GitHub download path and --file sideload —
+ * the rails are the point of the verb, whichever way the bytes arrived. */
+static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
+    char newpath[4096], prevpath[4096];
     snprintf(newpath, sizeof(newpath), "%s.new", self);
     snprintf(prevpath, sizeof(prevpath), "%s.prev", self);
-
-    printf("downloading %s\n", url);
-    HttpResponse r = {0};
-    int status = http_get_to_memory(url, &r, 0);
-    if (status != 200 || !r.data || r.len == 0) {
-        fprintf(stderr, "error: download failed (HTTP %d%s%s)\n", status,
-                r.err_detail[0] ? ": " : "", r.err_detail);
-        http_response_free(&r);
-        return 1;
-    }
-    if (r.truncated) {
-        fprintf(stderr, "error: download was truncated at the size cap\n");
-        http_response_free(&r);
-        return 1;
-    }
-
-    FILE *f = fopen(newpath, "wb");
-    if (!f || fwrite(r.data, 1, r.len, f) != r.len || fclose(f) != 0) {
-        fprintf(stderr, "error: cannot write %s: %s\n", newpath, strerror(errno));
-        if (f) fclose(f);
-        http_response_free(&r);
-        unlink(newpath);
-        return 1;
-    }
-    size_t got_bytes = r.len;
-    http_response_free(&r);
-    chmod(newpath, 0755);
 
     /* Vet the candidate before it can touch anything. */
     char *ver = run_capture(newpath, "--version");
     if (!ver) {
-        fprintf(stderr, "error: downloaded binary will not run here "
+        fprintf(stderr, "error: candidate binary will not run here "
                         "(wrong architecture, or a missing shared library)\n");
         unlink(newpath);
         return 1;
     }
-    printf("candidate: %s (%zu bytes)\n", ver, got_bytes);
+    printf("candidate: %s\n", ver);
     free(ver);
 
     char why[256] = "";
@@ -452,6 +426,70 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
     fprintf(stderr, "reverted to the previous build — start the daemon "
                     "to confirm it is healthy\n");
     return 1;
+}
+
+static int update_install(sqlite3 *db, const char *self, const char *repo,
+                          const char *asset, const char *tag) {
+    char url[768], newpath[4096];
+    snprintf(url, sizeof(url), "https://github.com/%s/releases/download/%s/%s",
+             repo, tag, asset);
+    snprintf(newpath, sizeof(newpath), "%s.new", self);
+
+    printf("downloading %s\n", url);
+    HttpResponse r = {0};
+    int status = http_get_to_memory(url, &r, 0);
+    if (status != 200 || !r.data || r.len == 0) {
+        fprintf(stderr, "error: download failed (HTTP %d%s%s)\n", status,
+                r.err_detail[0] ? ": " : "", r.err_detail);
+        http_response_free(&r);
+        return 1;
+    }
+    if (r.truncated) {
+        fprintf(stderr, "error: download was truncated at the size cap\n");
+        http_response_free(&r);
+        return 1;
+    }
+
+    FILE *f = fopen(newpath, "wb");
+    if (!f || fwrite(r.data, 1, r.len, f) != r.len || fclose(f) != 0) {
+        fprintf(stderr, "error: cannot write %s: %s\n", newpath, strerror(errno));
+        if (f) fclose(f);
+        http_response_free(&r);
+        unlink(newpath);
+        return 1;
+    }
+    printf("downloaded %zu bytes\n", r.len);
+    http_response_free(&r);
+    chmod(newpath, 0755);
+
+    return install_candidate(db, self, tag);
+}
+
+/* --file sideload: a binary the operator produced some other way (CI
+ * artifact, cross build) goes through the exact same rails as a release
+ * download. The label stamped into installed_tag / the verify marker is
+ * derived from the filename, sanitized because it lands inside hand-built
+ * JSON in update_verify_arm. */
+static int update_install_file(sqlite3 *db, const char *self, const char *path) {
+    char newpath[4096];
+    snprintf(newpath, sizeof(newpath), "%s.new", self);
+
+    if (copy_file(path, newpath, 0755) != 0) {
+        fprintf(stderr, "error: cannot read %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    char label[64];
+    snprintf(label, sizeof(label), "file:%.57s", base);
+    for (char *p = label; *p; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || strchr(".-_:", *p)))
+            *p = '_';
+
+    printf("installing from %s\n", path);
+    return install_candidate(db, self, label);
 }
 
 /* ── post-update crash-loop verification ───────────────────────────
@@ -712,16 +750,25 @@ void update_check_tick(sqlite3 *db) {
 int update_main(int argc, char *argv[]) {
     int check_only = 0;
     const char *want_tag = NULL;
+    const char *want_file = NULL;
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--check") == 0) check_only = 1;
         else if (strcmp(argv[i], "--tag") == 0) {
             if (++i >= argc) { fprintf(stderr, "--tag requires a value\n"); return 2; }
             want_tag = argv[i];
+        } else if (strcmp(argv[i], "--file") == 0) {
+            if (++i >= argc) { fprintf(stderr, "--file requires a path\n"); return 2; }
+            want_file = argv[i];
         } else {
-            fprintf(stderr, "usage: cclaw update [--check] [--tag vX.Y.Z]\n");
+            fprintf(stderr,
+                    "usage: cclaw update [--check] [--tag vX.Y.Z] [--file path]\n");
             return 2;
         }
+    }
+    if (want_file && (want_tag || check_only)) {
+        fprintf(stderr, "--file does not combine with --tag or --check\n");
+        return 2;
     }
 
     char *self = self_exe_path();
@@ -729,6 +776,12 @@ int update_main(int argc, char *argv[]) {
 
     sqlite3 *db = update_db_open();
     if (!db) { free(self); return 1; }
+
+    if (want_file) {
+        int frc = update_install_file(db, self, want_file);
+        free(self); sqlite3_close(db);
+        return frc;
+    }
 
     char *repo = config_get(db, "update.repo");
     char *asset = config_get(db, "update.asset");

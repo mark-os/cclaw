@@ -322,7 +322,9 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   the running process keeps its inode and picks up the new build at the next
   restart. Set `update.check_interval_hours` and the
   daemon notices new releases and drops a note in the default agent's inbox —
-  it tells you, it never installs on its own.
+  it tells you, it never installs on its own. `cclaw update --file <path>`
+  sideloads an operator-supplied binary (CI artifact, cross build) through
+  the same rails, skipping only the download.
 - **The real DB is `~/.cclaw/cclaw.db`, not `./cclaw.db`.** `resolve_db_path()` returns `$HOME/.cclaw/cclaw.db` when `$HOME` is set (override with `CCLAW_DB_PATH`). "Delete the db" means that path — and its `-wal`/`-shm` siblings.
 - **Schema changes need a forward patch.** When `templates/schema.sql` changes shape, bump `CCLAW_SCHEMA_VERSION` (`src/cclaw.h`) and append a matching entry to `schema_patches[]` (`src/db.c`) that brings a live DB from the previous version to the new one. Startup auto-applies pending patches; DBs newer than the build, or older than the floor `CCLAW_SCHEMA_MIN` (v40 — the 2026-07-31 turn_id/iteration_id rename froze a new floor and collapsed prior patch history into it), are refused with a delete-and-restart message. A schema.sql change *without* the bump + patch leaves existing DBs stamped current but shaped old — missing columns, `advance_session` returns `ADVANCE_ERROR`, and the CLI can hang.
 - **`-p` with piped/non-tty stdin auto-selects the most recent session**; `-s <id>` pins one. Useful for scripted multi-turn testing (turn 1 creates the session, reuse its id for turn 2+).

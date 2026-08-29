@@ -99,7 +99,34 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
         char *tag = tool_args_str(proc_db(), a->args_json, "tag");
         char exe[PATH_MAX];
         ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-        if (!tag || !tag[0] || n <= 0) {
+        /* An update restarts the daemon, and forked job children die with it.
+         * Refuse while any live instance still owns a running background job
+         * rather than silently orphaning work the model is waiting on. */
+        int64_t live_jobs = 0;
+        {
+            sqlite3_stmt *st = NULL;
+            if (sqlite3_prepare_v2(proc_db(),
+                    "SELECT count(*) FROM tool_calls WHERE status='background'"
+                    " AND resolved_by IN (SELECT instance_id FROM processes)",
+                    -1, &st, NULL) == SQLITE_OK &&
+                sqlite3_step(st) == SQLITE_ROW)
+                live_jobs = sqlite3_column_int64(st, 0);
+            sqlite3_finalize(st);
+        }
+        if (live_jobs > 0) {
+            LOG_WARN_("install_update refused: %lld background job(s) running",
+                      (long long)live_jobs);
+            *apply_failed = 1;
+            if (detail) {
+                char d[192];
+                snprintf(d, sizeof(d),
+                         "%lld background job(s) are still running and would "
+                         "be killed by the restart — wait for them to finish "
+                         "or cancel them, then re-request",
+                         (long long)live_jobs);
+                *detail = strdup(d);
+            }
+        } else if (!tag || !tag[0] || n <= 0) {
             LOG_WARN_("install_update apply failed: %s",
                       tag && tag[0] ? "no exe path" : "no tag");
             *apply_failed = 1;

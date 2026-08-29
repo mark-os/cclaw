@@ -12,7 +12,7 @@ static const char *SHELL_PARAMS_JSON_FMT =
     "{\"type\":\"object\",\"properties\":{"
     "\"command\":{\"type\":\"string\",\"description\":\"Shell command to execute\"},"
     "\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds (default %d; for background jobs default 600, ceiling config job_timeout_max)\"},"
-    "\"background\":{\"type\":\"boolean\",\"description\":\"Run past this turn as a background job: returns a job handle immediately, output streams to a workspace log you can tail live, and the result arrives as a message on completion. For builds, installs, long scripts.\"},"
+    "\"background\":{\"type\":\"boolean\",\"description\":\"Run past this turn as a background job: returns a job handle immediately, output streams to a workspace log you can tail live, and the result arrives as a message on completion. For bounded work — builds, installs, long scripts. Jobs end when the daemon stops or restarts (you are notified), so do not use them as servers or watchers; something that should run permanently must be installed as a real system service instead.\"},"
     "\"save_secret\":{\"type\":\"string\",\"description\":\"Capture a credential from this command's output: NAME (^[A-Z][A-Z0-9_]*$) stores it encrypted and masks it to {{SECRET:NAME}} — the raw value never enters context\"},"
     "\"save_secret_path\":{\"type\":\"string\",\"description\":\"With save_secret: JSON path (e.g. $.token) selecting the credential in JSON output; omit to capture the whole trimmed output\"}"
     "},\"required\":[\"command\"]}";
@@ -31,7 +31,7 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     sc->secrets = NULL;
     sc->secret_count = 0;
     sc->sb.sandbox = 1;
-    char params[1024];
+    char params[2048];
     snprintf(params, sizeof(params), SHELL_PARAMS_JSON_FMT, sc->timeout);
     int rc = tools_register(reg, "shell_exec",
                             "Execute a shell command and return stdout+stderr. "

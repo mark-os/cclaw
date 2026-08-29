@@ -49,6 +49,13 @@ typedef void (*ToolFreeFn)(void *user_data);
 typedef enum { EXEC_INLINE, EXEC_THREAD, EXEC_SANDBOX } ExecVehicle;
 typedef enum { SBX_NONE, SBX_FILE, SBX_WEB, SBX_SHELL, SBX_JS } SandboxTier;
 
+/* NULL-result protocol for EXEC_INLINE tools: a handler returning NULL means
+ * it dispatched async work instead of finishing inline.
+ * NULL_NONE  — not actually async; NULL is an error ("returned null")
+ * NULL_ASYNC — sub-agent launched; dispatch continues per parallel_safe
+ * NULL_PARK  — approval gate; session parks awaiting_approval */
+typedef enum { NULL_NONE = 0, NULL_ASYNC, NULL_PARK } ToolNullKind;
+
 typedef struct {
     ExecVehicle  vehicle;
     SandboxTier  tier;                 /* meaningful iff EXEC_SANDBOX */
@@ -58,6 +65,16 @@ typedef struct {
     char *(*thread_run)(sqlite3 *db, const char *agent_name,
                         int64_t session_id, const char *args,
                         int *is_error);
+    /* Behavioral traits — the recipe is the single declaration site (the old
+     * dispatch.c tool_traits[] strcmp table is gone). Defaults (zero) are the
+     * safe ones: serial, no interpolation, NULL is an error, not
+     * backgroundable — extension-defined tools get exactly these. Serial is
+     * the default because models emit ordered calls (shell especially)
+     * expecting sequential side effects on the shared workspace. */
+    unsigned parallel_safe : 1;  /* sibling calls in one batch may run concurrently */
+    unsigned needs_interp  : 1;  /* {{SECRET:X}} resolved to real values at exec time */
+    unsigned backgroundable: 1;  /* accepts background:true → job delivery */
+    ToolNullKind null_kind;      /* EXEC_INLINE NULL-return protocol */
 } ToolRecipe;
 
 /* Single tool entry in the registry */

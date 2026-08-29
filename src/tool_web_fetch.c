@@ -376,7 +376,9 @@ int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx) {
                           "  {\"url\":\"https://example.com\",\"raw\":true} — skip HTML-to-markdown conversion",
                           WEB_FETCH_PARAMS_JSON, tool_sandboxed_stub, ctx);
     if (rc == 0)  /* sandboxed broker; egress via per-hop proxy decide() */
-        tools_set_recipe(reg, "web_fetch", (ToolRecipe){EXEC_SANDBOX, SBX_WEB, NULL});
+        tools_set_recipe(reg, "web_fetch",
+                         (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_WEB,
+                                      .needs_interp = 1});
     return rc;
 }
 

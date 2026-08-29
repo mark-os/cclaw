@@ -550,8 +550,10 @@ int tool_cron_register(ToolRegistry *reg, ToolCronCtx *ctx) {
                        "it, cron_set the same name.",
                        CRON_REMOVE_PARAMS, tool_cron_remove_handler, ctx) != 0)
         return -1;
-    tools_set_recipe(reg, "cron_set",    (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
-    tools_set_recipe(reg, "cron_list",   (ToolRecipe){EXEC_THREAD, SBX_NONE, cron_list_thread_run});
-    tools_set_recipe(reg, "cron_remove", (ToolRecipe){EXEC_THREAD, SBX_NONE, cron_remove_thread_run});
+    /* cron_set only parks when the job would run as another agent. */
+    tools_set_recipe(reg, "cron_set",    (ToolRecipe){.vehicle = EXEC_INLINE,
+                                                      .null_kind = NULL_PARK});
+    tools_set_recipe(reg, "cron_list",   (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = cron_list_thread_run});
+    tools_set_recipe(reg, "cron_remove", (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = cron_remove_thread_run});
     return 0;
 }

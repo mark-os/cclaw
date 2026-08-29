@@ -86,7 +86,9 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
                           "When using 'filename', must be a .qjs file.",
                           JSEVAL_PARAMS_JSON, tool_js_eval_handler, ctx);
     if (rc == 0)  /* sandboxed broker; qjs runs in-process, egress via proxy */
-        tools_set_recipe(reg, "js_eval", (ToolRecipe){EXEC_SANDBOX, SBX_JS, NULL});
+        tools_set_recipe(reg, "js_eval",
+                         (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_JS,
+                                      .needs_interp = 1});
     return rc;
 }
 
@@ -128,7 +130,7 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
         existing->parameters_json = parameters_json ? strdup(parameters_json) : NULL;
         existing->policy_json = policy_json ? strdup(policy_json) : NULL;
         existing->handler = js_defined_tool_handler;
-        existing->recipe = (ToolRecipe){EXEC_SANDBOX, SBX_JS, NULL};
+        existing->recipe = (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_JS};
         return 0;
     }
     JsToolData *td = malloc(sizeof(JsToolData));
@@ -143,7 +145,7 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
         if (e) {
             e->free_fn = js_tool_data_free;
             e->policy_json = policy_json ? strdup(policy_json) : NULL;
-            e->recipe = (ToolRecipe){EXEC_SANDBOX, SBX_JS, NULL};
+            e->recipe = (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_JS};
         }
     }
     return rc;

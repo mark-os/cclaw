@@ -435,10 +435,11 @@ int tool_extension_register(ToolRegistry *reg, ToolExtensionCtx *ctx) {
         "extension — the original stays untouched.",
         FORK_PARAMS, tool_extension_fork_handler, ctx);
     /* Inline tools: apply in-process via ctx->db. */
-    tools_set_recipe(reg, "extension_promote", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
-    tools_set_recipe(reg, "extension_publish", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
-    tools_set_recipe(reg, "extension_attach",  (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
-    tools_set_recipe(reg, "extension_list",    (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
-    tools_set_recipe(reg, "extension_fork",    (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+    tools_set_recipe(reg, "extension_promote", (ToolRecipe){.vehicle = EXEC_INLINE,
+                                                            .null_kind = NULL_PARK});
+    tools_set_recipe(reg, "extension_publish", (ToolRecipe){.vehicle = EXEC_INLINE});
+    tools_set_recipe(reg, "extension_attach",  (ToolRecipe){.vehicle = EXEC_INLINE});
+    tools_set_recipe(reg, "extension_list",    (ToolRecipe){.vehicle = EXEC_INLINE});
+    tools_set_recipe(reg, "extension_fork",    (ToolRecipe){.vehicle = EXEC_INLINE});
     return rc;
 }

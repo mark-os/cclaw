@@ -218,7 +218,12 @@ int tool_launch_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
                           "everything inline — the roster is in search_config.",
                           SPAWN_PARAMS_JSON, tool_launch_agent_handler, ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "launch_agent", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+        tools_set_recipe(reg, "launch_agent",
+                         (ToolRecipe){.vehicle = EXEC_INLINE,
+                                      /* independent, self-contained delegations
+                                       * are safe to run concurrently */
+                                      .parallel_safe = 1,
+                                      .null_kind = NULL_ASYNC});
     return rc;
 }
 
@@ -308,7 +313,7 @@ int tool_check_session_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
                           "background result is delivered to you on its own.",
                           CHECK_PARAMS_JSON, tool_check_session_handler, ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "check_session", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+        tools_set_recipe(reg, "check_session", (ToolRecipe){.vehicle = EXEC_INLINE});
     return rc;
 }
 

@@ -72,6 +72,6 @@ int tool_search_models_register(ToolRegistry *reg, SearchModelsCtx *ctx) {
         PARAMS_JSON, handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "search_models",
-                         (ToolRecipe){EXEC_THREAD, SBX_NONE, search_models_thread_run});
+                         (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = search_models_thread_run});
     return rc;
 }

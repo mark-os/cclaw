@@ -1815,6 +1815,8 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
         "Accepts an optional 'reason' shown to the approver.",
         PARAMS_JSON, handler, ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "request_config", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+        tools_set_recipe(reg, "request_config",
+                         (ToolRecipe){.vehicle = EXEC_INLINE,
+                                      .null_kind = NULL_PARK});
     return rc;
 }

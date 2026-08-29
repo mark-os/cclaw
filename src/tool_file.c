@@ -167,7 +167,7 @@ int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           FILE_READ_PARAMS_JSON, tool_sandboxed_stub,
                           (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_read", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+        tools_set_recipe(reg, "file_read", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
     return rc;
 }
 
@@ -244,7 +244,7 @@ int tool_file_write_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           FILE_WRITE_PARAMS_JSON, tool_sandboxed_stub,
                           (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_write", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+        tools_set_recipe(reg, "file_write", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
     return rc;
 }
 
@@ -340,7 +340,7 @@ int tool_file_list_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "Use this to see what files exist.",
                           FILE_LIST_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_list", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+        tools_set_recipe(reg, "file_list", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
     return rc;
 }
 
@@ -470,7 +470,7 @@ int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "(e.g. 'src/**/*.spec.ts'). Skips .git and node_modules.",
                           FIND_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_find", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+        tools_set_recipe(reg, "file_find", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
     return rc;
 }
 
@@ -626,7 +626,7 @@ int tool_file_edit_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "overlap. Use file_write to create a file or replace it entirely.",
                           FILE_EDIT_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_edit", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+        tools_set_recipe(reg, "file_edit", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
     return rc;
 }
 
@@ -767,7 +767,7 @@ int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "under the given directory. Skips binary files, .git, and node_modules.",
                           GREP_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_grep", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+        tools_set_recipe(reg, "file_grep", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
     return rc;
 }
 

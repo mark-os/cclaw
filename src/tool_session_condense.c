@@ -245,6 +245,6 @@ int tool_session_condense_register(ToolRegistry *reg, ToolCondenseCtx *ctx) {
                        ctx) != 0)
         return -1;
     tools_set_recipe(reg, "session_condense",
-                     (ToolRecipe){EXEC_THREAD, SBX_NONE, condense_thread_run});
+                     (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = condense_thread_run});
     return 0;
 }

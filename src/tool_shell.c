@@ -41,7 +41,10 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
         ToolEntry *e = tools_lookup(reg, "shell_exec");
         if (e) {
             e->free_fn = free;
-            e->recipe = (ToolRecipe){EXEC_SANDBOX, SBX_SHELL, NULL};
+            e->recipe = (ToolRecipe){.vehicle = EXEC_SANDBOX,
+                                     .tier = SBX_SHELL,
+                                     .needs_interp = 1,
+                                     .backgroundable = 1};
         }
     } else {
         free(sc);

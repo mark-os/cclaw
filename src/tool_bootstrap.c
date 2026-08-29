@@ -123,7 +123,8 @@ int tool_update_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
                           tool_update_agent_handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "update_agent",
-                         (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+                         (ToolRecipe){.vehicle = EXEC_INLINE,
+                                      .null_kind = NULL_PARK});
     return rc;
 }
 
@@ -137,6 +138,7 @@ int tool_create_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
                           tool_create_agent_handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "create_agent",
-                         (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+                         (ToolRecipe){.vehicle = EXEC_INLINE,
+                                      .null_kind = NULL_PARK});
     return rc;
 }

@@ -377,9 +377,9 @@ int tool_memory_register(ToolRegistry *reg, ToolMemoryCtx *ctx) {
                        MEMORY_DELETE_PARAMS, tool_memory_delete_handler, ctx) != 0)
         return -1;
     /* All DB-only — fire-and-forget threads with their own db handle. */
-    tools_set_recipe(reg, "memory_create", (ToolRecipe){EXEC_THREAD, SBX_NONE, memory_create_thread_run});
-    tools_set_recipe(reg, "memory_add",    (ToolRecipe){EXEC_THREAD, SBX_NONE, memory_add_thread_run});
-    tools_set_recipe(reg, "memory_edit",   (ToolRecipe){EXEC_THREAD, SBX_NONE, memory_edit_thread_run});
-    tools_set_recipe(reg, "memory_delete", (ToolRecipe){EXEC_THREAD, SBX_NONE, memory_delete_thread_run});
+    tools_set_recipe(reg, "memory_create", (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = memory_create_thread_run});
+    tools_set_recipe(reg, "memory_add",    (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = memory_add_thread_run});
+    tools_set_recipe(reg, "memory_edit",   (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = memory_edit_thread_run});
+    tools_set_recipe(reg, "memory_delete", (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = memory_delete_thread_run});
     return 0;
 }

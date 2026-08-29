@@ -175,6 +175,6 @@ int tool_channel_send_register(ToolRegistry *reg, ToolChannelSendCtx *ctx) {
         "outbound path for explicit-mode routes, e.g. group chats). Targets "
         "are allowlisted by channel_routes; action='list' shows yours.",
         CHANNEL_SEND_PARAMS, tool_channel_send_handler, ctx);
-    tools_set_recipe(reg, "channel_send", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+    tools_set_recipe(reg, "channel_send", (ToolRecipe){.vehicle = EXEC_INLINE});
     return rc;
 }

@@ -258,58 +258,14 @@ void stalled_drain(void) {
 
 /* ── dispatch_tool ─────────────────────────────────────────────── */
 
-/* NULL-result handling for EXEC_INLINE tools (see dispatch_inline): a NULL
- * return means the handler dispatched async work instead of finishing inline.
- * NULL_NONE   — not actually async; NULL is an error (default: "returned null")
- * NULL_ASYNC  — sub-agent launched; keep going per parallel_safe (launch_agent)
- * NULL_PARK   — approval gate; session parks awaiting_approval */
-typedef enum { NULL_NONE = 0, NULL_ASYNC, NULL_PARK } ToolNullKind;
-
-/* Per-tool traits, collapsed from three separate strcmp chains. Tools not
- * listed get the defaults: serial, no interpolation, NULL is an error. */
-typedef struct {
-    const char *name;
-    int parallel_safe;   /* sibling calls in one turn may run concurrently */
-    int needs_interp;    /* {{SECRET:X}} resolved to real values at exec time */
-    ToolNullKind null_kind;
-} ToolTraits;
-
-static const ToolTraits tool_traits[] = {
-    /* Default is serial (safe): models emit ordered calls — shell especially —
-     * expecting sequential side effects on the shared workspace. Only
-     * independent, self-contained delegations opt in. */
-    { "launch_agent",      1, 0, NULL_ASYNC },
-    { "shell_exec",        0, 1, NULL_NONE },
-    { "web_fetch",         0, 1, NULL_NONE },
-    { "js_eval",           0, 1, NULL_NONE },
-    { "request_config",    0, 0, NULL_PARK },
-    { "create_agent",      0, 0, NULL_PARK },
-    { "update_agent",      0, 0, NULL_PARK },
-    { "extension_promote", 0, 0, NULL_PARK },
-    /* cron_set only parks when the job would run as another agent. */
-    { "cron_set",          0, 0, NULL_PARK },
-};
-
-static const ToolTraits *tool_traits_lookup(const char *name) {
-    for (size_t i = 0; i < sizeof(tool_traits) / sizeof(tool_traits[0]); i++)
-        if (strcmp(tool_traits[i].name, name) == 0) return &tool_traits[i];
-    return NULL;
-}
-
-static int tool_is_parallel_safe(const char *name) {
-    const ToolTraits *t = tool_traits_lookup(name);
-    return t ? t->parallel_safe : 0;
-}
+/* Per-tool behavioral traits (parallel_safe / needs_interp / null_kind /
+ * backgroundable) live in the ToolRecipe, declared at each tool's
+ * registration site — the dispatcher reads te->recipe. */
 
 /* A caller-supplied `timeout`, clamped to what we're willing to hold a turn
  * open for. Absent/garbage falls back to the tool's default. */
 static int tool_call_timeout(const char *args, int def) {
     return tool_timeout_clamp(tool_args_int(proc_db(), args, "timeout", def), def);
-}
-
-static int tool_needs_interpolation(const char *name) {
-    const ToolTraits *t = tool_traits_lookup(name);
-    return t ? t->needs_interp : 0;
 }
 
 /* Append an inline error tool-result and mark the call done. `detail` is the
@@ -813,7 +769,7 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
                            const ShellSecret *secrets, size_t secret_count) {
     /* Interpolate {{SECRET:X}} only for tools that exec with credentials */
     char *interp_args = NULL;
-    if (tool_needs_interpolation(tc->name) && secret_count > 0)
+    if (te->recipe.needs_interp && secret_count > 0)
         interp_args = secret_interpolate(tc->arguments, secrets, secret_count);
     /* Thread the live session + tool_call_id into the per-tool context.
      * proc_tool_setup() is a single shared instance, so the session_id captured
@@ -864,10 +820,9 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
     if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
     /* A NULL result means the tool dispatched async work and left this
      * tool_call without an inline result. Shape depends on the tool's
-     * null_kind trait (see tool_traits above). */
+     * recipe.null_kind. */
     if (!result) {
-        const ToolTraits *t = tool_traits_lookup(tc->name);
-        ToolNullKind nk = t ? t->null_kind : NULL_NONE;
+        ToolNullKind nk = te->recipe.null_kind;
         if (nk == NULL_ASYNC) {
             /* Sub-agent launched. The call is already 'running' (claimed at
              * dispatch), so the turn-join (advance_session, tool_running)
@@ -877,7 +832,7 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
              * dispatching → real parallelism. */
             /* parallel-safe tools let dispatch continue to siblings (3);
              * a serial tool would stop and wait (0). */
-            return tool_is_parallel_safe(tc->name) ? 3 : 0;
+            return te->recipe.parallel_safe ? 3 : 0;
         }
         if (nk == NULL_PARK) {
             /* Approval gate: the session is parked in awaiting_approval; the
@@ -1149,7 +1104,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
      * tier is exempt: file_write content is a document, not a resolution
      * site — writing a placeholder into a file is always legal; it resolves
      * (or errors) later, at the js fetch boundary. */
-    if ((tool_needs_interpolation(tc->name) ||
+    if ((te->recipe.needs_interp ||
          (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier != SBX_FILE)) &&
         tc->arguments && strstr(tc->arguments, "{{SECRET:")) {
         char *miss = unknown_secret_name(tc->arguments, secrets, secret_count);

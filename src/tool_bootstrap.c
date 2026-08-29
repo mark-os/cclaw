@@ -2,7 +2,9 @@
 #include "tool_bootstrap.h"
 #include "agent_define.h"
 #include "approval.h"
+#include "config_registry.h"  /* config_get (install_update) */
 #include "db.h"
+#include "tool_args.h"        /* tool_args_str (install_update) */
 #include "validate.h"
 #include <stdlib.h>
 #include <string.h>
@@ -138,6 +140,95 @@ int tool_create_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
                           tool_create_agent_handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "create_agent",
+                         (ToolRecipe){.vehicle = EXEC_INLINE,
+                                      .null_kind = NULL_PARK});
+    return rc;
+}
+
+/* ── install_update ──────────────────────────────────────────────────
+ * The agent can notice a release (update_check_tick's inbox note) and OFFER
+ * it — the offer is this park, the button is the approval. Installing is
+ * never agent authority: approval forks the binary's own `update --tag`
+ * rails (handshake, snapshot, atomic swap, crash-loop verify) in resolve.c.
+ * Auto-update stays operator config. */
+
+static const char *INSTALL_UPDATE_PARAMS =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"tag\":{\"type\":\"string\",\"description\":\"Release tag to install; omit for the newest release the daemon's check has seen\"},"
+    "\"reason\":{\"type\":\"string\",\"description\":\"Shown to the approver — what is new, why now\"}"
+    "}}";
+
+static char *tool_install_update_handler(const char *arguments, void *user_data, int *is_error) {
+    ToolBootstrapCtx *ctx = (ToolBootstrapCtx *)user_data;
+    if (!ctx || !ctx->db)
+        return tool_fail(is_error, "error: install_update unavailable");
+
+    char *repo = config_get(ctx->db, "update.repo");
+    if (!repo || !repo[0]) {
+        free(repo);
+        return tool_fail(is_error, "error: no update.repo configured — "
+                                   "updates are not set up on this deployment");
+    }
+
+    char *tag = tool_args_str(ctx->db, arguments, "tag");
+    if (!tag) tag = config_get(ctx->db, "update.notified_tag");
+    if (!tag || !tag[0]) {
+        free(repo); free(tag);
+        return tool_fail(is_error, "error: no known newer release — the "
+                                   "daemon's release check has not seen one; "
+                                   "pass a tag explicitly if you know it");
+    }
+    char *installed = config_get(ctx->db, "update.installed_tag");
+    if (installed && strcmp(installed, tag) == 0) {
+        char *msg = tool_fail(is_error,
+            "error: %s is already the installed release", tag);
+        free(repo); free(tag); free(installed);
+        return msg;
+    }
+    free(installed);
+
+    char *reason = tool_args_str(ctx->db, arguments, "reason");
+    /* Rendered via json_object so a hostile tag/reason can't break the doc. */
+    sqlite3_stmt *st;
+    char *doc = NULL;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT json_object('tag', ?1, 'repo', ?2, 'reason', ?3,"
+            " 'current', ?4);", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, tag, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, repo, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 3, reason ? reason : "", -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 4, VERSION_COMMIT, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *j = (const char *)sqlite3_column_text(st, 0);
+            if (j) doc = strdup(j);
+        }
+        sqlite3_finalize(st);
+    }
+    free(reason); free(repo);
+    if (!doc) { free(tag); return tool_fail(is_error, "error: OOM"); }
+
+    int64_t aid = approval_create(ctx->db, ctx->session_id,
+        ctx->current_tool_call_id, "install_update", APPROVAL_PARK_REQUIRED,
+        doc, "apply");
+    free(doc); free(tag);
+    if (aid < 0)
+        return tool_fail(is_error, "error: failed to create approval");
+    session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
+    return NULL; /* park */
+}
+
+int tool_install_update_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
+    int rc = tools_register(reg, "install_update",
+                          "Propose installing a newer cclaw release (requires human "
+                          "approval). Approval runs the full update rails: schema "
+                          "handshake, DB snapshot, atomic binary swap, crash-loop "
+                          "revert; the daemon restarts only if the deployment "
+                          "configures update.restart_command. Say what is new in "
+                          "'reason' so the approver can decide.",
+                          INSTALL_UPDATE_PARAMS,
+                          tool_install_update_handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "install_update",
                          (ToolRecipe){.vehicle = EXEC_INLINE,
                                       .null_kind = NULL_PARK});
     return rc;

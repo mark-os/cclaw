@@ -78,6 +78,39 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
             *apply_failed = 1; /* generic apply-failed: error result, no grant */
         }
         free(cerr);
+    } else if (strcmp(a->tool_name, "install_update") == 0) {
+        /* Approval = run the operator rails, exactly as `cclaw update --tag`
+         * would: handshake, snapshot, atomic swap, crash-loop verify. Forked
+         * detached — the updater may restart this very daemon, so nothing
+         * here waits on it; success means "launched", and the update's own
+         * refusals (schema handshake, download) land in the daemon log. */
+        char *tag = tool_args_str(proc_db(), a->args_json, "tag");
+        char exe[PATH_MAX];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (!tag || !tag[0] || n <= 0) {
+            LOG_WARN_("install_update apply failed: %s",
+                      tag && tag[0] ? "no exe path" : "no tag");
+            *apply_failed = 1;
+        } else {
+            exe[n] = '\0';
+            pid_t pid = fork();
+            if (pid == 0) {
+                execl(exe, exe, "update", "--tag", tag, (char *)NULL);
+                _exit(127);
+            }
+            if (pid < 0) {
+                LOG_WARN_("install_update fork failed");
+                *apply_failed = 1;
+            } else if (detail) {
+                char d[192];
+                snprintf(d, sizeof(d),
+                         "update to %s launched — the schema handshake may "
+                         "still refuse it; the daemon restarts only if "
+                         "update.restart_command is configured", tag);
+                *detail = strdup(d);
+            }
+        }
+        free(tag);
     } else if (strcmp(a->tool_name, "cron_set") == 0) {
         /* Standing job: approved once here, then it fires unattended. The
          * document is the same one cron_set validated before parking. */

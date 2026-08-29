@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_bootstrap.h"
+#include "config_registry.h"
 #include "db.h"
 #include "test_util.h"
 #include "secret.h"
@@ -129,6 +130,50 @@ static int test_create_agent_missing_name(void) {
     return 0;
 }
 
+/* install_update: refuses without update.repo / a known release; parks an
+ * 'apply' approval carrying the tag once both exist. */
+static int test_install_update(void) {
+    sqlite3 *db = setup_db();
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "Bootstrap",
+                            .current_tool_call_id = "call_upd"};
+    tool_install_update_register(&reg, &ctx);
+    ToolEntry *e = tools_lookup(&reg, "install_update");
+    assert(e && e->recipe.null_kind == NULL_PARK);
+
+    /* update.repo has a registry default, so the first refusal in a fresh
+     * DB is "no known release" (the notified_tag gate). */
+    int err = 0;
+    char *r = e->handler("{}", e->user_data, &err);
+    assert(r && err && strstr(r, "no known newer release"));
+    free(r);
+
+    config_set(db, "update.notified_tag", "v9.9.9");
+    err = 0;
+    r = e->handler("{\"reason\":\"fixes the flux capacitor\"}",
+                   e->user_data, &err);
+    assert(r == NULL);   /* parked */
+    assert(db_scalar_i64(db,
+        "SELECT EXISTS(SELECT 1 FROM approvals WHERE tool_name='install_update'"
+        " AND state='pending'"
+        " AND json_extract(args_json,'$.tag')='v9.9.9'"
+        " AND json_extract(args_json,'$.reason') LIKE '%flux%');", 0, 0) == 1);
+
+    /* Already installed → refuse instead of parking again. */
+    config_set(db, "update.installed_tag", "v9.9.9");
+    err = 0;
+    r = e->handler("{}", e->user_data, &err);
+    assert(r && err && strstr(r, "already"));
+    free(r);
+
+    tools_free(&reg);
+    db_close(db);
+    cleanup();
+    printf("  PASS: test_install_update\n");
+    return 0;
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_tool_bootstrap:\n");
@@ -136,5 +181,6 @@ int main(void) {
     rc |= test_create_agent_parks();
     rc |= test_create_agent_invalid_name();
     rc |= test_create_agent_missing_name();
+    rc |= test_install_update();
     return rc;
 }

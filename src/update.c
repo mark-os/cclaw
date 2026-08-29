@@ -736,8 +736,10 @@ void update_check_tick(sqlite3 *db) {
     char note[512];
     snprintf(note, sizeof(note),
              "A newer cclaw release is available: %s (this build is %s). "
-             "Mention it to the operator — say what is new if you can find out, "
-             "and that `cclaw update` installs it. Do not install it yourself.",
+             "Mention it to the operator — say what is new if you can find "
+             "out. If you have the install_update tool, offer to install it "
+             "(that parks an approval — the operator decides); otherwise "
+             "`cclaw update` installs it. Never install without approval.",
              tag, VERSION_COMMIT);
     if (inbox_insert(db, sid, "update", tag, note) > 0) {
         config_set(db, "update.notified_tag", tag);

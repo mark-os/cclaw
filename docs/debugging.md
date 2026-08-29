@@ -14,6 +14,11 @@ boxes: the system `sqlite3` may be missing entirely, and anything older than
 3.45 renders the JSONB columns (`llm_responses.body`, `request_body`) as binary
 garbage, which reads as corruption but is just the storage format.
 
+Two safety properties the bare shell lacks: `cclaw sqlite3` opens **read-only
+by default** — pass `--write` for destructive access — and, invoked as root
+against another user's DB, it drops to the DB file's owner first so it never
+plants root-owned `-wal`/`-shm` files that lock the daemon out.
+
 ## Diagnosing a failed LLM turn
 
 A failed turn shows up in chat as `error: LLM request failed [resp #N]` (or

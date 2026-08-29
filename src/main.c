@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <grp.h>
 #include <poll.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -76,6 +77,62 @@
 
 /* vendor/sqlite3/shell.c, compiled with -Dmain=sqlite3_shell_main */
 int sqlite3_shell_main(int argc, char **argv);
+
+/* `cclaw sqlite3` wrapper enforcing the two safety properties the bare
+ * upstream shell lacks (design settled 2026-07-21, ruled 2026-08-29):
+ *   - read-only by default; `--write` (ours, stripped) opts into writes.
+ *   - invoked as root against another user's DB, drop to the DB owner first,
+ *     so we never plant root-owned -wal/-shm that lock the daemon out. */
+static int sqlite3_verb_main(int argc, char **argv) {
+    int write_mode = 0;
+    char **out = malloc((size_t)(argc + 2) * sizeof(char *));
+    if (!out) return 1;
+    int outc = 0;
+    out[outc++] = argv[0];
+    const char *dbfile = NULL;
+    /* Upstream options whose value could be mistaken for the DB filename. */
+    static const char *valopts[] = { "-init", "-cmd", "-vfs", "-nullvalue",
+        "-separator", "-colseparator", "-rowseparator", "-newline",
+        "-mmap", "-maxsize", NULL };
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--write") == 0) { write_mode = 1; continue; }
+        if (!dbfile && argv[i][0] != '-') {
+            dbfile = argv[i];
+        } else if (argv[i][0] == '-') {
+            const char *z = argv[i][1] == '-' ? argv[i] + 1 : argv[i];
+            for (int k = 0; valopts[k]; k++)
+                if (strcmp(z, valopts[k]) == 0 && i + 1 < argc) {
+                    out[outc++] = argv[i++];
+                    break;
+                }
+        }
+        out[outc++] = argv[i];
+    }
+    out[outc] = NULL;
+    if (!write_mode) {
+        /* Inject right after argv[0]: options must precede the filename. */
+        memmove(out + 2, out + 1, (size_t)outc * sizeof(char *));
+        out[1] = (char *)"-readonly";
+        outc++;
+    }
+    if (dbfile && geteuid() == 0) {
+        struct stat st;
+        if (stat(dbfile, &st) == 0 && st.st_uid != 0) {
+            gid_t g = st.st_gid;
+            if (setgroups(1, &g) != 0 ||
+                setgid(st.st_gid) != 0 || setuid(st.st_uid) != 0) {
+                fprintf(stderr, "cclaw sqlite3: cannot drop to uid %d "
+                        "(owner of %s): %s\n",
+                        (int)st.st_uid, dbfile, strerror(errno));
+                free(out);
+                return 1;
+            }
+        }
+    }
+    int rc = sqlite3_shell_main(outc, out);
+    free(out);
+    return rc;
+}
 
 /* Saved at startup for SIGUSR2 re-exec (see reexec_self). Captured *early* and
  * on purpose: `cclaw update` replaces the binary by rename(), after which
@@ -820,9 +877,9 @@ int main(int argc, char *argv[]) {
      * daemon uses. Deployment targets (Pogoplug, minimal containers) often
      * have no sqlite3 package, or one too old to read our JSONB columns.
      * Intercepted before DB/config init — it opens whatever file it is given,
-     * including none. argv is handed over verbatim from argv[1]. */
+     * including none. Read-only unless --write; drops root to the DB owner. */
     if (argc >= 2 && strcmp(argv[1], "sqlite3") == 0)
-        return sqlite3_shell_main(argc - 1, argv + 1);
+        return sqlite3_verb_main(argc - 1, argv + 1);
 
     /* --doctor: one-shot diagnostic bundle. Runs its own DB/config path so a
      * broken DB open is itself a finding — never bail on failures. */

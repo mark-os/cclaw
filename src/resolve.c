@@ -69,6 +69,18 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
         if (agent_definition_apply(proc_db(), a->args_json, agent, adir, &cerr) != 0) {
             LOG_WARN_("create_agent apply failed: %s", cerr ? cerr : "?");
             *apply_failed = 1; /* generic apply-failed: error result, no grant */
+        } else if (detail) {
+            /* State the child's workspace in the result — Assistant once
+             * burned ~6 tool calls discovering it by filesystem archaeology. */
+            char *cname = tool_args_str(proc_db(), a->args_json, "name");
+            if (cname && adir) {
+                char d[PATH_MAX + 96];
+                snprintf(d, sizeof(d),
+                         "agent %s created; its workspace is %s/%s/workspace"
+                         " (search_config lists the roster)", cname, adir, cname);
+                *detail = strdup(d);
+            }
+            free(cname);
         }
         free(cerr);
     } else if (strcmp(a->tool_name, "update_agent") == 0) {

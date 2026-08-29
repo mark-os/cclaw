@@ -348,6 +348,24 @@ static int64_t oneshot_resolve(sqlite3 *db, int64_t child_sid, int64_t parent_si
     return woken;
 }
 
+/* What to say when a terminal child produced no visible text. A
+ * length-stop with empty content is a reasoning model burning the whole
+ * max_tokens cap before emitting anything (Livermore session 81) — the
+ * parent must learn *why* there is nothing, or it retries blind. */
+static char *no_response_text(sqlite3 *db, int64_t sid, int is_error) {
+    if (is_error) return strdup("error: sub-agent terminated abnormally");
+    int len_stop = db_scalar_i64(db,
+        "SELECT e.stop_reason=2 /* STOP_REASON_LENGTH */ FROM entries e"
+        " WHERE e.session_id=?1 AND e.role=2"
+        " ORDER BY e.id DESC LIMIT 1;", sid, 0) == 1;
+    if (len_stop)
+        return strdup("(no response: the model hit its output cap before"
+                      " emitting any visible text — the tokens went to"
+                      " reasoning. Retrying the same way will likely repeat"
+                      " this; simplify the task or raise max_tokens.)");
+    return strdup("(no response)");
+}
+
 /* The per-session row every evaluation starts from. */
 typedef struct {
     int64_t leaf_id;
@@ -522,8 +540,7 @@ int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
                            ? digest_since(db, session_id, e->cursor)
                            : get_response_text(db, session_id);
             if (!text)
-                text = strdup(is_error ? "error: sub-agent terminated abnormally"
-                                       : "(no response)");
+                text = no_response_text(db, session_id, is_error);
             int64_t w = oneshot_resolve(db, session_id, sr.parent_sid,
                                         e->ref, text, is_error);
             free(text);
@@ -601,8 +618,7 @@ int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
         } else {                                 /* turn | quiescent */
             char *text = get_response_text(db, session_id);
             if (!text && is_parent)
-                text = strdup(is_error ? "error: sub-agent terminated abnormally"
-                                       : "(no response)");
+                text = no_response_text(db, session_id, is_error);
             if (text) {
                 if (is_parent) parent_push(db, sr.parent_sid, session_id, label, text);
                 else channel_push(db, e->ref, session_id, sr.chat_id, text);

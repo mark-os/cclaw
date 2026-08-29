@@ -337,7 +337,10 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   agent then tends to loop re-requesting. Plan multi-turn scripts around this.
 - **`--auto-approve` approves whatever is parked, not what you meant.** It is
   single-use and blind to which approval it answers — inspect
-  `select id, tool_call_id, args_json, state from approvals` before and after.
+  `cclaw sqlite3 <db> "select id, tool_call_id, args_json, state from
+  approvals"` before and after. (`cclaw sqlite3` is the operator DB verb:
+  vendored SQLite 3.53, full CLI compat, read-only unless `--write`, drops
+  root to the DB owner.)
 - **Verify config changes in the DB, never from the agent's claims.** The
   agent will assert success ("Gemini is now active") without checking; the
   truth is `agent_models` (the agent's routing list), `grants`,
@@ -355,10 +358,12 @@ Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
 - **Follow the citation.** Error entries end with `[resp #N]` — read that row with
   `cclaw resp` (bare = most recent failure; `resp <id> [req]` for one row or the
   request we sent; `resp list [n]`).
-- **Never SELECT `llm_responses.body` with a system sqlite3 older than 3.45** — it's
-  JSONB and dumps as binary garbage (that's the format, not corruption). `cclaw resp`
-  reads it with the vendored SQLite. Metadata columns (`status`, `model`, `iteration_id`,
-  `length(body)`) are safe to query anywhere.
+- **Ad-hoc DB inspection: `cclaw sqlite3 <db> "<sql>"`** — vendored SQLite 3.53
+  (decodes JSONB everywhere), full sqlite3 CLI compat, read-only by default
+  (`--write` for destructive access), drops root to the DB file's owner.
+  Prefer it over the system sqlite3 on any deployed box. (Footnote: a system
+  sqlite3 older than 3.45 dumps `llm_responses.body` as binary garbage —
+  that's JSONB, not corruption; metadata columns are safe anywhere.)
 - **Verbosity**: `-v` (debug: timing, retry decisions) / `-vv` (trace: full req/resp
   JSON), or `--log-level=LEVEL`.
 - **Policy reference**: [specs/error-handling.md](specs/error-handling.md) — failure

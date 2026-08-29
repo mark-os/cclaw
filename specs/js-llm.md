@@ -22,7 +22,7 @@ LLM(prompt, {
   system: "...",                  // prepended system message
   model: "gemini",                // substring-match against the routing list
   max_tokens: 1024, temperature: 0,
-  timeout: 90,                    // secs per attempt (default 120, max 180)
+  timeout: 90,                    // secs per attempt (default 120, max 600)
   extra: {...},                   // merged into the provider body last
   full: true                      // -> {text, model, id, status, body}
 })

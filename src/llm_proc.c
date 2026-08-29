@@ -28,7 +28,9 @@
  * bounds (grounded/reasoning calls run ~1min on slow targets). */
 #define JSLLM_MAX_CANDIDATES 4
 #define JSLLM_TIMEOUT_DEFAULT 120
-#define JSLLM_TIMEOUT_MAX     180
+/* Ceiling, not default: must accommodate the slowest working setup (grounded
+ * Gemini measured 48s from the Pogoplug; reasoning models run past 180). */
+#define JSLLM_TIMEOUT_MAX     600
 /* Generous ceiling on any provider response body — a real completion is a few
  * MB at most; this only bounds daemon OOM from a malicious/buggy provider
  * (web_fetch/js_http already cap their own). */
@@ -36,7 +38,9 @@
 /* Hard ceiling on the apply-time probe. It runs synchronously in the approval
  * path, so this is also the worst-case event-loop stall — deliberately short,
  * and a timeout counts as a failed probe (config-ax Phase 2A). */
-#define LLM_PROBE_TIMEOUT_SEC 15
+#define LLM_PROBE_TIMEOUT_SEC 30   /* was 15 — tight for a cold TLS handshake
+                                    * on a small ARM box; a false probe failure
+                                    * rolls back a healthy config */
 
 
 
@@ -479,6 +483,14 @@ static int llm_attempt(sqlite3 *db, ModelCandidate *m, const char *body,
                        const char *kind, const char *source,
                        int64_t session_id, int64_t iteration_id,
                        HttpResponse *resp) {
+    /* timeout<=0 = "the standing per-request cap": a config knob, not the
+     * http.c 300s constant — a slow provider on a slow link is a working
+     * configuration, and a fixed ceiling makes it an impossible one
+     * (2026-08-27 timeout audit; same lesson as http_request's old 30s). */
+    if (timeout <= 0) {
+        timeout = (int)config_get_int(db, "llm_request_timeout");
+        if (timeout <= 0) timeout = 300;
+    }
     const char *env = m->api_key_env[0] ? getenv(m->api_key_env) : NULL;
     char *key_buf = (env && env[0]) ? strdup(env)
                   : m->api_key_env[0] ? db_secret_get_system(db, m->api_key_env)

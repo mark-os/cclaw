@@ -14,6 +14,9 @@ static const ConfigDef s_defs[] = {
       "Max tool-loop iterations per turn" },
     { "shell_timeout",      "30",
       "shell_exec timeout in seconds" },
+    { "llm_request_timeout", "300",
+      "Per-attempt cap in seconds for LLM API requests (turn requests,"
+      " transcription); raise on slow links or slow providers" },
     { "job_timeout_max",    "3600",
       "Ceiling on a background job's timeout parameter (seconds); background"
       " calls default to 600s within it" },

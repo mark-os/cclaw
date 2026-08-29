@@ -13,7 +13,9 @@
  * value would be a hang. Slow paths that legitimately need longer — an
  * LLM-backed search grounding a query, on a slow box — pass their own. */
 #define JS_HTTP_TIMEOUT_DEFAULT 30
-#define JS_HTTP_TIMEOUT_MAX     180
+/* Ceiling a caller may raise the per-request timeout to — sized for the
+ * slowest working setup, not the fastest (2026-08-27 timeout audit). */
+#define JS_HTTP_TIMEOUT_MAX     600
 
 /* Result from js_http_fetch_exec. Caller must free body. */
 typedef struct {

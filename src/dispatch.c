@@ -982,8 +982,8 @@ static int job_start(int64_t session_id, PendingToolCall *tc, ChildProc *cp) {
      * completion overwrites it with the job:* outcome. */
     db_tool_call_set_status(proc_db(), session_id, tc->call_id,
                             "background", proc_instance_id());
-    if (!proc_is_daemon())
-        cli_print_tool_call(tc->name, tc->arguments);
+    /* (CLI already printed the tool call before the fork, like any shell
+     * dispatch — no second print here.) */
     LOG_INFO_("job start tool=%s job=%lld session=%lld", tc->name,
               (long long)job_id, (long long)session_id);
     return 1;
@@ -1251,7 +1251,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
     /* background:true is legal only on tools whose recipe declares it.
      * launch_agent (EXEC_INLINE) handles its own background argument; the
      * check keys on the recipe flag, not the vehicle, so it covers both. */
-    int background = tool_args_int(proc_db(), tc->arguments, "background", 0) != 0;
+    int background =
+        tool_args_bool(proc_db(), tc->arguments, "background", 0) ||
+        tool_args_int(proc_db(), tc->arguments, "background", 0) != 0;
     if (background && !te->recipe.backgroundable)
         return tool_inline_error(session_id, tc,
             "error: this tool cannot run in the background (background:true "

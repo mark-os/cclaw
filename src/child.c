@@ -84,9 +84,14 @@ static int child_is_run_tool(const ChildProc *c) {
 }
 
 int child_has_session(int64_t session_id) {
+    /* "Turn tool work in flight" — every caller uses this to hold the turn
+     * (no LLM dispatch, no advance, CLI prompt stays busy). A background
+     * job's child is exactly NOT turn work: its call was answered at
+     * dispatch and the session must keep advancing while it runs. */
     for (int i = 0; i < g_child_count; i++)
         if (g_children[i].type == CHILD_TOOL_EXEC
-            && g_children[i].session_id == session_id)
+            && g_children[i].session_id == session_id
+            && !g_children[i].background)
             return 1;
     return 0;
 }

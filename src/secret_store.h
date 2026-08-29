@@ -18,4 +18,9 @@ ShellSecret *secrets_snapshot(sqlite3 *db, const ShellSecret *env_base,
 /* Free a snapshot from secrets_snapshot: wipes values, frees names+array. */
 void secrets_snapshot_free(ShellSecret *secrets, size_t count);
 
+/* Scan/redact + UTF-8-sanitize an external-origin result (sub-agent final
+ * text, background job output) before it enters another session's context.
+ * Returns a new string (caller frees), or NULL for NULL input. */
+char *tool_result_scrub(sqlite3 *db, const char *text);
+
 #endif

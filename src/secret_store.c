@@ -2,6 +2,8 @@
 #include "secret_store.h"
 #include "db.h"
 #include "tool_shell.h"   /* shell_secrets_free */
+#include "secret_interp.h"      /* tool_result_postprocess */
+#include "unicode_normalize.h"  /* utf8_sanitize */
 #include <stdlib.h>
 #include <string.h>
 
@@ -47,4 +49,23 @@ ShellSecret *secrets_snapshot(sqlite3 *db, const ShellSecret *env_base,
 
 void secrets_snapshot_free(ShellSecret *secrets, size_t count) {
     shell_secrets_free(secrets, count);
+}
+
+/* Scan/redact + UTF-8-sanitize a result string of external origin — a
+ * sub-agent's final text or a background job's output — before it enters
+ * another session's context as a tool result or inbox notice. The same
+ * security half of the ingestion chain every direct tool result gets
+ * (blocking-vs-background step 3: one result-ingestion path). Fresh
+ * per-call snapshot so a secret born mid-session is maskable here too.
+ * Returns a new string (caller frees), or NULL for NULL input. */
+char *tool_result_scrub(sqlite3 *db, const char *text) {
+    if (!text) return NULL;
+    size_t snap_n = 0;
+    ShellSecret *snap = secrets_snapshot(db, NULL, 0, &snap_n);
+    char *pp = tool_result_postprocess(text, snap, snap_n);
+    secrets_snapshot_free(snap, snap_n);
+    const char *base = pp ? pp : text;
+    char *clean = utf8_sanitize(base, strlen(base));
+    if (clean) { free(pp); return clean; }
+    return pp ? pp : strdup(text);
 }

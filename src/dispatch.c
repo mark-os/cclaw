@@ -268,6 +268,49 @@ static int tool_call_timeout(const char *args, int def) {
     return tool_timeout_clamp(tool_args_int(proc_db(), args, "timeout", def), def);
 }
 
+/* Shared result-ingestion tail — the one path every completed tool result
+ * takes into a session (blocking-vs-background step 3): CLI progress arrow,
+ * UTF-8 sanitize, truncate/spill, entry write (+ optional network-hosts tag),
+ * call completion, hook annotation patch. The security half of the chain
+ * (secret capture, deinterpolate + scan/redact, hooks) runs in the caller
+ * first — it differs per origin (inline vs reaped child). Consumes `result`
+ * and `hook_annotate`. Returns the result entry id (or -1). */
+static int64_t tool_result_commit(int64_t session_id, const char *call_id,
+                                  int64_t entry_id, int64_t iteration_id,
+                                  const char *msg_tool_name, char *result,
+                                  int is_err, const char *hosts,
+                                  char *hook_annotate) {
+    if (!proc_is_daemon()) {
+        size_t rlen = strlen(result);
+        if (rlen <= 80)
+            fprintf(stdout, "\033[2m→ %s\033[0m\n", result);
+        else
+            fprintf(stdout, "\033[2m→ %.77s...\033[0m\n", result);
+        fflush(stdout);
+    }
+    /* Ensure valid UTF-8 before DB storage (binary tool output like gzip
+     * would poison JSON serialization of the payload later). */
+    { char *clean = utf8_sanitize(result, strlen(result));
+      if (clean) { free(result); result = clean; } }
+    char *stored = truncate_and_spill(proc_db(), result, session_id, call_id);
+    ToolResult tr = {.tool_call_id = (char *)call_id,
+                     .content = stored ? stored : result};
+    Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                   .tool_name = (char *)msg_tool_name, .is_error = is_err};
+    int64_t rid = entry_append_with_iteration(proc_db(), session_id, &msg,
+                                              iteration_id);
+    if (hosts && rid > 0)
+        db_entry_set_network_hosts(proc_db(), rid, hosts);
+    db_tool_call_complete_with_result(proc_db(), entry_id, call_id, rid);
+    if (hook_annotate) {
+        if (rid > 0) hook_entry_data_patch(proc_db(), rid, hook_annotate);
+        free(hook_annotate);
+    }
+    free(stored);
+    free(result);
+    return rid;
+}
+
 /* Append an inline error tool-result and mark the call done. `detail` is the
  * status detail column (may be NULL). Always returns 1 (handled inline). */
 static int tool_inline_error(int64_t session_id, PendingToolCall *tc,
@@ -864,37 +907,12 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
         if (rep) { free(result); result = rep; }
     }
 
-    /* CLI progress */
-    if (!proc_is_daemon()) {
+    if (!proc_is_daemon())
         cli_print_tool_call(tc->name, tc->arguments);
-        size_t rlen = strlen(result);
-        if (rlen <= 80)
-            fprintf(stdout, "\033[2m→ %s\033[0m\n", result);
-        else
-            fprintf(stdout, "\033[2m→ %.77s...\033[0m\n", result);
-        fflush(stdout);
-    }
-
-    /* Ensure valid UTF-8 before DB storage */
-    { char *clean = utf8_sanitize(result, strlen(result));
-      if (clean) { free(result); result = clean; } }
-
-    char *stored = truncate_and_spill(proc_db(), result, session_id, tc->call_id);
-    ToolResult tr = {.tool_call_id = tc->call_id,
-                     .content = stored ? stored : result};
-    Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
-                   .tool_name = tc->name, .is_error = is_err};
-    int64_t rid = entry_append_with_iteration(proc_db(), session_id, &msg, tc->iteration_id);
-    db_tool_call_complete_with_result(proc_db(), tc->entry_id, tc->call_id, rid);
-    if (hook_annotate) {
-        if (rid > 0) hook_entry_data_patch(proc_db(), rid, hook_annotate);
-        free(hook_annotate);
-    }
-    free(stored);
-    free(result);
+    tool_result_commit(session_id, tc->call_id, tc->entry_id, tc->iteration_id,
+                       tc->name, result, is_err, NULL, hook_annotate);
     LOG_INFO_("tool done tool=%s inline=1", tc->name);
     return 1; /* Handled inline */
-
 }
 
 /* Resolve+create the agent's scratch dir, bound as /tmp in the child. Done in
@@ -1905,39 +1923,12 @@ void reap_children(void) {
                 if (rep) { free(output); output = rep; out_len = strlen(output); }
             }
 
-            /* CLI progress */
-            if (!proc_is_daemon()) {
-                if (out_len <= 80)
-                    fprintf(stdout, "\033[2m→ %s\033[0m\n", output);
-                else
-                    fprintf(stdout, "\033[2m→ %.77s...\033[0m\n", output);
-                fflush(stdout);
-            }
-
-            /* Ensure valid UTF-8 before DB storage (binary tool output like
-             * gzip would poison JSON serialization of the payload later). */
-            { char *clean = utf8_sanitize(output, out_len);
-              if (clean) { free(output); output = clean; out_len = strlen(output); } }
-
-            /* Write result to DB */
-            char *stored = truncate_and_spill(proc_db(), output, session_id, c->tool_call_id);
-            ToolResult tr = {.tool_call_id = c->tool_call_id,
-                             .content = stored ? stored : output};
-            Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
-                           .tool_name = "", .is_error = is_err};
-            int64_t rid = entry_append_with_iteration(proc_db(), session_id, &msg, c->iteration_id);
-            if (hosts && rid > 0)
-                db_entry_set_network_hosts(proc_db(), rid, hosts);
-            db_tool_call_complete_with_result(proc_db(), c->entry_id, c->tool_call_id, rid);
             LOG_INFO_("tool done tool=%s is_err=%d", c->tool_name, is_err);
             LOG_TRACE_("tool result tool=%s len=%zu content=%s",
                        c->tool_name, out_len, output);
-            if (hook_annotate) {
-                if (rid > 0) hook_entry_data_patch(proc_db(), rid, hook_annotate);
-                free(hook_annotate);
-            }
-            free(stored);
-            free(output);
+            tool_result_commit(session_id, c->tool_call_id, c->entry_id,
+                               c->iteration_id, "", output, is_err, hosts,
+                               hook_annotate);
             child_remove(c);
             run_advance(session_id);
         }

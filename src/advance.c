@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "advance.h"
 #include "config_registry.h"
+#include "context.h"       /* truncate_and_spill */
+#include "secret_store.h"  /* tool_result_scrub */
 #include "log.h"
 #include "wake.h"
 #include <stdio.h>
@@ -199,20 +201,29 @@ static char *digest_since(sqlite3 *db, int64_t session_id, int64_t cursor) {
  * (source_ref), not prose; the drain re-attaches it as a [tag]. */
 static void parent_push(sqlite3 *db, int64_t parent_sid, int64_t child_sid,
                         const char *label, const char *text) {
+    /* One result-ingestion path (step 3): the child's text gets the same
+     * scan/redact + sanitize as any direct tool result before it enters the
+     * parent's context. Near-redundant today (entries are written post-scan)
+     * but the asymmetry was undocumented and unguarded. */
+    char *scrubbed = tool_result_scrub(db, text);
+    if (scrubbed) text = scrubbed;
     char child_ref[24];
     snprintf(child_ref, sizeof(child_ref), "%lld", (long long)child_sid);
     sqlite3_stmt *ins;
     if (sqlite3_prepare_v2(db,
             "INSERT INTO inbox (session_id, source, source_ref, payload)"
             " VALUES (?1, 'agent_result', ?2, 'Sub-agent ' || ?3 || ': ' || ?4)",
-            -1, &ins, NULL) != SQLITE_OK)
+            -1, &ins, NULL) != SQLITE_OK) {
+        free(scrubbed);
         return;
+    }
     sqlite3_bind_int64(ins, 1, parent_sid);
     sqlite3_bind_text(ins, 2, child_ref, -1, SQLITE_STATIC);
     sqlite3_bind_text(ins, 3, label, -1, SQLITE_STATIC);
     sqlite3_bind_text(ins, 4, text, -1, SQLITE_STATIC);
     sqlite3_step(ins);
     sqlite3_finalize(ins);
+    free(scrubbed);
 }
 
 /* One outbox row toward the session's bound chat (deliver_response's shape).
@@ -288,12 +299,21 @@ static int64_t oneshot_resolve(sqlite3 *db, int64_t child_sid, int64_t parent_si
 
     int64_t woken = 0;
     if (open && parent_sid > 0) {
+        /* One result-ingestion path (step 3): scan/redact + sanitize, then
+         * the same truncate/spill policy as any direct tool result — a huge
+         * child answer spills to the parent's .tool_results home instead of
+         * landing whole in its context. */
+        char *scrubbed = tool_result_scrub(db, text);
+        const char *body = scrubbed ? scrubbed : text;
+        char *stored = truncate_and_spill(db, body, parent_sid, call_id);
         ToolResult tr = { .tool_call_id = (char *)call_id,
-                          .content = (char *)text };
+                          .content = (char *)(stored ? stored : body) };
         Message rmsg = { .role = ROLE_TOOL, .tool_result = &tr,
                          .tool_name = "launch_agent", .is_error = is_error };
         int64_t rid = entry_append_with_iteration(db, parent_sid, &rmsg, 0);
         db_tool_call_complete_by_call(db, parent_sid, call_id, rid);
+        free(stored);
+        free(scrubbed);
         /* Unpark parent — but only from a state that permits it. A parent
          * sitting in awaiting_approval or compacting must not be stomped
          * back to tool_running (that double-prompts / re-emits per sibling

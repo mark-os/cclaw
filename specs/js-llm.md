@@ -84,3 +84,16 @@ sandboxed child asserting anything.
 - No per-extension model config: model choice is `opts.model` against the
   agent's routing, so the operator's `agent_models` stays the single source
   of truth.
+- No concurrent calls — `LLM()` blocks inside the native function, so
+  `Promise.all` over it is legal and correct but executes serially.
+  Deliberate: no promise lifetimes held C-side, no interleavings to get
+  wrong; the failure mode is slowness against the (caller-raisable) tool
+  timeout, never a wrong answer. Revisit only when a real extension needs
+  fan-out (mapping `LLM()`/`http_request` over a list, where serial
+  wall-clock = N × latency — e.g. grounded Gemini calls run ~48s each).
+  The known design when that day comes is a two-layer promise bridge
+  (seen in `reference/pi_agent_rust`): the native side returns an opaque
+  call_id immediately and a small JS shim owns the pending-promise map, so
+  completions arrive as plain data over the existing per-call socket and
+  all promise lifetime management stays in JS where GC handles it — C
+  never holds a JSValue across an await.

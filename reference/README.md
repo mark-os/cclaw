@@ -34,6 +34,12 @@ git clone --depth 1 https://github.com/zeroclaw-labs/zeroclaw.git reference/zero
 
 # GoClaw — Go, OpenClaw rebuilt with multi-tenant isolation and native concurrency
 git clone --depth 1 https://github.com/nextlevelbuilder/goclaw.git reference/goclaw
+
+# Oh My Pi — community fork of Pi, coding-first (hashline edits, LSP, subagents)
+git clone --depth 1 https://github.com/can1357/oh-my-pi.git reference/omp
+
+# pi_agent_rust — Rust clone of Pi (Dicklesworthstone), heavily automated build-out
+git clone --depth 1 https://github.com/Dicklesworthstone/pi_agent_rust.git reference/pi_agent_rust
 ```
 
 ## Notes

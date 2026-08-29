@@ -113,7 +113,19 @@ static void test_write_new_file(void) {
 }
 
 static void test_write_overwrite(void) {
+    /* Existing non-empty file: refused without the flag... */
     char *r = test_file_tool_run("file_write", "{\"path\":\"hello.txt\",\"content\":\"overwritten\"}", &file_ctx);
+    assert(r != NULL);
+    assert(strstr(r, "error") != NULL);
+    assert(strstr(r, "overwrite") != NULL);
+    free(r);
+
+    r = test_file_tool_run("file_read", "{\"path\":\"hello.txt\"}", &file_ctx);
+    assert(strstr(r, "overwritten") == NULL);
+    free(r);
+
+    /* ...allowed with it. */
+    r = test_file_tool_run("file_write", "{\"path\":\"hello.txt\",\"content\":\"overwritten\",\"overwrite\":true}", &file_ctx);
     assert(r != NULL);
     assert(strstr(r, "wrote") != NULL);
     free(r);

@@ -176,7 +176,8 @@ int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx) {
 static const char *FILE_WRITE_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"path\":{\"type\":\"string\",\"description\":\"File path to write (relative or absolute)\"},"
-    "\"content\":{\"type\":\"string\",\"description\":\"Content to write\"}"
+    "\"content\":{\"type\":\"string\",\"description\":\"Content to write\"},"
+    "\"overwrite\":{\"type\":\"boolean\",\"description\":\"Required true to replace an existing non-empty file. Prefer file_edit for changing part of a file.\"}"
     "},\"required\":[\"path\",\"content\"]}";
 
 static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_error) {
@@ -201,6 +202,22 @@ static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_er
         snprintf(fullpath, sizeof(fullpath), "%s", req_path);
     else
         snprintf(fullpath, sizeof(fullpath), "%s/%s", workspace, req_path);
+
+    /* Overwriting an existing file must be stated, not stumbled into: a model
+     * reproducing a file from memory can silently truncate it to a stub. */
+    if (!run_tool_param_bool(q, "overwrite", 0)) {
+        struct stat stbuf;
+        if (stat(fullpath, &stbuf) == 0 && stbuf.st_size > 0) {
+            char *msg = malloc(192);
+            if (!msg) return tool_fail(is_error, "error: file exists");
+            snprintf(msg, 192,
+                     "error: %s exists (%lld bytes); pass overwrite:true to "
+                     "replace it, or use file_edit to change part of it",
+                     req_path, (long long)stbuf.st_size);
+            *is_error = 1;
+            return msg;
+        }
+    }
 
     FILE *f = fopen(fullpath, "wb");
     if (!f) {

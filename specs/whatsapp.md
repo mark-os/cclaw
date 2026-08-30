@@ -49,7 +49,7 @@ token → 401.
 ### GET /v1/status
 
 ```json
-{ "state": "starting" | "pairing" | "connected" | "logged_out",
+{ "state": "starting" | "pairing" | "connected" | "disconnected" | "logged_out",
   "jid": "15551234567@s.whatsapp.net",   // present once known
   "pair_code": "ABCD-EFGH",              // present while pairing via pair-code
   "bridge": "whatsapp-bridge", "version": "0.1.0", "api": 1 }
@@ -129,6 +129,12 @@ Config is environment only, mirroring cclaw's own ethos:
 | `WAB_TOKEN` | *(empty)* | API token; empty = no auth (loopback only). |
 | `WAB_DB` | `whatsapp.db` | WhatsApp session store (SQLite). **Credentials — protect like `.cclaw_key`.** |
 | `WAB_PHONE` | *(empty)* | If set and unpaired, start pair-code flow for this number at boot. |
+
+The bridge never exits on a session ending (QR codes expired unscanned,
+logged out, transport lost): it reports `disconnected`, waits 60 s, and
+starts a fresh session on the same store — so an unpaired bridge re-offers
+pairing indefinitely and a paired one reconnects. Supervision only has to
+handle a crash.
 
 Event buffer: last 512 events in memory. WhatsApp itself queues offline
 messages server-side and replays them on reconnect, so bridge downtime loses

@@ -10,7 +10,7 @@
 
 use log::{error, info, warn};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
@@ -23,6 +23,10 @@ const EVENT_BUF_MAX: usize = 512;
 const POLL_TIMEOUT_MAX: u64 = 30;
 const POLL_TIMEOUT_DEFAULT: u64 = 25;
 const HTTP_REQ_MAX: usize = 64 * 1024;
+// After the WhatsApp session ends (QR codes expired unscanned, logged out,
+// transport gone for good) the bot loop returns. A supervised bridge must not
+// exit on that: keep the API up, report the state, and re-offer pairing.
+const RECONNECT_DELAY_SECS: u64 = 60;
 
 struct State {
     // (id, event-json) — ids are per-process; the buffer is memory, not a
@@ -31,7 +35,7 @@ struct State {
     events: Mutex<(VecDeque<(u64, Value)>, u64)>, // (buf, next_id)
     notify: Notify,
     status: Mutex<Value>,
-    client: OnceLock<Arc<whatsapp_rust::client::Client>>,
+    client: Mutex<Option<Arc<whatsapp_rust::client::Client>>>,
     token: Option<String>,
     phone: Option<String>,
 }
@@ -79,7 +83,7 @@ fn main() {
         events: Mutex::new((VecDeque::new(), 1)),
         notify: Notify::new(),
         status: Mutex::new(json!({"state": "starting"})),
-        client: OnceLock::new(),
+        client: Mutex::new(None),
         token,
         phone: phone.clone(),
     });
@@ -98,72 +102,84 @@ fn main() {
         info!("whatsapp-bridge listening on {listen}");
         tokio::spawn(serve(state.clone(), listener));
 
-        let store = match SqliteStore::new(&db).await {
-            Ok(s) => s,
-            Err(e) => {
-                error!("session store {db}: {e}");
-                std::process::exit(1);
-            }
-        };
-
-        let st = state.clone();
-        let st_qr = state.clone();
-        let st_pair = state.clone();
-        let st_conn = state.clone();
-        let st_out = state.clone();
-        let mut builder = Bot::builder()
-            .with_backend(store)
-            .on_qr_code(move |code, timeout| {
-                let st = st_qr.clone();
-                async move {
-                    info!("QR code (valid {}s):\n{}", timeout.as_secs(), code);
-                    st.set_state("pairing", &[("qr", json!(code))]);
-                }
-            })
-            .on_pair_code(move |code, timeout| {
-                let st = st_pair.clone();
-                async move {
-                    info!("PAIR CODE (valid {}s): {}", timeout.as_secs(), code);
-                    info!("WhatsApp > Linked Devices > Link a Device > Link with phone number instead");
-                    st.set_state("pairing", &[("pair_code", json!(code))]);
-                }
-            })
-            .on_connected(move |client| {
-                let st = st_conn.clone();
-                async move {
-                    info!("connected");
-                    let _ = st.client.set(client);
-                    st.set_state("connected", &[]);
-                }
-            })
-            .on_logged_out(move |_info| {
-                let st = st_out.clone();
-                async move {
-                    error!("logged out — re-pairing required");
-                    st.set_state("logged_out", &[]);
-                }
-            })
-            .on_message(move |ctx| {
-                let st = st.clone();
-                async move { handle_message(&st, &ctx) }
-            });
-
-        if let Some(p) = phone {
-            builder = builder.with_pair_code(PairCodeOptions {
-                phone_number: p,
-                ..Default::default()
-            });
+        loop {
+            run_session(&state, &db, phone.clone()).await;
+            *state.client.lock().unwrap() = None;
+            state.set_state("disconnected", &[]);
+            info!("session ended; retrying in {RECONNECT_DELAY_SECS}s");
+            tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
         }
-
-        let bot = match builder.build().await {
-            Ok(b) => b,
-            Err(e) => {
-                error!("bot build: {e}");
-                std::process::exit(1);
-            }
-        };
-        bot.run().await;
     });
+}
+
+// One WhatsApp session: build the bot on the persistent store and run it to
+// completion. Returns when the session ends for any reason; the caller loops.
+async fn run_session(state: &Arc<State>, db: &str, phone: Option<String>) {
+    let store = match SqliteStore::new(db).await {
+        Ok(s) => s,
+        Err(e) => {
+            error!("session store {db}: {e}");
+            return;
+        }
+    };
+
+    let st = state.clone();
+    let st_qr = state.clone();
+    let st_pair = state.clone();
+    let st_conn = state.clone();
+    let st_out = state.clone();
+    let mut builder = Bot::builder()
+        .with_backend(store)
+        .on_qr_code(move |code, timeout| {
+            let st = st_qr.clone();
+            async move {
+                info!("QR code (valid {}s):\n{}", timeout.as_secs(), code);
+                st.set_state("pairing", &[("qr", json!(code))]);
+            }
+        })
+        .on_pair_code(move |code, timeout| {
+            let st = st_pair.clone();
+            async move {
+                info!("PAIR CODE (valid {}s): {}", timeout.as_secs(), code);
+                info!("WhatsApp > Linked Devices > Link a Device > Link with phone number instead");
+                st.set_state("pairing", &[("pair_code", json!(code))]);
+            }
+        })
+        .on_connected(move |client| {
+            let st = st_conn.clone();
+            async move {
+                info!("connected");
+                *st.client.lock().unwrap() = Some(client);
+                st.set_state("connected", &[]);
+            }
+        })
+        .on_logged_out(move |_info| {
+            let st = st_out.clone();
+            async move {
+                error!("logged out — re-pairing required");
+                st.set_state("logged_out", &[]);
+            }
+        })
+        .on_message(move |ctx| {
+            let st = st.clone();
+            async move { handle_message(&st, &ctx) }
+        });
+
+    if let Some(p) = phone {
+        builder = builder.with_pair_code(PairCodeOptions {
+            phone_number: p,
+            ..Default::default()
+        });
+    }
+
+    let bot = match builder.build().await {
+        Ok(b) => b,
+        Err(e) => {
+            error!("bot build: {e}");
+            return;
+        }
+    };
+    bot.run().await;
 }
 
 // ── WhatsApp → event buffer ─────────────────────────────────────
@@ -364,7 +380,8 @@ async fn do_send(st: &State, body: &[u8]) -> (u16, Value) {
         Ok(j) => j,
         Err(e) => return (400, json!({"error": format!("bad jid: {e}")})),
     };
-    let Some(client) = st.client.get() else {
+    let client = st.client.lock().unwrap().clone();
+    let Some(client) = client else {
         return (502, json!({"error": "not connected"}));
     };
     match client.send_message(jid, wa::Message::text(text)).await {

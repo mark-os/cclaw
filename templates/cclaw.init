@@ -16,9 +16,12 @@ RESPAWN_MAX=10
 NAME=cclaw
 RUNAS=cclaw
 
+# Export everything the env file sets: the file exists to configure the
+# daemon, and an explicit allowlist here silently dropped every new channel's
+# CCLAW_<CHANNEL>_* keys (whatsapp, 2026-08-30).
+set -a
 [ -f "$ENVFILE" ] && . "$ENVFILE"
-export OPENROUTER_API_KEY CCLAW_PROVIDER CCLAW_MODEL CCLAW_DB_PATH CCLAW_WEB_PORT \
-       CCLAW_TELEGRAM_ENABLED CCLAW_TELEGRAM_BOT_TOKEN CCLAW_TELEGRAM_ADMIN_IDS CCLAW_LOG_LEVEL
+set +a
 
 # Drop root before launching: setpriv execs in place (unlike su, which forks),
 # so $! is the daemon's real pid and check_pid's comm check still matches.

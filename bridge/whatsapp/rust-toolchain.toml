@@ -1,0 +1,4 @@
+# Match whatsapp-rust's pinned toolchain (its repo carries the same pin; as a
+# git dependency that pin does not propagate, so restate it here).
+[toolchain]
+channel = "nightly-2026-06-16"

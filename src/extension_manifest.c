@@ -1184,6 +1184,10 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
         { "discord.json",   TPL_CHANNEL_DISCORD_JSON },
         { "extension.json", TPL_CHANNEL_DISCORD_MANIFEST_JSON },
     };
+    static const BuiltinFile whatsapp_files[] = {
+        { "channel.qjs",    TPL_CHANNEL_WHATSAPP_QJS },
+        { "extension.json", TPL_CHANNEL_WHATSAPP_MANIFEST_JSON },
+    };
     static const BuiltinFile docs_files[] = {
         { "extension.json", TPL_DOCS_MANIFEST_JSON },
         { "skills/configuring-cclaw/SKILL.md",    TPL_DOCS_CONFIGURING_CCLAW_MD },
@@ -1202,6 +1206,8 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
                                   sizeof(telegram_files)/sizeof(*telegram_files));
     rc |= install_channel_builtin(db, base, "discord", discord_files,
                                   sizeof(discord_files)/sizeof(*discord_files));
+    rc |= install_channel_builtin(db, base, "whatsapp", whatsapp_files,
+                                  sizeof(whatsapp_files)/sizeof(*whatsapp_files));
 
     /* ── cclaw-docs (skills-only self-documentation) ── */
     if (!builtin_row_foreign(db, "cclaw-docs")) {

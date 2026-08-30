@@ -1,0 +1,17 @@
+{
+  "name": "whatsapp",
+  "version": "0.1.0",
+  "channel": { "type": "whatsapp", "handler": "channel.qjs", "transports": ["poll"] },
+  "config": [
+    { "key": "enabled", "default": "0",
+      "description": "Run the whatsapp channel (1 = on)" },
+    { "key": "base_url", "default": "http://127.0.0.1:8471",
+      "description": "WhatsApp bridge API base URL (egress pin source of truth) — see specs/whatsapp.md" },
+    { "key": "api_token", "secret": true, "default": "",
+      "description": "Bridge API token (required when the bridge is not loopback)" },
+    { "key": "admin_ids", "default": "",
+      "description": "Comma-separated WhatsApp JIDs with admin commands (e.g. 15551234567@s.whatsapp.net)" },
+    { "key": "allow_unknown", "default": "0",
+      "description": "Accept unrouted senders via default_agent (1 = on; default drops them with an admin notice)" }
+  ]
+}

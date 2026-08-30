@@ -1,0 +1,21 @@
+# whatsapp-bridge — the reference bridge for cclaw's whatsapp channel.
+# Speaks WhatsApp multi-device (via whatsapp-rust) on one side and the HTTP
+# API in specs/whatsapp.md on the other. Builds down to ARMv5TE (Pogoplug):
+# keep dependencies to what whatsapp-rust already pulls in — in particular no
+# HTTP framework (the API is served by a ~150-line hand-rolled loop on tokio)
+# and never metrics-exporter-prometheus (hardcodes AtomicU64, breaks armv5te).
+[package]
+name = "whatsapp-bridge"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "535732f44a540a7017942a0481eba0a675f2bd0c" }
+wacore = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "535732f44a540a7017942a0481eba0a675f2bd0c" }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+strip = true

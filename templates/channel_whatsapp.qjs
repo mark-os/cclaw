@@ -1,0 +1,136 @@
+// WhatsApp channel extension for channel_runner.
+// Talks to a local (or remote) WhatsApp bridge over the HTTP API in
+// specs/whatsapp.md — the bridge owns the WhatsApp protocol and credentials;
+// this handler is an ordinary poll channel and never sees WhatsApp wire
+// format. The reference bridge is bridge/whatsapp/ (Rust); anything that
+// implements the same API (e.g. a Baileys wrapper elsewhere) works unchanged
+// via base_url.
+//
+// Reactive handlers: onInit, onPoll, onOutbox. Admin authority commands
+// (/new, /sessions, /approve, /deny, /status) are handled in C before
+// dispatch — nothing to do here.
+
+var config = {};
+var cursor = 0;
+
+// Append auth as ?token= — the recurring poll shape carries no headers
+// (channel.send does, but one mechanism for both paths keeps the bridge and
+// this handler simple; the bridge accepts either form).
+function apiUrl(path, params) {
+    var url = config.base + path;
+    var q = params || [];
+    if (config.token) q = q.concat(["token=" + encodeURIComponent(config.token)]);
+    return q.length ? url + "?" + q.join("&") : url;
+}
+
+function onInit() {
+    config.base = channel.getConfig("base_url") || "http://127.0.0.1:8471";
+    config.token = channel.getConfig("api_token") || "";
+
+    var saved = channel.getState("wa_cursor");
+    if (saved) cursor = parseInt(saved, 10) || 0;
+
+    channel.log("whatsapp channel ready (bridge=" + config.base +
+                ", cursor=" + cursor + ")");
+    return {poll: pollShape()};
+}
+
+// Long-poll under the runner's 35s poll timeout.
+function pollShape() {
+    return {
+        method: "GET",
+        url: apiUrl("/v1/events", ["cursor=" + cursor, "timeout=25"])
+    };
+}
+
+function onPoll(result) {
+    // Bridge down (connection refused) or restarting is an ordinary failed
+    // poll: log, keep the shape, let the C loop's backoff pace the retries.
+    if (result.error) {
+        channel.log("poll error: " + result.error + " (bridge down?)");
+        return {poll: pollShape()};
+    }
+    if (result.status < 200 || result.status >= 300) {
+        channel.log("poll status=" + result.status + " body=" +
+                    (result.body || "").substring(0, 200));
+        return {poll: pollShape()};
+    }
+
+    var data;
+    try { data = JSON.parse(result.body); } catch (e) {
+        channel.log("poll parse error: " + e);
+        return {poll: pollShape()};
+    }
+
+    var events = data.events || [];
+    for (var i = 0; i < events.length; i++) {
+        var ok = processEvent(events[i]);
+        if (!ok) {
+            channel.log("emit failed for event " + events[i].id + ", halting batch");
+            return {poll: pollShape()};   // cursor unmoved past the failure
+        }
+        if (typeof events[i].id === "number" && events[i].id > cursor)
+            cursor = events[i].id;
+    }
+    // A cursor from a previous bridge incarnation: the bridge answers with
+    // its current cursor and no events — adopt it (moving DOWN is the resync).
+    if (events.length === 0 && typeof data.cursor === "number" &&
+        data.cursor < cursor) {
+        channel.log("bridge restarted, cursor " + cursor + " -> " + data.cursor);
+        cursor = data.cursor;
+    }
+    channel.setState("wa_cursor", "" + cursor);
+    return {poll: pollShape()};
+}
+
+// Returns false only when channel.emit fails (halts the batch so the cursor
+// never passes an undelivered message). Everything else is fact-reporting:
+// authority decisions happen in C against the DB.
+function processEvent(ev) {
+    if (ev.type === "status") {
+        // Setup surface: during pairing the code must reach the operator, and
+        // the daemon log is the one place a headless box always has.
+        channel.log("bridge state=" + ev.state +
+                    (ev.pair_code ? " PAIR CODE: " + ev.pair_code : ""));
+        return true;
+    }
+    if (ev.type !== "message") return true;   // additive API: skip unknown
+
+    if (!ev.chat_id || !ev.msg_id) return true;
+    var env = {
+        chat_id: "" + ev.chat_id,
+        sender_id: ev.sender_id ? "" + ev.sender_id : "",
+        sender_name: ev.sender_name || "",
+        chat_type: ev.chat_type === "group" ? "group" : "dm",
+        mentioned: !!ev.mentioned,
+        reply_to_me: !!ev.reply_to_me,
+        text: ev.text || ""
+    };
+    if (!env.text) return true;               // text-only v1; bridge already filters
+    return channel.emit("message", JSON.stringify(env), "wa_" + ev.msg_id) === 0;
+}
+
+// ── Outbox delivery ──────────────────────────────────────────────
+// channel.send: the C loop acks/fails/retries the outbox row on completion.
+// Sent whole — WhatsApp's text ceiling (~64KB) exceeds any sane turn output.
+// item.mode (the plain-degrade ladder) is ignored: WhatsApp renders plain
+// text, there is no formatted mode to degrade from.
+
+function onOutbox(item) {
+    var payload;
+    try { payload = JSON.parse(item.payload); } catch (e) {
+        channel.failOutbox(item.id, "JSON parse error");
+        return;
+    }
+    if (!payload.chat_id || !payload.text) {
+        channel.failOutbox(item.id, "missing chat_id or text");
+        return;
+    }
+    channel.send({
+        method: "POST",
+        url: apiUrl("/v1/send"),
+        body: JSON.stringify({chat_id: payload.chat_id, text: payload.text}),
+        outbox_id: item.id,
+        final: 1
+    });
+}

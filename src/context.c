@@ -5,6 +5,8 @@
 #include "db.h"
 #include "http.h"
 #include "llm.h"
+#include "agent_config.h"
+#include "log.h"
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -600,35 +602,135 @@ int model_context_window(sqlite3 *db, const char *agent_name, int global_default
     return result > 0 ? result : global_default;
 }
 
-/* Compaction trigger — recovered from f4b50e0's dead-code purge,
- * now driven post-turn by the worker-job path instead of synchronously. */
+/* Head of a request: the tools array plus the system prompt, neither of
+ * which is an entry. The cut has always budgeted for it (llm_req passes it
+ * as `overhead`); the trigger must see the same number or it loses the race
+ * to the cut by exactly the head's size and history gets dropped rather
+ * than summarized. system_prompt may be NULL — then it is built and freed
+ * here (the post-turn trigger); llm_req passes the one it already holds. */
+int context_head_estimate(sqlite3 *db, const char *agent_name, int64_t session_id,
+                          const Config *cfg, const char *system_prompt) {
+    int head = 0;
+    sqlite3_stmt *ts;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COALESCE(SUM(length(name)+length(description)+length(parameters_json)),0)/3"
+            " FROM tools WHERE enabled=1 AND (agent_name IS NULL OR agent_name=?)",
+            -1, &ts, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(ts, 1, agent_name, -1, SQLITE_STATIC);
+        if (sqlite3_step(ts) == SQLITE_ROW) head = sqlite3_column_int(ts, 0);
+        sqlite3_finalize(ts);
+    }
+    char *built = NULL;
+    if (!system_prompt) {
+        built = agent_build_system_prompt(db, agent_name, session_id, "agents", cfg);
+        system_prompt = built;
+    }
+    if (system_prompt) head += (int)strlen(system_prompt) / CHARS_PER_TOKEN;
+    free(built);
+    return head;
+}
+
+/* Compaction trigger. Three measures of the context, the largest wins:
+ *   1. branch sum of token_estimate + head   — always available, the base
+ *   2. the provider's own prompt_tokens for the newest request (usage_in on
+ *      the newest assistant entry)            — a floor when present
+ *   3. the request body we actually sent, /3  — llm_responses.request_body
+ * 2 and 3 are refinements, never dependencies: absent/zero/pruned they drop
+ * out, and both are ignored when they predate the newest compaction entry
+ * (a just-compacted session would otherwise re-read its pre-compaction bill
+ * and compact again). max() also makes a cache-discounted prompt_tokens
+ * harmless — it can only ever raise the answer, never lower it.
+ *
+ * The limit is threshold × window, the same ceiling the cut enforces, less
+ * the size of the turn just completed: compaction only runs at a turn
+ * boundary, so it must fire while the *next* turn (assumed to be like the
+ * last) can still fit under the cut. That keeps compaction — one cache
+ * invalidation, then append-only — ahead of the cut, which invalidates the
+ * prompt-cache prefix on every request it moves. */
 int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg) {
     if (!db || !cfg || !cfg->compaction) return 0;
     float threshold = cfg->context_threshold > 0 ? cfg->context_threshold : 0.6f;
 
-    /* Resolve effective context window from the session's agent model */
     char *agent = session_get_agent_name(db, session_id);
     int window = model_context_window(db, agent, cfg->context_window);
+    int head = context_head_estimate(db, agent ? agent : "Assistant", session_id, cfg, NULL);
     free(agent);
     int token_limit = (int)(threshold * (float)window);
     if (token_limit <= 0) token_limit = 8000;
 
     const char *sql =
-        "WITH RECURSIVE branch(id, parent_id, token_estimate) AS ("
-        "  SELECT id, parent_id, token_estimate FROM entries"
-        "    WHERE id=(SELECT leaf_id FROM sessions WHERE id=?) AND session_id=?"
+        "WITH RECURSIVE branch(id, parent_id, role, token_estimate, turn_id,"
+        "                      usage_in, iteration_id, lvl) AS ("
+        "  SELECT id, parent_id, role, token_estimate, turn_id, usage_in, iteration_id, 0"
+        "    FROM entries WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1) AND session_id=?1"
         "  UNION ALL"
-        "  SELECT e.id, e.parent_id, e.token_estimate"
+        "  SELECT e.id, e.parent_id, e.role, e.token_estimate, e.turn_id, e.usage_in,"
+        "         e.iteration_id, b.lvl+1"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
+        "), newest AS ("
+        /* The newest assistant entry that post-dates every compaction on the
+         * branch (ids are creation-ordered; a compaction entry sits root-ward
+         * of the tail it kept, so branch order cannot tell them apart). */
+        "  SELECT usage_in, iteration_id FROM branch"
+        "   WHERE role=2 AND id > COALESCE((SELECT MAX(id) FROM branch WHERE role=4), -1)"
+        "   ORDER BY lvl LIMIT 1"
+        ") SELECT"
+        "  (SELECT COALESCE(SUM(token_estimate),0) FROM branch),"
+        "  (SELECT COALESCE(SUM(token_estimate),0) FROM branch"
+        "    WHERE turn_id=(SELECT turn_id FROM branch WHERE lvl=0)),"
+        "  (SELECT COALESCE(usage_in,0) FROM newest),"
+        "  (SELECT COALESCE(length(json(r.request_body)),0) FROM llm_responses r"
+        "    WHERE r.session_id=?1 AND r.request_body IS NOT NULL"
+        "      AND r.iteration_id=(SELECT iteration_id FROM newest)"
+        "    ORDER BY r.id DESC LIMIT 1);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    int branch_sum = 0, last_turn = 0, provider = 0, sent = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        branch_sum = sqlite3_column_int(stmt, 0);
+        last_turn  = sqlite3_column_int(stmt, 1);
+        provider   = sqlite3_column_int(stmt, 2);
+        sent       = sqlite3_column_int(stmt, 3) / CHARS_PER_TOKEN;
+    }
+    sqlite3_finalize(stmt);
+
+    int size = branch_sum + head;
+    if (provider > size) size = provider;
+    if (sent > size) size = sent;
+    int fire = size > token_limit - last_turn;
+    LOG_DEBUG_("compaction check session=%lld estimate=%d provider=%d sent=%d"
+               " head=%d last_turn=%d limit=%d fire=%d",
+               (long long)session_id, branch_sum + head, provider, sent, head,
+               last_turn, token_limit, fire);
+    return fire;
+}
+
+/* Mid-turn overflow probe: the cut can only drop whole turns, so once the
+ * current turn's own entries exceed what the window can hold beside the
+ * head, no cut fits and the next request would 400 (E5). Compared against
+ * the window itself, not the threshold — the threshold is a cost margin,
+ * this is the wall. Returns 1 when the turn no longer fits; *turn_tokens
+ * gets the turn's size either way (0 when nothing is known). */
+int context_turn_overflows(sqlite3 *db, int64_t session_id, int window, int head,
+                           int *turn_tokens) {
+    if (turn_tokens) *turn_tokens = 0;
+    if (!db || window <= 0) return 0;
+    const char *sql =
+        "WITH RECURSIVE branch(id, parent_id, token_estimate, turn_id, lvl) AS ("
+        "  SELECT id, parent_id, token_estimate, turn_id, 0"
+        "    FROM entries WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1) AND session_id=?1"
+        "  UNION ALL"
+        "  SELECT e.id, e.parent_id, e.token_estimate, e.turn_id, b.lvl+1"
+        "    FROM entries e JOIN branch b ON e.id=b.parent_id"
+        "    WHERE e.turn_id=b.turn_id"
         ") SELECT COALESCE(SUM(token_estimate),0) FROM branch;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_int64(stmt, 1, session_id);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    int total_tokens = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        total_tokens = sqlite3_column_int(stmt, 0);
+    int turn = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) turn = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
-
-    return total_tokens > token_limit;
+    if (turn_tokens) *turn_tokens = turn;
+    return turn > window - head;
 }

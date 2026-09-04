@@ -518,7 +518,7 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `usage_out` | INTEGER | output tokens |
 | `cached_tokens` | INTEGER | cache-read subset of `usage_in`; NULL when the provider doesn't report it. Discounted to 0.25 weight by `rate_limit_check` |
 | `cost_nano` | INTEGER | nanodollars |
-| `token_estimate` | INTEGER | chars/4 heuristic |
+| `token_estimate` | INTEGER | chars/3 + 4 heuristic (`TOKEN_ESTIMATE`, errs high; v52 rescaled old rows from `content_bytes`) |
 | `content_bytes` | INTEGER | byte length of content + tool_calls |
 | `tool_call_count` | INTEGER NOT NULL DEFAULT 0 | denormalized for plan pass |
 | `data` | TEXT | JSON side-channel, merged not overwritten (`json_patch`), nullable. `$.pin` — a hook's durable context pin; `$.source` / `$.source_ref` — provenance stamped by the inbox drain (the cron auto-pause streak reads it); `$.job` on a `cron_result` — the job that produced it; plus whatever an `annotate` hook merges in |

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "advance.h"
+#include "config.h"
 #include "config_registry.h"
 #include "context.h"       /* truncate_and_spill */
 #include "secret_store.h"  /* tool_result_scrub */
@@ -21,21 +22,20 @@ static AdvanceOutput make_output(AdvanceResult action, int64_t sid,
 /* The cutoff notice must carry the norm at the moment it matters: the limit
  * that fired, that work was cut mid-flight (not finished, not denied), and
  * that picking it back up next turn is legal. */
+#define CUTOFF_TAIL \
+    " — work was cut mid-flight, not finished. Continuing where you left off" \
+    " next turn is legal and expected."
 #define MAX_ITER_NOTICE_FMT \
-    "error: iteration limit reached (%d per turn) — work was cut mid-flight," \
-    " not finished. Continuing where you left off next turn is legal and" \
-    " expected."
+    "error: iteration limit reached (%d per turn)" CUTOFF_TAIL
+#define CONTEXT_NOTICE_FMT \
+    "error: context budget reached (this turn's own tool results ~%d tokens" \
+    " against a %d-token window)" CUTOFF_TAIL
 
-static char *max_iter_notice(int max_iterations) {
-    char buf[256];
-    snprintf(buf, sizeof(buf), MAX_ITER_NOTICE_FMT, max_iterations);
-    return strdup(buf);
-}
-
-/* Build a richer max-iterations error message by concatenating the last few
- * substantive assistant content blocks (tool_use responses with real text)
- * before appending the error notice. Returns heap-allocated string. */
-static char *rich_max_iter_message(sqlite3 *db, int64_t session_id, int max_iterations) {
+/* Build a richer cutoff message by concatenating the last few substantive
+ * assistant content blocks (tool_use responses with real text) before
+ * appending the notice — the turn ends with what the model had said so far,
+ * not a bare error. Returns heap-allocated string. */
+static char *rich_cutoff_message(sqlite3 *db, int64_t session_id, const char *notice) {
     /* Walk recent assistant entries with content, stop_reason=tool_use (3) */
     const char *sql =
         "WITH RECURSIVE branch(id, parent_id, role, stop_reason, content, lvl) AS ("
@@ -49,7 +49,7 @@ static char *rich_max_iter_message(sqlite3 *db, int64_t session_id, int max_iter
         "  ORDER BY lvl ASC LIMIT 3;";
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK)
-        return max_iter_notice(max_iterations);
+        return strdup(notice);
     sqlite3_bind_int64(s, 1, session_id);
 
     /* Collect up to 3 chunks */
@@ -61,13 +61,13 @@ static char *rich_max_iter_message(sqlite3 *db, int64_t session_id, int max_iter
     }
     sqlite3_finalize(s);
 
-    if (n == 0) return max_iter_notice(max_iterations);
+    if (n == 0) return strdup(notice);
 
     /* Concatenate oldest→newest (the branch walk collects leaf-first, so
      * iterate chunks in reverse): chunk3\n\n---\n\nchunk2\n\n---\n\n...error */
     const char *sep = "\n\n---\n\n";
-    char tail[280];
-    snprintf(tail, sizeof(tail), "\n\n---\n\n" MAX_ITER_NOTICE_FMT, max_iterations);
+    char tail[512];
+    snprintf(tail, sizeof(tail), "\n\n---\n\n%s", notice);
     size_t len = strlen(tail) + 1;
     for (int i = 0; i < n; i++)
         len += strlen(chunks[i]) + (i > 0 ? strlen(sep) : 0);
@@ -75,7 +75,7 @@ static char *rich_max_iter_message(sqlite3 *db, int64_t session_id, int max_iter
     char *buf = malloc(len);
     if (!buf) {
         for (int i = 0; i < n; i++) free(chunks[i]);
-        return max_iter_notice(max_iterations);
+        return strdup(notice);
     }
     buf[0] = '\0';
     for (int i = n - 1; i >= 0; i--) {
@@ -163,7 +163,7 @@ static void edge_cursor_set(sqlite3 *db, int64_t edge_id, int64_t cursor) {
 }
 
 /* Content-bearing assistant prose in (cursor, ∞), oldest→newest, joined with
- * the rich_max_iter_message separator. Session-scoped by id order rather than
+ * the rich_cutoff_message separator. Session-scoped by id order rather than
  * a branch walk: mid-turn entries are linear, and a digest window spanning a
  * compaction re-parent is not worth a CTE here. NULL if none. */
 static char *digest_since(sqlite3 *db, int64_t session_id, int64_t cursor) {
@@ -790,7 +790,7 @@ static void streak_note(sqlite3 *db, int64_t session_id, const char *note,
     int len = (int)strlen(text);
     sqlite3_bind_int64(st, 1, session_id);
     sqlite3_bind_text(st, 2, text, len, SQLITE_STATIC);
-    sqlite3_bind_int(st, 3, (len / 4) + 4);
+    sqlite3_bind_int(st, 3, TOKEN_ESTIMATE(len));
     sqlite3_bind_int(st, 4, len);
     sqlite3_bind_text(st, 5, note, -1, SQLITE_STATIC);
     sqlite3_step(st);
@@ -939,6 +939,20 @@ static ConcGate conc_gate_check(sqlite3 *db, int64_t session_id) {
         g.defer = 1;
     }
     return g;
+}
+
+/* Does the leaf turn's own content already exceed what the agent's model can
+ * take beside its head? Config and head are resolved here, per iteration —
+ * the same work llm_req does for the request that would otherwise follow. */
+static int turn_overflows(sqlite3 *db, int64_t session_id, const char *agent,
+                          int *turn_tokens, int *window) {
+    Config *cfg = config_load(db);
+    if (!cfg) return 0;
+    *window = model_context_window(db, agent, cfg->context_window);
+    int head = context_head_estimate(db, agent, session_id, cfg, NULL);
+    int over = context_turn_overflows(db, session_id, *window, head, turn_tokens);
+    config_free(cfg);
+    return over;
 }
 
 AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iterations) {
@@ -1244,18 +1258,34 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
 
         /* All tools done — dispatch next LLM iteration */
         int new_iter = session_bump_iteration(db, session_id);
+        char notice[256] = "";
         if (new_iter >= max_iterations) {
-            /* Hit iteration cap */
             LOG_INFO_("advance state=tool_running next=idle reason=max_iterations iter=%d max=%d", new_iter, max_iterations);
-            char *rich_msg = rich_max_iter_message(db, session_id, max_iterations);
+            snprintf(notice, sizeof(notice), MAX_ITER_NOTICE_FMT, max_iterations);
+        } else {
+            /* The other cap on a turn: its own accumulated tool results. The
+             * cut drops whole turns only, so once this turn alone outgrows
+             * the window there is no request that fits — stop here with what
+             * the model has, rather than let the provider 400 (E5) and lose
+             * the turn. Iteration 0 never lands here: a lone user message is
+             * always sent and left to the provider's judgment. */
+            int turn_tokens = 0, window = 0;
+            if (turn_overflows(db, session_id, agent, &turn_tokens, &window)) {
+                LOG_INFO_("advance state=tool_running next=idle reason=context_budget iter=%d turn_tokens=%d window=%d",
+                          new_iter, turn_tokens, window);
+                snprintf(notice, sizeof(notice), CONTEXT_NOTICE_FMT, turn_tokens, window);
+            }
+        }
+        if (notice[0]) {
+            char *rich_msg = rich_cutoff_message(db, session_id, notice);
             Message msg = { .role = ROLE_ASSISTANT,
                             .content = rich_msg,
                             .stop_reason = STOP_REASON_ERROR };
             entry_append_with_iteration(db, session_id, &msg, 0);
             free(rich_msg);
             session_set_state(db, session_id, "idle");
-            /* Max-iter is a terminal error boundary — every edge delivers,
-             * chat included (it always saw the rich max-iter message). */
+            /* A cutoff is a terminal error boundary — every edge delivers,
+             * chat included (it always saw the rich cutoff message). */
             advance_deliver_boundary(db, session_id, 1, 1);
             AdvanceOutput out = make_output(ADVANCE_DONE, session_id, agent, new_iter);
             free(agent);

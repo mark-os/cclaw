@@ -6,7 +6,7 @@
 /* DB schema generation. Bumped whenever templates/schema.sql changes shape.
  * Existing DBs are patched forward at startup (schema_patches[] in db.c);
  * fresh DBs get the full schema at the current version. */
-#define CCLAW_SCHEMA_VERSION 51
+#define CCLAW_SCHEMA_VERSION 52
 
 /* Oldest DB generation this build can patch forward from. Together with
  * CCLAW_SCHEMA_VERSION this is the range of databases the binary accepts, which

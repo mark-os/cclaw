@@ -653,6 +653,16 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "         ('off','minimal','low','medium','high'));"
       "ALTER TABLE models ADD COLUMN effort_map TEXT;",
       NULL },
+
+    /* v52: token_estimate divisor 4 → 3 (context-accounting). Stored
+     * estimates are what the cut and the compaction trigger sum, so rows
+     * written at /4 would keep under-measuring every existing session until
+     * they aged out. content_bytes is exactly the length each estimate was
+     * computed from, so this is a rescale, not a re-derivation. */
+    { 52,
+      "UPDATE entries SET token_estimate = content_bytes/3 + 4"
+      " WHERE content_bytes IS NOT NULL;",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
@@ -1275,7 +1285,7 @@ int64_t entry_compact(sqlite3 *db, int64_t session_id, int64_t last_kept_id,
     sqlite3_bind_int64(stmt, 2, session_id);
     sqlite3_bind_text(stmt, 3, summary, -1, SQLITE_TRANSIENT);
     int len = (int)strlen(summary);
-    sqlite3_bind_int(stmt, 4, (len / 4) + 4);
+    sqlite3_bind_int(stmt, 4, TOKEN_ESTIMATE(len));
     sqlite3_bind_int(stmt, 5, len);
 
     int rc = sqlite3_step(stmt);
@@ -1483,7 +1493,7 @@ int64_t entry_append_with_iteration(sqlite3 *db, int64_t session_id, const Messa
     int content_len = content_val ? (int)strlen(content_val) : 0;
     int tc_len = tc_json ? (int)strlen(tc_json) : 0;
     int total_bytes = content_len + tc_len;
-    sqlite3_bind_int(stmt, b, (total_bytes / 4) + 4); b++;
+    sqlite3_bind_int(stmt, b, TOKEN_ESTIMATE(total_bytes)); b++;
     sqlite3_bind_int(stmt, b, total_bytes); b++;
     sqlite3_bind_int(stmt, b, tc_count); b++;
     if (msg->metadata_json) sqlite3_bind_text(stmt, b, msg->metadata_json, -1, SQLITE_TRANSIENT);
@@ -1546,7 +1556,7 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t iteration_id
     if (cost_nano > 0) sqlite3_bind_int64(stmt, 14, cost_nano);
     else sqlite3_bind_null(stmt, 14);
     int clen = content ? (int)strlen(content) : 0;
-    sqlite3_bind_int(stmt, 15, (clen / 4) + 4);
+    sqlite3_bind_int(stmt, 15, TOKEN_ESTIMATE(clen));
     sqlite3_bind_int(stmt, 16, clen);
 
     int rc = sqlite3_step(stmt);
@@ -1576,7 +1586,7 @@ int64_t entry_append_cron_result(sqlite3 *db, int64_t session_id,
     if (content) sqlite3_bind_text(st, 2, content, len, SQLITE_TRANSIENT);
     else sqlite3_bind_null(st, 2);
     sqlite3_bind_int(st, 3, is_error ? 1 : 0);
-    sqlite3_bind_int(st, 4, (len / 4) + 4);
+    sqlite3_bind_int(st, 4, TOKEN_ESTIMATE(len));
     sqlite3_bind_int(st, 5, len);
     sqlite3_bind_text(st, 6, job_name, -1, SQLITE_STATIC);
     int rc = sqlite3_step(st);
@@ -1950,7 +1960,7 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
         sqlite3_bind_int64(ins, 1, parent_id);
         sqlite3_bind_int64(ins, 2, session_id);
         sqlite3_bind_text(ins, 3, content_val, content_len, SQLITE_TRANSIENT);
-        sqlite3_bind_int(ins, 4, (content_len / 4) + 4);
+        sqlite3_bind_int(ins, 4, TOKEN_ESTIMATE(content_len));
         sqlite3_bind_int(ins, 5, content_len);
         if (data_json) sqlite3_bind_text(ins, 6, data_json, -1, SQLITE_TRANSIENT);
         else sqlite3_bind_null(ins, 6);

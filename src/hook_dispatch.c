@@ -369,7 +369,7 @@ static int apply_transform_content(sqlite3 *db, int64_t session_id,
             "                    json_object('original_content', COALESCE(content,'')))"
             "    ELSE data END,"
             "  content = ?3,"
-            "  token_estimate = length(?3)/4 + 4,"
+            "  token_estimate = length(?3)/3 + 4,"
             "  content_bytes = length(?3)"
             " WHERE id=?1 AND session_id=?2 AND type='assistant_message';",
             -1, &s, NULL) != SQLITE_OK)

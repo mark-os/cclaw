@@ -10,6 +10,15 @@
 #include <stddef.h>
 #include <time.h>
 
+/* Token estimate for a byte length. The divisor is 3, measured (not chosen)
+ * against real payloads on 2026-08-13: /3 lands at 100-107% of Claude's
+ * count and ~130% of DeepSeek's; /4 under-measured by 25-45% and put the
+ * compaction trigger past the window. The estimate errs high by policy — an
+ * over-estimate compacts a little early, an under-estimate is an outage.
+ * Every C and SQL site must agree (plan/projects/context-accounting.md). */
+#define CHARS_PER_TOKEN 3
+#define TOKEN_ESTIMATE(len) ((int)((len) / CHARS_PER_TOKEN) + 4)
+
 /* Message roles */
 typedef enum {
     ROLE_SYSTEM,

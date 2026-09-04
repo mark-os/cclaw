@@ -1,5 +1,6 @@
 /* Test advance_session decision logic */
 #include "advance.h"
+#include "config_registry.h"
 #include "db.h"
 #include "test_util.h"
 #include "tool_agent.h"
@@ -97,6 +98,62 @@ static void test_max_iterations(void) {
 
     db_close(db);
     printf("  PASS test_max_iterations\n");
+}
+
+/* Context accounting: a turn whose own tool results outgrow the window is
+ * cut like the iteration limit — a complete assistant entry, session idle,
+ * ADVANCE_DONE — instead of being sent to the provider to 400. */
+static void test_context_budget_cuts_turn(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+    assert(config_set(db, "context_window", "2000") == 0);
+
+    int64_t it = db_next_iteration_id(db, sid);
+    Message u = { .role = ROLE_USER, .content = "do a big thing" };
+    entry_append_with_iteration(db, sid, &u, it);
+    Message a = { .role = ROLE_ASSISTANT, .content = "calling tool",
+                  .stop_reason = STOP_REASON_TOOL_USE };
+    entry_append_with_iteration(db, sid, &a, it);
+    /* ~12000 chars → ~4000 tokens, well over a 2000-token window. */
+    char *big = malloc(12001);
+    memset(big, 'x', 12000); big[12000] = 0;
+    ToolResult tr = { .tool_call_id = "c1", .content = big };
+    Message t = { .role = ROLE_TOOL, .tool_result = &tr };
+    entry_append_with_iteration(db, sid, &t, it);
+    free(big);
+
+    session_set_state(db, sid, "llm_running");
+    session_set_state(db, sid, "tool_running");
+    session_set_iteration(db, sid, 1);
+
+    AdvanceOutput out = advance_session(db, sid, 25);
+    assert(out.action == ADVANCE_DONE);
+    char *leaf = db_scalar_text(db,
+        "SELECT content FROM entries WHERE session_id=? AND role=2"
+        " ORDER BY id DESC LIMIT 1;", sid);
+    assert(leaf && strstr(leaf, "context budget reached"));
+    free(leaf);
+    char *state = db_scalar_text(db, "SELECT state FROM sessions WHERE id=?;", sid);
+    assert(state && strcmp(state, "idle") == 0);
+    free(state);
+
+    /* Same shape under a roomy window: the loop continues normally. */
+    int64_t sid2 = session_create(db, "test2", "default", -1, 0);
+    assert(config_set(db, "context_window", "128000") == 0);
+    it = db_next_iteration_id(db, sid2);
+    entry_append_with_iteration(db, sid2, &u, it);
+    entry_append_with_iteration(db, sid2, &a, it);
+    ToolResult tr2 = { .tool_call_id = "c1", .content = "small" };
+    Message t2 = { .role = ROLE_TOOL, .tool_result = &tr2 };
+    entry_append_with_iteration(db, sid2, &t2, it);
+    session_set_state(db, sid2, "llm_running");
+    session_set_state(db, sid2, "tool_running");
+    session_set_iteration(db, sid2, 1);
+    out = advance_session(db, sid2, 25);
+    assert(out.action == ADVANCE_DISPATCH_LLM);
+
+    db_close(db);
+    printf("  PASS test_context_budget_cuts_turn\n");
 }
 
 static void test_waiting(void) {
@@ -625,6 +682,7 @@ int main(void) {
     test_llm_complete_stop();
     test_tool_running_all_done();
     test_max_iterations();
+    test_context_budget_cuts_turn();
     test_waiting();
     test_stale_call_reconciled_at_turn_start();
     test_open_undispatched_turn_not_stranded();

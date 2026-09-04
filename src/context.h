@@ -76,8 +76,20 @@ void session_tmp_dir(sqlite3 *db, int64_t session_id, char *buf, size_t bufsz);
 
 /* Auto-recall — FTS5 search across sessions for relevant context.
  * Returns heap-allocated text (caller frees) or NULL if nothing recalled. */
-/* Compaction trigger: branch token sum exceeds context_threshold x window. */
+/* Estimated tokens of the request head (tools array + system prompt) for
+ * this agent — the part of a request that is never an entry. Pass the
+ * system prompt when already built, NULL to build it here. */
+int context_head_estimate(sqlite3 *db, const char *agent_name, int64_t session_id,
+                          const Config *cfg, const char *system_prompt);
+
+/* Compaction trigger: max(branch estimate + head, provider count, sent
+ * payload) exceeds context_threshold x window less the last turn's size. */
 int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg);
+
+/* 1 when the leaf turn's own entries no longer fit in window - head, so no
+ * cut can rescue the next request. *turn_tokens receives the turn's size. */
+int context_turn_overflows(sqlite3 *db, int64_t session_id, int window, int head,
+                           int *turn_tokens);
 
 /* Resolve the effective context window for an agent's model.
  * Priority: models.context_window (non-NULL) → global_default.

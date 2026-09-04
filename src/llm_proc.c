@@ -795,24 +795,13 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     char *agent_name_alloc = session_get_agent_name(db, session_id);
     const char *agent_name = agent_name_alloc ? agent_name_alloc : "Assistant";
 
-    /* Estimate tool overhead for context budget */
-    int tool_overhead = 0;
-    {
-        sqlite3_stmt *ts;
-        if (sqlite3_prepare_v2(db,
-                "SELECT COALESCE(SUM(length(name)+length(description)+length(parameters_json)),0)/4"
-                " FROM tools WHERE enabled=1 AND (agent_name IS NULL OR agent_name=?)",
-                -1, &ts, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(ts, 1, agent_name, -1, SQLITE_STATIC);
-            if (sqlite3_step(ts) == SQLITE_ROW) tool_overhead = sqlite3_column_int(ts, 0);
-            sqlite3_finalize(ts);
-        }
-    }
-
     /* Generate system prompt (like tools — not stored as entry) */
     char *system_prompt = agent_build_system_prompt(db, agent_name, session_id, "agents", cfg);
-    if (system_prompt)
-        tool_overhead += (int)strlen(system_prompt) / 4;
+
+    /* Head estimate for the context budget — the same number the compaction
+     * trigger subtracts, so the cut and the trigger agree on what history
+     * may occupy (context-accounting: they must not disagree). */
+    int tool_overhead = context_head_estimate(db, agent_name, session_id, cfg, system_prompt);
 
     /* Declared before any goto err so the err: label can safely free it,
      * even on the early context_plan-failure path where it isn't set yet. */

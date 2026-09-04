@@ -39,8 +39,8 @@ static void test_entry_stats_populated(void) {
 
     if (tok <= 0) FAIL("token_estimate should be > 0");
     if (bytes <= 0) FAIL("content_bytes should be > 0");
-    /* token_estimate = bytes/4 + 4 */
-    if (tok != (bytes / 4) + 4) FAIL("token_estimate != bytes/4 + 4");
+    /* token_estimate = TOKEN_ESTIMATE(bytes) (chars/3 + 4) */
+    if (tok != TOKEN_ESTIMATE(bytes)) FAIL("token_estimate != TOKEN_ESTIMATE(bytes)");
 
     db_close(db);
     PASS();

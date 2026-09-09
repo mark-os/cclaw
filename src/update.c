@@ -6,10 +6,12 @@
 #include "db.h"
 #include "http.h"
 #include "log.h"
+#include "monocypher.h"
 #include "util.h"
 
 #include <errno.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,7 +63,7 @@ static char *json_string_field(const char *body, const char *field) {
 /* Run `path <flag>` and capture its first line. Returns malloc'd string or
  * NULL. This is how a *candidate* binary is interrogated before install — it
  * must never be given the database or any argument that could mutate state. */
-static char *run_capture(const char *path, const char *flag) {
+char *update_run_capture(const char *path, const char *flag) {
     int fds[2];
     if (pipe(fds) != 0) return NULL;
 
@@ -153,23 +155,6 @@ static pid_t running_daemon_pid(sqlite3 *db, int64_t *started_at,
     return pid;
 }
 
-static int copy_file(const char *from, const char *to, mode_t mode) {
-    FILE *in = fopen(from, "rb");
-    if (!in) return -1;
-    FILE *out = fopen(to, "wb");
-    if (!out) { fclose(in); return -1; }
-    char buf[65536];
-    size_t n;
-    int rc = 0;
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
-        if (fwrite(buf, 1, n, out) != n) { rc = -1; break; }
-    if (ferror(in)) rc = -1;
-    fclose(in);
-    if (fclose(out) != 0) rc = -1;
-    if (rc == 0) chmod(to, mode);
-    return rc;
-}
-
 /* readlink("/proc/self/exe") — the file we are about to replace. Not argv[0]:
  * that is whatever the caller typed, and "update" must act on the real image. */
 static char *self_exe_path(void) {
@@ -235,7 +220,7 @@ int update_schema_ok(const char *range, int db_version, char *why, size_t cap) {
 }
 
 static int schema_compatible(const char *candidate, sqlite3 *db, char *why, size_t cap) {
-    char *line = run_capture(candidate, "--schema-range");
+    char *line = update_run_capture(candidate, "--schema-range");
     int uv = 0;
     db_schema_state(db, &uv);
     int ok = update_schema_ok(line, uv, why, cap);
@@ -247,7 +232,7 @@ static int schema_compatible(const char *candidate, sqlite3 *db, char *why, size
  * Identity is started_at from the daemon's own processes row, so this cannot
  * be fooled by a recycled pid. */
 int update_await_restart(const char *db_path, const char *old_instance_id,
-                         int timeout_s) {
+                         int64_t since, int timeout_s) {
     /* Deadline, not a count of sleeps. nanosleep() returns early when a signal
      * arrives, and this runs right after system() has reaped a shell — so
      * counting iterations quietly turns a 90s wait into a fraction of that,
@@ -271,11 +256,65 @@ int update_await_restart(const char *db_path, const char *old_instance_id,
             continue;
         }
         char id[64] = "";
-        pid_t pid = running_daemon_pid(poll_db, NULL, id, sizeof(id));
+        int64_t started_at = 0;
+        pid_t pid = running_daemon_pid(poll_db, &started_at, id, sizeof(id));
         sqlite3_close(poll_db);
-        if (pid > 0 && id[0] && strcmp(id, old_instance_id) != 0) return 0;
+        /* `since` matters after a rollback: the restored database carries a
+         * processes row from before the snapshot whose instance_id is not the
+         * one we signalled — and whose pid may even be alive again after the
+         * re-exec. Only a row born after we asked counts. */
+        if (pid > 0 && id[0] && strcmp(id, old_instance_id) != 0 &&
+            (since <= 0 || started_at >= since)) return 0;
     } while (time(NULL) < deadline);
     return -1;
+}
+
+/* `update.last` is what --doctor shows for "what happened the last time
+ * someone touched the binary": one JSON object, overwritten at every exit of
+ * the install rails, by the crash-loop guard, and by `cclaw rollback`. */
+static void update_last_set(sqlite3 *db, const char *tag, const char *outcome) {
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_object('tag', ?1, 'at', unixepoch(), 'outcome', ?2)",
+            -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(st, 1, tag, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, outcome, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW)
+        config_set(db, "update.last", (const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+}
+
+/* An update is the one operation that writes a whole database copy and a
+ * second binary at once; on a small SD card it can be the write that fills
+ * the disk. Same floor `cclaw backup` honours. What cannot be measured is
+ * skipped, not refused. */
+static int disk_room_ok(const char *dbfile, const char *self) {
+    int floor_mb = config_default_int("disk_min_free_mb");
+    if (floor_mb <= 0) return 1;
+    struct stat st;
+    long have;
+    if (dbfile && dbfile[0] && stat(dbfile, &st) == 0 &&
+        (have = util_free_mb(dbfile)) >= 0) {
+        long need = (long)(st.st_size >> 20) + 1;
+        if (have - need < floor_mb) {
+            fprintf(stderr, "error: %ld MB free beside the database, the snapshot "
+                            "needs ~%ld MB and the floor is %d MB "
+                            "(disk_min_free_mb) — not installing\n",
+                    have, need, floor_mb);
+            return 0;
+        }
+    }
+    if (stat(self, &st) == 0 && (have = util_free_mb(self)) >= 0) {
+        long need = (long)(st.st_size >> 20) + 1;   /* .prev; .new is on disk already */
+        if (have - need < floor_mb) {
+            fprintf(stderr, "error: %ld MB free beside the binary, keeping the "
+                            "previous build needs ~%ld MB and the floor is %d MB "
+                            "(disk_min_free_mb) — not installing\n",
+                    have, need, floor_mb);
+            return 0;
+        }
+    }
+    return 1;
 }
 
 /* Everything after "a candidate binary sits at <self>.new": vet, schema
@@ -288,7 +327,7 @@ static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
     snprintf(prevpath, sizeof(prevpath), "%s.prev", self);
 
     /* Vet the candidate before it can touch anything. */
-    char *ver = run_capture(newpath, "--version");
+    char *ver = update_run_capture(newpath, "--version");
     if (!ver) {
         fprintf(stderr, "error: candidate binary will not run here "
                         "(wrong architecture, or a missing shared library)\n");
@@ -305,9 +344,14 @@ static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
         return 1;
     }
 
+    const char *dbfile = sqlite3_db_filename(db, "main");
+    if (!disk_room_ok(dbfile, self)) {
+        unlink(newpath);
+        return 1;
+    }
+
     /* Backstop for the failure the handshake cannot see: a build that migrates
      * the database fine and then dies for an unrelated reason. */
-    const char *dbfile = sqlite3_db_filename(db, "main");
     /* Own the path: the revert below closes db, and sqlite3_db_filename's
      * pointer dies with the connection. */
     char dbpath_copy[4096] = "";
@@ -329,7 +373,7 @@ static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
     char old_instance[64] = "";
     pid_t pid = running_daemon_pid(db, NULL, old_instance, sizeof(old_instance));
 
-    if (copy_file(self, prevpath, 0755) != 0) {
+    if (util_copy_file(self, prevpath, 0755) != 0) {
         fprintf(stderr, "error: cannot preserve the current binary\n");
         unlink(newpath);
         return 1;
@@ -349,6 +393,7 @@ static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
     if (pid <= 0) {
         printf("no daemon running — the new binary is in place\n");
         config_set(db, "update.installed_tag", tag);
+        update_last_set(db, tag, "installed_no_daemon");
         return 0;
     }
 
@@ -387,15 +432,17 @@ static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
             fprintf(stderr, "error: could not signal the daemon: %s\n", strerror(errno));
             free(restart_cmd);
             config_set(db, "update.installed_tag", tag);
+            update_last_set(db, tag, "installed_restart_pending");
             printf("the new binary is installed; restart the daemon to apply it\n");
             return 0;
         }
     }
     free(restart_cmd);
 
-    if (update_await_restart(dbpath_copy, old_instance, RESTART_TIMEOUT_S) == 0) {
+    if (update_await_restart(dbpath_copy, old_instance, 0, RESTART_TIMEOUT_S) == 0) {
         printf("daemon is back up on %s\n", tag);
         config_set(db, "update.installed_tag", tag);
+        update_last_set(db, tag, "ok");
         return 0;
     }
 
@@ -413,6 +460,7 @@ static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
         fprintf(stderr, "restored the previous binary\n");
     /* The guard was armed for the build we just removed. */
     config_set(db, "update.verify", "");
+    update_last_set(db, tag, "reverted_no_restart");
 
     /* The database is deliberately NOT rolled back automatically. Writing over
      * a database file is an aggressive act with no safe way to know whether
@@ -425,7 +473,41 @@ static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
                         "is at\n  %s\n", snap);
     fprintf(stderr, "reverted to the previous build — start the daemon "
                     "to confirm it is healthy\n");
+    if (snap[0])
+        fprintf(stderr, "to discard what the new build wrote and go back to the "
+                        "snapshot: cclaw rollback\n");
     return 1;
+}
+
+/* checksums.b2: one "<blake2b-512 hex>  <asset>" line per release asset, as
+ * b2sum writes it in CI. BLAKE2b because monocypher is already in the binary
+ * and has no SHA-256. Integrity, not authenticity: it catches a truncated or
+ * wrong-arch download, not a hostile release page. */
+int update_checksum_ok(const char *list, const char *asset,
+                       const unsigned char *data, size_t len,
+                       char *why, size_t cap) {
+    uint8_t hash[64];
+    crypto_blake2b(hash, sizeof(hash), data, len);
+    char hex[129];
+    for (int i = 0; i < 64; i++) snprintf(hex + 2 * i, 3, "%02x", hash[i]);
+
+    size_t alen = strlen(asset);
+    for (const char *line = list; line && *line; ) {
+        const char *nl = strchr(line, '\n');
+        const char *end = nl ? nl : line + strlen(line);
+        /* b2sum separates with two spaces, or " *" in binary mode. */
+        const char *name = line + 128;
+        while (name < end && (*name == ' ' || *name == '*')) name++;
+        if (end - line > 128 && (size_t)(end - name) == alen &&
+            memcmp(name, asset, alen) == 0) {
+            if (strncasecmp(line, hex, 128) == 0) return 1;
+            snprintf(why, cap, "checksum mismatch for %s", asset);
+            return 0;
+        }
+        line = nl ? nl + 1 : end;
+    }
+    snprintf(why, cap, "%s is not listed in the release's checksums.b2", asset);
+    return 0;
 }
 
 static int update_install(sqlite3 *db, const char *self, const char *repo,
@@ -449,6 +531,28 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
         http_response_free(&r);
         return 1;
     }
+
+    /* Integrity against the release's checksums.b2, when it has one. Older
+     * releases have none; that is reported, not refused. */
+    snprintf(url, sizeof(url), "https://github.com/%s/releases/download/%s/checksums.b2",
+             repo, tag);
+    HttpResponse c = {0};
+    int cstatus = http_get_to_memory(url, &c, 0);
+    if (cstatus == 200 && c.data && c.len > 0) {
+        char why[256] = "";
+        if (!update_checksum_ok(c.data, asset, (const unsigned char *)r.data, r.len,
+                                why, sizeof(why))) {
+            fprintf(stderr, "error: %s — not installing\n", why);
+            http_response_free(&c);
+            http_response_free(&r);
+            return 1;
+        }
+        printf("checksum verified (blake2b)\n");
+    } else {
+        printf("no checksums published for %s (HTTP %d) — skipping the integrity check\n",
+               tag, cstatus);
+    }
+    http_response_free(&c);
 
     FILE *f = fopen(newpath, "wb");
     if (!f || fwrite(r.data, 1, r.len, f) != r.len || fclose(f) != 0) {
@@ -474,7 +578,7 @@ static int update_install_file(sqlite3 *db, const char *self, const char *path) 
     char newpath[4096];
     snprintf(newpath, sizeof(newpath), "%s.new", self);
 
-    if (copy_file(path, newpath, 0755) != 0) {
+    if (util_copy_file(path, newpath, 0755) != 0) {
         fprintf(stderr, "error: cannot read %s: %s\n", path, strerror(errno));
         return 1;
     }
@@ -580,6 +684,7 @@ int update_verify_startup(sqlite3 *db) {
     ssize_t sn = readlink("/proc/self/exe", self, sizeof(self) - 1);
     if (sn <= 0) {
         config_set(db, "update.verify", "");
+        update_last_set(db, tag, "crash_loop_no_revert");
         update_verify_notify(db,
             "cclaw update verify: this build is crash-looping but its own "
             "path could not be resolved — no automatic revert; intervene by "
@@ -594,6 +699,7 @@ int update_verify_startup(sqlite3 *db) {
     char why[256] = "";
     if (access(prevpath, X_OK) != 0) {
         config_set(db, "update.verify", "");
+        update_last_set(db, tag, "crash_loop_no_revert");
         snprintf(note, sizeof(note),
                  "cclaw %.63s is crash-looping (%d starts in %d min) and no "
                  "previous binary is available at %.255s — no automatic "
@@ -606,10 +712,12 @@ int update_verify_startup(sqlite3 *db) {
         /* Forward-only schema: a revert that cannot open the migrated DB
          * would brick the box harder than the crash loop does. Stay passive. */
         config_set(db, "update.verify", "");
+        update_last_set(db, tag, "crash_loop_no_revert");
         snprintf(note, sizeof(note),
                  "cclaw %.63s is crash-looping (%d starts in %d min) but the "
                  "previous build cannot take this database back (%.200s) — "
-                 "no automatic revert; intervene by hand.", tag, starts,
+                 "no automatic revert. `cclaw rollback` restores the pre-update "
+                 "snapshot together with the previous build.", tag, starts,
                  UPDATE_VERIFY_WINDOW / 60, why);
         update_verify_notify(db, note);
         return 0;
@@ -619,9 +727,10 @@ int update_verify_startup(sqlite3 *db) {
      * rename, never a write, because this binary is running (ETXTBSY). */
     char badpath[4096];
     snprintf(badpath, sizeof(badpath), "%.4086s.bad", self);
-    copy_file(self, badpath, 0755);   /* best-effort evidence */
+    util_copy_file(self, badpath, 0755);   /* best-effort evidence */
     if (rename(prevpath, self) != 0) {
         config_set(db, "update.verify", "");
+        update_last_set(db, tag, "crash_loop_no_revert");
         snprintf(note, sizeof(note),
                  "cclaw %.63s is crash-looping and the revert rename failed "
                  "(%.100s) — intervene by hand.", tag, strerror(errno));
@@ -629,6 +738,7 @@ int update_verify_startup(sqlite3 *db) {
         return 0;
     }
     config_set(db, "update.verify", "");
+    update_last_set(db, tag, "crash_loop_reverted");
     snprintf(note, sizeof(note),
              "cclaw %.63s crash-looped (%d starts in %d min) and was "
              "automatically reverted to the previous build; the bad binary "
@@ -647,6 +757,9 @@ void update_verify_tick(sqlite3 *db) {
     free(v);
     if (!armed) return;
     config_set(db, "update.verify", "");
+    char *tag = config_get(db, "update.installed_tag");
+    update_last_set(db, tag && tag[0] ? tag : "", "verified");
+    free(tag);
     LOG_INFO_("update verify: healthy for %ds — verified", UPDATE_VERIFY_WINDOW);
 }
 
@@ -846,5 +959,288 @@ int update_main(int argc, char *argv[]) {
 
     free(self); free(repo); free(asset); free(installed); free(tag);
     sqlite3_close(db);
+    return rc;
+}
+
+/* ── rollback ──────────────────────────────────────────────────────
+ *
+ * The one thing the update rails deliberately never do on their own is put
+ * the database back: swapping a file another process may hold open is how
+ * databases get corrupted. `cclaw rollback` does it with consent and with the
+ * file closed. The verb writes a marker — <db>.rollback, two lines: where the
+ * current database goes, which binary to restore — and the swap itself
+ * happens at one of three moments when nothing has the DB open: in the verb
+ * when no daemon is running; in the daemon's shutdown tail; at daemon
+ * startup before the DB is opened. Only a build that knows the protocol
+ * applies it, and that is the build on disk — the *new* one — so a build too
+ * old to have this verb can never half-apply it.
+ *
+ * Order: database first, binary second. The failure that leaves an old
+ * binary beside a migrated database is the one that cannot start; the reverse
+ * (old database, new binary) merely migrates again at the next start, with
+ * the replaced copy kept beside it. */
+
+static void rollback_marker_path(char *out, size_t cap, const char *db_path) {
+    snprintf(out, cap, "%s.rollback", db_path);
+}
+
+static int rollback_marker_read(const char *db_path, char *failed, size_t fcap,
+                                char *bin, size_t bcap) {
+    char marker[4096];
+    rollback_marker_path(marker, sizeof(marker), db_path);
+    FILE *f = fopen(marker, "r");
+    if (!f) return -1;
+    int ok = fgets(failed, (int)fcap, f) && fgets(bin, (int)bcap, f);
+    fclose(f);
+    if (!ok) return -1;
+    failed[strcspn(failed, "\n")] = '\0';
+    bin[strcspn(bin, "\n")] = '\0';
+    return failed[0] && bin[0] ? 0 : -1;
+}
+
+static int rollback_marker_write(const char *db_path, const char *failed,
+                                 const char *bin) {
+    char marker[4096];
+    rollback_marker_path(marker, sizeof(marker), db_path);
+    FILE *f = fopen(marker, "w");
+    if (!f) return -1;
+    int rc = fprintf(f, "%s\n%s\n", failed, bin) < 0 ? -1 : 0;
+    if (fclose(f) != 0) rc = -1;
+    if (rc != 0) unlink(marker);
+    return rc;
+}
+
+/* WAL and shm travel with the file they belong to: a -wal left beside the
+ * restored database would be replayed into it. Absent ones are fine. */
+static void move_sidecars(const char *from, const char *to) {
+    static const char *const sfx[] = { "-wal", "-shm" };
+    for (int i = 0; i < 2; i++) {
+        char a[4200], b[4200];
+        snprintf(a, sizeof(a), "%s%s", from, sfx[i]);
+        snprintf(b, sizeof(b), "%s%s", to, sfx[i]);
+        (void)rename(a, b);
+    }
+}
+
+int update_rollback_apply(const char *db_path, char *msg, size_t cap) {
+    char failed[4096], bin[4096];
+    if (rollback_marker_read(db_path, failed, sizeof(failed), bin, sizeof(bin)) != 0)
+        return 0;
+    char marker[4096], snap[4096], prev[4096], bad[4096];
+    rollback_marker_path(marker, sizeof(marker), db_path);
+    snprintf(snap, sizeof(snap), "%s.preupdate", db_path);
+    snprintf(prev, sizeof(prev), "%.4090s.prev", bin);
+    snprintf(bad, sizeof(bad), "%.4091s.bad", bin);
+
+    /* Everything checked before anything moves: a rollback that stops halfway
+     * is the one outcome worse than no rollback. The marker is consumed on
+     * every path — a daemon must not re-attempt this at each start. */
+    const char *missing = access(snap, R_OK) != 0 ? snap
+                        : access(prev, X_OK) != 0 ? prev : NULL;
+    if (missing) {
+        snprintf(msg, cap, "rollback: %s is missing — nothing changed", missing);
+        unlink(marker);
+        return -1;
+    }
+    if (rename(db_path, failed) != 0) {
+        snprintf(msg, cap, "rollback: cannot move %s aside: %s — nothing changed",
+                 db_path, strerror(errno));
+        unlink(marker);
+        return -1;
+    }
+    move_sidecars(db_path, failed);
+    if (rename(snap, db_path) != 0) {
+        int e = errno;
+        move_sidecars(failed, db_path);
+        (void)rename(failed, db_path);
+        snprintf(msg, cap, "rollback: cannot restore %s: %s — nothing changed",
+                 snap, strerror(e));
+        unlink(marker);
+        return -1;
+    }
+    util_copy_file(bin, bad, 0755);   /* best-effort evidence, as the guard keeps */
+    if (rename(prev, bin) != 0) {
+        snprintf(msg, cap, "rollback: database restored from the snapshot but %s "
+                 "could not replace %s (%s) — the build on disk will migrate it "
+                 "again at the next start; restore the binary by hand",
+                 prev, bin, strerror(errno));
+        unlink(marker);
+        return -1;
+    }
+    unlink(marker);
+    snprintf(msg, cap, "rollback applied: database restored from the pre-update "
+             "snapshot (the replaced one is kept at %s), binary restored from "
+             "%s (the replaced one is kept at %s)", failed, prev, bad);
+    return 1;
+}
+
+int rollback_main(int argc, char *argv[]) {
+    int yes = 0;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--yes") == 0) yes = 1;
+        else { fprintf(stderr, "usage: cclaw rollback [--yes]\n"); return 2; }
+    }
+
+    int rc = 1;
+    char *self = self_exe_path(), *prev_ver = NULL, *db_path = NULL;
+    char *tag = NULL, *restart_cmd = NULL;
+    sqlite3 *db = NULL;
+    if (!self) { fprintf(stderr, "error: cannot resolve own path\n"); return 1; }
+
+    char prev[4096], snap[4096], failed[4096], marker[4096];
+    snprintf(prev, sizeof(prev), "%s.prev", self);
+    if (access(prev, X_OK) != 0) {
+        fprintf(stderr, "error: no previous build at %s — nothing to roll back to\n", prev);
+        goto out;
+    }
+    prev_ver = update_run_capture(prev, "--version");
+    if (!prev_ver) {
+        fprintf(stderr, "error: the previous build at %s will not run\n", prev);
+        goto out;
+    }
+
+    db_path = util_resolve_db_path();
+    if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); goto out; }
+    snprintf(snap, sizeof(snap), "%s.preupdate", db_path);
+    rollback_marker_path(marker, sizeof(marker), db_path);
+    struct stat sst;
+    if (stat(snap, &sst) != 0) {
+        fprintf(stderr, "error: no pre-update snapshot at %s — nothing to roll "
+                        "back to (cclaw update takes one before it installs)\n", snap);
+        goto out;
+    }
+
+    /* What the snapshot is — schema version and last entry — comes from the
+     * file itself; no config key can drift from that. */
+    int snap_version = 0;
+    int64_t snap_max = 0;
+    {
+        sqlite3 *sdb = db_open_immutable(snap);
+        if (!sdb) {
+            fprintf(stderr, "error: cannot open the snapshot %s\n", snap);
+            goto out;
+        }
+        db_schema_state(sdb, &snap_version);
+        snap_max = db_scalar_i64(sdb, "SELECT COALESCE(MAX(id),0) FROM entries", 0, 0);
+        sqlite3_close(sdb);
+    }
+
+    /* The same handshake update runs forward, run backward: the previous
+     * build must be able to open the snapshot. */
+    {
+        char *range = update_run_capture(prev, "--schema-range");
+        char why[256] = "";
+        int ok = update_schema_ok(range, snap_version, why, sizeof(why));
+        free(range);
+        if (!ok) {
+            fprintf(stderr, "error: the previous build cannot open the snapshot — %s\n", why);
+            goto out;
+        }
+    }
+
+    /* The live database is opened plainly and never migrated: this verb has to
+     * work from the build whose migration is the thing being undone. */
+    db = db_open(db_path);
+    if (!db) { fprintf(stderr, "error: cannot open %s\n", db_path); goto out; }
+    int64_t discard = db_scalar_i64(db, "SELECT COUNT(*) FROM entries WHERE id > ?",
+                                    snap_max, 0);
+    tag = config_get(db, "update.installed_tag");
+    const char *label = tag && tag[0] ? tag : VERSION_COMMIT;
+    snprintf(failed, sizeof(failed), "%s.failed-%s", db_path, label);
+    if (access(failed, F_OK) == 0)
+        snprintf(failed, sizeof(failed), "%s.failed-%s-%lld", db_path, label,
+                 (long long)time(NULL));
+    char old_instance[64] = "";
+    pid_t pid = running_daemon_pid(db, NULL, old_instance, sizeof(old_instance));
+    restart_cmd = config_get(db, "update.restart_command");
+
+    /* The whole plan before the question. */
+    char when[32];
+    strftime(when, sizeof(when), "%Y-%m-%d %H:%M", localtime(&sst.st_mtime));
+    printf("rollback plan\n"
+           "  database  restore %s\n"
+           "            (schema v%d, taken %s)\n"
+           "            the current database moves to %s\n"
+           "            %lld entries written since the snapshot are discarded\n"
+           "  binary    restore %s (%s)\n"
+           "            the current build stays at %s.bad\n",
+           snap, snap_version, when, failed, (long long)discard, prev, prev_ver, self);
+    if (pid > 0)
+        printf("  daemon    pid %d is running: it will be %s and the swap "
+               "happens once it has closed the database\n", (int)pid,
+               restart_cmd && restart_cmd[0] ? "restarted via update.restart_command"
+                                             : "signalled to restart (SIGUSR2)");
+    else
+        printf("  daemon    not running: the swap happens now\n");
+
+    if (!yes) {
+        if (!isatty(0)) {
+            fflush(stdout);
+            fprintf(stderr, "not a terminal — pass --yes to proceed\n");
+            rc = 2; goto out;
+        }
+        printf("proceed? [y/N] ");
+        fflush(stdout);
+        char ans[16] = "";
+        if (!fgets(ans, sizeof(ans), stdin) || (ans[0] != 'y' && ans[0] != 'Y')) {
+            printf("aborted\n");
+            rc = 2; goto out;
+        }
+    }
+
+    update_last_set(db, label, "rollback_requested");
+    if (rollback_marker_write(db_path, failed, self) != 0) {
+        fprintf(stderr, "error: cannot write %s: %s\n", marker, strerror(errno));
+        goto out;
+    }
+    /* From here the marker drives everything, and this connection must be
+     * gone before anything applies it. */
+    sqlite3_close(db);
+    db = NULL;
+
+    char msg[8192];
+    if (pid <= 0) {
+        int arc = update_rollback_apply(db_path, msg, sizeof(msg));
+        fprintf(arc == 1 ? stdout : stderr, "%s\n", msg);
+        rc = arc == 1 ? 0 : 1;
+        goto out;
+    }
+
+    int64_t since = time(NULL);
+    if (restart_cmd && restart_cmd[0]) {
+        printf("restarting daemon (pid %d): %s\n", (int)pid, restart_cmd);
+        int cmd_rc = system(restart_cmd);
+        if (cmd_rc != 0)
+            fprintf(stderr, "warning: restart command exited %d — checking anyway\n",
+                    cmd_rc);
+    } else {
+        printf("signalling daemon (pid %d) to restart\n", (int)pid);
+        if (kill(pid, SIGUSR2) != 0) {
+            fprintf(stderr, "error: could not signal the daemon: %s\nthe rollback "
+                            "is pending in %s and applies when the daemon next "
+                            "stops or starts\n", strerror(errno), marker);
+            goto out;
+        }
+    }
+    if (update_await_restart(db_path, old_instance, since, RESTART_TIMEOUT_S) == 0) {
+        if (access(marker, F_OK) == 0) {
+            fprintf(stderr, "error: the daemon is back but the rollback did not "
+                            "apply (%s is still there) — check the daemon log\n",
+                    marker);
+            goto out;
+        }
+        printf("rolled back: daemon is back up on %s; the replaced database is "
+               "kept at %s\n", prev_ver, failed);
+        rc = 0;
+        goto out;
+    }
+    fprintf(stderr, "daemon did not come back within %ds. The rollback stays "
+                    "pending in\n  %s\nand applies the next time a daemon stops "
+                    "or starts — or stop the daemon and run `cclaw rollback` "
+                    "again.\n", RESTART_TIMEOUT_S, marker);
+
+out:
+    if (db) sqlite3_close(db);
+    free(self); free(prev_ver); free(db_path); free(tag); free(restart_cmd);
     return rc;
 }

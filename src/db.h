@@ -18,6 +18,12 @@ void db_configure_logging(void);
  * Returns NULL on failure. */
 sqlite3 *db_open(const char *path);
 
+/* Open a database *file* to look at, not to use: read-only and immutable, so
+ * SQLite creates no -wal/-shm beside it. For snapshots and kept copies that
+ * must stay exactly the bytes they are (a snapshot about to be renamed into
+ * place must not acquire sidecars). NULL if it cannot be opened. */
+sqlite3 *db_open_immutable(const char *path);
+
 /* Apply schema (CREATE TABLE IF NOT EXISTS). Call once from main process. */
 int db_ensure_schema(sqlite3 *db);
 

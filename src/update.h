@@ -55,7 +55,28 @@ void update_check_tick(sqlite3 *db);
  * re-exec keeps it. Takes a db *path*, not a handle, precisely because it
  * must reopen. */
 int update_await_restart(const char *db_path, const char *old_instance_id,
-                         int timeout_s);
+                         int64_t since, int timeout_s);
+
+/* Verify a downloaded release asset against the release's checksums.b2 (one
+ * "<blake2b-512 hex>  <asset>" line per asset). 1 = listed and matching;
+ * 0 = mismatch or not listed, reason in `why`. Exposed for tests. */
+int update_checksum_ok(const char *list, const char *asset,
+                       const unsigned char *data, size_t len,
+                       char *why, size_t cap);
+
+/* `cclaw rollback` — undo the last update entirely: the pre-update snapshot
+ * (<db>.preupdate) becomes the database again and <self>.prev the binary. The
+ * verb writes a marker (<db>.rollback) and update_rollback_apply performs the
+ * swap at a moment when nothing has the database open: the verb itself when
+ * no daemon runs, the daemon's shutdown tail, or daemon startup before the DB
+ * is opened. Returns 1 applied (a daemon must re-exec: the binary under it
+ * changed), 0 no marker, -1 refused or failed with `msg` saying why — the
+ * marker is consumed on every path, and a failure leaves nothing half-done. */
+int rollback_main(int argc, char *argv[]);
+/* Run `path <flag>` and return its first output line (malloc'd), or NULL if
+ * it will not run. How a candidate or a kept .prev binary is interrogated. */
+char *update_run_capture(const char *path, const char *flag);
+int update_rollback_apply(const char *db_path, char *msg, size_t cap);
 
 /* Post-update crash-loop guard — the failure update_await_restart cannot see
  * (a build that starts, then keeps dying after the updater exited). Same

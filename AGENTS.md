@@ -314,17 +314,21 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   `--schema-range` and an update whose build could not open this DB is
   *refused* rather than attempted — schema patches are forward-only, so a
   binary that migrates the DB and then fails is not undone by swapping the
-  binary back. It also snapshots the DB, keeps the old binary as `.prev`,
-  swaps atomically. It restarts the daemon only when `update.restart_command`
-  is set (`/etc/init.d/cclaw restart`, `systemctl restart cclaw`, …) — with no
-  command configured it deliberately leaves the running daemon alone, because
-  a supervisor treats a graceful exit as intentional and will not respawn it;
-  the running process keeps its inode and picks up the new build at the next
-  restart. Set `update.check_interval_hours` and the
-  daemon notices new releases and drops a note in the default agent's inbox —
-  it tells you, it never installs on its own. `cclaw update --file <path>`
-  sideloads an operator-supplied binary (CI artifact, cross build) through
-  the same rails, skipping only the download.
+  binary back. It verifies the download against the release's
+  `checksums.b2`, snapshots the DB to `<db>.preupdate`, keeps the old binary
+  as `.prev`, swaps atomically, then restarts the daemon with `SIGUSR2` (shut
+  down and `exec` the binary now on disk, same pid — no supervisor sees an
+  exit) or `update.restart_command` when set; a daemon that does not come
+  back in 90 s gets the old binary back, and a crash-loop guard reverts a
+  build that keeps dying after that. **`cclaw rollback`** is the way back from
+  everything else: it restores the snapshot *and* `.prev` together, swapping
+  the DB only at a moment nothing has it open (see
+  [specs/operations.md](specs/operations.md)). Set `update.check_interval_hours`
+  and the daemon notices new releases and drops a note in the default agent's
+  inbox — it tells you, it never installs on its own. `cclaw update --file
+  <path>` sideloads an operator-supplied binary (CI artifact, cross build)
+  through the same rails, skipping only the download. `cclaw --doctor`'s
+  `[update]` section shows the last outcome and every leftover file.
 - **The real DB is `~/.cclaw/cclaw.db`, not `./cclaw.db`.** `resolve_db_path()` returns `$HOME/.cclaw/cclaw.db` when `$HOME` is set (override with `CCLAW_DB_PATH`). "Delete the db" means that path — and its `-wal`/`-shm` siblings.
 - **Schema changes need a forward patch.** When `templates/schema.sql` changes shape, bump `CCLAW_SCHEMA_VERSION` (`src/cclaw.h`) and append a matching entry to `schema_patches[]` (`src/db.c`) that brings a live DB from the previous version to the new one. Startup auto-applies pending patches; DBs newer than the build, or older than the floor `CCLAW_SCHEMA_MIN` (v40 — the 2026-07-31 turn_id/iteration_id rename froze a new floor and collapsed prior patch history into it), are refused with a delete-and-restart message. A schema.sql change *without* the bump + patch leaves existing DBs stamped current but shaped old — missing columns, `advance_session` returns `ADVANCE_ERROR`, and the CLI can hang.
 - **`-p` with piped/non-tty stdin auto-selects the most recent session**; `-s <id>` pins one. Useful for scripted multi-turn testing (turn 1 creates the session, reuse its id for turn 2+).

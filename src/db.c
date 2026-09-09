@@ -23,7 +23,6 @@
 #include <errno.h>
 #include <time.h>
 #include <stdint.h>
-#include <sys/statvfs.h>
 #include <sys/stat.h>
 
 #define STR_HELPER(x) #x
@@ -245,6 +244,18 @@ static int db_busy_handler(void *arg, int count) {
     struct timespec ts = { .tv_sec = 0, .tv_nsec = delay * 1000000L };
     nanosleep(&ts, NULL);
     return 1;  /* retry */
+}
+
+sqlite3 *db_open_immutable(const char *path) {
+    char uri[4200];
+    snprintf(uri, sizeof(uri), "file:%s?immutable=1", path);
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, NULL)
+            != SQLITE_OK) {
+        sqlite3_close(db);
+        return NULL;
+    }
+    return db;
 }
 
 sqlite3 *db_open(const char *path) {
@@ -3327,14 +3338,9 @@ void db_wal_checkpoint(sqlite3 *db) {
 }
 
 /* ── Disk free space ─────────────────────────────────────────────────── */
-/* Megabytes available (to an unprivileged process) on the filesystem holding
-   the main DB file, or -1 if it can't be measured. 64-bit math so the
-   block-count product doesn't overflow on 32-bit targets (ARMv5TE). */
 long db_free_mb(sqlite3 *db) {
     if (!db) return -1;
     const char *path = sqlite3_db_filename(db, "main");
     if (!path || !*path) return -1;   /* temp/in-memory DB — nothing to stat */
-    struct statvfs vfs;
-    if (statvfs(path, &vfs) != 0) return -1;
-    return (long)(((uint64_t)vfs.f_bavail * vfs.f_frsize) >> 20);
+    return util_free_mb(path);
 }

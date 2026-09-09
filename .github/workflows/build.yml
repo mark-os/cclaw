@@ -291,7 +291,8 @@ jobs:
           three commands either way.
 
           Each target is also attached unzipped (same name without \`.zip\`) —
-          that is what \`cclaw update\` downloads.
+          that is what \`cclaw update\` downloads, verifying it against
+          \`checksums.b2\` (BLAKE2b-512, \`b2sum -c checksums.b2\`).
           EOF
           assets="dist/cclaw-linux-x64/cclaw-linux-x64.zip
             dist/cclaw-linux-x86/cclaw-linux-x86.zip
@@ -301,6 +302,11 @@ jobs:
             dist/cclaw-linux-armv5te/cclaw-linux-armv5te
             dist/whatsapp-bridge/whatsapp-bridge-linux-x64
             dist/whatsapp-bridge/whatsapp-bridge-linux-armv5te"
+          # Basenames only: `cclaw update` looks its asset up by name, and
+          # `b2sum -c` from a download directory expects the same.
+          for a in $assets; do (cd "$(dirname "$a")" && b2sum "$(basename "$a")"); done > dist/checksums.b2
+          cat dist/checksums.b2
+          assets="$assets dist/checksums.b2"
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             # Release already exists (retagged, or notes written ahead of the
             # build): replace its binaries, leave title/notes alone.

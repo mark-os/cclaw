@@ -330,12 +330,6 @@ static void ensure_default_agent(const char *base_dir) {
 
 static int run_daemon(char *db_path) {
     proc_set_daemon(1);
-    /* Post-update crash-loop guard: count this start against an armed
-     * update.verify marker BEFORE any subsystem can be the thing that
-     * crashes. A revert re-execs into the restored build immediately —
-     * nothing is running yet, so there is nothing to tear down. */
-    if (update_verify_startup(proc_db()))
-        reexec_self();   /* returns only if exec itself failed */
     g_next_db_poll = time(NULL);  /* run DB checks immediately on first iter */
     workspace_init(proc_cfg());
 
@@ -498,7 +492,18 @@ static int run_daemon(char *db_path) {
     cron_set_script_runner(NULL);
     proc_set_tool_setup(NULL);
     agent_setup_destroy(&daemon_setup);
-    config_free(proc_cfg()); db_close(proc_db()); free(db_path);
+    config_free(proc_cfg()); db_close(proc_db());
+
+    /* The database is closed and nothing of ours holds it: the moment a
+     * pending `cclaw rollback` is allowed to swap it. Any shutdown, not just a
+     * re-exec — a supervisor restart applies it just the same. */
+    {
+        char msg[8192];
+        int rrc = update_rollback_apply(db_path, msg, sizeof(msg));
+        if (rrc == 1) LOG_INFO_("%s", msg);
+        else if (rrc < 0) LOG_ERROR_("%s", msg);
+    }
+    free(db_path);
 
     /* Last thing, after every subsystem is down and the DB is closed: become
      * the new binary. Descriptors survive exec, so this must come after the
@@ -919,6 +924,9 @@ int main(int argc, char *argv[]) {
     /* update: replace this binary with a newer tagged release. Own DB open,
      * like the other verbs — it must work with the daemon up or down. */
     if (argc >= 2 && strcmp(argv[1], "update") == 0) return update_main(argc, argv);
+    /* rollback: undo the last update — snapshot back as the database, .prev
+     * back as the binary. Same "own DB open, daemon up or down" shape. */
+    if (argc >= 2 && strcmp(argv[1], "rollback") == 0) return rollback_main(argc, argv);
 
     if (argc >= 2 && strcmp(argv[1], "resp") == 0) return resp_main(argc, argv);
 
@@ -1004,6 +1012,18 @@ int main(int argc, char *argv[]) {
     db_configure_logging();   /* before the first db_open (sqlite3_initialize) */
     char *db_path = util_resolve_db_path();
     util_ensure_parent_dir(db_path);
+
+    /* A pending `cclaw rollback` is applied here, before this process opens
+     * the database: the swap needs the file closed, and the build that knows
+     * the protocol is this one. Success means the binary under us changed —
+     * re-exec so the restored build is what actually runs. */
+    if (daemon_mode) {
+        char msg[8192];
+        int rrc = update_rollback_apply(db_path, msg, sizeof(msg));
+        if (rrc == 1) { LOG_INFO_("%s", msg); free(db_path); reexec_self(); return 1; }
+        if (rrc < 0) LOG_ERROR_("%s", msg);
+    }
+
     proc_set_db(db_open(db_path));
     if (!proc_db()) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }
 
@@ -1014,6 +1034,18 @@ int main(int argc, char *argv[]) {
             "  rm %s %s-wal %s-shm\n",
             db_path, CCLAW_SCHEMA_VERSION, db_path, db_path, db_path);
         db_close(proc_db()); free(db_path); return 1;
+    }
+
+    /* Post-update crash-loop guard: count this start against an armed
+     * update.verify marker BEFORE the migration below — a build that dies
+     * inside its own schema patch would otherwise never be counted, and that
+     * is the one crash the .prev build can still recover from, because the
+     * database has not moved yet. A revert re-execs into the restored build
+     * with nothing running and the DB closed. */
+    if (daemon_mode && update_verify_startup(proc_db())) {
+        db_close(proc_db()); free(db_path);
+        reexec_self();   /* returns only if exec itself failed */
+        return 1;
     }
 
     /* Schema + seed in one exclusive transaction. When multiple processes

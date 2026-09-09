@@ -3,10 +3,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include <curl/curl.h>
 
@@ -87,6 +89,14 @@ int util_copy_file(const char *src, const char *dst, mode_t mode) {
     fclose(in);
     close(fd);
     return rc;
+}
+
+/* 64-bit math so the block-count product doesn't overflow on 32-bit targets
+   (ARMv5TE). */
+long util_free_mb(const char *path) {
+    struct statvfs vfs;
+    if (statvfs(path, &vfs) != 0) return -1;
+    return (long)((uint64_t)vfs.f_bavail * vfs.f_frsize / (1024 * 1024));
 }
 
 char *base64_encode(const unsigned char *buf, size_t len) {

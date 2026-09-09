@@ -41,7 +41,12 @@ compile_commands.json
 .cclaw/
 __pycache__/
 
-# Local, not-checked-in agent instructions
+# Local, not-checked-in agent instructions. Everything under .claude/ is
+# private (deployment notes, machine-specific skills) except the one generic
+# troubleshooting skill, which is deliberately shared.
 CLAUDE.local.md
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/cclaw-troubleshoot/
 

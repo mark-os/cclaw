@@ -162,12 +162,16 @@ static const ConfigDef s_defs[] = {
       " counted/cleared by the daemon — not for hand-editing)" },
     { "update.notified_tag", "",
       "Last release tag an agent was told about; suppresses repeat notices" },
+    { "update.last", "",
+      "Internal: outcome of the last update/rollback/crash-loop event as JSON "
+      "{tag,at,outcome} — read by `cclaw --doctor`, not for hand-editing" },
     { "update.restart_command", "",
       "Shell command that restarts the daemon (e.g. '/etc/init.d/cclaw restart' "
       "or 'systemctl restart cclaw'). Empty = `cclaw update` installs the binary "
       "but leaves the running daemon alone, to take effect at your next restart" },
     { "disk_min_free_mb", "20",
-      "Free-space floor in MB below which the daemon refuses new LLM dispatch (0 = disabled)" },
+      "Free-space floor in MB below which the daemon refuses new LLM dispatch and "
+      "`cclaw backup`/`cclaw update` refuse to write a copy (0 = disabled)" },
     { "workspace",          "",
       "Workspace directory (empty = ~/.cclaw/agents/default/workspace)" },
     { "tmp_root",           "",

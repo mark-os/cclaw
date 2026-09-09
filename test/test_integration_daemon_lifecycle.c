@@ -156,7 +156,7 @@ int main(void) {
     char first_instance[64] = "";
     read_instance(first_instance, sizeof(first_instance));
     if (!first_instance[0]) { stop_daemon(first); FAIL("no instance_id registered"); }
-    int rc = update_await_restart(DB_PATH, first_instance, NEG_TIMEOUT_S);
+    int rc = update_await_restart(DB_PATH, first_instance, 0, NEG_TIMEOUT_S);
     time_t waited = time(NULL) - t0;
     if (rc == 0) {
         stop_daemon(first);
@@ -173,9 +173,12 @@ int main(void) {
      * second as the daemon it replaced. That is the case that regressed. */
     printf("  detects_restart... ");
     stop_daemon(first);
+    /* `since` = now: the row must be born after we asked, which is what a
+     * rollback relies on (the restored database carries an older row). */
+    int64_t since = (int64_t)time(NULL);
     pid_t second = spawn_daemon();
     if (second < 0) FAIL("fork");
-    rc = update_await_restart(DB_PATH, first_instance, START_TIMEOUT_S);
+    rc = update_await_restart(DB_PATH, first_instance, since, START_TIMEOUT_S);
     if (rc != 0) {
         stop_daemon(second);
         FAIL("a restarted daemon was not detected (the WAL-snapshot bug)");
@@ -195,7 +198,7 @@ int main(void) {
 
     /* ── and says no again once the daemon is gone ── */
     printf("  detects_daemon_gone... ");
-    rc = update_await_restart(DB_PATH, second_instance, NEG_TIMEOUT_S);
+    rc = update_await_restart(DB_PATH, second_instance, 0, NEG_TIMEOUT_S);
     if (rc == 0) FAIL("reported a restart with no daemon running");
     printf("PASS\n");
 

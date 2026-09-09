@@ -9,10 +9,12 @@
 #include "http.h"
 #include "log.h"
 #include "types.h"
+#include "update.h"
 #include "util.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <glob.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
@@ -584,7 +586,163 @@ static void check_streak_guard(sqlite3 *db) {
     if (!n) print_ok("tripped sessions", "none");
 }
 
-/* ── Check 11: Syslog listener ──────────────────────────────────── */
+/* ── Check 11: Update / rollback state ──────────────────────────── */
+
+static void fmt_age(time_t mtime, char *out, size_t cap) {
+    long s = (long)(time(NULL) - mtime);
+    if (s < 3600) snprintf(out, cap, "%ldm old", s / 60);
+    else if (s < 86400) snprintf(out, cap, "%ldh old", s / 3600);
+    else snprintf(out, cap, "%ldd old", s / 86400);
+}
+
+/* "<size> MB, schema vN, <age>" for a database file on disk. Immutable open:
+ * the file may belong to another user, and a kept copy must not grow
+ * sidecars just because someone looked at it. */
+static void db_file_facts(const char *path, char *out, size_t cap) {
+    struct stat st;
+    if (stat(path, &st) != 0) { snprintf(out, cap, "%s", strerror(errno)); return; }
+    int uv = 0;
+    sqlite3 *d = db_open_immutable(path);
+    if (d) db_schema_state(d, &uv);
+    sqlite3_close(d);
+    char age[32];
+    fmt_age(st.st_mtime, age, sizeof(age));
+    if (uv > 0)
+        snprintf(out, cap, "%.1f MB, schema v%d, %s", st.st_size / 1048576.0, uv, age);
+    else
+        snprintf(out, cap, "%.1f MB, %s", st.st_size / 1048576.0, age);
+}
+
+/* Every file `cclaw update` / `cclaw rollback` / the schema migration leave
+ * behind, and what the last one of them did — the view a remote helper needs
+ * before telling someone which command to type. */
+static void check_update(sqlite3 *db, const char *db_path) {
+    printf("\n[update]\n");
+    char self[4096] = "";
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n > 0) self[n] = '\0';
+    printf("  binary: %s\n", self[0] ? self : "(unknown)");
+
+    char *tag = db ? config_get(db, "update.installed_tag") : NULL;
+    printf("  installed tag: %s\n",
+           tag && tag[0] ? tag : "(not installed by `cclaw update`)");
+    free(tag);
+
+    /* update.last: the outcome of whatever last touched the binary. */
+    char *last = db ? config_get(db, "update.last") : NULL;
+    if (last && last[0]) {
+        sqlite3_stmt *st = NULL;
+        if (sqlite3_prepare_v2(db,
+                "SELECT json_extract(?1,'$.tag'), json_extract(?1,'$.outcome'),"
+                " datetime(json_extract(?1,'$.at'),'unixepoch','localtime')"
+                " WHERE json_valid(?1)", -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, last, -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                const char *t = (const char *)sqlite3_column_text(st, 0);
+                const char *o = (const char *)sqlite3_column_text(st, 1);
+                const char *w = (const char *)sqlite3_column_text(st, 2);
+                char detail[256];
+                snprintf(detail, sizeof(detail), "%s %s (%s)", t && t[0] ? t : "?",
+                         o ? o : "?", w ? w : "?");
+                int bad = o && (strncmp(o, "crash_loop", 10) == 0 ||
+                                strncmp(o, "reverted", 8) == 0);
+                if (bad) print_fail("last update", detail);
+                else print_ok("last update", detail);
+            }
+        }
+        sqlite3_finalize(st);
+    } else {
+        printf("  last update: (none recorded)\n");
+    }
+
+    /* The crash-loop guard: armed means the new build has not yet survived
+     * its 5-minute window. */
+    char *verify = db ? config_get(db, "update.verify") : NULL;
+    if (verify && verify[0]) {
+        sqlite3_stmt *st = NULL;
+        if (sqlite3_prepare_v2(db,
+                "SELECT json_extract(?1,'$.tag'), COALESCE(json_extract(?1,'$.starts'),0)"
+                " WHERE json_valid(?1)", -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, verify, -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                const char *t = (const char *)sqlite3_column_text(st, 0);
+                printf("  WARN post-update guard armed for %s: %d/%d starts — clears "
+                       "after %d min of daemon uptime\n", t ? t : "?",
+                       sqlite3_column_int(st, 1), UPDATE_VERIFY_MAX_STARTS,
+                       UPDATE_VERIFY_WINDOW / 60);
+            }
+        }
+        sqlite3_finalize(st);
+    }
+    free(verify);
+
+    char path[4200], facts[256];
+    struct stat st;
+
+    snprintf(path, sizeof(path), "%s.prev", self);
+    int have_prev = self[0] && access(path, X_OK) == 0;
+    if (have_prev) {
+        char *ver = update_run_capture(path, "--version");
+        char age[32];
+        stat(path, &st);
+        fmt_age(st.st_mtime, age, sizeof(age));
+        printf("  previous build: %s (%s, %s)\n", path, ver ? ver : "will not run", age);
+        free(ver);
+    } else {
+        printf("  previous build: none kept (never updated, or already rolled back)\n");
+    }
+
+    snprintf(path, sizeof(path), "%s.bad", self);
+    if (self[0] && access(path, F_OK) == 0)
+        printf("  WARN bad build kept at %s (from a crash-loop revert or a rollback;"
+               " delete once diagnosed)\n", path);
+
+    snprintf(path, sizeof(path), "%s.preupdate", db_path);
+    int have_snap = stat(path, &st) == 0;
+    if (have_snap) {
+        db_file_facts(path, facts, sizeof(facts));
+        printf("  pre-update snapshot: %s (%s)\n", path, facts);
+    } else {
+        printf("  pre-update snapshot: none\n");
+    }
+
+    if (have_prev && have_snap)
+        print_ok("rollback", "available — `cclaw rollback` restores the snapshot and the previous build");
+    else
+        printf("  rollback: not available (needs both a previous build and a snapshot)\n");
+
+    snprintf(path, sizeof(path), "%s.rollback", db_path);
+    if (access(path, F_OK) == 0)
+        print_fail("rollback pending", "a rollback was requested and applies when a "
+                   "daemon next stops or starts");
+
+    /* Leftovers worth knowing about, each with a plain answer to "can I
+     * delete this?". */
+    glob_t g;
+    snprintf(path, sizeof(path), "%s.v[0-9]*.bak", db_path);
+    if (glob(path, 0, NULL, &g) == 0) {
+        for (size_t i = 0; i < g.gl_pathc; i++) {
+            db_file_facts(g.gl_pathv[i], facts, sizeof(facts));
+            printf("  schema backup: %s (%s) — taken before a migration; safe to "
+                   "delete once the daemon has run on the new schema\n",
+                   g.gl_pathv[i], facts);
+        }
+    }
+    globfree(&g);
+    snprintf(path, sizeof(path), "%s.failed-*", db_path);
+    if (glob(path, 0, NULL, &g) == 0) {
+        for (size_t i = 0; i < g.gl_pathc; i++) {
+            if (strstr(g.gl_pathv[i], "-wal") || strstr(g.gl_pathv[i], "-shm")) continue;
+            db_file_facts(g.gl_pathv[i], facts, sizeof(facts));
+            printf("  WARN replaced database kept at %s (%s) — what `cclaw rollback` "
+                   "discarded; delete (with its -wal/-shm) when no longer needed\n",
+                   g.gl_pathv[i], facts);
+        }
+    }
+    globfree(&g);
+}
+
+/* ── Check 12: Syslog listener ──────────────────────────────────── */
 
 static void check_syslog(void) {
     printf("\n[syslog]\n");
@@ -629,6 +787,7 @@ int doctor_main(void) {
     check_denials(db);
     check_cron(db);
     check_streak_guard(db);
+    check_update(db, db_path);
     check_syslog();
 
     printf("\ndone.\n");

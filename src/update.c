@@ -34,6 +34,8 @@ static const char *default_asset(void) {
     return "cclaw-linux-x64";
 #elif defined(__i386__)
     return "cclaw-linux-x86";
+#elif defined(__aarch64__)
+    return "cclaw-linux-arm64";
 #elif defined(__arm__)
     return "cclaw-linux-armv5te";
 #else

@@ -84,10 +84,9 @@ static int numeric_ip_permitted(const ProxyContext *ctx, const char *ip,
  * "*"). Default-deny — empty/NULL rules deny everything. */
 static int ip_to_bin(const char *ip, int *fam, unsigned char *buf16);
 static int host_decide(const ProxyContext *ctx, const char *host) {
-    /* Sensitive-host deny list: checked FIRST, before any allow logic.
-     * Hostname-level deny is sufficient for numeric CONNECT too: a denied
-     * hostname never passes RESOLVE, so its IP is never blessed, and
-     * unblessed numeric CONNECT is already denied by the default-deny path. */
+    /* Sensitive-host deny list: checked FIRST, before any allow logic. A
+     * hostname-level deny cannot be sidestepped by dialing the host's
+     * address: a numeric target needs its own literal-IP or CIDR grant. */
     if (ctx->deny_rules && host_covered(ctx->deny_rules, ctx->deny_count, host)) {
         LOG_WARN_("proxy deny host=%s reason=sensitive", host);
         return 0;
@@ -133,84 +132,15 @@ static int ip_to_bin(const char *ip, int *fam, unsigned char *buf16) {
     return -1;
 }
 
-/* True if `ip` is in the blessed set and not expired. When found,
- * *via_hostname_out (may be NULL) reports whether the bless came from
- * hostname resolution. */
-static int bless_contains(ProxyContext *ctx, const char *ip, int *via_hostname_out) {
-    int fam;
-    unsigned char bin[16];
-    if (ip_to_bin(ip, &fam, bin) != 0) return 0;
-    int len = (fam == AF_INET) ? 4 : 16;
-    long now = (long)time(NULL);
-    int found = 0;
-    pthread_mutex_lock(&ctx->blessed_mu);
-    for (int i = 0; i < ctx->blessed_count; i++) {
-        ProxyBlessedAddr *b = &ctx->blessed[i];
-        if (b->expiry <= now) continue;
-        if (b->family == fam && memcmp(b->addr, bin, (size_t)len) == 0) {
-            found = 1;
-            if (via_hostname_out) *via_hostname_out = b->via_hostname;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&ctx->blessed_mu);
-    return found;
-}
-
-/* Add `ip` to the blessed set with a fresh TTL. Prunes expired entries and
- * evicts the oldest if the set is full. Refreshes the TTL on a duplicate
- * (via_hostname is sticky — OR-merged on refresh). */
-static void bless_add(ProxyContext *ctx, const char *ip, int via_hostname) {
-    int fam;
-    unsigned char bin[16];
-    if (ip_to_bin(ip, &fam, bin) != 0) return;
-    int len = (fam == AF_INET) ? 4 : 16;
-    long now = (long)time(NULL);
-    pthread_mutex_lock(&ctx->blessed_mu);
-    /* Drop expired entries (compact in place). */
-    int w = 0;
-    for (int i = 0; i < ctx->blessed_count; i++) {
-        if (ctx->blessed[i].expiry > now) {
-            if (w != i) ctx->blessed[w] = ctx->blessed[i];
-            w++;
-        }
-    }
-    ctx->blessed_count = w;
-    /* Refresh if already present. */
-    for (int i = 0; i < ctx->blessed_count; i++) {
-        if (ctx->blessed[i].family == fam &&
-            memcmp(ctx->blessed[i].addr, bin, (size_t)len) == 0) {
-            ctx->blessed[i].expiry = now + PROXY_BLESS_TTL_SECS;
-            ctx->blessed[i].via_hostname |= via_hostname;
-            pthread_mutex_unlock(&ctx->blessed_mu);
-            return;
-        }
-    }
-    if (ctx->blessed_count >= PROXY_BLESS_MAX) {
-        int oldest = 0;
-        for (int i = 1; i < ctx->blessed_count; i++)
-            if (ctx->blessed[i].expiry < ctx->blessed[oldest].expiry) oldest = i;
-        ctx->blessed[oldest] = ctx->blessed[ctx->blessed_count - 1];
-        ctx->blessed_count--;
-    }
-    ProxyBlessedAddr *b = &ctx->blessed[ctx->blessed_count++];
-    b->family = fam;
-    memset(b->addr, 0, sizeof(b->addr));
-    memcpy(b->addr, bin, (size_t)len);
-    b->expiry = now + PROXY_BLESS_TTL_SECS;
-    b->via_hostname = via_hostname;
-    pthread_mutex_unlock(&ctx->blessed_mu);
-}
-
 /* Remember an allowed target for the entry's network_hosts tag. Dedup'd,
  * capped at PROXY_CONTACTED_MAX (overflow drops silently — the tag is
  * provenance metadata, not policy). Called from conn threads. */
 static void record_host(ProxyContext *ctx, const char *host) {
     if (!host || !host[0]) return;
-    pthread_mutex_lock(&ctx->blessed_mu);
+    pthread_mutex_lock(&ctx->mu);
     for (int i = 0; i < ctx->contacted_count; i++) {
         if (strcmp(ctx->contacted[i], host) == 0) {
-            pthread_mutex_unlock(&ctx->blessed_mu);
+            pthread_mutex_unlock(&ctx->mu);
             return;
         }
     }
@@ -218,17 +148,17 @@ static void record_host(ProxyContext *ctx, const char *host) {
         char *dup = strdup(host);
         if (dup) ctx->contacted[ctx->contacted_count++] = dup;
     }
-    pthread_mutex_unlock(&ctx->blessed_mu);
+    pthread_mutex_unlock(&ctx->mu);
 }
 
 /* Remember a denied target for the tool result summary. Same dedup/cap pattern
  * as record_host — the list is best-effort metadata, not policy. */
 static void record_denied(ProxyContext *ctx, const char *host) {
     if (!host || !host[0]) return;
-    pthread_mutex_lock(&ctx->blessed_mu);
+    pthread_mutex_lock(&ctx->mu);
     for (int i = 0; i < ctx->denied_count; i++) {
         if (strcmp(ctx->denied[i], host) == 0) {
-            pthread_mutex_unlock(&ctx->blessed_mu);
+            pthread_mutex_unlock(&ctx->mu);
             return;
         }
     }
@@ -236,7 +166,7 @@ static void record_denied(ProxyContext *ctx, const char *host) {
         char *dup = strdup(host);
         if (dup) ctx->denied[ctx->denied_count++] = dup;
     }
-    pthread_mutex_unlock(&ctx->blessed_mu);
+    pthread_mutex_unlock(&ctx->mu);
 }
 
 /* A resolved address is permitted per the egress-filter.md §4 pipeline:
@@ -253,10 +183,12 @@ static int addr_permitted(const ProxyContext *ctx, const char *ip) {
     return numeric_ip_permitted(ctx, ip, fam, bin, /*allow_public=*/1);
 }
 
-/* Resolve host (allowlist already checked by the caller), drop disallowed
- * addresses, bless the survivors with a TTL. On success writes the first
- * blessed IP into ip_out and returns 0; returns -1 if nothing is permitted. */
-static int resolve_and_bless(ProxyContext *ctx, const char *host,
+/* Resolve host (allowlist already checked by the caller) and return the
+ * first address the filter permits. Writes it into ip_out and returns 0;
+ * returns -1 if the name does not resolve or no address is permitted. The
+ * caller dials exactly this literal, so there is one resolution per
+ * connection and nothing for a DNS rebind to get between. */
+static int resolve_permitted(const ProxyContext *ctx, const char *host,
                              char *ip_out, size_t ip_cap) {
     struct addrinfo hints = {0}, *res, *rp;
     hints.ai_family = AF_UNSPEC;
@@ -264,7 +196,7 @@ static int resolve_and_bless(ProxyContext *ctx, const char *host,
     if (getaddrinfo(host, NULL, &hints, &res) != 0)
         return -1;
     int got = 0;
-    for (rp = res; rp; rp = rp->ai_next) {
+    for (rp = res; rp && !got; rp = rp->ai_next) {
         char ip[INET6_ADDRSTRLEN];
         if (rp->ai_family == AF_INET) {
             struct sockaddr_in *s = (struct sockaddr_in *)rp->ai_addr;
@@ -274,18 +206,40 @@ static int resolve_and_bless(ProxyContext *ctx, const char *host,
             if (!inet_ntop(AF_INET6, &s->sin6_addr, ip, sizeof(ip))) continue;
         } else continue;
         if (!addr_permitted(ctx, ip)) continue;
-        bless_add(ctx, ip, /*via_hostname=*/1);
-        if (!got) {
-            snprintf(ip_out, ip_cap, "%s", ip);
-            got = 1;
-        }
+        snprintf(ip_out, ip_cap, "%s", ip);
+        got = 1;
     }
     freeaddrinfo(res);
     return got ? 0 : -1;
 }
 
+int proxy_decide(const ProxyContext *ctx, const char *target,
+                 char *ip_out, size_t ip_cap, int *sni_gate) {
+    if (sni_gate) *sni_gate = 0;
+    if (!host_decide(ctx, target)) return PROXY_DENIED;
+
+    /* Numeric target: host_decide just required an explicit literal-IP or
+     * CIDR grant for it — there is no name to resolve. The operator vouched
+     * for the address itself, so no SNI gate. */
+    int fam;
+    unsigned char bin[16];
+    if (ip_to_bin(target, &fam, bin) == 0) {
+        snprintf(ip_out, ip_cap, "%s", target);
+        return PROXY_ALLOWED;
+    }
+
+    /* Hostname target: allowlisted by name; resolve and SSRF-filter. A
+     * hostname grant is only as good as the SNI the client then presents on
+     * a shared address, so the caller gates on it. */
+    if (resolve_permitted(ctx, target, ip_out, ip_cap) != 0)
+        return PROXY_UNRESOLVED;
+    if (sni_gate) *sni_gate = 1;
+    return PROXY_ALLOWED;
+}
+
 /* Dial a literal IP:port directly — no name resolution, so the dialed address
- * is exactly the blessed one (no resolve/connect TOCTOU). Returns fd or -1. */
+ * is exactly the one proxy_decide returned (no resolve/connect TOCTOU).
+ * Returns fd or -1. */
 static int dial_ip(const char *ip, uint16_t port) {
     struct in_addr a4;
     if (inet_pton(AF_INET, ip, &a4) == 1) {
@@ -315,16 +269,16 @@ static int dial_ip(const char *ip, uint16_t port) {
 /* Reserve a relay slot. Returns 1 on success, 0 if at the per-call cap. */
 static int relay_acquire(ProxyContext *ctx) {
     int ok = 0;
-    pthread_mutex_lock(&ctx->blessed_mu);
+    pthread_mutex_lock(&ctx->mu);
     if (ctx->relay_count < PROXY_MAX_RELAYS) { ctx->relay_count++; ok = 1; }
-    pthread_mutex_unlock(&ctx->blessed_mu);
+    pthread_mutex_unlock(&ctx->mu);
     return ok;
 }
 
 static void relay_release(ProxyContext *ctx) {
-    pthread_mutex_lock(&ctx->blessed_mu);
+    pthread_mutex_lock(&ctx->mu);
     if (ctx->relay_count > 0) ctx->relay_count--;
-    pthread_mutex_unlock(&ctx->blessed_mu);
+    pthread_mutex_unlock(&ctx->mu);
 }
 
 /* Relay data bidirectionally between two fds until one closes.
@@ -468,11 +422,10 @@ static int parse_client_hello_sni(const unsigned char *buf, size_t have,
 
 /* Peek (never consume — relay() still needs to see these bytes) at the start
  * of the client's byte stream, looking for a TLS ClientHello's SNI hostname.
- * Called for connections whose authority derives from a hostname rule — a
- * hostname CONNECT, or a numeric CONNECT to a hostname-blessed IP (Q6 gate):
- * once an allowlisted hostname blesses an IP, a CONNECT to that same IP is
- * otherwise admitted regardless of what vhost it actually targets — on
- * shared-IP CDN hosting this reaches unauthorized tenants sharing the IP.
+ * Called for connections whose authority derives from a hostname rule (Q6
+ * gate): the address an allowlisted name resolves to may be shared with
+ * unrelated vhosts — on shared-IP CDN hosting, a tunnel opened for the
+ * granted name could otherwise be used to reach another tenant of that IP.
  * Fail-open (return 1) when the bytes aren't parseable as a single-record
  * ClientHello within the peek budget — a hostname grant doesn't imply the
  * protocol is HTTPS. One exception (D7): a *well-formed* ClientHello that
@@ -483,7 +436,7 @@ static int parse_client_hello_sni(const unsigned char *buf, size_t have,
  * IP-literal clients that legitimately skip SNI are covered by the exact-IP
  * grant exemption upstream. When SNI *is* parsed, checked against the full
  * granted host-rule set (not just the specific rule that authorized this
- * connection) — mirrors how bless_contains() already works at the IP level.
+ * connection).
  * On deny (return 0) *deny_reason names the arm for the log line. */
 static int sni_check(const ProxyContext *ctx, int client_fd, uint16_t port,
                      const char **deny_reason) {
@@ -532,39 +485,13 @@ static int sni_check(const ProxyContext *ctx, int client_fd, uint16_t port,
     }
 }
 
-/* Handle a single client connection from a shell child. One unified policy
- * path: a hostname is allowlist-checked, resolved, SSRF-filtered, and blessed;
- * a numeric target is dialed only if it was blessed by a prior RESOLVE or is an
- * explicitly granted literal IP. The dialed address is always one we blessed. */
+/* Handle a single client connection from a sandboxed child: one preamble,
+ * "host:port". proxy_decide is the whole policy; the address dialed is always
+ * the one it returned. */
 static void handle_client(ProxyContext *ctx, int client_fd) {
     char preamble[PREAMBLE_MAX];
     int len = proxy_read_line(client_fd, preamble, PREAMBLE_MAX);
     if (len <= 0) { close(client_fd); return; }
-
-    /* RESOLVE request: "RESOLVE <host>" */
-    if (strncmp(preamble, "RESOLVE ", 8) == 0) {
-        const char *host = preamble + 8;
-        if (!host_decide(ctx, host)) {
-            LOG_WARN_("proxy deny host=%s reason=policy", host);
-            record_denied(ctx, host);
-            write(client_fd, "ERROR denied\n", 13);
-            close(client_fd);
-            return;
-        }
-        char ip[INET6_ADDRSTRLEN];
-        if (resolve_and_bless(ctx, host, ip, sizeof(ip)) == 0) {
-            record_host(ctx, host);
-            char resp[INET6_ADDRSTRLEN + 8];
-            int n = snprintf(resp, sizeof(resp), "ADDR %s\n", ip);
-            write(client_fd, resp, (size_t)n);
-        } else {
-            LOG_WARN_("proxy deny host=%s reason=resolve_failed", host);
-            record_denied(ctx, host);
-            write(client_fd, "ERROR resolve\n", 14);
-        }
-        close(client_fd);
-        return;
-    }
 
     /* Connect request: "host:port" or "ip:port" */
     char *colon = strrchr(preamble, ':');
@@ -584,64 +511,20 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     }
     uint16_t port = (uint16_t)pval;
 
-    char resolved[INET6_ADDRSTRLEN];
-    const char *dial;
-    int fam;
-    unsigned char bin[16];
+    char dial[INET6_ADDRSTRLEN];
     int sni_gate = 0;
-    if (ip_to_bin(target, &fam, bin) == 0) {
-        /* Numeric target: must be blessed by a prior RESOLVE, or an explicitly
-         * granted literal IP. A literal IP that is neither (e.g. a raw
-         * 1.2.3.4 SSRF attempt) is refused — there is no resolve to bless it. */
-        int via_host_bless = 0;
-        if (bless_contains(ctx, target, &via_host_bless)) {
-            /* blessed by a prior RESOLVE — the hostname was recorded there.
-             * A hostname-derived bless carries the Q6 SNI gate along to the
-             * numeric CONNECT (the common path: getaddrinfo shim RESOLVEs,
-             * then the client dials the returned IP) — otherwise the gate on
-             * the hostname branch below is a fence with no side walls. An
-             * exact literal-IP grant is exempt: the operator vouched for the
-             * IP itself (same exact-vs-covering distinction as the metadata
-             * carve-out); a covering CIDR authorizes reaching a range, not
-             * any particular vhost identity behind one address. */
-            dial = target;
-            if (via_host_bless &&
-                !granted_exact(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin))
-                sni_gate = 1;
-        } else if (host_decide(ctx, target)) {
-            bless_add(ctx, target, /*via_hostname=*/0);
-            record_host(ctx, target);
-            dial = target;
-        } else {
-            LOG_WARN_("proxy deny host=%s reason=policy", target);
-            record_denied(ctx, target);
-            write(client_fd, "DENIED\n", 7);
-            close(client_fd);
-            return;
-        }
-    } else {
-        /* Hostname target: allowlist, then resolve + SSRF-filter + bless.
-         * ip_to_bin() failing above means only host_match (via host_decide)
-         * can have authorized this branch — CIDR/exact-grant checks are
-         * unreachable for non-numeric input. */
-        if (!host_decide(ctx, target)) {
-            LOG_WARN_("proxy deny host=%s reason=policy", target);
-            record_denied(ctx, target);
-            write(client_fd, "DENIED\n", 7);
-            close(client_fd);
-            return;
-        }
-        sni_gate = 1;
-        if (resolve_and_bless(ctx, target, resolved, sizeof(resolved)) != 0) {
-            LOG_WARN_("proxy deny host=%s reason=resolve_failed", target);
-            record_denied(ctx, target);
-            write(client_fd, "ERROR resolve\n", 14);
-            close(client_fd);
-            return;
-        }
-        record_host(ctx, target);
-        dial = resolved;
+    int verdict = proxy_decide(ctx, target, dial, sizeof(dial), &sni_gate);
+    if (verdict != PROXY_ALLOWED) {
+        int unresolved = verdict == PROXY_UNRESOLVED;
+        LOG_WARN_("proxy deny host=%s reason=%s", target,
+                  unresolved ? "resolve_failed" : "policy");
+        record_denied(ctx, target);
+        if (unresolved) write(client_fd, "ERROR resolve\n", 14);
+        else            write(client_fd, "DENIED\n", 7);
+        close(client_fd);
+        return;
     }
+    record_host(ctx, target);
 
     /* Bound simultaneous relays per call — refuse cleanly when at the cap. */
     if (!relay_acquire(ctx)) {
@@ -661,8 +544,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
 
     write(client_fd, "OK\n", 3);
 
-    /* Shared-IP CDN check (Q6): a hostname-authorized connection — whether
-     * CONNECTed by name or by a hostname-blessed IP — is only as trustworthy
+    /* Shared-IP CDN check (Q6): a hostname-authorized connection is only as trustworthy
      * as the SNI it actually presents once the IP is shared across unrelated
      * vhosts. Fail-open when unparseable — a hostname grant doesn't imply
      * HTTPS — except a well-formed no-SNI hello on :443, denied per D7 (see
@@ -693,11 +575,11 @@ static void *conn_thread(void *arg) {
     ProxyContext *ctx = ca->ctx;
     handle_client(ctx, ca->fd);
     free(ca);
-    pthread_mutex_lock(&ctx->blessed_mu);
+    pthread_mutex_lock(&ctx->mu);
     ctx->conn_active--;
     if (ctx->conn_active == 0)
         pthread_cond_broadcast(&ctx->conn_cond);
-    pthread_mutex_unlock(&ctx->blessed_mu);
+    pthread_mutex_unlock(&ctx->mu);
     return NULL;
 }
 
@@ -717,24 +599,24 @@ static void *proxy_loop(void *arg) {
          * hostname whose DNS never responds from piling up unbounded blocked
          * threads. There is no thread yet to write a DENIED response, so this
          * is a silent TCP-level drop, not a proxy-protocol refusal. */
-        pthread_mutex_lock(&ctx->blessed_mu);
+        pthread_mutex_lock(&ctx->mu);
         if (ctx->conn_active >= PROXY_MAX_PENDING) {
-            pthread_mutex_unlock(&ctx->blessed_mu);
+            pthread_mutex_unlock(&ctx->mu);
             close(client);
             continue;
         }
         ctx->conn_active++;
-        pthread_mutex_unlock(&ctx->blessed_mu);
+        pthread_mutex_unlock(&ctx->mu);
 
         /* Spawn per-connection thread (detached) */
         struct conn_args *ca = malloc(sizeof(*ca));
         if (!ca) {
             close(client);
-            pthread_mutex_lock(&ctx->blessed_mu);
+            pthread_mutex_lock(&ctx->mu);
             ctx->conn_active--;
             if (ctx->conn_active == 0)
                 pthread_cond_broadcast(&ctx->conn_cond);
-            pthread_mutex_unlock(&ctx->blessed_mu);
+            pthread_mutex_unlock(&ctx->mu);
             continue;
         }
         ca->ctx = ctx;
@@ -742,11 +624,11 @@ static void *proxy_loop(void *arg) {
 
         pthread_t t;
         if (thread_spawn(&t, 1, conn_thread, ca) != 0) {
-            pthread_mutex_lock(&ctx->blessed_mu);
+            pthread_mutex_lock(&ctx->mu);
             ctx->conn_active--;
             if (ctx->conn_active == 0)
                 pthread_cond_broadcast(&ctx->conn_cond);
-            pthread_mutex_unlock(&ctx->blessed_mu);
+            pthread_mutex_unlock(&ctx->mu);
             close(client);
             free(ca);
         }
@@ -765,7 +647,7 @@ int proxy_bind(ProxyContext *ctx, const char *dir,
                char **deny_rules, size_t deny_count) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->listen_fd = -1;
-    pthread_mutex_init(&ctx->blessed_mu, NULL);
+    pthread_mutex_init(&ctx->mu, NULL);
     pthread_cond_init(&ctx->conn_cond, NULL);
     ctx->hosts = hosts;          /* borrowed — must outlive the proxy */
     ctx->host_count = host_count;
@@ -863,10 +745,10 @@ void proxy_stop(ProxyContext *ctx) {
         ctx->thread_started = 0;
     }
     /* Wait for all in-flight conn_threads to finish */
-    pthread_mutex_lock(&ctx->blessed_mu);
+    pthread_mutex_lock(&ctx->mu);
     while (ctx->conn_active > 0)
-        pthread_cond_wait(&ctx->conn_cond, &ctx->blessed_mu);
-    pthread_mutex_unlock(&ctx->blessed_mu);
+        pthread_cond_wait(&ctx->conn_cond, &ctx->mu);
+    pthread_mutex_unlock(&ctx->mu);
     if (ctx->listen_fd >= 0) {
         close(ctx->listen_fd);
         ctx->listen_fd = -1;
@@ -890,7 +772,7 @@ void proxy_stop(ProxyContext *ctx) {
     free(ctx->cidr_rules);      /* owned parsed CIDR array */
     ctx->cidr_rules = NULL;
     ctx->cidr_rule_count = 0;
-    pthread_mutex_destroy(&ctx->blessed_mu);
+    pthread_mutex_destroy(&ctx->mu);
     pthread_cond_destroy(&ctx->conn_cond);
 }
 
@@ -899,9 +781,9 @@ const char *proxy_sock_path(const ProxyContext *ctx) {
 }
 
 char *proxy_hosts_json(ProxyContext *ctx) {
-    pthread_mutex_lock(&ctx->blessed_mu);
+    pthread_mutex_lock(&ctx->mu);
     if (ctx->contacted_count == 0) {
-        pthread_mutex_unlock(&ctx->blessed_mu);
+        pthread_mutex_unlock(&ctx->mu);
         return NULL;
     }
     size_t cap = 3;  /* "[" + "]" + NUL */
@@ -909,7 +791,7 @@ char *proxy_hosts_json(ProxyContext *ctx) {
         cap += strlen(ctx->contacted[i]) * 6 + 3;  /* worst-case \uXXXX + quotes + comma */
     char *out = malloc(cap);
     if (!out) {
-        pthread_mutex_unlock(&ctx->blessed_mu);
+        pthread_mutex_unlock(&ctx->mu);
         return NULL;
     }
     size_t o = 0;
@@ -925,14 +807,14 @@ char *proxy_hosts_json(ProxyContext *ctx) {
     }
     out[o++] = ']';
     out[o] = '\0';
-    pthread_mutex_unlock(&ctx->blessed_mu);
+    pthread_mutex_unlock(&ctx->mu);
     return out;
 }
 
 char *proxy_denied_summary(ProxyContext *ctx, const char *advice) {
-    pthread_mutex_lock(&ctx->blessed_mu);
+    pthread_mutex_lock(&ctx->mu);
     if (ctx->denied_count == 0) {
-        pthread_mutex_unlock(&ctx->blessed_mu);
+        pthread_mutex_unlock(&ctx->mu);
         return NULL;
     }
     /* Build: "\ncclaw: proxy blocked host(s) not in allowlist: foo.com, bar.com
@@ -945,7 +827,7 @@ char *proxy_denied_summary(ProxyContext *ctx, const char *advice) {
     for (int i = 0; i < ctx->denied_count; i++)
         cap += strlen(ctx->denied[i]) + 4;
     char *out = malloc(cap);
-    if (!out) { pthread_mutex_unlock(&ctx->blessed_mu); return NULL; }
+    if (!out) { pthread_mutex_unlock(&ctx->mu); return NULL; }
     size_t o = 0;
     o += (size_t)snprintf(out + o, cap - o,
         "\ncclaw: proxy blocked host(s) not in allowlist: ");
@@ -954,6 +836,6 @@ char *proxy_denied_summary(ProxyContext *ctx, const char *advice) {
         o += (size_t)snprintf(out + o, cap - o, "%s", ctx->denied[i]);
     }
     o += (size_t)snprintf(out + o, cap - o, " — %s\n", advice);
-    pthread_mutex_unlock(&ctx->blessed_mu);
+    pthread_mutex_unlock(&ctx->mu);
     return out;
 }

@@ -320,101 +320,54 @@ static void test_sni_absent_failopen(void) {
     printf("  PASS: non-TLS bytes fail open (relay proceeds)\n");
 }
 
-/* RESOLVE the hostname first (blessing its IP via-hostname), then CONNECT to
- * the returned numeric IP — the common getaddrinfo-shim path. Returns the
- * connected fd after the OK, ready for client bytes. */
-static int numeric_connect_after_resolve(ProxyContext *ctx, int port) {
-    int rfd = uds_connect(proxy_sock_path(ctx));
-    assert(rfd >= 0);
-    const char *rq = "RESOLVE localhost\n";
-    assert(write(rfd, rq, strlen(rq)) == (ssize_t)strlen(rq));
-    char resp[64];
-    int n = read_line(rfd, resp, sizeof(resp));
-    close(rfd);
-    assert(n > 0);
-    assert(strncmp(resp, "ADDR 127.0.0.1", 14) == 0);
-
+/* Send a numeric CONNECT preamble; returns the fd with the first response
+ * line in resp. */
+static int numeric_connect(ProxyContext *ctx, int port, char *resp, int cap) {
     int fd = uds_connect(proxy_sock_path(ctx));
     assert(fd >= 0);
     char req[64];
     int rn = snprintf(req, sizeof(req), "127.0.0.1:%d\n", port);
     assert(write(fd, req, (size_t)rn) == rn);
-    n = read_line(fd, resp, sizeof(resp));
-    assert(n > 0);
-    assert(strncmp(resp, "OK", 2) == 0);
+    assert(read_line(fd, resp, cap) > 0);
     return fd;
 }
 
-static void test_sni_numeric_blessed_gated(void) {
-    /* The gap this closes (review-2 F16): RESOLVE blesses the IP, then a
-     * numeric CONNECT to that IP presents an SNI for an unrelated vhost.
-     * The bless is hostname-derived and 127.0.0.1 has no exact-IP grant
-     * (127.0.0.0/8 is a covering CIDR, not a vouch for this address), so the
-     * Q6 gate must apply and refuse the mismatched SNI. */
+static void test_numeric_needs_its_own_grant(void) {
+    /* A hostname grant authorises the name, not the address it resolves to:
+     * a client that dials the address directly could present any vhost's SNI
+     * on a shared IP. With no RESOLVE/bless path left, a numeric target is
+     * admitted only by a literal-IP or CIDR grant of its own. */
     int port;
     int lfd = sink_listen(&port);
-    struct sink_result res = {0, 0};
-    struct sink_arg sarg = { lfd, &res };
-    pthread_t th;
-    pthread_create(&th, NULL, sink_once, &sarg);
 
-    char *hosts[] = {"localhost", "127.0.0.0/8"};
+    char *hosts[] = {"localhost"};
     ProxyContext ctx;
-    assert(proxy_start(&ctx, tmpdir, hosts, 2) == 0);
+    assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
 
-    int fd = numeric_connect_after_resolve(&ctx, port);
-    unsigned char hello[512];
-    size_t hlen = build_client_hello("evil.example.com", hello, sizeof(hello));
-    write(fd, hello, hlen);
-
-    char buf[16];
-    ssize_t rd = read(fd, buf, sizeof(buf));
-    assert(rd == 0 || (rd < 0 && errno == ECONNRESET));
+    char resp[64];
+    int fd = numeric_connect(&ctx, port, resp, sizeof(resp));
+    assert(strncmp(resp, "DENIED", 6) == 0);
     close(fd);
 
-    pthread_join(th, NULL);
-    assert(res.accepted == 1);
-    assert(res.got_bytes == 0);   /* refused before any relay */
+    /* The removed half of the protocol is not understood any more. */
+    fd = uds_connect(proxy_sock_path(&ctx));
+    assert(fd >= 0);
+    const char *rq = "RESOLVE localhost\n";
+    assert(write(fd, rq, strlen(rq)) == (ssize_t)strlen(rq));
+    assert(read_line(fd, resp, sizeof(resp)) > 0);
+    assert(strncmp(resp, "ADDR", 4) != 0);
+    close(fd);
 
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: numeric CONNECT to hostname-blessed IP gated (vhost hop refused)\n");
-}
-
-static void test_sni_numeric_blessed_match(void) {
-    /* Same numeric path, but the SNI matches the granted hostname rule —
-     * the narrowed grant passes and the relay proceeds. */
-    int port;
-    int lfd = sink_listen(&port);
-    struct sink_result res = {0, 0};
-    struct sink_arg sarg = { lfd, &res };
-    pthread_t th;
-    pthread_create(&th, NULL, sink_once, &sarg);
-
-    char *hosts[] = {"localhost", "127.0.0.0/8"};
-    ProxyContext ctx;
-    assert(proxy_start(&ctx, tmpdir, hosts, 2) == 0);
-
-    int fd = numeric_connect_after_resolve(&ctx, port);
-    unsigned char hello[512];
-    size_t hlen = build_client_hello("localhost", hello, sizeof(hello));
-    assert(write(fd, hello, hlen) == (ssize_t)hlen);
-
-    pthread_join(th, NULL);
-    assert(res.accepted == 1);
-    assert(res.got_bytes == 1);   /* relayed through */
-
-    close(fd);
-    proxy_stop(&ctx);
-    close(lfd);
-    printf("  PASS: numeric CONNECT to hostname-blessed IP, matching SNI relayed\n");
+    printf("  PASS: numeric CONNECT needs its own grant; RESOLVE is gone\n");
 }
 
 static void test_sni_numeric_exact_grant_exempt(void) {
-    /* An exact literal-IP grant vouches for the address itself (same
-     * exact-vs-covering distinction as the metadata carve-out) — the gate
-     * must NOT apply even though the IP is also hostname-blessed, so an
-     * operator-granted IP is never over-blocked by an unrelated SNI. */
+    /* A literal-IP grant vouches for the address itself (same
+     * exact-vs-covering distinction as the metadata carve-out) — the SNI
+     * gate must NOT apply, so an operator-granted IP is never over-blocked
+     * by whatever SNI the client presents. */
     int port;
     int lfd = sink_listen(&port);
     struct sink_result res = {0, 0};
@@ -422,11 +375,13 @@ static void test_sni_numeric_exact_grant_exempt(void) {
     pthread_t th;
     pthread_create(&th, NULL, sink_once, &sarg);
 
-    char *hosts[] = {"localhost", "127.0.0.0/8", "127.0.0.1"};
+    char *hosts[] = {"localhost", "127.0.0.1"};
     ProxyContext ctx;
-    assert(proxy_start(&ctx, tmpdir, hosts, 3) == 0);
+    assert(proxy_start(&ctx, tmpdir, hosts, 2) == 0);
 
-    int fd = numeric_connect_after_resolve(&ctx, port);
+    char resp[64];
+    int fd = numeric_connect(&ctx, port, resp, sizeof(resp));
+    assert(strncmp(resp, "OK", 2) == 0);
     unsigned char hello[512];
     size_t hlen = build_client_hello("evil.example.com", hello, sizeof(hello));
     assert(write(fd, hello, hlen) == (ssize_t)hlen);
@@ -438,7 +393,7 @@ static void test_sni_numeric_exact_grant_exempt(void) {
     close(fd);
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: exact-IP grant exempt from the numeric SNI gate\n");
+    printf("  PASS: exact-IP grant exempt from the SNI gate\n");
 }
 
 static void test_no_sni_hello_denied_on_strict_port(void) {
@@ -577,8 +532,7 @@ int main(void) {
     test_sni_mismatch_blocked();
     test_sni_match_allowed();
     test_sni_absent_failopen();
-    test_sni_numeric_blessed_gated();
-    test_sni_numeric_blessed_match();
+    test_numeric_needs_its_own_grant();
     test_sni_numeric_exact_grant_exempt();
     test_no_sni_hello_denied_on_strict_port();
     test_no_sni_hello_failopen_off_strict_port();

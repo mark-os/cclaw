@@ -454,7 +454,7 @@ static void sandbox_child_main(const TierDescriptor *desc, RunToolParsed *q,
     setpgid(0, 0);
     /* Die if the broker dies (daemon SIGKILLs on backstop deadline):
      * the broker can no longer kill our group, so tie our lifetime to it.
-     * sandbox_apply_namespace re-arms this on the inner PID-ns init. */
+     * contain_enter re-arms this on the inner PID-ns init. */
     prctl(PR_SET_PDEATHSIG, SIGKILL);
     close(pipefd[0]);
     dup2(pipefd[1], STDOUT_FILENO);

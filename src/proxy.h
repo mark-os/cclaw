@@ -9,12 +9,9 @@
  * Listens on a per-call pathname UDS at <agent-folder>/.proxy.<pid>.sock — the
  * agent folder, never the agent-visible workspace. The sandbox bind-mounts the
  * socket to a fixed in-netns path so the in-sandbox net_shim can reach it.
- * Accepts connections, reads preamble (host:port or RESOLVE host), checks the
- * allowlist, resolves DNS, relays TCP bidirectionally.
+ * Accepts connections, reads the preamble (host:port), checks the allowlist,
+ * resolves DNS, dials the address it resolved, relays TCP bidirectionally.
  * Accept-loop thread is joined in proxy_stop(). */
-
-#define PROXY_BLESS_MAX 256
-#define PROXY_BLESS_TTL_SECS 60
 
 /* Per-call cap on simultaneous relays — bounds broker-side fd consumption when a
  * pooling HTTP client opens many CONNECT tunnels. Leaves headroom under the
@@ -30,20 +27,6 @@
 /* Cap on distinct contacted hosts remembered per call (network_hosts tag). */
 #define PROXY_CONTACTED_MAX 64
 
-/* A resolution-blessed address: an IP that passed the allowlist + SSRF check
- * via a prior RESOLVE, or an explicitly granted literal IP. A numeric CONNECT
- * is permitted only if its address is present here and unexpired — this binds
- * the dialed IP to a prior allowed resolution (anti SSRF / DNS-rebinding). The
- * set is per-ProxyContext: process-lifetime while the proxy is a singleton,
- * per-call once the proxy moves into the broker. */
-typedef struct {
-    int family;                 /* AF_INET or AF_INET6 */
-    unsigned char addr[16];     /* binary address (4 or 16 bytes used) */
-    long expiry;                /* unix time when this bless expires */
-    int via_hostname;           /* blessed by hostname resolution — CONNECTs to
-                                   it get the Q6 SNI gate like the hostname path */
-} ProxyBlessedAddr;
-
 typedef struct {
     char **hosts;           /* borrowed egress allowlist (NULL ⇒ deny all) */
     size_t host_count;      /* must outlive the proxy (per-call caps->hosts) */
@@ -58,16 +41,14 @@ typedef struct {
     int running;            /* set to 0 to stop */
     pthread_t thread;       /* accept-loop thread (valid if thread_started) */
     int thread_started;
-    ProxyBlessedAddr blessed[PROXY_BLESS_MAX];  /* TTL-bound blessed-IP set */
-    int blessed_count;
-    int relay_count;            /* live relays (guarded by blessed_mu) */
-    pthread_mutex_t blessed_mu; /* guards blessed[]/blessed_count/relay_count */
-    int conn_active;            /* in-flight conn_threads (guarded by blessed_mu) */
+    int relay_count;            /* live relays (guarded by mu) */
+    pthread_mutex_t mu;         /* guards the counters and lists below */
+    int conn_active;            /* in-flight conn_threads (guarded by mu) */
     pthread_cond_t conn_cond;   /* signalled when conn_active reaches 0 */
     char *contacted[PROXY_CONTACTED_MAX]; /* dedup'd allowed targets (owned) */
-    int contacted_count;                  /* guarded by blessed_mu */
+    int contacted_count;                  /* guarded by mu */
     char *denied[PROXY_CONTACTED_MAX];    /* dedup'd denied targets (owned) */
-    int denied_count;                     /* guarded by blessed_mu */
+    int denied_count;                     /* guarded by mu */
     unsigned short sni_strict_port; /* port where a parsed ClientHello lacking
                                        SNI is denied (D7: modern HTTPS always
                                        sends SNI; omitting it is the trivial
@@ -85,6 +66,20 @@ typedef struct {
 int proxy_bind(ProxyContext *ctx, const char *dir,
                char **hosts, size_t host_count,
                char **deny_rules, size_t deny_count);
+
+/* The egress decision for one target — the single implementation, used by
+ * the connection handler for every request. `target` is a hostname or an IP
+ * literal. On PROXY_ALLOWED, ip_out holds the literal address to dial: the
+ * target itself when it is numeric (which requires an explicit literal-IP or
+ * CIDR grant), else the first address the name resolved to that the SSRF
+ * filter permits. *sni_gate (optional) is set when the authority came from a
+ * hostname rule, so the caller must check the TLS SNI the client presents.
+ * Needs only the rule fields of ctx (proxy_bind fills them). */
+#define PROXY_ALLOWED     0
+#define PROXY_DENIED     (-1)   /* policy: not allowlisted, or deny-listed */
+#define PROXY_UNRESOLVED (-2)   /* allowlisted name: no permitted address */
+int proxy_decide(const ProxyContext *ctx, const char *target,
+                 char *ip_out, size_t ip_cap, int *sni_gate);
 
 /* Start the accept-loop thread for a bound context. Returns 0 on success. */
 int proxy_serve(ProxyContext *ctx);

@@ -9,7 +9,7 @@ request for `host:port` over a Unix domain socket to a proxy thread in the
 per-call broker. A program that honors the proxy variables reaches allowlisted
 hosts by name; a program that does not has no network.
 
-Secrets are injected via environment variables (`CCLAW_SECRET_<NAME>`), never interpolated into command strings. Output is masked before storage.
+Secrets reach a child two ways: the trusted parent interpolates `{{SECRET:name}}` in the tool arguments just before dispatch, and referenced secrets are also set as `CCLAW_SECRET_<NAME>` environment variables. The stored command keeps the placeholder, never the value. Output is masked before storage. See [security.md](security.md).
 
 ## Security Layers
 
@@ -128,9 +128,11 @@ Proxy → Client: "OK\n"                   (connection established)
 [bidirectional byte relay after OK]
 ```
 
-The proxy also still answers `RESOLVE <host>` and admits a numeric connect to
-an address a prior RESOLVE blessed. That was the removed preload library's
-half of the protocol; nothing in the tree speaks it now (see History).
+That preamble is the whole protocol. The decision behind it is
+`proxy_decide()` (`src/proxy.c`): allowlist, then for a hostname one
+resolution and the SSRF filter, and the proxy dials the address it kept. A
+numeric target needs a literal-IP or CIDR grant of its own. See
+[egress-filter.md](egress-filter.md).
 
 ## Coverage: what gets network inside the sandbox
 
@@ -236,7 +238,9 @@ program whose preloaded library it cannot satisfy, every sandboxed shell
 command died, `/bin/sh` included. It also could not load on musl hosts, was
 blind to static binaries (Go, musl Rust), and needed a loopback carve-out to
 coexist with the proxy-variable path. What it added over the variables was
-ssh and raw sockets; ssh is covered by `connect` mode.
+ssh and raw sockets; ssh is covered by `connect` mode. The proxy's `RESOLVE`
+request and its per-address "bless" set, which existed only so the library
+could resolve first and connect by number second, were removed in v0.6.2.
 
 ## Implementation Status (all shipped)
 

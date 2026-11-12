@@ -87,7 +87,7 @@ jobs:
 
       - name: No namespace code is linked
         run: |
-          ! nm build/cclaw | grep -E ' [Tt] (sandbox_setup_static_egress|sandbox_mask_state_files|bind_path_into)$'
+          ! nm build/cclaw | grep -E ' [Tt] (sandbox_setup_proxy|sandbox_mask_state_files|bind_path_into)$'
 
       - name: Doctor reports the missing layer
         run: |

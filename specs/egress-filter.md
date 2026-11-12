@@ -10,16 +10,20 @@ This note specifies the decision function behind the proxy's per-connection
 check. It **replaced** the old exact-string `host_allowed()` (deleted; the
 staged pipeline landed as `host_decide()` in `src/proxy.c` over the
 `host_match()`/CIDR primitives in `src/host_match.c`) with a richer rule
-grammar. It does **not** change the proxy's
-architecture, lifetime, bless set, or resolve-then-dial-literal anti-TOCTOU
-behaviour — those are already correct and are reused as-is.
+grammar. It does **not** change the proxy's architecture, lifetime, or
+resolve-then-dial-literal anti-TOCTOU behaviour.
+
+The decision has one entry point: `proxy_decide()` in `src/proxy.c`
+(`host_decide()` for the allowlist, then resolution and the IP filter for a
+hostname). The connection handler calls it for every request, and the policy
+tests call it directly.
 
 ---
 
 ## 1. Enforcement point (unchanged)
 
-- `proxy.c` `handle_client()`, per `CONNECT` / `RESOLVE`, keyed on
-  `(host, port)`.
+- `proxy.c` `handle_client()`, once per connection, keyed on `(host, port)`.
+  The preamble is `host:port`; there is no other request.
 - Sole egress route: the netns gives sandboxed children no other path out, so
   a program cannot route around the decision.
 - The decision function (`host_decide()`, this note's `decide()`) replaced
@@ -29,10 +33,15 @@ What stays exactly as it is today:
 
 - **Deny-by-default.** An empty / NULL allowlist denies every host. No network
   rather than allow-all.
-- **resolve_and_bless / bless set / numeric-CONNECT binding.** A hostname is
-  resolved, survivors are blessed with a TTL, and a numeric CONNECT only
-  succeeds against a blessed IP. This closes the resolve→connect TOCTOU and
-  DNS-rebinding window and is **not** modified — the new pipeline feeds it.
+- **Resolve, then dial the literal.** The proxy resolves an allowlisted
+  hostname itself, filters the addresses, and dials the one it kept. There is
+  one resolution per connection, done by the proxy, so there is no
+  resolve→connect TOCTOU and no window for DNS rebinding. A numeric target is
+  never admitted on the strength of a hostname: it needs a literal-IP or CIDR
+  grant of its own. (Until v0.6.1 the proxy also answered a `RESOLVE` request
+  and remembered the addresses it returned in a TTL-bound "bless" set, so
+  that a client could resolve first and connect by number second. That was
+  the `LD_PRELOAD` library's half of the protocol and went with it.)
 - **Per-call proxy lifetime, single-threaded bind-before-fork.** Untouched.
 - **The UDS preamble + net_shim CONNECT path.** Untouched — only the decision
   function changed.
@@ -64,8 +73,8 @@ Stage 4a — PORT CHECK                      [optional]
 
 Stage 4b — RESOLVE + IP RANGE CHECK        [SSRF / rebind floor]
     resolve host; for each candidate IP apply §4 IP rules.
-    No permitted IP survives → DENY. Survivors are blessed (existing TTL
-    mechanism). Numeric CONNECT must hit a blessed IP (existing).
+    No permitted IP survives → DENY. The first permitted IP is the one
+    dialed.
 
 Otherwise → ALLOW.
 ```
@@ -110,9 +119,9 @@ use cases; the dangerous third pattern is excluded):
 
 1. **Direct literal IP in a granted CIDR.** Operator grants `10.0.0.0/8` (or
    `192.168.1.0/24`); the agent dials `192.168.1.50` directly; it is in range
-   → permitted + blessed. ("I go to those local IPs directly.")
+   → permitted. ("I go to those local IPs directly.")
 2. **Internal hostname resolving into a granted CIDR.** `something.local`
-   resolves via the operator's own resolver to `10.x` → permitted + blessed.
+   resolves via the operator's own resolver to `10.x` → permitted.
    ("I have local DNS pointing at internal hosts.")
 
 The **excluded** pattern — the only one that is an attack and is never a real
@@ -250,8 +259,8 @@ same `decide()` across every redirect hop. Therefore:
   (`cidr_parse`, `host_match`, `cidr_match`, `granted_exact`). Grants are
   partitioned into hostname rules and CIDR rules at `proxy_bind` time.
 - **Metadata carve-out** (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`):
-  enforced on both the numeric-CONNECT path (`host_decide`) and the
-  RESOLVE path (`addr_permitted`). IPv4-mapped IPv6 (`::ffff:x.x.x.x`) is
+  enforced for a numeric target (`host_decide`) and for every address a
+  hostname resolves to (`addr_permitted`). IPv4-mapped IPv6 (`::ffff:x.x.x.x`) is
   canonicalized to its v4 form before any check, closing the mapped-address
   bypass.
 - **Suffix matching** (`.github.com` → exact base + dot-boundary suffix),
@@ -288,13 +297,10 @@ same `decide()` across every redirect hop. Therefore:
   A hostname-authorized CONNECT now gets a bounded `MSG_PEEK` (2048B cap,
   ~2s budget) hand-rolled ClientHello walk before the blind splice starts.
   Gate (`sni_gate` in `handle_client()`): connections whose authority derives
-  from a hostname rule — a hostname CONNECT, or a numeric CONNECT to an IP
-  blessed by hostname resolution (`ProxyBlessedAddr.via_hostname`, the common
-  getaddrinfo-shim path of RESOLVE-then-dial). An **exact** literal-IP grant
-  is exempt (the operator vouched for the address itself — the same
-  exact-vs-covering distinction as the metadata carve-out); a covering CIDR
-  grant does not lift the gate, it authorizes reaching a range, not a
-  particular vhost identity. Fallback: fails open (relay proceeds) on
+  from a hostname rule, which since the `RESOLVE` request was removed means
+  exactly a hostname CONNECT. A numeric CONNECT carries no hostname authority
+  — it is admitted only by a literal-IP or CIDR grant, where the operator
+  vouched for the address or range itself — so it is not gated. Fallback: fails open (relay proceeds) on
   unparseable SNI — non-TLS traffic or a ClientHello that doesn't fit the
   peek budget passes through unaffected, since a hostname grant never implied
   the protocol was HTTPS. One exception (D7, resolved 2026-07-17): a
@@ -306,8 +312,7 @@ same `decide()` across every redirect hop. Therefore:
   a no-SNI hello. Match rule: when SNI
   *is* parsed, checked against the full granted host-rule set via
   `host_match()`, not just the specific rule that authorized this connection
-  — mirrors how `bless_contains()` already works at the IP level (a suffix
-  grant may legitimately cover sibling hosts sharing the CDN IP). No MITM —
+  (a suffix grant may legitimately cover sibling hosts sharing the CDN IP). No MITM —
   SNI is read cleartext from the ClientHello, never decrypted.
 
 ### Still open

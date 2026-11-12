@@ -1,5 +1,5 @@
 /* test_proxy.c — unit test for credential proxy thread.
- * Tests UDS accept, RESOLVE, CONNECT preamble, allowed_hosts enforcement. */
+ * Tests UDS accept, the decision function, CONNECT preamble, allowed_hosts enforcement. */
 #define _POSIX_C_SOURCE 200809L
 #include "proxy.h"
 #include "test_proxy_util.h"
@@ -89,27 +89,18 @@ static void test_proxy_start_stop(void) {
     printf("  PASS: proxy start/stop\n");
 }
 
-static void test_resolve_blessed(void) {
-    /* A granted, public literal IP resolves and is blessed. getaddrinfo of a
-     * numeric literal does not touch the network. */
+static void test_literal_grant_allowed(void) {
+    /* A granted literal IP is allowed and is itself the address to dial. */
     ProxyContext ctx;
     int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
     assert(rc == 0);
 
-    int fd = uds_connect(proxy_sock_path(&ctx));
-    assert(fd >= 0);
-
-    const char *req = "RESOLVE 8.8.8.8\n";
-    write(fd, req, strlen(req));
-
-    char resp[128];
-    int n = read_line(fd, resp, sizeof(resp));
-    assert(n > 0);
-    assert(strncmp(resp, "ADDR 8.8.8.8", 12) == 0);
-    close(fd);
+    char ip[64];
+    assert(proxy_decide(&ctx, "8.8.8.8", ip, sizeof(ip), NULL) == PROXY_ALLOWED);
+    assert(strcmp(ip, "8.8.8.8") == 0);
 
     proxy_stop(&ctx);
-    printf("  PASS: resolve blessed (granted public IP)\n");
+    printf("  PASS: granted literal IP allowed\n");
 }
 
 static void test_resolve_denied(void) {
@@ -118,17 +109,8 @@ static void test_resolve_denied(void) {
     int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
     assert(rc == 0);
 
-    int fd = uds_connect(proxy_sock_path(&ctx));
-    assert(fd >= 0);
-
-    const char *req = "RESOLVE notallowed.test\n";
-    write(fd, req, strlen(req));
-
-    char resp[128];
-    int n = read_line(fd, resp, sizeof(resp));
-    assert(n > 0);
-    assert(strncmp(resp, "ERROR", 5) == 0);
-    close(fd);
+    char ip[64];
+    assert(proxy_decide(&ctx, "notallowed.test", ip, sizeof(ip), NULL) == PROXY_DENIED);
 
     proxy_stop(&ctx);
     printf("  PASS: resolve denied (not in allowlist)\n");
@@ -142,17 +124,8 @@ static void test_resolve_private_rejected(void) {
     int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
     assert(rc == 0);
 
-    int fd = uds_connect(proxy_sock_path(&ctx));
-    assert(fd >= 0);
-
-    const char *req = "RESOLVE localhost\n";
-    write(fd, req, strlen(req));
-
-    char resp[128];
-    int n = read_line(fd, resp, sizeof(resp));
-    assert(n > 0);
-    assert(strncmp(resp, "ERROR", 5) == 0);
-    close(fd);
+    char ip[64];
+    assert(proxy_decide(&ctx, "localhost", ip, sizeof(ip), NULL) == PROXY_UNRESOLVED);
 
     proxy_stop(&ctx);
     printf("  PASS: resolve private rejected (SSRF)\n");
@@ -203,8 +176,7 @@ static void test_connect_bad_preamble(void) {
 }
 
 static void test_connect_literal_private_ip_denied(void) {
-    /* A raw literal private IP that was never RESOLVE'd and is not explicitly
-     * granted is refused — the anti-SSRF rule for direct numeric connects to
+    /* A raw literal private IP that is not explicitly granted is refused — the anti-SSRF rule for direct numeric connects to
      * private space. */
     ProxyContext ctx;
     int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
@@ -223,42 +195,28 @@ static void test_connect_literal_private_ip_denied(void) {
     close(fd);
 
     proxy_stop(&ctx);
-    printf("  PASS: connect literal private IP denied (unblessed)\n");
+    printf("  PASS: connect literal private IP denied (no grant)\n");
 }
 
 static void test_connect_literal_ungranted_public_ip_denied(void) {
     /* A raw literal public IP with no covering CIDR grant is DENIED — a
      * hostname grant (e.g. "8.8.8.8" or "example.com" in grant_hosts) never
      * authorizes an unrelated literal IP. host_decide's numeric branch is
-     * deliberately NOT symmetric with addr_permitted (the RESOLVE-completion
+     * deliberately NOT symmetric with addr_permitted (the post-resolution
      * check): addr_permitted only ever runs after a hostname already passed
      * host_match, so unconditionally allowing the resulting public IP is
      * spending a grant that was already earned. A raw literal skips that
      * vetting entirely, so it needs its own CIDR grant — otherwise any tool
      * call could reach an arbitrary public host by IP with zero grants,
-     * defeating the allowlist. Exercised via RESOLVE rather than a numeric
-     * CONNECT: both preambles route through the same host_decide() gate, but
-     * RESOLVE on a numeric literal never leaves the process (getaddrinfo of a
-     * literal is a pure parse, see test_resolve_blessed) whereas CONNECT
-     * would hand the (unreachable, real) address to dial_ip()'s untimed
-     * connect() — proxy_stop() waits for that thread to finish, so a real
-     * dial here could block the test for minutes. Same policy code path, no
-     * real-network risk. */
+     * defeating the allowlist. Asked of proxy_decide directly: a numeric
+     * CONNECT takes the same decision, but would then hand a real,
+     * unreachable address to dial_ip(). */
     ProxyContext ctx;
     int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
     assert(rc == 0);
 
-    int fd = uds_connect(proxy_sock_path(&ctx));
-    assert(fd >= 0);
-
-    const char *req = "RESOLVE 1.2.3.4\n";
-    write(fd, req, strlen(req));
-
-    char resp[128];
-    int n = read_line(fd, resp, sizeof(resp));
-    assert(n > 0);
-    assert(strncmp(resp, "ERROR denied", 12) == 0);
-    close(fd);
+    char ip[64];
+    assert(proxy_decide(&ctx, "1.2.3.4", ip, sizeof(ip), NULL) == PROXY_DENIED);
 
     proxy_stop(&ctx);
     printf("  PASS: literal ungranted public IP denied (no allowlist bypass by IP)\n");
@@ -398,7 +356,7 @@ int main(void) {
 
     printf("test_proxy:\n");
     test_proxy_start_stop();
-    test_resolve_blessed();
+    test_literal_grant_allowed();
     test_resolve_denied();
     test_resolve_private_rejected();
     test_connect_denied();

@@ -577,7 +577,7 @@ static void sandbox_setup_proxy(const char *uds_path) {
          * the shim orphans to init and lingers forever. PDEATHSIG doesn't
          * survive fork(), so it must be set here, not inherited from the
          * sandboxed process that forked us (same reasoning as the PID-ns
-         * init's re-arm, sandbox_apply_namespace above). */
+         * init's re-arm, contain_enter above). */
         prctl(PR_SET_PDEATHSIG, SIGKILL);
 
         /* Shim: drop stdout/stderr (they point at the tool result pipe — the

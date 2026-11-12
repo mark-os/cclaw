@@ -56,7 +56,17 @@ static int read_line(int fd, char *buf, int max) {
     return pos;
 }
 
-/* Send a RESOLVE or CONNECT preamble and return the first line of the response */
+/* Ask the decision function directly — no socket, no dial. Formats the
+ * verdict as one line so the assertions read like the wire protocol. */
+static int probe(const ProxyContext *ctx, const char *target, char *resp, int cap) {
+    char ip[64];
+    int v = proxy_decide(ctx, target, ip, sizeof(ip), NULL);
+    if (v == PROXY_ALLOWED) return snprintf(resp, (size_t)cap, "ADDR %s\n", ip);
+    return snprintf(resp, (size_t)cap, "%s",
+                    v == PROXY_DENIED ? "ERROR denied\n" : "ERROR resolve\n");
+}
+
+/* Send a CONNECT preamble and return the first line of the response */
 static int proxy_req(const char *sock, const char *req, char *resp, int resp_cap) {
     int fd = uds_connect(sock);
     if (fd < 0) return -1;
@@ -75,7 +85,7 @@ static void test_suffix_subdomain_allow(void) {
 
     char resp[128];
     /* api.github.com is a subdomain — should be allowed at hostname level */
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE api.github.com\n", resp, sizeof(resp));
+    probe(&ctx, "api.github.com", resp, sizeof(resp));
     /* It resolves to a public IP, so we get ADDR (or ERROR resolve if DNS fails
      * in CI — but the point is it's NOT "ERROR denied") */
     assert(strncmp(resp, "ERROR denied", 12) != 0);
@@ -90,7 +100,7 @@ static void test_suffix_bare_allow(void) {
     assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
 
     char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE github.com\n", resp, sizeof(resp));
+    probe(&ctx, "github.com", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) != 0);
 
     proxy_stop(&ctx);
@@ -103,7 +113,7 @@ static void test_suffix_evil_deny(void) {
     assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
 
     char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE evilgithub.com\n", resp, sizeof(resp));
+    probe(&ctx, "evilgithub.com", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) == 0);
 
     proxy_stop(&ctx);
@@ -150,12 +160,9 @@ static void test_cidr_grant_out_of_range_deny(void) {
     assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
 
     char resp[128];
-    /* Use RESOLVE path to avoid hanging TCP connect to unreachable IP.
-     * RESOLVE 10.0.0.1 → resolves to itself (literal), addr_permitted checks
-     * it: private, not in 192.168.1.0/24 → denied. */
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE 10.0.0.1\n", resp, sizeof(resp));
-    /* host_decide allows it (it's a numeric IP in... wait, 10.0.0.1 is NOT in
-     * 192.168.1.0/24). host_decide will deny at the hostname level too. */
+    /* Asked of the decision function, so nothing is dialed: a private
+     * literal outside every granted CIDR. */
+    probe(&ctx, "10.0.0.1", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) == 0);
 
     proxy_stop(&ctx);
@@ -167,21 +174,9 @@ static void test_cidr_grant_out_of_range_deny(void) {
 static void test_metadata_covering_cidr_deny(void) {
     /* Grant 169.254.0.0/16 which CONTAINS 169.254.169.254. The metadata IP
      * must still be DENIED — CIDR grants cannot reach metadata.
-     * Use numeric CONNECT — host_decide sees 169.254.169.254 as a numeric IP
-     * in the granted CIDR so it passes host_decide, but addr_permitted (called
-     * indirectly for numeric IPs via bless path) blocks it.
-     * Actually for numeric CONNECT: host_decide → bless_add → dial. But wait —
-     * the metadata check is in addr_permitted which is only on the RESOLVE path.
-     * For numeric CONNECT, host_decide does the check. So I need to ensure
-     * host_decide also enforces the metadata carve-out for numeric IPs.
-     *
-     * Actually looking at the code flow: numeric CONNECT → host_decide. host_decide
-     * tries host_match (no), then cidr_match on the binary → 169.254.169.254 IS
-     * in 169.254.0.0/16 → returns 1. Then it would bless and dial.
-     *
-     * This means the metadata carve-out needs to be enforced in host_decide too,
-     * not just addr_permitted! The numeric CONNECT path bypasses addr_permitted
-     * entirely. Let me fix host_decide to check metadata range. */
+     * A numeric target is judged by host_decide alone, so the carve-out has
+     * to live there (it does: numeric_ip_permitted checks the metadata range
+     * before any CIDR match). */
 
     char *hosts[] = {"169.254.0.0/16"};
     ProxyContext ctx;
@@ -211,19 +206,15 @@ static void test_metadata_wildcard_cidr_deny(void) {
 
 static void test_metadata_exact_grant_allow(void) {
     /* Grant the exact metadata IP literal — this IS allowed.
-     * Can't actually dial 169.254.169.254, so verify via RESOLVE path:
-     * RESOLVE 169.254.169.254 → resolves to itself, addr_permitted checks:
-     * in metadata range → granted_exact → yes (it's a /32 for exactly that IP)
-     * → ADDR returned. */
+     * Asked of the decision function (169.254.169.254 cannot be dialed here):
+     * in the metadata range → granted_exact → yes, and the literal is itself
+     * the address to dial. */
     char *hosts[] = {"169.254.169.254"};
     ProxyContext ctx;
     assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
 
     char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE 169.254.169.254\n", resp, sizeof(resp));
-    /* host_decide allows the hostname-level check (it's the literal in CIDR rules).
-     * Then resolve_and_bless resolves → addr_permitted → in metadata → granted_exact
-     * → yes → blessed. */
+    probe(&ctx, "169.254.169.254", resp, sizeof(resp));
     assert(strncmp(resp, "ADDR", 4) == 0);
 
     proxy_stop(&ctx);
@@ -240,7 +231,7 @@ static void test_ssrf_private_resolve_deny(void) {
     assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
 
     char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE localhost\n", resp, sizeof(resp));
+    probe(&ctx, "localhost", resp, sizeof(resp));
     /* resolve succeeds at DNS level but all results are private and ungrated → ERROR */
     assert(strncmp(resp, "ERROR", 5) == 0);
 
@@ -255,7 +246,7 @@ static void test_empty_rules_deny(void) {
     assert(proxy_start(&ctx, tmpdir, NULL, 0) == 0);
 
     char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE anything.com\n", resp, sizeof(resp));
+    probe(&ctx, "anything.com", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) == 0);
 
     proxy_stop(&ctx);
@@ -272,7 +263,7 @@ static void test_deny_overrides_allow(void) {
     assert(proxy_start_with_deny(&ctx, tmpdir, hosts, 1, deny, 1) == 0);
 
     char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE api.github.com\n", resp, sizeof(resp));
+    probe(&ctx, "api.github.com", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) == 0);
 
     proxy_stop(&ctx);
@@ -288,11 +279,11 @@ static void test_deny_subdomain_blocked(void) {
 
     char resp[128];
     /* api.secret.example.com is a subdomain of the denied label */
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE api.secret.example.com\n", resp, sizeof(resp));
+    probe(&ctx, "api.secret.example.com", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) == 0);
 
     /* The exact denied host too */
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE secret.example.com\n", resp, sizeof(resp));
+    probe(&ctx, "secret.example.com", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) == 0);
 
     proxy_stop(&ctx);
@@ -301,16 +292,15 @@ static void test_deny_subdomain_blocked(void) {
 
 static void test_deny_unrelated_host_unaffected(void) {
     /* Deny list for one host does not interfere with other allowed targets.
-     * Numeric IP grant + RESOLVE keeps this DNS-free (no real network in
-     * unit tests — a hostname that passes the allow check would hit the
-     * resolver). */
+     * A numeric IP grant keeps this DNS-free (no real network in unit tests —
+     * a hostname that passes the allow check would hit the resolver). */
     char *hosts[] = {".github.com", "127.0.0.1"};
     char *deny[]  = {"github.com"};
     ProxyContext ctx;
     assert(proxy_start_with_deny(&ctx, tmpdir, hosts, 2, deny, 1) == 0);
 
     char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE 127.0.0.1\n", resp, sizeof(resp));
+    probe(&ctx, "127.0.0.1", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) != 0);
 
     proxy_stop(&ctx);
@@ -325,7 +315,7 @@ static void test_deny_empty_changes_nothing(void) {
     assert(proxy_start_with_deny(&ctx, tmpdir, hosts, 1, NULL, 0) == 0);
 
     char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE 127.0.0.1\n", resp, sizeof(resp));
+    probe(&ctx, "127.0.0.1", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) != 0);
 
     proxy_stop(&ctx);
@@ -333,36 +323,33 @@ static void test_deny_empty_changes_nothing(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * PATH-SPECIFIC METADATA CARVE-OUT TESTS (2.1–2.5)
- * Each test explicitly exercises one path (RESOLVE or numeric CONNECT)
- * to prove both enforcement sites work independently.
+ * METADATA CARVE-OUT, BY ENTRY POINT (2.1–2.7)
+ * The decision function asked directly, and a numeric CONNECT over the
+ * socket: the carve-out must hold at both.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* 2.1: RESOLVE path, covering CIDR — metadata denied via addr_permitted */
+/* 2.1: decision function, covering CIDR — metadata denied */
 static void test_path_resolve_covering_cidr_deny(void) {
-    /* Grant 169.254.0.0/16. RESOLVE 169.254.169.254:
-     * host_decide allows the hostname-level (numeric IP in granted CIDR via
-     * host_decide's cidr_match? No — metadata carve-out in host_decide fires).
-     * Actually: RESOLVE goes through host_decide first, which also enforces the
-     * carve-out. So this tests both layers on the RESOLVE path. */
+    /* Grant 169.254.0.0/16 and ask about 169.254.169.254: in the metadata
+     * range with no exact grant. */
     char *hosts[] = {"169.254.0.0/16"};
     ProxyContext ctx;
     assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
 
     char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE 169.254.169.254\n", resp, sizeof(resp));
+    probe(&ctx, "169.254.169.254", resp, sizeof(resp));
     /* host_decide rejects it (metadata range, no exact grant) → "ERROR denied" */
     assert(strncmp(resp, "ERROR denied", 12) == 0);
 
     proxy_stop(&ctx);
-    printf("  PASS: 2.1 RESOLVE path + covering CIDR → metadata DENIED\n");
+    printf("  PASS: 2.1 decision + covering CIDR → metadata DENIED\n");
 }
 
 /* 2.2: NUMERIC CONNECT path, covering CIDR — THE path-specific case */
 static void test_path_numeric_connect_covering_cidr_deny(void) {
     /* Grant 169.254.0.0/16; CONNECT 169.254.169.254:80 (numeric target).
-     * Flow: bless_contains (empty) → host_decide → in_metadata_range → true →
-     * granted_exact (no /32 for metadata) → 0 → host_decide returns 0 → DENIED */
+     * Flow: host_decide → in_metadata_range → true → granted_exact (no /32
+     * for metadata) → 0 → DENIED */
     char *hosts[] = {"169.254.0.0/16"};
     ProxyContext ctx;
     assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
@@ -389,49 +376,40 @@ static void test_path_numeric_connect_all_cidr_deny(void) {
     printf("  PASS: 2.3 numeric CONNECT + 0.0.0.0/0 → metadata DENIED\n");
 }
 
-/* 2.4: Exact grant — RESOLVE path allows (proves addr_permitted accepts).
- * Numeric CONNECT to metadata IP would hang (unreachable) so we verify via
- * RESOLVE only. The bless shortcut for metadata with exact grant is proven
- * structurally: if RESOLVE blesses it, a subsequent numeric CONNECT would hit
- * bless_contains → allowed. We test the RESOLVE→ADDR to confirm the grant. */
+/* 2.4: Exact grant — allowed. A numeric CONNECT to the metadata IP would
+ * hang (unreachable), so this asks the decision function only. */
 static void test_path_exact_grant_resolve_allow(void) {
     char *hosts[] = {"169.254.169.254"};
     ProxyContext ctx;
     assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
 
     char resp[128];
-    /* RESOLVE path: host_decide → metadata range → granted_exact → yes.
-     * Then resolve_and_bless → addr_permitted → metadata → granted_exact → yes
-     * → blesses → returns ADDR. */
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE 169.254.169.254\n", resp, sizeof(resp));
+    /* host_decide → metadata range → granted_exact → yes. */
+    probe(&ctx, "169.254.169.254", resp, sizeof(resp));
     assert(strncmp(resp, "ADDR", 4) == 0);
 
     proxy_stop(&ctx);
-    printf("  PASS: 2.4 exact grant → RESOLVE path ALLOWS metadata IP\n");
+    printf("  PASS: 2.4 exact grant ALLOWS metadata IP\n");
 }
 
-/* 2.5: Bless-shortcut probe — covering CIDR cannot launder metadata into bless set.
- * Attempt RESOLVE 169.254.169.254 with covering CIDR grant (should fail to bless),
- * then numeric CONNECT (should not find it blessed → falls to host_decide → DENIED). */
-static void test_path_bless_shortcut_probe(void) {
+/* 2.5: Asking first changes nothing — the proxy keeps no memory between
+ * requests (the per-address "bless" set went with the RESOLVE request), so a
+ * denied question cannot prime a later numeric CONNECT. */
+static void test_path_no_state_between_requests(void) {
     char *hosts[] = {"169.254.0.0/16"};
     ProxyContext ctx;
     assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
 
     char resp[128];
-    /* Step 1: try to get metadata blessed via RESOLVE path.
-     * host_decide rejects at hostname level (metadata carve-out), so resolve
-     * never runs and bless_add is never called. */
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE 169.254.169.254\n", resp, sizeof(resp));
+    probe(&ctx, "169.254.169.254", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) == 0);
 
-    /* Step 2: numeric CONNECT — bless_contains must be empty for metadata IP.
-     * Falls through to host_decide → metadata carve-out → DENIED. */
+    /* Then a numeric CONNECT: host_decide → metadata carve-out → DENIED. */
     proxy_req(proxy_sock_path(&ctx), "169.254.169.254:80\n", resp, sizeof(resp));
     assert(strncmp(resp, "DENIED", 6) == 0);
 
     proxy_stop(&ctx);
-    printf("  PASS: 2.5 bless-shortcut probe: covering CIDR cannot launder metadata\n");
+    printf("  PASS: 2.5 no state between requests: covering CIDR cannot launder metadata\n");
 }
 
 /* 2.6: IPv4-mapped IPv6 must not launder a metadata IP past the carve-out.
@@ -448,15 +426,15 @@ static void test_path_mapped_v6_metadata_deny(void) {
     proxy_req(proxy_sock_path(&ctx), "::ffff:169.254.169.254:80\n", resp, sizeof(resp));
     assert(strncmp(resp, "DENIED", 6) == 0);
 
-    /* RESOLVE path of the same mapped address — also denied at host_decide. */
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE ::ffff:169.254.169.254\n", resp, sizeof(resp));
+    /* The decision function on the same mapped address — also denied. */
+    probe(&ctx, "::ffff:169.254.169.254", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) == 0);
 
     proxy_stop(&ctx);
     printf("  PASS: 2.6 mapped IPv4-in-IPv6 cannot launder metadata past ::/0\n");
 }
 
-/* 2.7: "*" host grant allows an ordinary hostname RESOLVE (the wildcard's
+/* 2.7: "*" host grant allows an ordinary hostname (the wildcard's
  * actual purpose) but still cannot launder the metadata IP — the numeric
  * CIDR pipeline in host_decide runs before host_match ever sees "*". */
 static void test_path_wildcard_allows_host_denies_metadata(void) {
@@ -465,17 +443,17 @@ static void test_path_wildcard_allows_host_denies_metadata(void) {
     assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
 
     char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE example.com\n", resp, sizeof(resp));
+    probe(&ctx, "example.com", resp, sizeof(resp));
     assert(strncmp(resp, "ADDR", 4) == 0);
 
     proxy_req(proxy_sock_path(&ctx), "169.254.169.254:80\n", resp, sizeof(resp));
     assert(strncmp(resp, "DENIED", 6) == 0);
 
-    proxy_req(proxy_sock_path(&ctx), "RESOLVE 169.254.169.254\n", resp, sizeof(resp));
+    probe(&ctx, "169.254.169.254", resp, sizeof(resp));
     assert(strncmp(resp, "ERROR denied", 12) == 0);
 
     proxy_stop(&ctx);
-    printf("  PASS: 2.7 \"*\" grant ALLOWS hostname RESOLVE, still DENIES metadata\n");
+    printf("  PASS: 2.7 \"*\" grant ALLOWS a hostname, still DENIES metadata\n");
 }
 
 int main(void) {
@@ -518,7 +496,7 @@ int main(void) {
     test_path_numeric_connect_covering_cidr_deny();
     test_path_numeric_connect_all_cidr_deny();
     test_path_exact_grant_resolve_allow();
-    test_path_bless_shortcut_probe();
+    test_path_no_state_between_requests();
     test_path_mapped_v6_metadata_deny();
     test_path_wildcard_allows_host_denies_metadata();
 

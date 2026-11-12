@@ -18,6 +18,14 @@ set -euo pipefail
 : "${CURL_VERSION:?set CURL_VERSION}"
 
 export DEBIAN_FRONTEND=noninteractive
+# Bullseye is past end of life and its packages now live on
+# archive.debian.org; deb.debian.org has already pruned bullseye-security.
+rm -f /etc/apt/sources.list.d/*
+cat > /etc/apt/sources.list <<'SRC'
+deb http://archive.debian.org/debian bullseye main
+deb http://archive.debian.org/debian bullseye-updates main
+deb http://archive.debian.org/debian-security bullseye-security main
+SRC
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
   build-essential libssl-dev xxd git ca-certificates >/dev/null

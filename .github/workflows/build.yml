@@ -194,7 +194,7 @@ jobs:
           curl -sSfLo curl-${CURL_VERSION}.tar.gz https://curl.se/download/curl-${CURL_VERSION}.tar.gz
           # seccomp=unconfined: since the ubuntu-26.04 runner image (Docker
           # 29, kernel 7.0) the default seccomp profile blocks the syscall
-          # 32-bit glibc uses for DNS, so apt cannot resolve deb.debian.org.
+          # 32-bit glibc uses for DNS, so apt cannot resolve its mirrors.
           # Throwaway container building our own code — no isolation lost
           # that matters here.
           docker run --rm --platform linux/386 --security-opt seccomp=unconfined \

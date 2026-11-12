@@ -121,7 +121,7 @@ of finding out.
 - **Production deploy**: any Linux box — small EC2 instances, embedded SoCs, old and new architectures (ARM64, ARMv7, ARMv5TE, x86_64, RISC-V)
 - **Known target**: Pogoplug V4 (ARMv5TE, 128MB RAM, Debian Bookworm armel)
 
-**Build/release considerations**: a source build (`make`) vendors everything except libcurl (dynamic link to system `libcurl.so`). Release binaries are a separate build: static musl with a pinned curl + mbedTLS inside, cross-compiled per target by `scripts/build_static.sh` — see [specs/static-build.md](specs/static-build.md).
+**Build/release considerations**: a source build (`make`) vendors everything except libcurl (dynamic link to system `libcurl.so`). Release binaries are a separate build: static musl with a pinned curl + mbedTLS inside, cross-compiled per target by `scripts/build_static.sh` — see [specs/static-build.md](specs/static-build.md). The portability goal and the capability layers a host may or may not support are in [specs/portability.md](specs/portability.md).
 
 ## Memory Model
 

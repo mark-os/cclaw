@@ -17,7 +17,6 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include "test_util.h"
 
 static char sock_path[128];
 static int server_fd = -1;
@@ -313,7 +312,7 @@ static void test_loopback_passthrough(void) {
 }
 
 int main(void) {
-    TEST_INIT();
+    setvbuf(stdout, NULL, _IOLBF, 0);   /* no test_util.h: this binary links no cclaw code */
     printf("test_preload_net:\n");
     alarm(10); /* Hard timeout — kill test if stuck */
 

@@ -156,7 +156,10 @@ libsystemd dependency; journald receives the messages through syslog.
 
 The level comes from `CCLAW_LOG_LEVEL`, or from the CLI flags `-v`/`--debug`
 (debug), `-vv`/`--trace` (trace) and `--log-level=LEVEL`. A flag overrides the
-env var and is exported to child processes through `CCLAW_LOG_LEVEL`.
+env var and is exported to child processes through `CCLAW_LOG_LEVEL`. With
+neither set, the default is `info`, except in the interactive CLI on a
+terminal, where it is `error` so that log lines do not interrupt the
+conversation.
 
 **Destinations.** The interactive CLI (not `--daemon`, not `--channel`) also
 writes each message to stderr as `cclaw[<pid>]: <message>`. The daemon and

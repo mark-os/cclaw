@@ -42,11 +42,18 @@ the cost of not depending on the host's copy.
 - **The preload shim is not musl.** `libcclaw_net.so` is `LD_PRELOAD`ed into
   the *host's* programs inside the sandbox, so it must match the host's libc.
   The script builds it with the plain target GCC (`PRELOAD_CC`), i.e. against
-  the build machine's glibc. Its floor is therefore that glibc's symbol
-  versions (`dlsym@GLIBC_2.34` on current runners), and on a musl host
-  (Alpine, OpenWrt) it cannot load — dynamic programs in the shell tier then
-  rely on `net_shim` and the proxy environment variables. This is the one
-  remaining libc dependency of a release binary and it is an open decision.
+  the build machine's glibc. Its floor is **glibc 2.34** (`dlsym@GLIBC_2.34`,
+  where `dlsym` moved into libc), and the script fails the build if any
+  symbol needs more. That check exists because the failure is total: on a
+  host whose glibc is older than the shim needs, `ld.so` refuses to start
+  *every* program the sandboxed shell runs (`version 'GLIBC_2.x' not found`),
+  `/bin/sh` included. v0.6.0 shipped needing 2.38 (`strtol` compiled under
+  `_GNU_SOURCE` on a current glibc becomes `__isoc23_strtol`) and broke the
+  shell on Debian 12 and Amazon Linux 2023 — so the shim must not call the
+  `strto*`/`scanf` families. Hosts below 2.34 and musl hosts (Alpine,
+  OpenWrt) remain unsupported for the sandboxed shell; what the shim does on
+  a musl host is untested. This is the one remaining libc dependency of a
+  release binary and it is an open decision.
 - **`net_shim` is static** (`NET_SHIM_LDFLAGS=-static`): it runs inside the
   sandbox by itself and must not need a loader the host lacks.
 - **Thread stacks.** musl's default thread stack is ~128K (glibc: 8M). All

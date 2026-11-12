@@ -136,4 +136,17 @@ if "${cross}readelf" -lW build/cclaw | grep -Eq 'INTERP|DYNAMIC'; then
     echo "error: build/cclaw is not fully static" >&2
     exit 1
 fi
-echo "static build ok: build/cclaw ($target, $(wc -c < build/cclaw) bytes unstripped)"
+
+# The preload library is loaded into the *host's* programs. One symbol newer
+# than the host's glibc and ld.so refuses to start every command the sandboxed
+# shell runs (v0.6.0 shipped needing 2.38 and broke the shell on Debian 12 and
+# Amazon Linux 2023). 2.34 is where dlsym moved into libc; nothing may exceed it.
+shim_floor=2.34
+shim_max=$("${cross}readelf" -W --dyn-syms build/libcclaw_net.so |
+    grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
+if [ "$(printf '%s\n%s\n' "$shim_floor" "$shim_max" | sort -V | tail -1)" != "$shim_floor" ]; then
+    echo "error: build/libcclaw_net.so needs glibc $shim_max (floor is $shim_floor):" >&2
+    "${cross}readelf" -W --dyn-syms build/libcclaw_net.so | grep "GLIBC_$shim_max" >&2
+    exit 1
+fi
+echo "static build ok: build/cclaw ($target,$(wc -c < build/cclaw) bytes unstripped)"

@@ -320,13 +320,35 @@ static void print_warn(const char *label, const char *detail) {
 
 /* Layer 1. The loop needs a database, a config, a provider it holds a key
  * for, and — for an https endpoint — something to verify the peer against. */
+/* Does any provider have a key? A provider names its key (api_key_env); the
+ * value is that env var or a system-scope secret of that name. On a deployed
+ * box the keys are in the secrets table and the daemon's env file is not in
+ * the operator's shell, so cfg->provider.api_key alone says "no" wrongly. */
+static int any_provider_key(sqlite3 *db, const Config *cfg) {
+    if (cfg->provider.api_key && cfg->provider.api_key[0]) return 1;
+    sqlite3_stmt *st;
+    int found = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT p.api_key_env, EXISTS(SELECT 1 FROM secrets s"
+            "   WHERE s.name = p.api_key_env AND s.scope = 'system')"
+            " FROM providers p WHERE p.api_key_env <> '';",
+            -1, &st, NULL) != SQLITE_OK) return 0;
+    while (!found && sqlite3_step(st) == SQLITE_ROW) {
+        const char *env = (const char *)sqlite3_column_text(st, 0);
+        const char *val = env ? getenv(env) : NULL;
+        found = sqlite3_column_int(st, 1) || (val && val[0]);
+    }
+    sqlite3_finalize(st);
+    return found;
+}
+
 static void layer_core(sqlite3 *db, const Config *cfg) {
     const char *missing = NULL;
     int ca_missing = 0;
     util_ca_bundle(&ca_missing);
     if (!db) missing = "the database did not open";
     else if (!cfg) missing = "the config did not load";
-    else if (!cfg->provider.api_key || !cfg->provider.api_key[0])
+    else if (!any_provider_key(db, cfg))
         missing = "no provider has a key";
     else if (ca_missing && cfg->provider.base_url &&
              strncmp(cfg->provider.base_url, "https:", 6) == 0)

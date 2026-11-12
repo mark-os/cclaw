@@ -219,10 +219,18 @@ int getaddrinfo(const char *node, const char *service,
      * instead of a silent port-0 connect. */
     uint16_t port = 0;
     if (service) {
-        char *send_ = NULL;
-        long pval = strtol(service, &send_, 10);
-        if (send_ == service || *send_ != '\0' || pval < 1 || pval > 65535)
-            return EAI_SERVICE;
+        /* Digits by hand, not strtol: under _GNU_SOURCE a current glibc
+         * redirects strtol to __isoc23_strtol@GLIBC_2.38, and a library that
+         * needs a newer glibc than the host has makes ld.so refuse to start
+         * *every* program it is preloaded into. */
+        long pval = 0;
+        const char *d = service;
+        if (!*d) return EAI_SERVICE;
+        for (; *d; d++) {
+            if (*d < '0' || *d > '9' || pval > 65535) return EAI_SERVICE;
+            pval = pval * 10 + (*d - '0');
+        }
+        if (pval < 1 || pval > 65535) return EAI_SERVICE;
         port = (uint16_t)pval;
     }
 

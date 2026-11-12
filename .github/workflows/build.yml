@@ -8,55 +8,24 @@ on:
     branches: [master]
   workflow_dispatch: {}
 
+# Two concerns, kept apart:
+#  - test / compat: the *source build* path (host libc, system libcurl), which
+#    is what `make` does on a user's machine. Nothing here is shipped.
+#  - release: the artifacts. Static musl binaries with curl + mbedTLS inside,
+#    cross-compiled on one x64 runner by scripts/build_static.sh, and tested
+#    as built — the binary that is tested is the binary that ships.
+
 jobs:
-  linux-x64:
-    name: linux-x64 (native)
-    runs-on: ubuntu-latest
+  test:
+    name: test (${{ matrix.name }}, source build)
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev xxd
-
-      - name: Allow unprivileged user namespaces
-        # ubuntu-latest (24.04) restricts CLONE_NEWUSER via AppArmor by
-        # default; cclaw's namespace sandbox (and its tests) need it.
-        run: |
-          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-
-      - name: Build
-        run: make all
-
-      - name: Unit tests
-        run: make test
-
-      - name: Integration tests
-        run: make test-integration
-
-      - name: Package
-        # Strip + zip so every target unpacks to the same binary name —
-        # install is "download, unzip, ./cclaw" regardless of target.
-        run: |
-          mkdir -p dist
-          strip -o dist/cclaw build/cclaw
-          chmod +x dist/cclaw
-          (cd dist && zip -q cclaw-linux-x64.zip cclaw)
-          mv dist/cclaw dist/cclaw-linux-x64
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cclaw-linux-x64
-          path: |
-            dist/cclaw-linux-x64.zip
-            dist/cclaw-linux-x64
-
-  linux-arm64:
-    name: linux-arm64 (native, Graviton-class)
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: x64,   runner: ubuntu-latest }
+          - { name: arm64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
 
@@ -80,52 +49,73 @@ jobs:
       - name: Integration tests
         run: make test-integration
 
-      - name: Package
-        # Strip + zip so every target unpacks to the same binary name —
-        # install is "download, unzip, ./cclaw" regardless of target.
-        run: |
-          mkdir -p dist
-          strip -o dist/cclaw build/cclaw
-          chmod +x dist/cclaw
-          (cd dist && zip -q cclaw-linux-arm64.zip cclaw)
-          mv dist/cclaw dist/cclaw-linux-arm64
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cclaw-linux-arm64
-          path: |
-            dist/cclaw-linux-arm64.zip
-            dist/cclaw-linux-arm64
-
-  websocket-transport:
-    name: websocket transport (libcurl with ws)
+  compat:
+    name: compat (source build on an old distro, compile only)
+    # Rocky 9 carries libcurl 7.76 (no WebSocket API) and gcc 11: the oldest
+    # toolchain a source build is expected to survive. Nothing is run — the
+    # question is only whether it still compiles and links.
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
+    container: rockylinux:9
+    steps:
+      - name: Install dependencies
+        run: dnf -y install gcc make git libcurl-devel vim-common diffutils findutils
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          git config --global --add safe.directory "$PWD"
+          curl-config --version
+          make all
+
+  release-build:
+    name: release (${{ matrix.target }}, static musl)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x64,     packages: "" }
+          - { target: arm64,   packages: gcc-aarch64-linux-gnu,  strip: aarch64-linux-gnu-strip }
+          - { target: i586,    packages: gcc-i686-linux-gnu,     strip: i686-linux-gnu-strip }
+          - { target: armv5te, packages: gcc-arm-linux-gnueabi,  strip: arm-linux-gnueabi-strip, qemu_cpu: arm926 }
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev xxd
+      - name: Pin the emulated CPU
+        # qemu-user reads QEMU_CPU, including when it is entered through
+        # binfmt: the armv5te binary runs on an ARM926, so an instruction from
+        # a later architecture (leaked in through a library) is SIGILL here
+        # rather than on a Pogoplug. Set only where a model is named — an
+        # empty value is not "default", it is an unknown CPU.
+        if: matrix.qemu_cpu
+        run: echo "QEMU_CPU=${{ matrix.qemu_cpu }}" >> "$GITHUB_ENV"
 
-      - name: Build a WS-capable libcurl
-        # No distro libcurl can carry the conn.* transport: they ship without
-        # the ws/wss handlers, and even a ws-enabled build below 8.13.0 cannot
-        # delimit a fragmented message (older frame flags never surfaced FIN —
-        # see curl_ws_available in src/util.c). On such a libcurl the gateway
-        # suites skip, which is how a broken reassembly path once sat green for
-        # months. This job exists to make them actually run.
+      - name: Install toolchain
         run: |
-          curl -sSLo curl.tar.gz https://curl.se/download/curl-${CURL_VERSION}.tar.gz
-          tar xzf curl.tar.gz
-          cd curl-${CURL_VERSION}
-          ./configure --prefix=/opt/curlws --with-openssl --enable-websockets \
-            --disable-ldap --disable-ldaps --disable-manual --without-libpsl \
-            --without-brotli --without-zstd --without-libidn2 \
-            --without-nghttp2 --without-libssh2 >/dev/null
-          make -j"$(nproc)" >/dev/null
-          sudo make install >/dev/null
-        env:
-          CURL_VERSION: 8.21.0
+          sudo apt-get update
+          sudo apt-get install -y xxd qemu-user-static ${{ matrix.packages }}
+
+      - name: Register qemu for foreign binaries
+        # cclaw re-executes itself (/proc/self/exe) for tools and channels, so
+        # the smoke tests need the kernel to hand foreign ELF files to qemu —
+        # prefixing one command with qemu-arm would not cover the children.
+        if: matrix.target != 'x64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm,arm64
+
+      - name: Cache musl, mbedTLS and curl
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-deps/dl
+            build-deps/${{ matrix.target }}/prefix
+          key: static-deps-${{ matrix.target }}-${{ hashFiles('scripts/build_static.sh') }}
 
       - name: Allow unprivileged user namespaces
         run: |
@@ -134,107 +124,66 @@ jobs:
           fi
 
       - name: Build
-        run: make all
+        # Asserts on its own that the result has no dynamic dependencies.
+        run: scripts/build_static.sh "$TARGET"
 
-      - name: Integration tests
-        # Built against the system libcurl, run against the WS-capable one —
-        # same soname, so LD_LIBRARY_PATH is enough.
-        run: LD_LIBRARY_PATH=/opt/curlws/lib make test-integration
+      - name: Unit and integration tests against the artifact
+        # x64 only: the full suites, built static like the binary they drive.
+        if: matrix.target == 'x64'
+        run: |
+          scripts/build_static.sh "$TARGET" test
+          scripts/build_static.sh "$TARGET" test-integration
 
-      - name: Verify the WS suites actually ran
-        # Without this the job is self-defeating: if the libcurl above stops
-        # taking effect, both suites skip and the job still reports green —
-        # exactly the failure mode it was added to catch.
+      - name: Verify the WebSocket suites actually ran
+        # The artifact carries a ws-capable libcurl, so a SKIP here means the
+        # transport silently fell out of the build — the failure mode that
+        # once let a broken reassembly path sit green for months.
+        if: matrix.target == 'x64'
         run: |
           rc=0
           for t in channel_conn channel_discord; do
             log="/tmp/cclaw_test_integration_$t.txt"
             if grep -q SKIP "$log"; then
-              echo "::error::test_integration_$t skipped — WS libcurl not in effect"
+              echo "::error::test_integration_$t skipped — no WebSocket transport in the artifact"
               cat "$log"
               rc=1
             fi
           done
           exit $rc
 
-  linux-x86:
-    name: linux-x86 (i386, libcurl4)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build and smoke-test in i386 container
+      - name: Smoke-test the artifact
+        # Every target, emulated where foreign. Three things a static binary
+        # can get wrong that compiling cannot show: it starts at all, it can
+        # open a DB and probe its environment, and it can resolve a name,
+        # find the host CA bundle and finish a TLS handshake. The request
+        # carries a deliberately invalid key; any HTTP 4xx proves the
+        # handshake and the HTTP exchange both completed.
         run: |
-          docker run --rm --platform linux/386 -v "$PWD":/src -w /src \
-            i386/debian:bookworm bash -c '
-              set -e
-              apt-get update
-              apt-get install -y build-essential libcurl4-openssl-dev xxd git
-              git config --global --add safe.directory /src
-              make all
-              make smoke
-            '
+          set -x
+          file build/cclaw
+          ./build/cclaw --version
+          export HOME="$RUNNER_TEMP/home"; mkdir -p "$HOME"
+          ./build/cclaw --doctor
+          OPENROUTER_API_KEY=sk-or-v1-invalid-ci-smoke-key \
+            timeout 180 ./build/cclaw -v -p "hi" </dev/null >"$RUNNER_TEMP/turn.log" 2>&1 || true
+          grep -E "llm_req: .*status=" "$RUNNER_TEMP/turn.log" || { cat "$RUNNER_TEMP/turn.log"; exit 1; }
+          grep -Eq "llm_req: .*status=4[0-9][0-9]" "$RUNNER_TEMP/turn.log"
 
-      - name: Package
+      - name: Smoke-test the JS engine on the target
+        # test_quickjs covers the 8-byte atomics that armv5te gets from
+        # scripts/atomic8_fallback.c instead of libatomic.
+        if: matrix.target != 'x64'
         run: |
-          mkdir -p dist
-          strip -o dist/cclaw build/cclaw
-          chmod +x dist/cclaw
-          (cd dist && zip -q cclaw-linux-x86.zip cclaw)
-          mv dist/cclaw dist/cclaw-linux-x86
+          scripts/build_static.sh "$TARGET" build/test_quickjs
+          ./build/test_quickjs
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cclaw-linux-x86
-          path: |
-            dist/cclaw-linux-x86.zip
-            dist/cclaw-linux-x86
-
-  linux-armv5te:
-    name: linux-armv5te (Pogoplug, armel, libcurl4)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm
-
-      - name: Build in armel container
-        # Build the target, then run the actual binary (not the unit-test
-        # harness) under qemu-arm as a live smoke check: --version proves
-        # dynamic linking against the emulated armel libcurl.so works,
-        # --doctor exercises DB/config/workspace/sandbox-probe end to end.
-        # Neither touches readdir()-heavy paths, so this avoids the
-        # getdents64 translation flakiness that broke `make smoke` here.
+      - name: Check the i586 baseline
+        # The runner's CPU executes i686+ instructions happily; a Pentium
+        # does not. Run the binary on an emulated one.
+        if: matrix.target == 'i586'
         run: |
-          docker run --rm --platform linux/arm/v5 -v "$PWD":/src -w /src \
-            arm32v5/debian:bookworm bash -c '
-              set -e
-              # Skip docs/man pages and recommended-but-unneeded packages —
-              # dpkg unpacking + man-db trigger processing is the slowest,
-              # most hang-prone part of this job under qemu-arm emulation,
-              # and neither is needed for a CI build.
-              mkdir -p /etc/dpkg/dpkg.cfg.d
-              printf "path-exclude /usr/share/doc/*\npath-exclude /usr/share/man/*\npath-exclude /usr/share/groff/*\npath-exclude /usr/share/info/*\n" > /etc/dpkg/dpkg.cfg.d/01_nodoc
-              apt-get update
-              apt-get install -y --no-install-recommends build-essential libcurl4-openssl-dev xxd git
-              git config --global --add safe.directory /src
-              # ARMv5TE has no hardware CAS instruction, so the 8-byte atomic
-              # builtins quickjs and sqlite emit become libatomic calls. The
-              # Makefile link probe detects that, and this job is where it gets
-              # exercised, so do not paper over it with an explicit LDFLAGS.
-              # (Careful: this whole script is a single-quoted argument to
-              # bash -c, so an apostrophe anywhere in it — even inside a
-              # comment — closes the quote and breaks the job.)
-              make all
-              strip build/cclaw
-              ./build/cclaw --version
-              ./build/cclaw --doctor
-            '
+          qemu-i386-static -cpu pentium ./build/cclaw --version
+          qemu-i386-static -cpu pentium ./build/test_quickjs
 
       # Two shapes of the same binary. The zip is for a human following the
       # release notes; the bare file is what `cclaw update` fetches, so the
@@ -242,17 +191,18 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          cp build/cclaw dist/cclaw
+          ${{ matrix.strip || 'strip' }} -o dist/cclaw build/cclaw
           chmod +x dist/cclaw
-          (cd dist && zip -q cclaw-linux-armv5te.zip cclaw)
-          mv dist/cclaw dist/cclaw-linux-armv5te
+          (cd dist && zip -q "cclaw-linux-$TARGET.zip" cclaw)
+          mv dist/cclaw "dist/cclaw-linux-$TARGET"
+          ls -l dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cclaw-linux-armv5te
+          name: cclaw-linux-${{ matrix.target }}
           path: |
-            dist/cclaw-linux-armv5te.zip
-            dist/cclaw-linux-armv5te
+            dist/cclaw-linux-${{ matrix.target }}.zip
+            dist/cclaw-linux-${{ matrix.target }}
 
   whatsapp-bridge:
     name: whatsapp-bridge (x64 native + armv5te cross)
@@ -300,7 +250,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [linux-x64, linux-arm64, websocket-transport, linux-x86, linux-armv5te, whatsapp-bridge]
+    needs: [test, compat, release-build, whatsapp-bridge]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -331,9 +281,11 @@ jobs:
           \`\`\`
 
           Swap \`cclaw-linux-x64.zip\` for \`cclaw-linux-arm64.zip\` (64-bit ARM, e.g. Graviton),
-          \`cclaw-linux-x86.zip\` (32-bit x86) or
+          \`cclaw-linux-i586.zip\` (32-bit x86, Pentium and later) or
           \`cclaw-linux-armv5te.zip\` (ARMv5TE, e.g. Pogoplug V4) as needed — same
-          three commands either way.
+          three commands either way. The binaries are statically linked
+          (musl, with libcurl and TLS inside): they need no particular libc or
+          libcurl on the host, only a CA certificate bundle.
 
           Each target is also attached unzipped (same name without \`.zip\`) —
           that is what \`cclaw update\` downloads, verifying it against
@@ -341,11 +293,11 @@ jobs:
           EOF
           assets="dist/cclaw-linux-x64/cclaw-linux-x64.zip
             dist/cclaw-linux-arm64/cclaw-linux-arm64.zip
-            dist/cclaw-linux-x86/cclaw-linux-x86.zip
+            dist/cclaw-linux-i586/cclaw-linux-i586.zip
             dist/cclaw-linux-armv5te/cclaw-linux-armv5te.zip
             dist/cclaw-linux-x64/cclaw-linux-x64
             dist/cclaw-linux-arm64/cclaw-linux-arm64
-            dist/cclaw-linux-x86/cclaw-linux-x86
+            dist/cclaw-linux-i586/cclaw-linux-i586
             dist/cclaw-linux-armv5te/cclaw-linux-armv5te
             dist/whatsapp-bridge/whatsapp-bridge-linux-x64
             dist/whatsapp-bridge/whatsapp-bridge-linux-armv5te"

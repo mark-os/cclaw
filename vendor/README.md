@@ -60,8 +60,16 @@ against a different version than it links to is not a supported combination.
   ASan by failing that one allocation: SEGV in `JS_DefineProperty` ←
   `build_backtrace`, matching an organic crash seen parsing a large feed at a
   4MB heap. Fix holds a reference across the function (`eobj`), so the value
-  is `JS_DupValue`d on entry and freed at the `done:` label. Drop this patch
-  if a release picks up an equivalent fix; re-apply on refresh otherwise.
+  is `JS_DupValue`d on entry and freed at the `done:` label. Upstream fixed
+  it the same way on 2026-10-26 (commit cd97c2b, issue #529), not yet in a
+  release as of 2026-11-12 — drop this patch on the first refresh past that
+  commit.
+- **Local edit: `CONFIG_ATOMICS` is not defined.** Upstream defines it
+  unconditionally near the top of `quickjs.c`; here that block is a comment.
+  No JS runtime in cclaw has a second thread and `quickjs-libc.c` (workers)
+  is not compiled, so `Atomics` had no use, and its 64-bit operations were
+  the only reason an ARMv5TE link needed libatomic. Re-apply on refresh;
+  `test_quickjs` fails if it comes back.
 
 ## Monocypher 4.0.2
 

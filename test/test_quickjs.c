@@ -176,6 +176,19 @@ static void test_interrupt_limit(void) {
     qjs_runtime_destroy(qrt);
 }
 
+/* An exception is reported as what was thrown — a null stays "null". */
+static void test_throw_null(void) {
+    QjsRuntime *qrt = qjs_runtime_create(1024 * 1024);
+    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
+
+    char *r = qjs_eval_to_string(ctx, "throw null", NULL);
+    ASSERT(r && strcmp(r, "null") == 0, "thrown null reads null");
+    free(r);
+
+    JS_FreeContext(ctx);
+    qjs_runtime_destroy(qrt);
+}
+
 /* Atomics is compiled out of the vendored QuickJS (see CONFIG_ATOMICS in
  * quickjs.c): no runtime here ever has a second thread to synchronise with,
  * and its 64-bit operations were the only thing needing libatomic on ARMv5TE.
@@ -205,6 +218,7 @@ int main(void) {
     test_console_log_circular();
     test_promise_resolve();
     test_interrupt_limit();
+    test_throw_null();
     test_no_atomics();
 
     if (failures == 0)

@@ -4,7 +4,6 @@
  * what a child may see lives in sandbox.c. */
 #include "contain.h"
 #include "log.h"
-#include "preload_blob.h"
 #include "net_shim_blob.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -66,18 +65,18 @@ int contain_probe(char *why, size_t cap) {
 
 /* Fixed in-sandbox path the broker's per-call proxy UDS is bind-mounted to. The
  * socket itself lives in the agent folder on the host (outside the workspace);
- * inside the netns the preload lib and net_shim reach it here. */
+ * inside the netns net_shim reaches it here. */
 #define SANDBOX_PROXY_SOCK_PATH "/tmp/.cclaw_proxy.sock"
 #define SANDBOX_LLM_SOCK_PATH   "/tmp/.cclaw_llm.sock"
 
-/* The egress interposer lives on the root tmpfs, not in /tmp. /tmp is now a
+/* net_shim as a file the shell tier can run by name (`connect` mode, for
+ * ssh's ProxyCommand). It lives on the root tmpfs, not in /tmp: /tmp is a
  * persistent bind of the agent's own scratch directory, so anything we drop
  * there survives the call and is the agent's to modify; the root tmpfs is
- * rebuilt per call and holds only our plumbing. (Tampering was never an egress
- * bypass — CLONE_NEWNET has no route out, so a disabled interposer is
- * self-inflicted denial of service — but our machinery does not belong in the
- * agent's scratch space.) */
-#define SANDBOX_PRELOAD_PATH "/.cclaw_net.so"
+ * rebuilt per call and holds only our plumbing. (Tampering is never an egress
+ * bypass — CLONE_NEWNET has no route out and the broker decides every
+ * connection — but our machinery does not belong in the agent's scratch.) */
+#define SANDBOX_CONNECT_PATH "/.cclaw_connect"
 
 /* Bind-mask the secret key + DB ciphertext from the child's view.
  *
@@ -362,8 +361,8 @@ int contain_enter(const char *workspace, const char *cwd_path,
         if (!mkdtemp(newroot))
             return -1;
     }
-    /* 4m, not 1m: this root holds mountpoint stubs *and* the ~200 KB egress
-     * interposer (SANDBOX_PRELOAD_PATH), which used to be written into /tmp. */
+    /* 4m, not 1m: this root holds mountpoint stubs *and* a copy of net_shim
+     * (SANDBOX_CONNECT_PATH; ~1 MB when statically linked). */
     if (mount("none", newroot, "tmpfs", MS_NOSUID | MS_NODEV, "size=4m") != 0)
         return -1;
 
@@ -427,7 +426,7 @@ int contain_enter(const char *workspace, const char *cwd_path,
     /* Bind the broker's per-call proxy UDS (created in the agent folder, outside
      * the agent-visible workspace) onto a fixed path inside the sandbox. Keeps
      * the control-plane socket out of the workspace while still letting the
-     * in-netns preload/shim reach the broker over a pathname UDS. Best-effort:
+     * in-netns net_shim reaches the broker over a pathname UDS. Best-effort:
      * a bind failure leaves no socket inside → no network (fail-closed). */
     if (full_cfg && full_cfg->proxy_sock && full_cfg->proxy_sock[0]) {
         char sdst[PATH_MAX];
@@ -536,15 +535,15 @@ static int sandbox_bring_up_lo(void) {
     return rc;
 }
 
-/* Static-binary egress: bring up lo, bind a loopback HTTP CONNECT listener, and
- * fork the link-isolated net_shim to serve it from /tmp. Static clients that
- * honor HTTP_PROXY then tunnel through the shim → the same per-call UDS the
- * preload uses, with the broker still the sole policy authority.
+/* The HTTP proxy every sandboxed program is pointed at: bring up lo, bind a
+ * loopback listener, and fork the link-isolated net_shim to serve it. A
+ * program that honors HTTP_PROXY / HTTPS_PROXY tunnels through the shim → the
+ * per-call UDS → the broker, the sole policy authority. A program that does
+ * not has no network: the namespace has no other route.
  *
- * Best-effort: any failure simply leaves the proxy env unset, so static
- * binaries stay networkless (the safe pre-feature default) while dynamic
- * binaries keep working via the preload. Runs as PID 1, before the exec. */
-static void sandbox_setup_static_egress(const char *uds_path) {
+ * Best-effort: any failure simply leaves the proxy env unset and the child
+ * networkless. Runs as PID 1, before the exec. */
+static void sandbox_setup_proxy(const char *uds_path) {
     if (sandbox_bring_up_lo() != 0) return;
 
     /* Bind 127.0.0.1:0 — the shim's HTTP CONNECT listener. Not CLOEXEC: the
@@ -620,34 +619,28 @@ static void sandbox_setup_static_egress(const char *uds_path) {
 void contain_egress(const SandboxConfig *cfg) {
     setenv("CCLAW_PROXY_SOCK", SANDBOX_PROXY_SOCK_PATH, 1);
 
-    /* LD_PRELOAD interposer: only for the shell tier (PID-ns present, an
-     * untrusted subprocess tree that dials network itself). The skip_pid_ns
-     * network tiers (web/js) run OUR own libcurl, which honors HTTP_PROXY →
-     * net_shim (spec §4: "no preload" for web). Loading the preload there
-     * would intercept curl's loopback connect to the shim and fight the
-     * HTTP_PROXY path, so it is gated off. The interposer is the only egress
-     * inside CLONE_NEWNET for shell, so a failed write must be loud. */
+    /* The loopback HTTP proxy: the one mechanism for every tier — our own
+     * libcurl (web/js) and whatever the shell runs. */
+    sandbox_setup_proxy(SANDBOX_PROXY_SOCK_PATH);
+
+    /* Shell tier only: programs that take a proxy *command* rather than proxy
+     * variables. ssh is the one that matters, and git reads GIT_SSH_COMMAND,
+     * so git-over-ssh works unprompted; a bare `ssh` needs the option spelled
+     * out (the shell tool's description says how). Best-effort like the rest:
+     * without the file, ssh simply has no route. */
     if (!cfg->skip_pid_ns) {
         /* O_NOFOLLOW: refuse to follow a symlink at this path rather than
          * writing 0755 content wherever it points. */
-        int pfd = open(SANDBOX_PRELOAD_PATH,
+        int cfd = open(SANDBOX_CONNECT_PATH,
                        O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0755);
-        ssize_t wr = pfd >= 0 ? write(pfd, preload_net_blob, (size_t)preload_net_blob_len) : -1;
-        if (pfd >= 0) close(pfd);
-        if (wr == (ssize_t)preload_net_blob_len)
-            setenv("LD_PRELOAD", SANDBOX_PRELOAD_PATH, 1);
-        else {
-            int e = errno;  /* log call below may clobber it */
-            LOG_INFO_("sandbox preload_fail errno=%d effect=no_network", e);
-            fprintf(stderr, "[cclaw] warning: proxy preload setup failed "
-                    "(errno=%d); child has no network\n", e);
+        ssize_t wr = cfd >= 0 ? write(cfd, net_shim_blob, (size_t)net_shim_blob_len) : -1;
+        if (cfd >= 0) close(cfd);
+        if (wr == (ssize_t)net_shim_blob_len) {
+            setenv("CCLAW_CONNECT", SANDBOX_CONNECT_PATH " connect", 1);
+            setenv("GIT_SSH_COMMAND",
+                   "ssh -o ProxyCommand='" SANDBOX_CONNECT_PATH " connect %h %p'", 1);
         }
     }
-
-    /* net_shim: a loopback HTTP CONNECT proxy forwarding to the broker UDS.
-     * Used by web/js's own curl (via HTTP_PROXY) and by shell's static
-     * binaries (which ignore LD_PRELOAD). Best-effort. */
-    sandbox_setup_static_egress(SANDBOX_PROXY_SOCK_PATH);
 }
 
 const char *contain_llm_sock_path(void) { return SANDBOX_LLM_SOCK_PATH; }

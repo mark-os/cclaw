@@ -1,5 +1,4 @@
 CC      ?= cc
-PRELOAD_CC ?= $(CC)
 # Containment backend (specs/portability.md, layer 3): linux = namespaces,
 # none = no boundary of our own (contained profiles refuse; host still runs).
 CONTAIN  ?= linux
@@ -32,7 +31,7 @@ BUILDDIR := build
 # binary) does not — so if the mode changed since the last build, wipe build/
 # before anything compiles. Runs at parse time (not as a recipe prerequisite)
 # so it can't lose an ordering race with rules that also touch build/.
-BUILD_TAG := $(CC)|$(EXTRA_CFLAGS)|$(PRELOAD_CC)|$(CONTAIN)
+BUILD_TAG := $(CC)|$(EXTRA_CFLAGS)|$(CONTAIN)
 BUILD_TAGFILE := $(BUILDDIR)/.buildtag
 ifneq ($(wildcard $(BUILD_TAGFILE)),)
 ifneq ($(shell cat $(BUILD_TAGFILE)),$(BUILD_TAG))
@@ -43,7 +42,7 @@ endif
 $(shell mkdir -p $(BUILDDIR) && echo "$(BUILD_TAG)" > $(BUILD_TAGFILE))
 
 TEMPLATES := $(wildcard templates/*)
-SRC      := $(filter-out src/preload_net.c src/net_shim.c $(filter-out src/contain_$(CONTAIN).c,$(wildcard src/contain_*.c)),$(wildcard src/*.c))
+SRC      := $(filter-out src/net_shim.c $(filter-out src/contain_$(CONTAIN).c,$(wildcard src/contain_*.c)),$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 # Recursive (=): TEST_BIN/INTEG_BIN/E2E_BIN are defined below; expansion
 # happens at the -include site after all of them exist. Test binaries compile
@@ -85,7 +84,7 @@ SMOKE := test_db test_config test_advance_session test_streak_guard \
          test_channel_intent
 SMOKE_BIN := $(patsubst %,$(BUILDDIR)/%,$(SMOKE))
 
-all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw.a $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/net_shim compile_commands.json
+all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw.a $(BUILDDIR)/net_shim compile_commands.json
 
 # Development build: debug symbols, no optimization, sanitizers (clang preferred for better traces)
 debug: clean
@@ -121,7 +120,7 @@ $(addprefix $(BUILDDIR)/,main.o doctor.o tool_bootstrap.o update.o update_channe
 $(BUILDDIR)/%.o: src/%.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -c -o $@ $<
 
-$(BUILDDIR)/contain_linux.o: $(BUILDDIR)/preload_blob.h $(BUILDDIR)/net_shim_blob.h
+$(BUILDDIR)/contain_linux.o: $(BUILDDIR)/net_shim_blob.h
 
 $(BUILDDIR)/sqlite3.o: vendor/sqlite3/sqlite3.c | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -c -o $@ $<
@@ -168,20 +167,10 @@ $(BUILDDIR)/qjs_libregexp.o: vendor/quickjs/libregexp.c | $(BUILDDIR)/
 $(BUILDDIR)/qjs_dtoa.o: vendor/quickjs/dtoa.c | $(BUILDDIR)/
 	$(CC) $(QJS_CFLAGS) -c -o $@ $<
 
-# PRELOAD_CC (defaults to CC): the preload library is loaded into the *host's* programs, so it
-# must be built against the host's libc even when cclaw itself is not (the
-# static musl release build, scripts/build_static.sh).
-$(BUILDDIR)/libcclaw_net.so: src/preload_net.c | $(BUILDDIR)/
-	$(PRELOAD_CC) -std=c11 -Wall -Wextra -Werror -shared -fPIC -o $@ $< -ldl
-
-$(BUILDDIR)/preload_blob.h: $(BUILDDIR)/libcclaw_net.so
-	printf 'static const unsigned char preload_net_blob[] = {\n' > $@
-	xxd -i < $< >> $@
-	printf '};\nstatic const unsigned int preload_net_blob_len = sizeof(preload_net_blob);\n' >> $@
-
-# net_shim: loopback HTTP CONNECT proxy for static binaries (link-isolated —
-# its own TU, libc only, no policy/resolver/secret symbols). Embedded as a blob
-# and written into the sandbox /tmp at runtime, like the preload .so.
+# net_shim: the in-sandbox end of the egress proxy (link-isolated — its own
+# TU, libc only, no policy/resolver/secret symbols). Embedded as a blob; run
+# from a memfd as the loopback HTTP proxy, and written into the sandbox root
+# for the shell tier's `connect` mode.
 $(BUILDDIR)/net_shim: src/net_shim.c | $(BUILDDIR)/
 	$(CC) -std=c11 -Wall -Wextra -Werror -o $@ $< $(NET_SHIM_LDFLAGS)
 
@@ -280,10 +269,6 @@ $(BUILDDIR)/libtest.a: $(BUILDDIR)/mock_server.o
 $(BUILDDIR)/test_%: test/test_%.c $(BUILDDIR)/libcclaw.a $(BUILDDIR)/libtest.a | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -o $@ $< $(BUILDDIR)/libtest.a $(BUILDDIR)/libcclaw.a $(LDFLAGS)
 
-# This one dlopen()s the preload library, so it is built by the compiler that
-# built the library — a static musl test binary cannot load anything.
-$(BUILDDIR)/test_preload_net: test/test_preload_net.c $(BUILDDIR)/libcclaw_net.so | $(BUILDDIR)/
-	$(PRELOAD_CC) -std=c11 -Wall -Wextra -Werror -MMD -MP -o $@ $< -lpthread -ldl
 
 # Paid measurement tool, not a test — never picked up by any suite.
 # Usage: BENCH_MODELS="a,b,c" make bench (shortlist via scripts/find_providers.py)

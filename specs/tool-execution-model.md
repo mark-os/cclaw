@@ -127,7 +127,7 @@ Per-tier inputs to the helper:
 | inner_exec  | 0               | 0                            | 0                            | 1                            |
 | run_fn      | tool_file_tier_run (not via helper) | tool_web_tier_run (curl + html_to_markdown, **in-process**) | tool_js_tier_run (qjs eval, **in-process**) | NULL (`execl /bin/sh`, **inner exec**) |
 | /proc       | absent          | absent                       | absent                       | present (PID ns backs it)    |
-| proxy reach | n/a             | net_shim + HTTP_PROXY only (curl is ours; no preload) | net_shim + HTTP_PROXY (qjs http_request uses curl) | net_shim + LD_PRELOAD (untrusted subprocess tree) |
+| proxy reach | n/a             | net_shim + HTTP_PROXY (curl is ours) | net_shim + HTTP_PROXY (qjs http_request uses curl) | net_shim + HTTP_PROXY; `connect` mode for ssh (untrusted subprocess tree) |
 
 Invariant restated: **/proc present IFF PID namespace present.** Mount set
 contains the proxy socket IFF the tier runs untrusted subprocesses that dial
@@ -253,7 +253,8 @@ and no DB. Only the proxy config + request blob cross fd 3.
   fork), bless set + TTL, resolve-then-dial-literal anti-TOCTOU/rebind. Reused
   verbatim — they move INTO the exec'd broker, their logic is untouched.
 - net_shim as the dumb CONNECT forwarder (structurally no resolver → per-hop
-  hostname gating is real). shell adds LD_PRELOAD; web does not.
+  hostname gating is real). Every tier reaches it the same way: proxy
+  variables; the shell tier also gets `connect` mode for ssh.
 - Crash-only discipline: the broker is a per-call disposable PROCESS — SIGKILL
   on timeout reclaims proxy threads, relays, fds, memory. (A thread could not
   provide this — isolation requires a process.)

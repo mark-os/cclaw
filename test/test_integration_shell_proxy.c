@@ -1,8 +1,5 @@
-/* test_integration_shell_proxy.c — dynamic client (curl) reaching a mock
- * server via HTTP_PROXY → shim → broker, with LD_PRELOAD=libcclaw_net.so still
- * loaded. The target is loopback, so the preload now passes the client→shim hop
- * straight through (P0) rather than hijacking it; curl proxies through the shim,
- * which forwards host:port to the broker. Verifies the response is relayed.
+/* test_integration_shell_proxy.c — a sandboxed curl reaching a mock server
+ * via HTTP_PROXY → net_shim → broker. Verifies the response is relayed.
  *
  * Uses the --run-tool broker path (fork+execve) matching production behavior. */
 #define _GNU_SOURCE
@@ -32,9 +29,9 @@ static void setup_workspace(void) {
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_proxy_integ_%d", getpid());
     mkdir(workspace, 0755);
 
-    /* The per-call broker writes the preload .so from its embedded blob and
-     * sets LD_PRELOAD/CCLAW_PROXY_SOCK itself — the test only supplies the
-     * workspace, the allowlist, and the command. */
+    /* The per-call broker starts net_shim from its embedded blob and sets the
+     * proxy variables itself — the test only supplies the workspace, the
+     * allowlist, and the command. */
 }
 
 static void cleanup_workspace(void) {
@@ -95,8 +92,8 @@ static void *mock_http_thread(void *arg) {
 
 static void check_prerequisites(void) {
     struct stat st;
-    if (stat("./build/libcclaw_net.so", &st) != 0) {
-        printf("  SKIP: libcclaw_net.so not built\n");
+    if (stat("./build/net_shim", &st) != 0) {
+        printf("  SKIP: net_shim not built\n");
         exit(0);
     }
 
@@ -124,12 +121,9 @@ static void test_shell_curl_through_proxy(void) {
     pthread_t thr;
     pthread_create(&thr, NULL, mock_http_thread, &ma);
 
-    /* Dynamic client (LD_PRELOAD stays loaded) reaching an allowlisted host via
-     * HTTP_PROXY → shim → broker. The target is loopback, so the preload now
-     * passes the client→shim hop straight through (P0) instead of hijacking it;
-     * curl reaches the shim, which forwards host:port to the broker. NO_PROXY is
-     * cleared so curl proxies the loopback target; --proxytunnel forces CONNECT
-     * (the shim is CONNECT-only). */
+    /* NO_PROXY is cleared so curl proxies the loopback target; --proxytunnel
+     * makes it a CONNECT tunnel (plain forwarding is covered in
+     * test_integration_shell_static). */
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
         "export NO_PROXY= no_proxy=; "

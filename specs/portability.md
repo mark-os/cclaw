@@ -57,7 +57,7 @@ policy for the "mediated" tiers is in fact enforced by that namespace:
 | Workspace and path grants, JS `fs.*` | Mount namespace. `fs.readFile` is a bare `fopen` | No |
 | `cclaw.db` / `.cclaw_key` masking | Mount namespace (outside every mount set) | No |
 | Host allowlist, `web_fetch` and JS `http_fetch` | Network namespace: the only route out is `HTTP_PROXY` → `net_shim` → the broker's proxy → `host_decide()` | The decision is; the *forcing* is the namespace |
-| Host allowlist, shell | Network namespace + preload shim → the same proxy | Same |
+| Host allowlist, shell | Network namespace: the same `HTTP_PROXY` → `net_shim` → proxy path, for programs that honor the variables; the rest have no network | Same |
 
 So on a kernel without unprivileged user namespaces there are two outcomes
 and nothing between them:
@@ -127,7 +127,11 @@ Not planned work. Recorded so the code leaves room for it.
   this path" for file tools and JS `fs.*`, in place of relying on what is
   mounted.
 
-## Open decisions
+## Decided
 
-- **The preload shim on musl hosts** ([static-build.md](static-build.md)) —
-  a layer 4 question.
+- **No code is loaded into the host's programs.** The `LD_PRELOAD` shim that
+  made the sandboxed shell's network transparent to proxy-unaware programs
+  was the last host-libc dependency, and was removed in v0.6.1: layer 4 now
+  needs layer 3 and nothing else from the host. The cost is that raw-socket
+  programs have no network inside the sandbox; ssh goes through `net_shim`'s
+  `connect` mode ([shell-networking.md](shell-networking.md)).

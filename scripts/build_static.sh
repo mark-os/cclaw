@@ -120,14 +120,12 @@ if [ ! -f "$prefix/lib/libcurl.a" ]; then
 fi
 
 # ── cclaw ────────────────────────────────────────────────────────────
-# The two embedded shims are the exception to "everything is musl":
-#  - net_shim runs inside the sandbox on its own, so it is static too.
-#  - libcclaw_net.so is LD_PRELOADed into the host's programs and must speak
-#    the host's libc, so it is built by the plain (glibc) target compiler.
+# net_shim, embedded in the binary and run inside the sandbox on its own, is
+# static too — nothing in a release binary speaks the host's libc.
 cd "$root"
 
 make -j"$jobs" "${@:-all}" \
-    CC="$cc" PRELOAD_CC="$gcc $archflags" NET_SHIM_LDFLAGS=-static \
+    CC="$cc" NET_SHIM_LDFLAGS=-static \
     EXTRA_CFLAGS="-I$prefix/include" \
     LDFLAGS="-static -L$prefix/lib -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lm -lpthread"
 
@@ -137,16 +135,4 @@ if "${cross}readelf" -lW build/cclaw | grep -Eq 'INTERP|DYNAMIC'; then
     exit 1
 fi
 
-# The preload library is loaded into the *host's* programs. One symbol newer
-# than the host's glibc and ld.so refuses to start every command the sandboxed
-# shell runs (v0.6.0 shipped needing 2.38 and broke the shell on Debian 12 and
-# Amazon Linux 2023). 2.34 is where dlsym moved into libc; nothing may exceed it.
-shim_floor=2.34
-shim_max=$("${cross}readelf" -W --dyn-syms build/libcclaw_net.so |
-    grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
-if [ "$(printf '%s\n%s\n' "$shim_floor" "$shim_max" | sort -V | tail -1)" != "$shim_floor" ]; then
-    echo "error: build/libcclaw_net.so needs glibc $shim_max (floor is $shim_floor):" >&2
-    "${cross}readelf" -W --dyn-syms build/libcclaw_net.so | grep "GLIBC_$shim_max" >&2
-    exit 1
-fi
 echo "static build ok: build/cclaw ($target,$(wc -c < build/cclaw) bytes unstripped)"

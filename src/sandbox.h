@@ -39,7 +39,7 @@ typedef struct { char path[PATH_MAX]; int ro; } SandboxMount;
 
 /* Child sandbox setup, shared by all --run-tool sandbox tiers (file/shell/web/js).
  * Establishes the namespace sandbox, scrubs the environment, applies rlimits,
- * and installs the network proxy preload. All fields default to 0/NULL. */
+ * and starts the in-sandbox proxy. All fields default to 0/NULL. */
 typedef struct {
     const char *workspace;  /* agent workspace bind-mounted rw (NULL = none) */
     const char *cwd_path;   /* CWD rw bind-mount in CLI mode (NULL in daemon) */
@@ -71,7 +71,7 @@ typedef struct {
 /* Run in the forked child before exec. Returns 0 on success, -1 on a hard
  * failure (caller must _exit). Fail-closed: when cfg->sandbox is set, a
  * namespace or read-only-remount failure returns -1 rather than running
- * unconfined. The proxy preload failing is a soft warning (returns 0). */
+ * unconfined. The in-sandbox proxy failing to start is soft (returns 0): no network. */
 int sandbox_child_setup(const SandboxConfig *cfg);
 
 /* Single source of truth: sandbox_profile string → sandbox policy fields.

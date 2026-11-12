@@ -240,12 +240,12 @@ Pattern mirrors existing shell networking proxy (shell→agent UDS) but one leve
 
 ## Alternative Proxy Mechanisms for Static/Go/Rust Binaries
 
-Two mechanisms shipped: `LD_PRELOAD=libcclaw_net.so` intercepts libc
-`connect()`/`getaddrinfo()` for dynamically-linked programs, and `net_shim.c`
-runs a loopback HTTP CONNECT listener *inside* the netns (reached via
-`HTTP_PROXY` env) for static/Go/Rust binaries that honor proxy env vars.
-Anything that ignores both gets zero network (`CLONE_NEWNET` hard backstop).
-Still future:
+One mechanism ships: `net_shim.c` runs a loopback HTTP proxy *inside* the
+netns, reached via the proxy variables, for any program that honors them
+(an `LD_PRELOAD` interposer shipped beside it until v0.6.0 — see
+[shell-networking.md](shell-networking.md), History). Anything that ignores
+the variables gets zero network (`CLONE_NEWNET` hard backstop). Still future,
+for transparent coverage of proxy-unaware programs:
 
 ### seccomp-unotify (kernel ≥5.9)
 Intercept the `connect()` syscall in the parent process via seccomp user

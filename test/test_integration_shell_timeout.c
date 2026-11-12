@@ -52,8 +52,8 @@ static void cleanup_workspace(void) {
 
 static void check_prerequisites(void) {
     struct stat st;
-    if (stat("./build/libcclaw_net.so", &st) != 0 || stat("./build/net_shim", &st) != 0) {
-        printf("  SKIP: libcclaw_net.so / net_shim not built\n");
+    if (stat("./build/net_shim", &st) != 0) {
+        printf("  SKIP: net_shim not built\n");
         exit(0);
     }
     if (stat(SHELL_BINARY, &st) != 0) {

@@ -39,21 +39,14 @@ the cost of not depending on the host's copy.
   runtime: `$SSL_CERT_FILE`, else libcurl's default if it exists, else the
   well-known distro paths. `cclaw --doctor` `[tls]` shows the result. Nothing
   found is a logged error and failing HTTPS requests, not a startup exit.
-- **The preload shim is not musl.** `libcclaw_net.so` is `LD_PRELOAD`ed into
-  the *host's* programs inside the sandbox, so it must match the host's libc.
-  The script builds it with the plain target GCC (`PRELOAD_CC`), i.e. against
-  the build machine's glibc. Its floor is **glibc 2.34** (`dlsym@GLIBC_2.34`,
-  where `dlsym` moved into libc), and the script fails the build if any
-  symbol needs more. That check exists because the failure is total: on a
-  host whose glibc is older than the shim needs, `ld.so` refuses to start
-  *every* program the sandboxed shell runs (`version 'GLIBC_2.x' not found`),
-  `/bin/sh` included. v0.6.0 shipped needing 2.38 (`strtol` compiled under
-  `_GNU_SOURCE` on a current glibc becomes `__isoc23_strtol`) and broke the
-  shell on Debian 12 and Amazon Linux 2023 — so the shim must not call the
-  `strto*`/`scanf` families. Hosts below 2.34 and musl hosts (Alpine,
-  OpenWrt) remain unsupported for the sandboxed shell; what the shim does on
-  a musl host is untested. This is the one remaining libc dependency of a
-  release binary and it is an open decision.
+- **Nothing in a release binary speaks the host's libc.** Until v0.6.0 one
+  thing did: `libcclaw_net.so`, built with the build machine's glibc and
+  `LD_PRELOAD`ed into the host's programs inside the sandbox. v0.6.0 shipped
+  it needing glibc 2.38, and `ld.so` then refused to start every sandboxed
+  shell command on Debian 12 and Amazon Linux 2023. It is gone; sandboxed
+  programs reach the network through the proxy variables only
+  ([shell-networking.md](shell-networking.md)), which also makes the sandboxed
+  shell work the same on glibc and musl hosts.
 - **`net_shim` is static** (`NET_SHIM_LDFLAGS=-static`): it runs inside the
   sandbox by itself and must not need a loader the host lacks.
 - **Thread stacks.** musl's default thread stack is ~128K (glibc: 8M). All

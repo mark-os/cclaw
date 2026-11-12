@@ -36,7 +36,14 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     int rc = tools_register(reg, "shell_exec",
                             "Execute a shell command and return stdout+stderr. "
                             "For file exploration prefer file_read/file_list/"
-                            "file_find/file_grep — cheaper and sandbox-friendly.",
+                            "file_find/file_grep — cheaper and sandbox-friendly. "
+                            "When sandboxed, the network is reached only through "
+                            "the HTTP(S)_PROXY variables already set, and only for "
+                            "allowlisted hosts: a 403 from the proxy is policy, so "
+                            "request the host rather than retrying. Programs that "
+                            "ignore those variables have no network. git over ssh "
+                            "works as is; for plain ssh add "
+                            "-o ProxyCommand=\"$CCLAW_CONNECT %h %p\".",
                             params, NULL, sc);
     if (rc == 0) {
         ToolEntry *e = tools_lookup(reg, "shell_exec");

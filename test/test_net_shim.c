@@ -1,11 +1,11 @@
-/* test_net_shim.c — unit test for the loopback CONNECT shim (Stage 3).
+/* test_net_shim.c — unit test for the in-sandbox loopback proxy.
  *
  * Namespace-free: net_shim only accept()s on a listener fd we pass it and talks
  * to a UDS we provide, so we can exercise the real binary directly. We stand up
  * a mock "broker" UDS that speaks the existing host:port/OK protocol, bind a
  * loopback TCP listener, hand both to net_shim, then drive HTTP CONNECT clients
- * against it and assert: allowed → 200 + bytes splice; denied → 407; non-CONNECT
- * → 405. Builds nothing real over the network — UDS + loopback only.
+ * against it and assert: allowed → 200 + bytes splice; denied → 403; plain HTTP
+ * forwarded in origin form. Builds nothing real over the network — UDS + loopback only.
  *
  * Skips cleanly if ./build/net_shim is absent (make test does not build it).
  */
@@ -29,7 +29,7 @@ static char uds_path[128];
 static int mock_listen_fd = -1;
 
 /* Mock broker: accept a UDS conn, read "host:port\n". If host begins with
- * "deny" reply "DENIED\n"; else reply "OK\n", then echo one client chunk back
+ * "deny" reply "DENIED\n", with "nores" reply "ERROR resolve\n"; else reply "OK\n", then echo one client chunk back
  * prefixed with "UP:" so the test can confirm the splice is bidirectional. */
 static void *mock_conn(void *arg) {
     int fd = (int)(long)arg;
@@ -47,10 +47,23 @@ static void *mock_conn(void *arg) {
         close(fd);
         return NULL;
     }
+    if (strncmp(line, "nores", 5) == 0) {
+        (void)!write(fd, "ERROR resolve\n", 14);
+        close(fd);
+        return NULL;
+    }
     (void)!write(fd, "OK\n", 3);
     /* Tunnel established: read client's bytes, send a recognizable reply. */
     char buf[256];
     ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    /* An HTTP request arrives in pieces: take all of its header block. */
+    while (n > 0 && n < (ssize_t)sizeof(buf) - 1 && strncmp(buf, "GET ", 4) == 0) {
+        buf[n] = '\0';
+        if (strstr(buf, "\r\n\r\n")) break;
+        ssize_t m = read(fd, buf + n, sizeof(buf) - 1 - (size_t)n);
+        if (m <= 0) break;
+        n += m;
+    }
     if (n > 0) {
         char out[300];
         buf[n] = '\0';
@@ -191,7 +204,8 @@ int main(void) {
         printf("  PASS allowed CONNECT tunnels + splices\n");
     }
 
-    /* 2. Denied CONNECT → 407 (proxy denied). */
+    /* 2. Denied CONNECT → 403 with the reason; a failure that is not policy
+     *    → 502, so the two are distinguishable. */
     {
         int c = shim_connect(port);
         assert(c >= 0);
@@ -199,22 +213,57 @@ int main(void) {
         assert(write(c, req, strlen(req)) > 0);
         char buf[512];
         read_some(c, buf, sizeof(buf));
-        assert(strstr(buf, "HTTP/1.1 407") != NULL);
+        assert(strstr(buf, "HTTP/1.1 403 Forbidden") != NULL);
+        assert(strstr(buf, "egress to deny.example:443 denied by policy") != NULL);
         close(c);
-        printf("  PASS denied CONNECT → 407\n");
+
+        c = shim_connect(port);
+        assert(c >= 0);
+        req = "CONNECT nores.example:443 HTTP/1.1\r\n\r\n";
+        assert(write(c, req, strlen(req)) > 0);
+        read_some(c, buf, sizeof(buf));
+        assert(strstr(buf, "HTTP/1.1 502") != NULL);
+        assert(strstr(buf, "denied") == NULL);
+        close(c);
+        printf("  PASS denied CONNECT → 403, unreachable → 502\n");
     }
 
-    /* 3. Non-CONNECT method → 405 (CONNECT-only). */
+    /* 3. Plain HTTP: the absolute-form request reaches the origin in origin
+     *    form, asked of the broker as host:80. A denied host is a 403 here
+     *    too, and a request that is neither is a 400. */
     {
         int c = shim_connect(port);
         assert(c >= 0);
-        const char *req = "GET http://example.com/ HTTP/1.1\r\n\r\n";
+        const char *req = "GET http://example.com/x?y=1 HTTP/1.1\r\n"
+                          "Host: example.com\r\nProxy-Connection: keep-alive\r\n\r\n";
         assert(write(c, req, strlen(req)) > 0);
         char buf[512];
         read_some(c, buf, sizeof(buf));
-        assert(strstr(buf, "HTTP/1.1 405") != NULL);
+        if (strncmp(buf, "UP:GET /x?y=1 HTTP/1.1\r\nConnection: close\r\n", 43) != 0) {
+            printf("  origin saw: [%s]\n", buf);
+            assert(0 && "plain HTTP not forwarded in origin form");
+        }
+        assert(strstr(buf, "Host: example.com\r\n") != NULL);
+        assert(strstr(buf, "Proxy-Connection") == NULL);
         close(c);
-        printf("  PASS non-CONNECT → 405\n");
+
+        c = shim_connect(port);
+        assert(c >= 0);
+        req = "GET http://deny.example/ HTTP/1.1\r\n\r\n";
+        assert(write(c, req, strlen(req)) > 0);
+        read_some(c, buf, sizeof(buf));
+        assert(strstr(buf, "HTTP/1.1 403 Forbidden") != NULL);
+        assert(strstr(buf, "deny.example:80") != NULL);
+        close(c);
+
+        c = shim_connect(port);
+        assert(c >= 0);
+        req = "GET /not-a-proxy-request HTTP/1.1\r\n\r\n";
+        assert(write(c, req, strlen(req)) > 0);
+        read_some(c, buf, sizeof(buf));
+        assert(strstr(buf, "HTTP/1.1 400") != NULL);
+        close(c);
+        printf("  PASS plain HTTP forwarded in origin form\n");
     }
 
     /* Teardown */

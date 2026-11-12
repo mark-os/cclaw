@@ -182,7 +182,7 @@ This is what CClaw *is for*, not an add-on. Agents extend themselves at runtime 
 See [specs/security.md](specs/security.md) for full details and [specs/trust.md](specs/trust.md) for the axis model (containment / authority / escalation / sensitivity).
 
 - **Agent process**: trusted binary. `setrlimit` (kernel-enforced); tool egress enforced at the credential proxy (`host_decide()`, default-deny).
-- **Shell children**: untrusted. Namespace sandbox + transparent credential proxy. See [specs/shell-networking.md](specs/shell-networking.md).
+- **Shell children**: untrusted. Namespace sandbox; the only route out is the egress proxy, reached through the `HTTP(S)_PROXY` variables (a program that ignores them has no network). See [specs/shell-networking.md](specs/shell-networking.md).
 - **Secrets**: encrypted in cclaw.db (ChaCha20-Poly1305). Decrypted at runtime, injected to tool children via env, never exposed to the model or logged.
 - **Secret scanner**: AC-based DLP scans all tool results and user messages for leaked credentials before they enter the context window. See [specs/security.md](specs/security.md#secret-scanner-ac-based-content-dlp).
 - **Secret interpolation**: LLMs reference secrets via `{{SECRET:name}}` — cclaw interpolates the real value before tool execution, the context never sees it.

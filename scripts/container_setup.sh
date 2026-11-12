@@ -4,7 +4,7 @@
 # CClaw vendors everything except libcurl, so a fresh Debian/Ubuntu image needs
 # exactly two packages:
 #   libcurl4-openssl-dev  — curl/curl.h (src/channel_runner.c and friends)
-#   xxd                   — Makefile:143/154 embed the preload + net_shim blobs
+#   xxd                   — the Makefile embeds the net_shim blob
 #
 # Those two get you a full build and every suite except the WebSocket ones.
 # Set CCLAW_SETUP_WS=1 to also build a WS-capable libcurl (see below); either

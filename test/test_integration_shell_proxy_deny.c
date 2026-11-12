@@ -57,8 +57,8 @@ static int start_mock_tcp(uint16_t *out_port) {
 
 static void check_prerequisites(void) {
     struct stat st;
-    if (stat("./build/libcclaw_net.so", &st) != 0) {
-        printf("  SKIP: libcclaw_net.so not built\n");
+    if (stat("./build/net_shim", &st) != 0) {
+        printf("  SKIP: net_shim not built\n");
         exit(0);
     }
     ns_available = run_tool_ns_available(workspace);
@@ -153,10 +153,9 @@ static void test_denied_summary_advice(void) {
         return;
     }
 
-    /* An https CONNECT is denied by the allowlist before any DNS. (A plain
-     * http GET via the http_proxy env takes net_shim's CONNECT-only 405 and
-     * never reaches policy; an in-namespace loopback connect never leaves
-     * the netns at all — neither records an attributable denial.) */
+    /* An https CONNECT is denied by the allowlist before any DNS. (An
+     * in-namespace loopback connect never leaves the netns at all, so it
+     * records no attributable denial.) */
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.command = "curl -s --max-time 5 https://denied.test/";
     r.workspace = workspace;

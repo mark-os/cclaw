@@ -8,7 +8,7 @@
 /* Credential proxy thread for shell children.
  * Listens on a per-call pathname UDS at <agent-folder>/.proxy.<pid>.sock — the
  * agent folder, never the agent-visible workspace. The sandbox bind-mounts the
- * socket to a fixed in-netns path so the in-sandbox preload/shim can reach it.
+ * socket to a fixed in-netns path so the in-sandbox net_shim can reach it.
  * Accepts connections, reads preamble (host:port or RESOLVE host), checks the
  * allowlist, resolves DNS, relays TCP bidirectionally.
  * Accept-loop thread is joined in proxy_stop(). */

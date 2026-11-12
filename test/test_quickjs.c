@@ -176,30 +176,20 @@ static void test_interrupt_limit(void) {
     qjs_runtime_destroy(qrt);
 }
 
-/* Atomics on a 64-bit typed array is the one place 8-byte atomic helpers are
- * called. On ARMv5TE those are library calls (libatomic, or
- * scripts/atomic8_fallback.c in the static build), so this is what tells a
- * working helper from a miscompiled or unresolved one. */
-static void test_atomics_64(void) {
+/* Atomics is compiled out of the vendored QuickJS (see CONFIG_ATOMICS in
+ * quickjs.c): no runtime here ever has a second thread to synchronise with,
+ * and its 64-bit operations were the only thing needing libatomic on ARMv5TE.
+ * A QuickJS update that silently turns it back on should fail here, not in an
+ * armv5te link. Shared memory itself stays. */
+static void test_no_atomics(void) {
     QjsRuntime *qrt = qjs_runtime_create(1024 * 1024);
     JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
 
     char *r = qjs_eval_to_string(ctx,
         "var a = new BigInt64Array(new SharedArrayBuffer(16));"
-        "var big = 0x123456789abcdefn;"
-        "Atomics.store(a, 0, big);"
-        "[Atomics.load(a, 0) === big,"
-        " Atomics.add(a, 0, 1n) === big, Atomics.sub(a, 0, 1n) === big + 1n,"
-        " Atomics.and(a, 0, 0xffn << 32n) === big,"
-        " Atomics.or(a, 0, 1n) === (big & (0xffn << 32n)),"
-        " Atomics.xor(a, 0, 1n) === ((big & (0xffn << 32n)) | 1n),"
-        " Atomics.exchange(a, 0, 7n) === (big & (0xffn << 32n)),"
-        " Atomics.compareExchange(a, 0, 8n, 9n) === 7n, Atomics.load(a, 0) === 7n,"
-        " Atomics.compareExchange(a, 0, 7n, -5n) === 7n, Atomics.load(a, 0) === -5n,"
-        " a[1] === 0n].join()", NULL);
-    ASSERT(r && strcmp(r, "true,true,true,true,true,true,true,true,true,true,true,true") == 0,
-           "Atomics on BigInt64Array");
-    if (r && strstr(r, "false")) printf("  atomics: %s\n", r);
+        "a[0] = 0x123456789abcdefn;"
+        "[typeof Atomics, a[0] === 0x123456789abcdefn].join()", NULL);
+    ASSERT(r && strcmp(r, "undefined,true") == 0, "Atomics absent, 64-bit arrays work");
     free(r);
 
     JS_FreeContext(ctx);
@@ -215,7 +205,7 @@ int main(void) {
     test_console_log_circular();
     test_promise_resolve();
     test_interrupt_limit();
-    test_atomics_64();
+    test_no_atomics();
 
     if (failures == 0)
         printf("PASS: test_quickjs (%d checks)\n", 0);

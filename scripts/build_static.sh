@@ -126,20 +126,10 @@ fi
 #    the host's libc, so it is built by the plain (glibc) target compiler.
 cd "$root"
 
-# Same probe as the Makefile's, different answer: where the compiler leaves
-# 8-byte atomics as library calls (ARMv5TE), link our own instead of the
-# distro libatomic — see scripts/atomic8_fallback.c for why.
-atomic8=
-if ! echo 'int main(void){long long v=0;return(int)__atomic_fetch_add(&v,1,5);}' |
-        $cc -static -x c - -o /dev/null 2>/dev/null; then
-    $cc -std=c11 -O2 -Wall -Wextra -Werror -c -o "$prefix/lib/atomic8.o" scripts/atomic8_fallback.c
-    atomic8=$prefix/lib/atomic8.o
-fi
-
 make -j"$jobs" "${@:-all}" \
     CC="$cc" PRELOAD_CC="$gcc $archflags" NET_SHIM_LDFLAGS=-static \
     EXTRA_CFLAGS="-I$prefix/include" \
-    LDFLAGS="-static -L$prefix/lib -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lm -lpthread $atomic8"
+    LDFLAGS="-static -L$prefix/lib -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lm -lpthread"
 
 # The property the whole exercise is for — check it, do not assume it.
 if "${cross}readelf" -lW build/cclaw | grep -Eq 'INTERP|DYNAMIC'; then

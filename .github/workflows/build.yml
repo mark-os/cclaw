@@ -170,8 +170,8 @@ jobs:
           grep -Eq "llm_req: .*status=4[0-9][0-9]" "$RUNNER_TEMP/turn.log"
 
       - name: Smoke-test the JS engine on the target
-        # test_quickjs covers the 8-byte atomics that armv5te gets from
-        # scripts/atomic8_fallback.c instead of libatomic.
+        # The one large vendored component with its own number formatting,
+        # bignum and regexp code: run its suite on the emulated target CPU.
         if: matrix.target != 'x64'
         run: |
           scripts/build_static.sh "$TARGET" build/test_quickjs

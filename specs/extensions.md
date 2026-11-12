@@ -330,7 +330,8 @@ dialect: `let`/`const`, arrows, template literals, classes, destructuring,
 not syntactic: **no modules** (`require`/`import` — there is no module
 loader), **no event loop** (no `setTimeout`; `http_request` is synchronous),
 and **no top-level `await`** (async functions and `.then` chains work — the
-host drains the microtask queue and unwraps a returned promise). Failed
+host drains the microtask queue and unwraps a returned promise), and **no
+`Atomics`** (compiled out — a runtime never has a second thread). Failed
 evals return targeted hints for these gaps (`qjs_syntax_hint`,
 src/qjs_host_eval.c). The in-process hooks profile is a reduced-intrinsics
 context (no `Promise`). Globals available to tool handlers (the

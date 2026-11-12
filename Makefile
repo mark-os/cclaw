@@ -7,13 +7,6 @@ PRELOAD_CC ?= $(CC)
 CFLAGS  := -std=c11 -Wall -Wextra -Werror -Wformat-security -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn -Ivendor/yxml
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
-# ARMv5TE (and other pre-v6 ARM, RISC-V rv32) has no hardware CAS wide enough
-# for the 8-byte atomic builtins quickjs and sqlite emit, so the compiler leaves
-# them as calls into libatomic. Probe rather than hardcode: the library is
-# absent on some musl toolchains where the builtins are inlined instead.
-ATOMIC_PROBE := 'int main(void){long long v=0;return(int)__atomic_fetch_add(&v,1,5);}'
-LDFLAGS += $(shell echo $(ATOMIC_PROBE) | $(CC) -x c - -o /dev/null 2>/dev/null || echo -latomic)
-
 VERSION_COMMIT := $(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) status --porcelain --untracked-files=no 2>/dev/null | grep -q . && echo -dirty)
 BUILD_DATE     := $(shell date -u +%Y-%m-%d)
 CFLAGS += -DVERSION_COMMIT='"$(VERSION_COMMIT)"' -DBUILD_DATE='"$(BUILD_DATE)"'

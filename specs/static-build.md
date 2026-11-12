@@ -56,11 +56,12 @@ the cost of not depending on the host's copy.
 - **Logging.** musl's `syslog()` truncates at 1024 bytes; the CLI's stderr tee
   is cclaw's own write and carries the whole line. The syslog copy is subject
   to the libc's limit.
-- **8-byte atomics on ARMv5TE.** The distro's ARM libatomic dispatches through
-  IFUNC, which a static musl binary does not resolve. The script links
-  `scripts/atomic8_fallback.c` instead when the compiler leaves those
-  operations as library calls. Only QuickJS's `Atomics` on 64-bit arrays uses
-  them; `test_quickjs` covers it.
+- **No libatomic.** ARMv5TE has no 64-bit compare-and-swap, and the distro's
+  ARM libatomic dispatches through IFUNC, which a static musl binary does not
+  resolve. The only code that asked for it was QuickJS's `Atomics`, which is
+  compiled out (`CONFIG_ATOMICS` in `vendor/quickjs/quickjs.c`) — no JS
+  runtime in cclaw has a second thread. Narrower atomics (curl's spinlock,
+  SQLite's barriers) come from libgcc's kernel-helper routines.
 - **DNS** is musl's resolver: `/etc/resolv.conf` only, no NSS (no mDNS, no
   `nsswitch.conf` plugins).
 

@@ -68,9 +68,10 @@
 
 /* define to include Atomics.* operations which depend on the OS
    threads */
-#if !defined(__EMSCRIPTEN__)
-#define CONFIG_ATOMICS
-#endif
+/* cclaw: left undefined. Every JS runtime here lives on one thread of one
+   process and quickjs-libc's os.Worker is not built, so Atomics has nothing
+   to synchronise — and its 64-bit operations are the only thing that pulls
+   libatomic into an ARMv5TE link. */
 
 #if !defined(__EMSCRIPTEN__)
 /* enable stack limitation */

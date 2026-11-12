@@ -176,6 +176,36 @@ static void test_interrupt_limit(void) {
     qjs_runtime_destroy(qrt);
 }
 
+/* Atomics on a 64-bit typed array is the one place 8-byte atomic helpers are
+ * called. On ARMv5TE those are library calls (libatomic, or
+ * scripts/atomic8_fallback.c in the static build), so this is what tells a
+ * working helper from a miscompiled or unresolved one. */
+static void test_atomics_64(void) {
+    QjsRuntime *qrt = qjs_runtime_create(1024 * 1024);
+    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
+
+    char *r = qjs_eval_to_string(ctx,
+        "var a = new BigInt64Array(new SharedArrayBuffer(16));"
+        "var big = 0x123456789abcdefn;"
+        "Atomics.store(a, 0, big);"
+        "[Atomics.load(a, 0) === big,"
+        " Atomics.add(a, 0, 1n) === big, Atomics.sub(a, 0, 1n) === big + 1n,"
+        " Atomics.and(a, 0, 0xffn << 32n) === big,"
+        " Atomics.or(a, 0, 1n) === (big & (0xffn << 32n)),"
+        " Atomics.xor(a, 0, 1n) === ((big & (0xffn << 32n)) | 1n),"
+        " Atomics.exchange(a, 0, 7n) === (big & (0xffn << 32n)),"
+        " Atomics.compareExchange(a, 0, 8n, 9n) === 7n, Atomics.load(a, 0) === 7n,"
+        " Atomics.compareExchange(a, 0, 7n, -5n) === 7n, Atomics.load(a, 0) === -5n,"
+        " a[1] === 0n].join()", NULL);
+    ASSERT(r && strcmp(r, "true,true,true,true,true,true,true,true,true,true,true,true") == 0,
+           "Atomics on BigInt64Array");
+    if (r && strstr(r, "false")) printf("  atomics: %s\n", r);
+    free(r);
+
+    JS_FreeContext(ctx);
+    qjs_runtime_destroy(qrt);
+}
+
 int main(void) {
     TEST_INIT();
     test_runtime_create_destroy();
@@ -185,6 +215,7 @@ int main(void) {
     test_console_log_circular();
     test_promise_resolve();
     test_interrupt_limit();
+    test_atomics_64();
 
     if (failures == 0)
         printf("PASS: test_quickjs (%d checks)\n", 0);

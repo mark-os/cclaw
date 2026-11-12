@@ -674,6 +674,23 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "UPDATE entries SET token_estimate = content_bytes/3 + 4"
       " WHERE content_bytes IS NOT NULL;",
       NULL },
+
+    /* v53: tool_result rows of forked tools (shell_exec, js_eval, web_fetch,
+     * extension tools) were stored with tool_name '' — the reap path passed
+     * an empty string. Only the Gemini wire format reads the column
+     * (functionResponse.name), and it rejects an empty name, so every request
+     * after such a result failed with HTTP 400 and the agent fell back to its
+     * next model. The name is on the call the result answers; a result whose
+     * call is gone gets NULL, which the payload query already covers. */
+    { 53,
+      "UPDATE entries SET tool_name ="
+      "  (SELECT c.tool_name FROM entries c"
+      "    WHERE c.session_id = entries.session_id"
+      "      AND c.iteration_id = entries.iteration_id"
+      "      AND c.type = 'tool_call'"
+      "      AND c.tool_call_id = entries.tool_call_id LIMIT 1)"
+      " WHERE type = 'tool_result' AND tool_name = '';",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {

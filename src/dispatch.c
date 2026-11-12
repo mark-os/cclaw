@@ -2103,7 +2103,7 @@ void reap_children(void) {
             LOG_TRACE_("tool result tool=%s len=%zu content=%s",
                        c->tool_name, out_len, output);
             tool_result_commit(session_id, c->tool_call_id, c->entry_id,
-                               c->iteration_id, "", output, is_err, hosts,
+                               c->iteration_id, c->tool_name, output, is_err, hosts,
                                hook_annotate);
             child_remove(c);
             run_advance(session_id);

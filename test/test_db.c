@@ -479,9 +479,30 @@ static void test_schema_patch_application(void) {
         " (100,'shell_exec','shell_exec','pending'),"
         " (100,'request_config','request_changes','denied');",
         NULL, NULL, NULL) == SQLITE_OK);
+    /* v53 inputs: tool results stored with an empty tool_name — one whose
+     * call is present, one whose call is not — and a named one left alone. */
+    assert(sqlite3_exec(old_db,
+        "INSERT INTO entries(id, session_id, iteration_id, type, role, tool_call_id, tool_name)"
+        " VALUES (600,100,77,'tool_call',2,'call_a','shell_exec'),"
+        "        (601,100,77,'tool_call',2,'call_b','js_eval'),"
+        "        (602,100,77,'tool_result',3,'call_b',''),"
+        "        (603,100,77,'tool_result',3,'call_a',''),"
+        "        (604,100,78,'tool_result',3,'call_gone',''),"
+        "        (605,100,77,'tool_result',3,'call_a','kept');",
+        NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(old_db, 40);
 
     assert(db_schema_compat(old_db) == 1);   /* runs every pending patch */
+
+    /* v53: each empty name becomes its call's name; no call → NULL. */
+    assert(db_scalar_i64(old_db,
+        "SELECT (SELECT tool_name FROM entries WHERE id=602)='js_eval'"
+        "   AND (SELECT tool_name FROM entries WHERE id=603)='shell_exec'"
+        "   AND (SELECT tool_name FROM entries WHERE id=604) IS NULL"
+        "   AND (SELECT tool_name FROM entries WHERE id=605)='kept';", 0, -1) == 1);
+    assert(db_scalar_i64(old_db,
+        "SELECT COUNT(*) FROM entries WHERE type='tool_result' AND tool_name='';",
+        0, -1) == 0);
 
     /* v47 rekey: 'sensitive' becomes the overlay value, everything else —
      * tool names and document verbs alike — is an ordinary required park.

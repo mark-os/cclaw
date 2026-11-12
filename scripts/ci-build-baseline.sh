@@ -9,7 +9,8 @@
 # build a current libcurl into /usr/local and compile against that. The binary
 # still links the libcurl.so.4 soname and uses whatever libcurl the target has
 # at runtime; curl_ws_available() gates the WebSocket transport on the
-# runtime version.
+# runtime version. This libcurl only serves the build, so it is built without
+# TLS (current curl needs OpenSSL 3; bullseye has 1.1.1).
 #
 # Usage (from the repo root, in the container): scripts/ci-build-baseline.sh
 # Expects curl-$CURL_VERSION.tar.gz in the repo root (downloaded by the host).
@@ -28,13 +29,13 @@ deb http://archive.debian.org/debian-security bullseye-security main
 SRC
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-  build-essential libssl-dev xxd git ca-certificates >/dev/null
+  build-essential xxd git ca-certificates >/dev/null
 
 tmp=$(mktemp -d)
 tar xzf "curl-${CURL_VERSION}.tar.gz" -C "$tmp"
 (
   cd "$tmp/curl-${CURL_VERSION}"
-  ./configure --prefix=/usr/local --with-openssl --enable-websockets \
+  ./configure --prefix=/usr/local --without-ssl --enable-websockets \
     --disable-static --disable-ldap --disable-ldaps --disable-manual \
     --without-libpsl --without-brotli --without-zstd --without-libidn2 \
     --without-nghttp2 --without-libssh2 >/dev/null

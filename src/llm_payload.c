@@ -701,9 +701,18 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         tool_filter = NULL;
     }
 
+    /* Reasoning replay matches on the model that produced it. Ingest stamps
+     * the routed model's id (`model@provider`), so that is what must be
+     * compared — the bare wire name never equals it, and the signature a
+     * thinking model requires back was silently dropped (Gemini: HTTP 400
+     * "missing a thought_signature"). The bare name is the fallback for the
+     * unrouted synthetic provider, where ingest stamps it too. */
+    const char *replay_model = cfg->provider.model_id ? cfg->provider.model_id
+                                                      : cfg->provider.model;
+
     if (gemini) {
         char *contents = query_text(db, SQL_GEMINI_CONTENTS, session_id, context_text,
-                                    cfg->provider.model);
+                                    replay_model);
         char *tools_json = query_tools(db, SQL_GEMINI_TOOLS, agent_name,
                                        allowed_tools, worker_tools);
 
@@ -737,7 +746,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         }
     } else {
         char *messages = query_text(db, SQL_OPENAI_MESSAGES, session_id, context_text,
-                                    cfg->provider.model);
+                                    replay_model);
         if (!messages) messages = strdup("[]");
         char *tools_json = query_tools(db, SQL_OPENAI_TOOLS, agent_name,
                                        allowed_tools, worker_tools);

@@ -1099,6 +1099,20 @@ static int64_t seed_tool_iteration(sqlite3 *db, char *model, EndpointType ep,
     return sid;
 }
 
+static void build_body_routed(sqlite3 *db, int64_t sid, char *model, char *model_id,
+                              EndpointType ep, LlmPayload *payload) {
+    Config cfg = {0};
+    cfg.provider.model = model;
+    cfg.provider.model_id = model_id;
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ep;
+    cfg.context_window = 128000;
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", payload) == 0);
+    context_plan_free(&plan);
+}
+
 static void build_body(sqlite3 *db, int64_t sid, char *model, EndpointType ep,
                        LlmPayload *payload) {
     Config cfg = {0};
@@ -1200,6 +1214,40 @@ static void test_reasoning_content_replay(void) {
 
     db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_reasoning_content_replay\n");
+}
+
+/* As routed in production: ingest stamps the model's id (`model@provider`)
+ * while the wire carries the bare name. Replay has to match on the id — it
+ * used to compare the bare name and never matched, so every Gemini request
+ * after a tool call went out without the signature and was rejected. */
+static void test_gemini_thought_signature_replay_routed(void) {
+    sqlite3 *db = open_seeded();
+    const char *body =
+        "{\"candidates\":[{\"content\":{\"parts\":["
+        "{\"functionCall\":{\"name\":\"shell_exec\",\"args\":{\"cmd\":\"ls\"}},"
+        " \"thoughtSignature\":\"GSIG\"}]},\"finishReason\":\"STOP\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}";
+    int64_t sid = seed_tool_iteration(db, (char *)"gemini-3-pro@gemini", ENDPOINT_GEMINI, body);
+
+    LlmPayload p;
+    sqlite3_stmt *s;
+    build_body_routed(db, sid, (char *)"gemini-3-pro", (char *)"gemini-3-pro@gemini",
+                      ENDPOINT_GEMINI, &p);
+    const char *sig = json_get_str(db, p.body, "$.contents[1].parts[0].thoughtSignature", &s);
+    assert(sig && strcmp(sig, "GSIG") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&p);
+
+    /* The same bare model reached through another provider is another model. */
+    build_body_routed(db, sid, (char *)"gemini-3-pro", (char *)"gemini-3-pro@openrouter",
+                      ENDPOINT_GEMINI, &p);
+    json_get_str(db, p.body, "$.contents[1].parts[0].thoughtSignature", &s);
+    assert(sqlite3_column_type(s, 0) == SQLITE_NULL);
+    sqlite3_finalize(s);
+    llm_payload_release(&p);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_gemini_thought_signature_replay_routed\n");
 }
 
 /* Gemini-native: the signature rides back on the replayed functionCall part. */
@@ -1653,6 +1701,7 @@ int main(void) {
     test_reasoning_details_replay();
     test_reasoning_content_replay();
     test_gemini_thought_signature_replay();
+    test_gemini_thought_signature_replay_routed();
     printf("All payload tests passed.\n");
     return 0;
 }

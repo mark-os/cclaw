@@ -68,7 +68,7 @@ and nothing between them:
 - `host`: every tier runs with no policy at all — any file, any host, and the
   shell.
 
-`--doctor` reports this as one line under `[userns]`.
+`--doctor` `[layers]` reports which of these applies, per agent.
 
 What is already in good shape:
 

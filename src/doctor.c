@@ -5,6 +5,7 @@
 #include "channel.h"
 #include "config.h"
 #include "config_registry.h"
+#include "contain.h"
 #include "db.h"
 #include "http.h"
 #include "log.h"
@@ -16,7 +17,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
-#include <sched.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -311,34 +312,88 @@ static void check_tls(void) {
            ? "available" : "unavailable (needs libcurl >= 8.13.0 built with ws)");
 }
 
-/* ── Check 5: User namespace availability ───────────────────────── */
+/* ── Layers: what this host can run (specs/portability.md) ──────── */
 
-static void check_userns(void) {
-    printf("\n[userns]\n");
+static void print_warn(const char *label, const char *detail) {
+    printf("  WARN %s: %s\n", label, detail);
+}
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        print_fail("fork", strerror(errno));
+/* Layer 1. The loop needs a database, a config, a provider it holds a key
+ * for, and — for an https endpoint — something to verify the peer against. */
+static void layer_core(sqlite3 *db, const Config *cfg) {
+    const char *missing = NULL;
+    int ca_missing = 0;
+    util_ca_bundle(&ca_missing);
+    if (!db) missing = "the database did not open";
+    else if (!cfg) missing = "the config did not load";
+    else if (!cfg->provider.api_key || !cfg->provider.api_key[0])
+        missing = "no provider has a key";
+    else if (ca_missing && cfg->provider.base_url &&
+             strncmp(cfg->provider.base_url, "https:", 6) == 0)
+        missing = "no CA bundle to verify the provider's certificate";
+    if (missing) print_fail("core", missing);
+    else print_ok("core", "database, config and a provider key");
+}
+
+/* Layers 2 and 4, per agent: every tool tier — file, web_fetch, js and shell
+ * alike — runs in one contained child, so they stand or fall together, and
+ * which it is depends on the agent's profile. */
+static void layer_tools(sqlite3 *db, int contained) {
+    sqlite3_stmt *st;
+    if (!db || sqlite3_prepare_v2(db,
+            "SELECT name, COALESCE(sandbox_profile,'standard') FROM agents ORDER BY name;",
+            -1, &st, NULL) != SQLITE_OK) {
+        printf("  tools: no agents yet (database not initialised)\n");
         return;
     }
-
-    if (pid == 0) {
-        /* Child: try the exact unshare flags sandbox.c uses */
-        int rc = unshare(CLONE_NEWUSER | CLONE_NEWNS);
-        _exit(rc == 0 ? 0 : 1);
+    int refused = 0, rows = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(st, 0);
+        const char *prof = (const char *)sqlite3_column_text(st, 1);
+        char d[320];
+        rows++;
+        if (strcmp(prof, "host") == 0) {
+            snprintf(d, sizeof(d), "%s (host) — uncontained: acts as this user, "
+                     "with no file, secret or network boundary", name);
+            print_warn("tools", d);
+        } else if (contained) {
+            snprintf(d, sizeof(d), "%s (%s) — file, web_fetch, js and shell contained",
+                     name, prof);
+            print_ok("tools", d);
+        } else {
+            snprintf(d, sizeof(d), "%s (%s) — every tool call is refused (exit 126)",
+                     name, prof);
+            print_fail("tools", d);
+            refused = 1;
+        }
     }
+    sqlite3_finalize(st);
+    if (!rows) printf("  tools: no agents yet\n");
+    if (refused)
+        printf("       this host cannot contain a tool child. To run an agent\n"
+               "       uncontained, set its sandbox_profile to 'host' (CLI:\n"
+               "       --trust-host) — the device itself is then the boundary\n");
+}
 
-    int wstatus;
-    if (waitpid(pid, &wstatus, 0) < 0) {
-        print_fail("probe", "waitpid failed");
-        return;
+static void check_layers(sqlite3 *db, const Config *cfg) {
+    printf("\n[layers]\n");
+    layer_core(db, cfg);
+
+    char why[160], d[256];
+    int contained = contain_probe(why, sizeof(why));
+    if (contained) {
+        print_ok("containment", contain_backend());
+    } else {
+        snprintf(d, sizeof(d), "%s unavailable — %s", contain_backend(), why);
+        print_fail("containment", d);
     }
+    layer_tools(db, contained);
 
-    if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0)
-        print_ok("unshare", "CLONE_NEWUSER|CLONE_NEWNS available");
-    else
-        print_fail("unshare", "CLONE_NEWUSER|CLONE_NEWNS not available "
-                   "(sandbox will fail-closed)");
+    /* Layer 5: channels and tool children are this binary re-executed. */
+    char self[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n > 0) { self[n] = '\0'; print_ok("daemon", self); }
+    else print_fail("daemon", "cannot resolve /proc/self/exe to re-execute");
 }
 
 /* ── Check 6: Workspace ─────────────────────────────────────────── */
@@ -801,7 +856,7 @@ int doctor_main(void) {
     check_models(db);
     check_tls();
     check_provider(cfg);
-    check_userns();
+    check_layers(db, cfg);
     check_workspace(cfg);
     check_channels(db);
     check_denials(db);

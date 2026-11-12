@@ -39,6 +39,30 @@
 #include "secret.h"
 #include "util.h"
 #include <curl/curl.h>
+
+/* libcurl grew the WebSocket API in 7.86.0. A source build against older
+ * headers (Debian 11, RHEL 9) must still compile: there curl_ws_available()
+ * is 0, a persistent-transport extension is refused at activation, and these
+ * stand-ins only fail any call that slips through. */
+#if LIBCURL_VERSION_NUM < 0x075600
+struct curl_ws_frame { int flags; curl_off_t bytesleft; };
+#define CURLWS_TEXT  (1 << 0)
+#define CURLWS_CONT  (1 << 2)
+#define CURLWS_CLOSE (1 << 3)
+#define CURLWS_PING  (1 << 4)
+#define CURLWS_PONG  (1 << 6)
+static CURLcode curl_ws_send(CURL *c, const void *buf, size_t len, size_t *sent,
+                             curl_off_t frag, unsigned int flags) {
+    (void)c; (void)buf; (void)len; (void)frag; (void)flags;
+    *sent = 0;
+    return CURLE_NOT_BUILT_IN;
+}
+static CURLcode curl_ws_recv(CURL *c, void *buf, size_t len, size_t *recvd, void *meta) {
+    (void)c; (void)buf; (void)len; (void)meta;
+    *recvd = 0;
+    return CURLE_NOT_BUILT_IN;
+}
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>

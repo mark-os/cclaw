@@ -164,6 +164,11 @@ int split_and_trim(char *s, char **out, int max) {
 }
 
 int curl_ws_available(void) {
+#if LIBCURL_VERSION_NUM < 0x075600
+    /* Built against pre-WebSocket headers: channel_runner compiled its
+     * stand-ins, so a newer runtime libcurl does not make the transport real. */
+    return 0;
+#endif
     curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
     if (!v || !v->protocols) return 0;
     /* Before 8.13.0 libcurl derived the frame flags from the opcode alone and
@@ -178,4 +183,16 @@ int curl_ws_available(void) {
     for (const char *const *p = v->protocols; *p; p++)
         if (ascii_strcasecmp(*p, "ws") == 0 || ascii_strcasecmp(*p, "wss") == 0) return 1;
     return 0;
+}
+
+int thread_spawn(pthread_t *t, int detached, void *(*fn)(void *), void *arg) {
+    pthread_attr_t attr;
+    int rc = pthread_attr_init(&attr);
+    if (rc != 0) return rc;
+    rc = pthread_attr_setstacksize(&attr, CCLAW_THREAD_STACK);
+    if (rc == 0 && detached)
+        rc = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (rc == 0) rc = pthread_create(t, &attr, fn, arg);
+    pthread_attr_destroy(&attr);
+    return rc;
 }

@@ -11,6 +11,7 @@
 #include "types.h"
 #include "update.h"
 #include "util.h"
+#include <curl/curl.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -290,6 +291,24 @@ static void check_provider(const Config *cfg) {
     }
 
     http_response_free(&resp);
+}
+
+/* ── TLS trust: which CA bundle outbound HTTPS verifies against ──── */
+
+static void check_tls(void) {
+    printf("\n[tls]\n");
+    curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
+    printf("  libcurl: %s (%s)\n", v ? v->version : "?",
+           v && v->ssl_version ? v->ssl_version : "no TLS");
+    int missing = 0;
+    const char *ca = util_ca_bundle(&missing);
+    if (missing)
+        print_fail("ca bundle", ca ? "SSL_CERT_FILE is not readable"
+                                   : "none found — install ca-certificates or set SSL_CERT_FILE");
+    else
+        print_ok("ca bundle", ca ? ca : "libcurl default");
+    printf("  websockets: %s\n", curl_ws_available()
+           ? "available" : "unavailable (needs libcurl >= 8.13.0 built with ws)");
 }
 
 /* ── Check 5: User namespace availability ───────────────────────── */
@@ -780,6 +799,7 @@ int doctor_main(void) {
     Config *cfg = NULL;
     check_config(db, &cfg);
     check_models(db);
+    check_tls();
     check_provider(cfg);
     check_userns();
     check_workspace(cfg);

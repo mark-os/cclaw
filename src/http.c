@@ -2,6 +2,7 @@
 #include "http.h"
 #include "buf.h"
 #include "log.h"
+#include "util.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,6 +130,8 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     char errbuf[CURL_ERROR_SIZE] = "";
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
     curl_easy_setopt(curl, CURLOPT_URL, opts->url);
+    const char *ca = util_ca_bundle(NULL);
+    if (ca) curl_easy_setopt(curl, CURLOPT_CAINFO, ca);
 
     /* Method */
     int is_post = (opts->body || opts->read_cb);

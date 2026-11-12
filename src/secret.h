@@ -15,7 +15,7 @@ char *secret_encrypt(const uint8_t key[32], const char *plaintext);
 char *secret_decrypt(const uint8_t key[32], const char *enc_str);
 
 /* Load or create .cclaw_key next to db_path. Writes 32 bytes into key_out.
- * Creates with getrandom() + mode 0600 if missing. Returns 0 on success, -1 on error. */
+ * Creates with util_random() + mode 0600 if missing. Returns 0 on success, -1 on error. */
 int secret_key_load_or_create(const char *db_path, uint8_t key_out[32]);
 
 #endif

@@ -7,7 +7,7 @@ struct mg_context;
 struct mg_connection;
 
 /* Register the /admin dashboard on a running civetweb context and ensure the
- * web_admin_token config value exists (generated from /dev/urandom on first
+ * web_admin_token config value exists (generated from util_random() on first
  * start; `cclaw dashboard` prints the tokenized URL). Returns 0 on success. */
 int dashboard_register(struct mg_context *ctx, sqlite3 *db);
 

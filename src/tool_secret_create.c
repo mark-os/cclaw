@@ -3,10 +3,10 @@
 #include "tool_args.h"
 #include "validate.h"
 #include "db.h"
+#include "util.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <sys/random.h>
 
 static const char CHARSET_ALNUM[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -35,7 +35,7 @@ static const char *charset_for(const char *name, size_t *out_len) {
     return NULL;
 }
 
-/* Rejection-sample len random bytes from getrandom() into charset. out must
+/* Rejection-sample len random bytes from util_random() into charset. out must
  * hold len+1 bytes (NUL-terminated). Returns 0 on success, -1 on error. */
 static int random_from_charset(char *out, size_t len, const char *charset, size_t clen) {
     unsigned int limit = 256u - (256u % clen);   /* widen: 256 truncates to 0 in a byte */
@@ -44,7 +44,7 @@ static int random_from_charset(char *out, size_t len, const char *charset, size_
         unsigned char buf[64];
         size_t want = len - filled;
         if (want > sizeof(buf)) want = sizeof(buf);
-        if (getrandom(buf, want, 0) != (ssize_t)want) return -1;
+        if (util_random(buf, want) != 0) return -1;
         for (size_t i = 0; i < want && filled < len; i++) {
             if (buf[i] >= limit) continue;   /* reject: would bias the distribution */
             out[filled++] = charset[buf[i] % clen];

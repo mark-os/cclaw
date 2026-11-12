@@ -14,7 +14,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/random.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -313,8 +312,8 @@ static int keygen(const char *path) {
     if (slash) { *slash = '\0'; util_mkdir_p(dir); }
 
     uint8_t seed[32], sk[64], pk[32];
-    if (getrandom(seed, sizeof(seed), 0) != (ssize_t)sizeof(seed)) {
-        fprintf(stderr, "error: getrandom failed\n");
+    if (util_random(seed, sizeof(seed)) != 0) {
+        fprintf(stderr, "error: no random source\n");
         return 1;
     }
     crypto_eddsa_key_pair(sk, pk, seed);

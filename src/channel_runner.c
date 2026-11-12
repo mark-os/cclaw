@@ -479,6 +479,8 @@ static CURL *make_easy(const char *method, const char *url, const char *body,
     }
     buf_free(resp);
     curl_easy_setopt(c, CURLOPT_URL, url);
+    const char *ca = util_ca_bundle(NULL);
+    if (ca) curl_easy_setopt(c, CURLOPT_CAINFO, ca);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, resp);
     curl_easy_setopt(c, CURLOPT_TIMEOUT, timeout);
@@ -815,6 +817,8 @@ int cr_conn_open(const char *url, const char *framing,
     CURL *c = curl_easy_init();
     if (!c) return -1;
     curl_easy_setopt(c, CURLOPT_URL, url);
+    const char *ca = util_ca_bundle(NULL);
+    if (ca) curl_easy_setopt(c, CURLOPT_CAINFO, ca);
     curl_easy_setopt(c, CURLOPT_CONNECT_ONLY, 2L);   /* 2 = WebSocket */
     /* A handler picks the handshake cap, but it does not get to remove it: an
      * extension asking for hours would re-open the wedge the cap exists to

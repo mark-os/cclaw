@@ -1,10 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "secret.h"
+#include "util.h"
 #include "monocypher.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <sys/random.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -53,7 +53,7 @@ char *secret_encrypt(const uint8_t key[32], const char *plaintext) {
     uint8_t *ct    = blob + NONCE_LEN;
     uint8_t *mac   = blob + NONCE_LEN + pt_len;
 
-    if (getrandom(nonce, NONCE_LEN, 0) != NONCE_LEN) {
+    if (util_random(nonce, NONCE_LEN) != 0) {
         free(blob);
         return NULL;
     }
@@ -133,7 +133,7 @@ int secret_key_load_or_create(const char *db_path, uint8_t key_out[32]) {
     }
 
     /* Create new key */
-    if (getrandom(key_out, 32, 0) != 32) { free(key_path); return -1; }
+    if (util_random(key_out, 32) != 0) { free(key_path); return -1; }
 
     fd = open(key_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) {

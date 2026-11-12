@@ -7,10 +7,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
 #include <curl/curl.h>
+#include "log.h"
 
 char *util_read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
@@ -195,4 +197,73 @@ int thread_spawn(pthread_t *t, int detached, void *(*fn)(void *), void *arg) {
     if (rc == 0) rc = pthread_create(t, &attr, fn, arg);
     pthread_attr_destroy(&attr);
     return rc;
+}
+
+static const char *g_ca_path;
+static int g_ca_missing;
+static pthread_once_t g_ca_once = PTHREAD_ONCE_INIT;
+
+static void ca_bundle_resolve(void) {
+    const char *env = getenv("SSL_CERT_FILE");
+    if (env && env[0]) {
+        /* An explicit choice is never second-guessed: an unreadable file is
+         * still handed to libcurl so the request fails rather than quietly
+         * verifying against some other bundle. */
+        g_ca_path = env;
+        if (access(env, R_OK) != 0) {
+            g_ca_missing = 1;
+            LOG_ERROR_("SSL_CERT_FILE=%s is not readable: HTTPS requests will fail", env);
+        }
+        return;
+    }
+
+#if LIBCURL_VERSION_NUM >= 0x075400   /* cainfo/capath reported since 7.84.0 */
+    curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
+    if (v && v->age >= CURLVERSION_TENTH &&
+        ((v->cainfo && access(v->cainfo, R_OK) == 0) ||
+         (v->capath && access(v->capath, R_OK) == 0)))
+        return;
+#else
+    /* Older headers cannot ask; such a libcurl is always the system's own. */
+    return;
+#endif
+
+    static const char *const known[] = {
+        "/etc/ssl/certs/ca-certificates.crt",                /* Debian, Ubuntu, Alpine, OpenWrt */
+        "/etc/pki/tls/certs/ca-bundle.crt",                  /* RHEL, Fedora, Amazon Linux */
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", /* RHEL 7+ */
+        "/etc/ssl/ca-bundle.pem",                            /* openSUSE */
+        "/etc/ssl/cert.pem",                                 /* Alpine, BSDs */
+    };
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
+        if (access(known[i], R_OK) == 0) { g_ca_path = known[i]; return; }
+
+    g_ca_missing = 1;
+    LOG_ERROR_("no CA certificate bundle found: HTTPS requests will fail. "
+               "Install ca-certificates or set SSL_CERT_FILE");
+}
+
+const char *util_ca_bundle(int *missing) {
+    pthread_once(&g_ca_once, ca_bundle_resolve);
+    if (missing) *missing = g_ca_missing;
+    return g_ca_path;
+}
+
+int util_random(void *buf, size_t len) {
+    unsigned char *p = buf;
+    size_t got = 0;
+    int fd = -1;
+    while (got < len) {
+        ssize_t n = fd < 0 ? getrandom(p + got, len - got, 0)
+                           : read(fd, p + got, len - got);
+        if (n > 0) { got += (size_t)n; continue; }
+        if (n < 0 && errno == EINTR) continue;
+        if (fd < 0 && n < 0 && errno == ENOSYS) {
+            fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) continue;
+        }
+        break;
+    }
+    if (fd >= 0) close(fd);
+    return got == len ? 0 : -1;
 }

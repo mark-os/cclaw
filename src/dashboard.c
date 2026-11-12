@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "dashboard.h"
+#include "util.h"
 #include "admin_api.h"
 #include "buf.h"
 #include "civetweb.h"
@@ -56,11 +57,7 @@ static int ensure_token(sqlite3 *db) {
     free(cur);
     if (have) return 0;
     unsigned char rnd[16];
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0) return -1;
-    ssize_t n = read(fd, rnd, sizeof(rnd));
-    close(fd);
-    if (n != (ssize_t)sizeof(rnd)) return -1;
+    if (util_random(rnd, sizeof(rnd)) != 0) return -1;
     char tok[33];
     for (int i = 0; i < 16; i++)
         snprintf(tok + i * 2, 3, "%02x", rnd[i]);

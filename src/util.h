@@ -77,6 +77,22 @@ int split_and_trim(char *s, char **out, int max);
  * dashboard.o into that test and broke the link on main.c's resolve_approval. */
 int curl_ws_available(void);
 
+/* Fill buf with len cryptographically random bytes. getrandom() where the
+ * kernel has it (3.17+); /dev/urandom on the older kernels a static binary
+ * can now reach. Returns 0 on success, -1 on failure — never a short fill. */
+int util_random(void *buf, size_t len);
+
+/* The CA bundle to hand libcurl as CURLOPT_CAINFO, or NULL to leave libcurl's
+ * own default alone. A system libcurl knows where its distro keeps the bundle;
+ * a libcurl linked into a static release binary does not — any path baked in
+ * at build time describes the build machine. So: $SSL_CERT_FILE wins when
+ * set; otherwise libcurl's compiled-in default is kept if it exists on this
+ * host; otherwise the well-known distro locations are probed. *missing (may
+ * be NULL) is set when nothing was found — HTTPS will then fail per request,
+ * and plain-http providers still work, which is why this is not fatal at
+ * startup. Resolved once per process. */
+const char *util_ca_bundle(int *missing);
+
 /* The one place threads are created. The stack size is named rather than left
  * to the libc: glibc's default follows RLIMIT_STACK (8M), musl's is ~128K, so
  * code that fits on one overflows on the other with no warning. Pages are

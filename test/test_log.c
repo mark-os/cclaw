@@ -1,6 +1,6 @@
 /* Test: log level gating, trace=1 marking, ctx suffix, heap-promote path.
- * cclaw_log_init(1) sets LOG_PERROR, so every syslog() write is teed to
- * stderr; we dup2 stderr onto a temp file and assert against its contents. */
+ * cclaw_log_init(1) tees every log line to stderr; we dup2 stderr onto a
+ * temp file and assert against its contents. */
 #define _POSIX_C_SOURCE 200809L
 #include "log.h"
 #include <assert.h>
@@ -144,7 +144,7 @@ int main(void) {
     assert(dup2(fd, STDERR_FILENO) == STDERR_FILENO);
     close(fd);
 
-    cclaw_log_init(1);  /* LOG_PERROR tees every write to (captured) stderr */
+    cclaw_log_init(1);  /* tees every write to (captured) stderr */
 
     test_level_gating();
     test_trace_marking();

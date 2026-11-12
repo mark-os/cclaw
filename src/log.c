@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "log.h"
 
 #include <stdarg.h>
@@ -5,19 +6,24 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <unistd.h>
 
 static LogLevel g_log_level = LOG_LEVEL_INFO;
+static int g_tee_stderr;
 
+/* The stderr tee is ours, not LOG_PERROR: what a libc's syslog() does with a
+ * long message is its own business (glibc carries any length, musl cuts at
+ * 1024 bytes), and the interactive CLI is where a trace-size line is read. */
 void cclaw_log_init(int tee_stderr) {
-    int opts = LOG_PID | (tee_stderr ? LOG_PERROR : 0);
-    openlog("cclaw", opts, LOG_USER);
+    g_tee_stderr = tee_stderr;
+    openlog("cclaw", LOG_PID, LOG_USER);
 }
 
 void cclaw_log_set_level(LogLevel level) {
     g_log_level = level;
     /* Also mask raw syslog() from vendored code below the same level —
      * cclaw_log_write gates itself, but a bare syslog(LOG_DEBUG, ...) would
-     * still hit stderr through LOG_PERROR without this. */
+     * still reach the system log without this. */
     int up = level >= LOG_LEVEL_DEBUG ? LOG_DEBUG :
              level == LOG_LEVEL_INFO  ? LOG_NOTICE :
              level == LOG_LEVEL_WARN  ? LOG_WARNING : LOG_ERR;
@@ -72,7 +78,7 @@ void cclaw_log_write(LogLevel level, const char *fmt, ...) {
     va_end(ap);
 
     /* Promote to the heap rather than truncate (trace logs the full response
-     * body, and glibc's syslog() handles arbitrary-length messages). */
+     * body). */
     if (n >= (int)sizeof stackbuf) {
         char *heap = malloc((size_t)n + 1);
         if (heap) {
@@ -88,8 +94,10 @@ void cclaw_log_write(LogLevel level, const char *fmt, ...) {
     int prio = level == LOG_LEVEL_ERROR ? LOG_ERR :
                level == LOG_LEVEL_WARN  ? LOG_WARNING :
                level == LOG_LEVEL_INFO  ? LOG_NOTICE : LOG_DEBUG;
-    syslog(prio, "%s%s%s", msg, suffix,
-           level == LOG_LEVEL_TRACE ? " trace=1" : "");
+    const char *trace = level == LOG_LEVEL_TRACE ? " trace=1" : "";
+    syslog(prio, "%s%s%s", msg, suffix, trace);
+    if (g_tee_stderr)
+        dprintf(STDERR_FILENO, "cclaw[%d]: %s%s%s\n", (int)getpid(), msg, suffix, trace);
 
     if (msg != stackbuf) free(msg);
 }

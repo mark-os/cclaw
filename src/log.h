@@ -5,7 +5,8 @@
 #include <stdint.h>
 
 /* Logging goes to syslog (journald captures it under `cclaw` automatically).
- * tee_stderr adds LOG_PERROR so the interactive CLI sees its own logs inline;
+ * tee_stderr copies every line to stderr so the interactive CLI sees its own
+ * logs inline;
  * the daemon passes 0 so its logs go strictly to the system facility. */
 void cclaw_log_init(int tee_stderr);
 

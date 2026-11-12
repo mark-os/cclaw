@@ -79,7 +79,7 @@ jobs:
         include:
           - { target: x64,     packages: "" }
           - { target: arm64,   packages: gcc-aarch64-linux-gnu,  strip: aarch64-linux-gnu-strip }
-          - { target: i586,    packages: gcc-i686-linux-gnu,     strip: i686-linux-gnu-strip }
+          - { target: i586,    packages: gcc-i686-linux-gnu qemu-user, strip: i686-linux-gnu-strip }
           - { target: armv5te, packages: gcc-arm-linux-gnueabi,  strip: arm-linux-gnueabi-strip, qemu_cpu: arm926 }
     env:
       TARGET: ${{ matrix.target }}
@@ -98,7 +98,7 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y xxd qemu-user-static ${{ matrix.packages }}
+          sudo apt-get install -y xxd ${{ matrix.packages }}
 
       - name: Register qemu for foreign binaries
         # cclaw re-executes itself (/proc/self/exe) for tools and channels, so
@@ -182,8 +182,8 @@ jobs:
         # does not. Run the binary on an emulated one.
         if: matrix.target == 'i586'
         run: |
-          qemu-i386-static -cpu pentium ./build/cclaw --version
-          qemu-i386-static -cpu pentium ./build/test_quickjs
+          qemu-i386 -cpu pentium ./build/cclaw --version
+          qemu-i386 -cpu pentium ./build/test_quickjs
 
       # Two shapes of the same binary. The zip is for a human following the
       # release notes; the bare file is what `cclaw update` fetches, so the

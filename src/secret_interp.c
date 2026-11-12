@@ -117,13 +117,19 @@ char **used_secret_names(const char *args, const ShellSecret *secrets,
     return all;
 }
 
-static const ShellSecret *s_deinterp_secrets; /* qsort context */
-
-static int cmp_secret_len_desc(const void *a, const void *b) {
-    size_t ia = *(const size_t *)a, ib = *(const size_t *)b;
-    size_t la = strlen(s_deinterp_secrets[ia].value);
-    size_t lb = strlen(s_deinterp_secrets[ib].value);
-    return (la < lb) - (la > lb); /* descending */
+/* Order indices by value length, longest first. An insertion sort over the
+ * handful of secrets a call carries, taking `secrets` as an argument: this
+ * runs concurrently on tool threads and the event loop, and the qsort
+ * comparator it replaces read the array through a process-wide static. */
+static void order_by_len_desc(size_t *order, const ShellSecret *secrets, size_t count) {
+    for (size_t i = 1; i < count; i++) {
+        size_t v = order[i], lv = strlen(secrets[v].value), j = i;
+        while (j > 0 && strlen(secrets[order[j - 1]].value) < lv) {
+            order[j] = order[j - 1];
+            j--;
+        }
+        order[j] = v;
+    }
 }
 
 /* Base64-encode src into dst. Returns bytes written (no NUL), 0 if too small. */
@@ -199,8 +205,7 @@ char *secret_deinterpolate(const char *text, const ShellSecret *secrets, size_t 
     size_t *order = malloc(count * sizeof(size_t));
     if (!order) return strdup(text);
     for (size_t i = 0; i < count; i++) order[i] = i;
-    s_deinterp_secrets = secrets;
-    qsort(order, count, sizeof(size_t), cmp_secret_len_desc);
+    order_by_len_desc(order, secrets, count);
 
     char *cur = strdup(text);
     if (!cur) { free(order); return NULL; }

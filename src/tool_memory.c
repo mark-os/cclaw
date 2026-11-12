@@ -242,8 +242,13 @@ static char *tool_memory_edit_handler(const char *arguments, void *user_data, in
                 succeeded++;
             } else {
                 failed++;
-                fpos += (size_t)snprintf(failed_nums + fpos, sizeof(failed_nums) - fpos,
-                                         "%s#%d", fpos > 0 ? ", " : "", number);
+                /* snprintf returns the length it *wanted*: adding that to
+                 * fpos unchecked walks it past the array, and the next call
+                 * then writes out of bounds. Append only what fits whole. */
+                int w = snprintf(failed_nums + fpos, sizeof(failed_nums) - fpos,
+                                 "%s#%d", fpos > 0 ? ", " : "", number);
+                if (w > 0 && (size_t)w < sizeof(failed_nums) - fpos) fpos += (size_t)w;
+                else failed_nums[fpos] = '\0';
             }
         }
         sqlite3_finalize(st);

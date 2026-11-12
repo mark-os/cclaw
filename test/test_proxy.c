@@ -283,7 +283,7 @@ static void test_relay_cap(void) {
     assert(write(over, req, (size_t)rn) == rn);
     char resp[64];
     assert(read_line(over, resp, sizeof(resp)) > 0);
-    assert(strncmp(resp, "DENIED", 6) == 0);
+    assert(strncmp(resp, "ERROR busy", 10) == 0);
     close(over);
 
     /* Free one slot and confirm a new tunnel is admitted again. */

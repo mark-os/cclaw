@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_cron.h"
 #include "approval.h"
+#include "buf.h"
 #include "config_registry.h"
 #include "cron.h"
 #include "db.h"
@@ -461,18 +462,18 @@ char *tool_cron_list_handler(const char *arguments, void *user_data, int *is_err
     CronJob *jobs = cron_list(ctx->db, ctx->agent_name, &count);
     if (count == 0) return strdup("no cron jobs");
 
-    size_t cap = 128 * (size_t)count + 64;
-    char *buf = malloc(cap);
-    if (!buf) { cron_list_free(jobs, count); return tool_fail(is_error, "error: OOM"); }
-    size_t pos = 0;
+    /* Buf, not a sized array: a row carries the job's whole prompt, so no
+     * per-job estimate is an upper bound. (This was `pos += snprintf(...)`
+     * into 128 bytes per job, which wrote past the allocation as soon as one
+     * prompt was longer than that.) */
+    Buf out = {0};
 
     /* Header. A blank cron_expr with a future next_run_at reads as a one-shot;
      * both payload columns blank is a bare wake. */
-    pos += (size_t)snprintf(buf + pos, cap - pos,
-        "id|name|cron_expr|prompt|script|enabled|next_run_at\n");
+    buf_append_str(&out, "id|name|cron_expr|prompt|script|enabled|next_run_at\n");
 
     for (int i = 0; i < count; i++) {
-        int n = snprintf(buf + pos, cap - pos, "%lld|%s|%s|%s|%s|%s|%lld\n",
+        buf_appendf(&out, "%lld|%s|%s|%s|%s|%s|%lld\n",
             (long long)jobs[i].id,
             jobs[i].name ? jobs[i].name : "",
             jobs[i].cron_expr ? jobs[i].cron_expr : "",
@@ -480,10 +481,10 @@ char *tool_cron_list_handler(const char *arguments, void *user_data, int *is_err
             jobs[i].script ? jobs[i].script : "",
             jobs[i].enabled ? "true" : "false",
             (long long)jobs[i].next_run_at);
-        if (n > 0) pos += (size_t)n;
     }
     cron_list_free(jobs, count);
-    return buf;
+    char *result = buf_take(&out);
+    return result ? result : tool_fail(is_error, "error: OOM");
 }
 
 char *tool_cron_remove_handler(const char *arguments, void *user_data, int *is_error) {

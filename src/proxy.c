@@ -216,6 +216,19 @@ static int resolve_permitted(const ProxyContext *ctx, const char *host,
 int proxy_decide(const ProxyContext *ctx, const char *target,
                  char *ip_out, size_t ip_cap, int *sni_gate) {
     if (sni_gate) *sni_gate = 0;
+
+    /* A fully-qualified name's trailing dot: "secret.example.com." resolves
+     * exactly like the name without it, but compared unequal to every rule —
+     * including the deny list, which a "*" grant then walked straight past. */
+    char norm[256];
+    size_t tlen = strlen(target);
+    if (tlen > 1 && target[tlen - 1] == '.') {
+        if (tlen > sizeof(norm)) return PROXY_DENIED;
+        memcpy(norm, target, tlen - 1);
+        norm[tlen - 1] = '\0';
+        target = norm;
+    }
+
     if (!host_decide(ctx, target)) return PROXY_DENIED;
 
     /* Numeric target: host_decide just required an explicit literal-IP or
@@ -453,6 +466,13 @@ static int sni_check(const ProxyContext *ctx, int client_fd, uint16_t port,
 
         int rc = parse_client_hello_sni(buf, have, sni, sizeof(sni));
         if (rc == SNI_PARSE_FOUND) {
+            /* The deny list outranks every allow rule here as it does in
+             * host_decide: an allowed sibling on a shared address must not
+             * be a way to reach a sensitive host by SNI. */
+            if (ctx->deny_rules && host_covered(ctx->deny_rules, ctx->deny_count, sni)) {
+                *deny_reason = "sni_sensitive";
+                return 0;
+            }
             if (host_match(ctx->host_rules, ctx->host_rule_count, sni))
                 return 1;
             *deny_reason = "sni_mismatch";
@@ -501,7 +521,15 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
         return;
     }
     *colon = '\0';
-    const char *target = preamble;
+    char *target = preamble;
+    /* An IPv6 literal arrives in brackets (what a CONNECT line carries; inet_pton wants it
+     * bare). */
+    size_t tlen = strlen(target);
+    if (tlen >= 2 && target[0] == '[' && target[tlen - 1] == ']') {
+        target[tlen - 1] = '\0';
+        target++;
+        tlen -= 2;
+    }
     char *pend = NULL;
     long pval = strtol(colon + 1, &pend, 10);
     if (pend == colon + 1 || *pend != '\0' || pval < 1 || pval > 65535) {
@@ -529,7 +557,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     /* Bound simultaneous relays per call — refuse cleanly when at the cap. */
     if (!relay_acquire(ctx)) {
         LOG_INFO_("proxy relay_full host=%s", target);
-        write(client_fd, "DENIED\n", 7);
+        write(client_fd, "ERROR busy\n", 11);   /* not policy: do not say DENIED */
         close(client_fd);
         return;
     }
@@ -552,6 +580,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     const char *sni_reason = NULL;
     if (sni_gate && !sni_check(ctx, client_fd, port, &sni_reason)) {
         LOG_WARN_("proxy deny host=%s reason=%s", target, sni_reason);
+        record_denied(ctx, target);
         close(remote_fd);
         close(client_fd);
         relay_release(ctx);

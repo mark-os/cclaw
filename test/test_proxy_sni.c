@@ -332,6 +332,50 @@ static int numeric_connect(ProxyContext *ctx, int port, char *resp, int cap) {
     return fd;
 }
 
+static void test_sni_sensitive_host_denied(void) {
+    /* The deny list outranks allow rules for the SNI as it does for the
+     * CONNECT target: with ".example.com" granted and secret.example.com
+     * marked sensitive, a tunnel opened for an allowed name must not carry a
+     * ClientHello for the sensitive one (same address on a shared front end). */
+    int port;
+    int lfd = sink_listen(&port);
+    struct sink_result res = {0, 0};
+    struct sink_arg sarg = { lfd, &res };
+    pthread_t th;
+    pthread_create(&th, NULL, sink_once, &sarg);
+
+    char *hosts[] = {"localhost", ".example.com", "127.0.0.0/8"};
+    char *deny[]  = {"secret.example.com"};
+    ProxyContext ctx;
+    assert(proxy_bind(&ctx, tmpdir, hosts, 3, deny, 1) == 0);
+    assert(proxy_serve(&ctx) == 0);
+
+    int fd = uds_connect(proxy_sock_path(&ctx));
+    assert(fd >= 0);
+    char req[64];
+    int rn = snprintf(req, sizeof(req), "localhost:%d\n", port);
+    assert(write(fd, req, (size_t)rn) == rn);
+    char resp[64];
+    assert(read_line(fd, resp, sizeof(resp)) > 0);
+    assert(strncmp(resp, "OK", 2) == 0);
+
+    unsigned char hello[512];
+    size_t hlen = build_client_hello("secret.example.com", hello, sizeof(hello));
+    write(fd, hello, hlen);
+
+    char buf[16];
+    ssize_t rd = read(fd, buf, sizeof(buf));
+    assert(rd == 0 || (rd < 0 && errno == ECONNRESET));
+    close(fd);
+
+    pthread_join(th, NULL);
+    assert(res.got_bytes == 0);   /* refused before any relay */
+
+    proxy_stop(&ctx);
+    close(lfd);
+    printf("  PASS: SNI naming a sensitive host refused despite an allow rule\n");
+}
+
 static void test_numeric_needs_its_own_grant(void) {
     /* A hostname grant authorises the name, not the address it resolves to:
      * a client that dials the address directly could present any vhost's SNI
@@ -532,6 +576,7 @@ int main(void) {
     test_sni_mismatch_blocked();
     test_sni_match_allowed();
     test_sni_absent_failopen();
+    test_sni_sensitive_host_denied();
     test_numeric_needs_its_own_grant();
     test_sni_numeric_exact_grant_exempt();
     test_no_sni_hello_denied_on_strict_port();

@@ -641,8 +641,16 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
 
     char *name = json_text(jdb, manifest, "'$.name'");
     if (!name || !name[0]) { free(name); xerr(err_out, "manifest missing 'name'"); goto out; }
-    if (strchr(name, '/') || strchr(name, '\\') || strstr(name, "..")) {
-        free(name); xerr(err_out, "invalid extension name (no path separators)"); goto out;
+    /* The name becomes a directory in the shared store and the prefix of the
+     * extension's config keys (<name>.<key>), so it must be a plain word:
+     * "." would unpack the bundle over the store root (and so over other
+     * extensions' promoted code), and "update" would own the update.* keys,
+     * one of which is a command `cclaw update` runs. */
+    if (!is_valid_name(name) || strcmp(name, "update") == 0) {
+        free(name);
+        xerr(err_out, "invalid extension name (letters, digits, '_' and '-' only; "
+                      "'update' is reserved)");
+        goto out;
     }
     free(name);
 

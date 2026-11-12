@@ -147,7 +147,9 @@ static const char SQL_CONFIG_DOC[] =
     "                 OR t.description LIKE '%'||?4||'%')"
     "          ORDER BY t.name))),"
     " 'config', json((SELECT COALESCE(json_group_object(key, json_object("
-    "     'value', CASE WHEN COALESCE(secret,0) THEN NULL"
+    /* web_admin_token is the dashboard's credential — the dashboard can
+     * approve requests, so an agent must not be able to read it here. */
+    "     'value', CASE WHEN COALESCE(secret,0) OR key='web_admin_token' THEN NULL"
     "                   ELSE COALESCE(value, default_value) END,"
     "     'overridden', value IS NOT NULL,"
     "     'secret', COALESCE(secret,0))),'{}') FROM config"
@@ -448,6 +450,11 @@ static char *render_text(SearchConfigCtx *ctx, const char *query,
             const char *desc = (const char *)sqlite3_column_text(st, 3);
             if (sqlite3_column_int(st, 4)) {
                 buf_appendf(&out, "%s = (secret, env/secret-store only) — %s\n",
+                            key, desc);
+                continue;
+            }
+            if (key && strcmp(key, "web_admin_token") == 0) {
+                buf_appendf(&out, "%s = (withheld — operator credential) — %s\n",
                             key, desc);
                 continue;
             }

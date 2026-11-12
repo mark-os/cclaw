@@ -270,6 +270,42 @@ static void test_deny_overrides_allow(void) {
     printf("  PASS: deny overrides allow: github.com denied despite .github.com allow\n");
 }
 
+static void test_deny_trailing_dot(void) {
+    /* The fully-qualified spelling of a denied name is the same host. */
+    char *hosts[] = {"*"};
+    char *deny[]  = {"secret.example.com"};
+    ProxyContext ctx;
+    assert(proxy_start_with_deny(&ctx, tmpdir, hosts, 1, deny, 1) == 0);
+
+    char resp[128];
+    probe(&ctx, "secret.example.com.", resp, sizeof(resp));
+    assert(strncmp(resp, "ERROR denied", 12) == 0);
+    probe(&ctx, "api.secret.example.com.", resp, sizeof(resp));
+    assert(strncmp(resp, "ERROR denied", 12) == 0);
+
+    proxy_stop(&ctx);
+    printf("  PASS: deny list holds for a trailing-dot spelling\n");
+}
+
+static void test_ipv6_literal_in_brackets(void) {
+    /* A CONNECT line carries an IPv6 literal in brackets. It must reach the
+     * numeric rules: granted → not a policy denial (the dial then fails or
+     * succeeds on its own); ungranted → DENIED, not "bad preamble". */
+    char *hosts[] = {"::1"};
+    ProxyContext ctx;
+    assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
+
+    char resp[128];
+    proxy_req(proxy_sock_path(&ctx), "[::1]:1\n", resp, sizeof(resp));
+    assert(strncmp(resp, "DENIED", 6) != 0);
+    assert(strncmp(resp, "ERROR bad", 9) != 0);
+    proxy_req(proxy_sock_path(&ctx), "[2001:db8::1]:443\n", resp, sizeof(resp));
+    assert(strncmp(resp, "DENIED", 6) == 0);
+
+    proxy_stop(&ctx);
+    printf("  PASS: bracketed IPv6 literal reaches the numeric rules\n");
+}
+
 static void test_deny_subdomain_blocked(void) {
     /* Broad allow suffix covers the host, but deny label blocks subdomain. */
     char *hosts[] = {".example.com"};
@@ -488,6 +524,8 @@ int main(void) {
     /* Sensitive-host deny list */
     test_deny_overrides_allow();
     test_deny_subdomain_blocked();
+    test_deny_trailing_dot();
+    test_ipv6_literal_in_brackets();
     test_deny_unrelated_host_unaffected();
     test_deny_empty_changes_nothing();
 

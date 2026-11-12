@@ -1216,6 +1216,30 @@ static void test_reasoning_content_replay(void) {
     printf("  PASS test_reasoning_content_replay\n");
 }
 
+/* Gemini native sends no call id, so ingest mints one — and it must not
+ * repeat across responses: approvals and call bookkeeping key on it. */
+static void test_gemini_call_ids_unique_per_session(void) {
+    sqlite3 *db = open_seeded();
+    const char *body =
+        "{\"candidates\":[{\"content\":{\"parts\":["
+        "{\"functionCall\":{\"name\":\"shell_exec\",\"args\":{\"cmd\":\"ls\"}}},"
+        "{\"functionCall\":{\"name\":\"js_eval\",\"args\":{\"code\":\"1\"}}}]},"
+        "\"finishReason\":\"STOP\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}";
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+    Message user = {.role = ROLE_USER, .content = "go"};
+    entry_append_with_iteration(db, sid, &user, 1);
+    assert(db_ingest_response(db, sid, 2, "gemini-3-pro", ENDPOINT_GEMINI, body, NULL, 0, NULL) == LLM_RESP_OK);
+    assert(db_ingest_response(db, sid, 3, "gemini-3-pro", ENDPOINT_GEMINI, body, NULL, 0, NULL) == LLM_RESP_OK);
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(*) FROM entries WHERE session_id=?1 AND type='tool_call';", sid, -1) == 4);
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(DISTINCT tool_call_id) FROM entries WHERE session_id=?1"
+        " AND type='tool_call';", sid, -1) == 4);
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_gemini_call_ids_unique_per_session\n");
+}
+
 /* As routed in production: ingest stamps the model's id (`model@provider`)
  * while the wire carries the bare name. Replay has to match on the id — it
  * used to compare the bare name and never matched, so every Gemini request
@@ -1702,6 +1726,7 @@ int main(void) {
     test_reasoning_content_replay();
     test_gemini_thought_signature_replay();
     test_gemini_thought_signature_replay_routed();
+    test_gemini_call_ids_unique_per_session();
     printf("All payload tests passed.\n");
     return 0;
 }

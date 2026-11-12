@@ -55,11 +55,11 @@ static int read_line(int fd, char *buf, int cap) {
 /* Consume request headers up to the blank line that ends them. Bounded so a
  * client that never sends the terminator cannot wedge the handler. */
 static void drain_headers(int fd) {
-    int blanks = 0, guard = 0;
+    int guard = 0;
     char line[LINE_CAP];
     while (guard++ < 256) {
         int n = read_line(fd, line, sizeof(line));
-        if (n <= 0) { (void)blanks; return; }  /* blank line or EOF: done */
+        if (n <= 0) return;  /* blank line or EOF: done */
     }
 }
 
@@ -101,10 +101,11 @@ static void splice_both(int cin, int cout, int u) {
 }
 
 static void reply(int fd, const char *status, const char *body) {
-    char r[512];
+    char r[LINE_CAP + 256];
     int n = snprintf(r, sizeof(r),
         "HTTP/1.1 %s\r\nContent-Type: text/plain\r\nContent-Length: %zu\r\n"
         "Connection: close\r\n\r\n%s", status, strlen(body), body);
+    if (n >= (int)sizeof(r)) n = (int)sizeof(r) - 1;   /* truncated: send what fit */
     if (n > 0) (void)!write(fd, r, (size_t)n);
 }
 
@@ -185,8 +186,10 @@ static int forward_headers(int client, int up) {
 
 /* Plain HTTP through the proxy: "GET http://host[:port]/path HTTP/1.1". The
  * request line is rewritten to origin form and the connection is pinned to
- * that one host and closed after one exchange — a second request on it could
- * name a different host, and the broker decided only this one. */
+ * that one host: whatever else the client sends on it goes to the host the
+ * broker decided on, never to another. "Connection: close" asks the origin
+ * to end it after one exchange; the bytes are relayed until either side
+ * closes. */
 static void handle_absolute(int client, const char *uds, char *line) {
     char *sp1 = strchr(line, ' ');
     char *url = sp1 ? sp1 + 1 : NULL;

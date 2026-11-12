@@ -60,6 +60,16 @@ static int hook_reply(struct mg_connection *conn, int status, const char *body) 
     return status;
 }
 
+/* Append s JSON-string-escaped (no surrounding quotes). */
+static void buf_append_json(Buf *b, const char *s) {
+    size_t n = strlen(s), cap = n * 6 + 1;
+    char *tmp = malloc(cap);
+    if (!tmp) { b->oom = 1; return; }
+    size_t w = json_escape(tmp, cap, s, n);
+    buf_append(b, tmp, w);
+    free(tmp);
+}
+
 static int handle_hook(struct mg_connection *conn, void *cbdata) {
     (void)cbdata;
     const struct mg_request_info *ri = mg_get_request_info(conn);
@@ -91,34 +101,34 @@ static int handle_hook(struct mg_connection *conn, void *cbdata) {
     if (body_len < 0) body_len = 0;
     body_buf[body_len] = '\0';
 
-    /* Build envelope: {"method","path","headers":{},"body"} */
-    size_t cap = (size_t)body_len * 2 + 8192;
-    char *env = malloc(cap);
-    if (!env) return hook_reply(conn, 500, "{\"error\":\"oom\"}");
-    size_t pos = 0;
-    pos += (size_t)snprintf(env + pos, cap - pos, "{\"method\":\"");
-    if (ri->request_method)
-        pos += json_escape(env + pos, cap - pos, ri->request_method, strlen(ri->request_method));
-    pos += (size_t)snprintf(env + pos, cap - pos, "\",\"path\":\"");
-    pos += json_escape(env + pos, cap - pos, uri, strlen(uri));
+    /* Build envelope: {"method","path","headers":{},"body"}. Every piece
+     * comes from an unauthenticated client, and JSON escaping can grow a byte
+     * sixfold, so this is a growable buffer — the fixed one it replaces
+     * (2x body + 8K) could be overrun by a single long header. */
+    Buf eb = {0};
+    buf_append_str(&eb, "{\"method\":\"");
+    if (ri->request_method) buf_append_json(&eb, ri->request_method);
+    buf_append_str(&eb, "\",\"path\":\"");
+    buf_append_json(&eb, uri);
     if (ri->query_string && ri->query_string[0]) {
-        pos += (size_t)snprintf(env + pos, cap - pos, "?");
-        pos += json_escape(env + pos, cap - pos, ri->query_string, strlen(ri->query_string));
+        buf_append_char(&eb, '?');
+        buf_append_json(&eb, ri->query_string);
     }
-    pos += (size_t)snprintf(env + pos, cap - pos, "\",\"headers\":{");
-    for (int i = 0; i < ri->num_headers && pos + 512 < cap; i++) {
-        if (i > 0) env[pos++] = ',';
-        env[pos++] = '"';
-        pos += json_escape(env + pos, cap - pos, ri->http_headers[i].name,
-                           strlen(ri->http_headers[i].name));
-        pos += (size_t)snprintf(env + pos, cap - pos, "\":\"");
-        pos += json_escape(env + pos, cap - pos, ri->http_headers[i].value,
-                           strlen(ri->http_headers[i].value));
-        env[pos++] = '"';
+    buf_append_str(&eb, "\",\"headers\":{");
+    for (int i = 0; i < ri->num_headers; i++) {
+        if (i > 0) buf_append_char(&eb, ',');
+        buf_append_char(&eb, '"');
+        buf_append_json(&eb, ri->http_headers[i].name);
+        buf_append_str(&eb, "\":\"");
+        buf_append_json(&eb, ri->http_headers[i].value);
+        buf_append_char(&eb, '"');
     }
-    pos += (size_t)snprintf(env + pos, cap - pos, "},\"body\":\"");
-    pos += json_escape(env + pos, cap - pos, body_buf, (size_t)body_len);
-    pos += (size_t)snprintf(env + pos, cap - pos, "\"}");
+    buf_append_str(&eb, "},\"body\":\"");
+    buf_append_json(&eb, body_buf);
+    buf_append_str(&eb, "\"}");
+    size_t pos = eb.len;
+    char *env = buf_take(&eb);
+    if (!env) return hook_reply(conn, 500, "{\"error\":\"oom\"}");
 
     /* Forward to the runner; this civetweb worker thread blocks, which is
      * the natural model here */

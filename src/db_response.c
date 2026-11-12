@@ -462,9 +462,16 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
             const char *id   = (const char *)sqlite3_column_text(tc, 0);
             const char *name = (const char *)sqlite3_column_text(tc, 1);
             const char *args = (const char *)sqlite3_column_text(tc, 2);
-            char id_buf[32];
+            /* No id on the wire (Gemini native): mint one that is unique in
+             * the session. Approvals, job bookkeeping and result matching all
+             * key on (session, call id); "call_gemini_<idx>" restarted at 0
+             * on every response, so a later call inherited whatever an
+             * earlier call with the same index had left behind — including
+             * an approval. */
+            char id_buf[48];
             if (!id || !id[0]) {
-                snprintf(id_buf, sizeof(id_buf), "call_gemini_%d", idx);
+                snprintf(id_buf, sizeof(id_buf), "call_%lld_%d",
+                         (long long)iteration_id, idx);
                 id = id_buf;
             }
             const char *args_val = (args && args[0]) ? args : "{}";

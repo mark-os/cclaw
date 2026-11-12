@@ -73,6 +73,7 @@
 #include "proc.h"
 #include "sweep.h"
 #include "update.h"
+#include "update_channel.h"
 #include "util.h"
 
 /* vendor/sqlite3/shell.c, compiled with -Dmain=sqlite3_shell_main */
@@ -927,6 +928,8 @@ int main(int argc, char *argv[]) {
     /* rollback: undo the last update — snapshot back as the database, .prev
      * back as the binary. Same "own DB open, daemon up or down" shape. */
     if (argc >= 2 && strcmp(argv[1], "rollback") == 0) return rollback_main(argc, argv);
+    /* publish: sign this build into a pre-release update channel. */
+    if (argc >= 2 && strcmp(argv[1], "publish") == 0) return publish_main(argc, argv);
 
     if (argc >= 2 && strcmp(argv[1], "resp") == 0) return resp_main(argc, argv);
 

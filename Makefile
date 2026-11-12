@@ -13,7 +13,7 @@ LDFLAGS := -lcurl -lm -lpthread -ldl
 ATOMIC_PROBE := 'int main(void){long long v=0;return(int)__atomic_fetch_add(&v,1,5);}'
 LDFLAGS += $(shell echo $(ATOMIC_PROBE) | $(CC) -x c - -o /dev/null 2>/dev/null || echo -latomic)
 
-VERSION_COMMIT := $(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) rev-parse --short HEAD 2>/dev/null || echo unknown)
+VERSION_COMMIT := $(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) status --porcelain --untracked-files=no 2>/dev/null | grep -q . && echo -dirty)
 BUILD_DATE     := $(shell date -u +%Y-%m-%d)
 CFLAGS += -DVERSION_COMMIT='"$(VERSION_COMMIT)"' -DBUILD_DATE='"$(BUILD_DATE)"'
 # debug passes its extra flags here — re-passing CFLAGS="$(CFLAGS)" through the
@@ -113,6 +113,13 @@ $(BUILDDIR)/templates.h $(BUILDDIR)/templates.c: $(TEMPLATES) scripts/gen_templa
 
 $(BUILDDIR)/templates.o: $(BUILDDIR)/templates.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -I$(BUILDDIR) -c -o $@ $<
+
+# Objects that bake VERSION_COMMIT rebuild when it changes (a new commit, or
+# the tree going dirty/clean); otherwise --version reports a stale commit,
+# which `cclaw publish` would then sign into the channel manifest.
+VERSION_STAMP := $(BUILDDIR)/version.stamp
+$(shell mkdir -p $(BUILDDIR); echo "$(VERSION_COMMIT) $(BUILD_DATE)" | cmp -s - $(VERSION_STAMP) 2>/dev/null || echo "$(VERSION_COMMIT) $(BUILD_DATE)" > $(VERSION_STAMP))
+$(addprefix $(BUILDDIR)/,main.o doctor.o tool_bootstrap.o update.o update_channel.o): $(VERSION_STAMP)
 
 $(BUILDDIR)/%.o: src/%.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -c -o $@ $<

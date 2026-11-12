@@ -327,7 +327,12 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   and the daemon notices new releases and drops a note in the default agent's
   inbox — it tells you, it never installs on its own. `cclaw update --file
   <path>` sideloads an operator-supplied binary (CI artifact, cross build)
-  through the same rails, skipping only the download. `cclaw --doctor`'s
+  through the same rails, skipping only the download. **Pre-release
+  channels**: `cclaw publish` signs a build into a channel directory as
+  `pre-<seq>` (dirty trees allowed); a box with `update.channel`
+  (`file://` or `https://`) + `update.pubkey` gets the agent's offer within a
+  DB poll and installs on approval through the same rails — see
+  [specs/operations.md](specs/operations.md#pre-release-channels--cclaw-publish). `cclaw --doctor`'s
   `[update]` section shows the last outcome and every leftover file.
 - **The real DB is `~/.cclaw/cclaw.db`, not `./cclaw.db`.** `resolve_db_path()` returns `$HOME/.cclaw/cclaw.db` when `$HOME` is set (override with `CCLAW_DB_PATH`). "Delete the db" means that path — and its `-wal`/`-shm` siblings.
 - **Schema changes need a forward patch.** When `templates/schema.sql` changes shape, bump `CCLAW_SCHEMA_VERSION` (`src/cclaw.h`) and append a matching entry to `schema_patches[]` (`src/db.c`) that brings a live DB from the previous version to the new one. Startup auto-applies pending patches; DBs newer than the build, or older than the floor `CCLAW_SCHEMA_MIN` (v40 — the 2026-07-31 turn_id/iteration_id rename froze a new floor and collapsed prior patch history into it), are refused with a delete-and-restart message. A schema.sql change *without* the bump + patch leaves existing DBs stamped current but shaped old — missing columns, `advance_session` returns `ADVANCE_ERROR`, and the CLI can hang.

@@ -106,6 +106,44 @@ shows: `ok`, `installed_no_daemon`, `installed_restart_pending`,
 `reverted_no_restart`, `verified`, `crash_loop_reverted`,
 `crash_loop_no_revert`, `rollback_requested`.
 
+## Pre-release channels — `cclaw publish`
+
+Releases are for milestones; most changes ship incrementally. A **channel** is
+a directory of builds outside GitHub — local (`file:///var/lib/cclaw/channel`)
+or any static https host (an R2 bucket) — and a box follows one by setting
+`update.channel`. Empty means GitHub releases via `update.repo`, as before.
+
+    cclaw publish --keygen                 # once: ~/.config/cclaw/publish.key, prints the pubkey
+    make && ./build/cclaw publish --notes "what changed"   # every incremental build
+
+Each publish is `pre-<seq>`, seq+1 of the last. The directory holds
+`manifest.signed` (line 1: EdDSA signature over the rest; rest: JSON with
+seq, version, commit, dirty, branch, notes, and per-asset file/BLAKE2b/size)
+and the binaries it names (`cclaw-linux-arm64-<seq>`, last `--keep` kept).
+Binary first, manifest last by atomic rename, so a reader sees one whole
+release or the previous one. Dirty trees are publishable — `--version` says
+`<commit>-dirty` and the agent's notice says so — because the incremental
+loop is the point; seq, not the commit, is the identity.
+
+**Trust is the signature, not the transport.** `update.pubkey` is required
+for every channel, so a writable bucket or a file planted in the spool offers
+nothing the publisher's key did not sign; the manifest's BLAKE2b then binds
+the binary to it. The signing key never goes on a box that only follows.
+
+**Notice → approval → install.** A `file://` channel is a `stat` per DB poll
+(inode + ns mtime, so two publishes in one second are both seen) and re-read
+only on change; an `https://` channel waits out `update.check_interval_minutes`
+(or `_hours`). A newer seq than `update.installed_tag` drops one note in the
+default agent's inbox; the agent offers `install_update` with `tag: pre-<seq>`;
+approval runs `cclaw update --tag pre-<seq>`, which installs only the
+channel's *newest* build (a stale tag is refused) through `install_candidate`
+— the same schema handshake, snapshot, atomic swap, restart and crash-loop
+revert as a release. `cclaw rollback` undoes it the same way.
+
+**Serving over https.** Upload the binary, then `manifest.signed`, to any
+static host — `scripts/channel_sync_r2.sh <dir> <bucket>[/prefix]` does it for
+R2 with wrangler — and point boxes at its public URL. Only https is accepted.
+
 ## Rollback — `cclaw rollback [--yes]`
 
 Undoes the last update *entirely*: `<db>.preupdate` becomes the database

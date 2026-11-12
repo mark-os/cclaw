@@ -26,6 +26,9 @@
 
 int update_main(int argc, char *argv[]);
 
+/* Release asset name for this build's architecture, or NULL. */
+const char *update_default_asset(void);
+
 /* The compatibility decision, split out from the fork/exec around it so it can
  * be tested directly. `range` is a candidate's `--schema-range` line
  * ("min=40 current=51"); `db_version` is the live database's user_version.

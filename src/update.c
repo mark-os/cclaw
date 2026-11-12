@@ -7,6 +7,7 @@
 #include "http.h"
 #include "log.h"
 #include "monocypher.h"
+#include "update_channel.h"
 #include "util.h"
 
 #include <errno.h>
@@ -41,6 +42,16 @@ static const char *default_asset(void) {
 #else
     return NULL;
 #endif
+}
+
+const char *update_default_asset(void) { return default_asset(); }
+
+/* update.asset when set, else this build's architecture. */
+static const char *asset_for(sqlite3 *db, char **owned) {
+    *owned = config_get(db, "update.asset");
+    if (*owned && (*owned)[0]) return *owned;
+    free(*owned); *owned = NULL;
+    return default_asset();
 }
 
 /* ── tiny JSON field reader ────────────────────────────────────────
@@ -800,18 +811,116 @@ static int64_t recent_session(sqlite3 *db, const char *agent) {
     return sid;
 }
 
-void update_check_tick(sqlite3 *db) {
-    int hours = config_get_int(db, "update.check_interval_hours");
-    if (hours <= 0) return;
+/* Tell the default agent a newer build exists, once per tag. Shared by the
+ * release check and the channel check. Returns 0 when the agent has been told
+ * (now or before), -1 when there was nobody to tell yet — the caller retries. */
+static int notify_available(sqlite3 *db, const char *tag, const char *what) {
+    char *installed = config_get(db, "update.installed_tag");
+    char *notified = config_get(db, "update.notified_tag");
+    int already = (installed && strcmp(installed, tag) == 0) ||
+                  (notified && strcmp(notified, tag) == 0);
+    free(installed);
+    free(notified);
+    if (already) return 0;
 
-    time_t now = time(NULL);
-    if (g_next_check == 0) {
-        /* Not at startup: a restart loop would otherwise check every boot. */
-        g_next_check = now + (time_t)hours * 3600;
+    char *agent = default_agent_name(db);
+    int64_t sid = agent ? recent_session(db, agent) : 0;
+    if (sid <= 0) {
+        /* Nobody to tell yet. Leave notified_tag unset so the note is
+         * delivered once a session exists, rather than being lost. */
+        LOG_DEBUG_("update check: %s available, no session to notify yet", tag);
+        free(agent);
+        return -1;
+    }
+    char note[1024];
+    snprintf(note, sizeof(note),
+             "%s (this build is %s). "
+             "Mention it to the operator — say what is new if you can find "
+             "out. If you have the install_update tool, offer to install it "
+             "with tag \"%s\" (that parks an approval — the operator decides); "
+             "otherwise `cclaw update` installs it. Never install without approval.",
+             what, VERSION_COMMIT, tag);
+    int rc = -1;
+    if (inbox_insert(db, sid, "update", tag, note) > 0) {
+        config_set(db, "update.notified_tag", tag);
+        LOG_INFO_("update check: %s available, notified %s (session %lld)",
+                  tag, agent, (long long)sid);
+        rc = 0;
+    }
+    free(agent);
+    return rc;
+}
+
+/* Channel check. A local channel is a stat() per poll and re-reads only when
+ * the manifest changes, so a `cclaw publish` reaches the operator within one
+ * DB poll; an https channel waits out the configured interval. */
+static unsigned long long g_chan_stamp;
+
+static void channel_check(sqlite3 *db, const char *channel, int due) {
+    unsigned long long mt = 0;
+    if (uchan_is_local(channel)) {
+        if (uchan_manifest_stamp(channel, &mt) != 0 || mt == g_chan_stamp) return;
+    } else if (!due) {
         return;
     }
-    if (now < g_next_check) return;
-    g_next_check = now + (time_t)hours * 3600;
+    char *asset_owned = NULL;
+    const char *asset = asset_for(db, &asset_owned);
+    char *pub = config_get(db, "update.pubkey");
+    UchanRelease rel;
+    char why[512] = "";
+    if (!asset || uchan_latest(channel, pub, asset, &rel, why, sizeof(why)) != 0) {
+        LOG_WARN_("update channel %s: %s", channel, asset ? why : "no asset for this arch");
+        if (mt) g_chan_stamp = mt;   /* don't re-log the same bad manifest */
+        free(pub); free(asset_owned);
+        return;
+    }
+    char *installed = config_get(db, "update.installed_tag");
+    long long have = uchan_tag_seq(installed);
+    free(installed);
+    if (rel.seq > have) {
+        char tag[32], what[512];
+        uchan_tag(rel.seq, tag, sizeof(tag));
+        snprintf(what, sizeof(what),
+                 "A new pre-release cclaw build is on the update channel: %s — %s%s%s%s",
+                 tag, rel.version ? rel.version : "?",
+                 rel.dirty ? " [built from uncommitted changes]" : "",
+                 rel.notes && rel.notes[0] ? ". Publisher notes: " : "",
+                 rel.notes ? rel.notes : "");
+        /* Only mark this manifest seen once someone has been told, so a
+         * publish that lands before any session exists is offered later. */
+        if (notify_available(db, tag, what) == 0 && mt) g_chan_stamp = mt;
+    } else if (mt) {
+        g_chan_stamp = mt;
+    }
+    uchan_release_free(&rel);
+    free(pub); free(asset_owned);
+}
+
+void update_check_tick(sqlite3 *db) {
+    int mins = config_get_int(db, "update.check_interval_minutes");
+    int hours = config_get_int(db, "update.check_interval_hours");
+    time_t interval = mins > 0 ? (time_t)mins * 60 : (time_t)hours * 3600;
+
+    time_t now = time(NULL);
+    int due = 0;
+    if (interval > 0) {
+        if (g_next_check == 0) {
+            /* Not at startup: a restart loop would otherwise check every boot. */
+            g_next_check = now + interval;
+        } else if (now >= g_next_check) {
+            g_next_check = now + interval;
+            due = 1;
+        }
+    }
+
+    char *channel = config_get(db, "update.channel");
+    if (uchan_is_channel(channel)) {
+        channel_check(db, channel, due);
+        free(channel);
+        return;
+    }
+    free(channel);
+    if (!due) return;
 
     char *repo = config_get(db, "update.repo");
     if (!repo || !repo[0]) { free(repo); return; }
@@ -830,38 +939,80 @@ void update_check_tick(sqlite3 *db) {
         return;
     }
 
+    char what[256];
+    snprintf(what, sizeof(what), "A newer cclaw release is available: %s", tag);
+    (void)notify_available(db, tag, what);
+    free(tag); free(repo);
+}
+
+/* ── channel installs ──────────────────────────────────────────────
+ * A pre-release channel (file:// or https://, see update_channel.h) instead
+ * of GitHub releases. Only the channel's newest build is installable — the
+ * manifest describes one release — so an explicit --tag must name it. The
+ * install itself is the same install_candidate the release path uses. */
+static int update_from_channel(sqlite3 *db, const char *self, const char *channel,
+                               const char *want_tag, int check_only) {
+    char *asset_owned = NULL;
+    const char *asset = asset_for(db, &asset_owned);
+    if (!asset) {
+        fprintf(stderr, "error: no release asset for this architecture — set update.asset\n");
+        return 1;
+    }
+    char *pub = config_get(db, "update.pubkey");
     char *installed = config_get(db, "update.installed_tag");
-    char *notified = config_get(db, "update.notified_tag");
-    int already = (installed && strcmp(installed, tag) == 0) ||
-                  (notified && strcmp(notified, tag) == 0);
-    free(installed);
-    free(notified);
-    if (already) { free(tag); free(repo); return; }
+    UchanRelease rel;
+    char why[512] = "", tag[32];
+    int rc = 1;
+    if (uchan_latest(channel, pub, asset, &rel, why, sizeof(why)) != 0) {
+        fprintf(stderr, "error: channel %s: %s\n", channel, why);
+        goto out;
+    }
+    uchan_tag(rel.seq, tag, sizeof(tag));
+    printf("channel:   %s\ninstalled: %s\nlatest:    %s — %s%s\n", channel,
+           installed && installed[0] ? installed : "(unknown)", tag,
+           rel.version ? rel.version : "?", rel.dirty ? " [dirty tree]" : "");
+    if (rel.notes && rel.notes[0]) printf("notes:     %s\n", rel.notes);
 
-    char *agent = default_agent_name(db);
-    int64_t sid = agent ? recent_session(db, agent) : 0;
-    if (sid <= 0) {
-        /* Nobody to tell yet. Leave notified_tag unset so the note is
-         * delivered once a session exists, rather than being lost. */
-        LOG_DEBUG_("update check: %s available, no session to notify yet", tag);
-        free(agent); free(tag); free(repo);
-        return;
+    if (want_tag && strcmp(want_tag, tag) != 0) {
+        fprintf(stderr, "error: the channel is at %s, not %s — only its newest "
+                        "build can be installed\n", tag, want_tag);
+        goto out_rel;
+    }
+    if (!want_tag && uchan_tag_seq(installed) >= rel.seq) {
+        printf("already up to date\n");
+        rc = 0;
+        goto out_rel;
+    }
+    if (check_only) {
+        printf("update available (not installed: --check)\n");
+        rc = 10;
+        goto out_rel;
     }
 
-    char note[512];
-    snprintf(note, sizeof(note),
-             "A newer cclaw release is available: %s (this build is %s). "
-             "Mention it to the operator — say what is new if you can find "
-             "out. If you have the install_update tool, offer to install it "
-             "(that parks an approval — the operator decides); otherwise "
-             "`cclaw update` installs it. Never install without approval.",
-             tag, VERSION_COMMIT);
-    if (inbox_insert(db, sid, "update", tag, note) > 0) {
-        config_set(db, "update.notified_tag", tag);
-        LOG_INFO_("update check: %s available, notified %s (session %lld)",
-                  tag, agent, (long long)sid);
+    char *data = NULL; size_t len = 0;
+    if (uchan_fetch_asset(channel, &rel, &data, &len, why, sizeof(why)) != 0) {
+        fprintf(stderr, "error: %s — not installing\n", why);
+        goto out_rel;
     }
-    free(agent); free(tag); free(repo);
+    printf("signature and checksum verified (%zu bytes)\n", len);
+    char newpath[4096];
+    snprintf(newpath, sizeof(newpath), "%s.new", self);
+    FILE *f = fopen(newpath, "wb");
+    if (!f || fwrite(data, 1, len, f) != len || fclose(f) != 0) {
+        fprintf(stderr, "error: cannot write %s: %s\n", newpath, strerror(errno));
+        if (f) fclose(f);
+        unlink(newpath);
+        free(data);
+        goto out_rel;
+    }
+    free(data);
+    chmod(newpath, 0755);
+    rc = install_candidate(db, self, tag);
+out_rel:
+    uchan_release_free(&rel);
+out:
+    free(pub); free(installed); free(asset_owned);
+    return rc;
 }
 
 int update_main(int argc, char *argv[]) {
@@ -879,7 +1030,7 @@ int update_main(int argc, char *argv[]) {
             want_file = argv[i];
         } else {
             fprintf(stderr,
-                    "usage: cclaw update [--check] [--tag vX.Y.Z] [--file path]\n");
+                    "usage: cclaw update [--check] [--tag vX.Y.Z|pre-N] [--file path]\n");
             return 2;
         }
     }
@@ -899,6 +1050,14 @@ int update_main(int argc, char *argv[]) {
         free(self); sqlite3_close(db);
         return frc;
     }
+
+    char *channel = config_get(db, "update.channel");
+    if (uchan_is_channel(channel)) {
+        int crc = update_from_channel(db, self, channel, want_tag, check_only);
+        free(channel); free(self); sqlite3_close(db);
+        return crc;
+    }
+    free(channel);
 
     char *repo = config_get(db, "update.repo");
     char *asset = config_get(db, "update.asset");

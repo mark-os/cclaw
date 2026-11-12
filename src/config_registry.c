@@ -149,6 +149,16 @@ static const ConfigDef s_defs[] = {
       "Seconds to keep terminal channel_outbox rows (0 = keep forever)" },
     { "update.repo", "mark-os/cclaw",
       "GitHub owner/repo that `cclaw update` pulls tagged releases from" },
+    { "update.channel", "",
+      "Pre-release update channel instead of GitHub releases: file:///dir or "
+      "https://host/dir holding a signed manifest from `cclaw publish` "
+      "(empty = GitHub releases via update.repo)" },
+    { "update.pubkey", "",
+      "Hex public key that must have signed the update channel's manifest "
+      "(printed by `cclaw publish --keygen`); required for any channel" },
+    { "update.check_interval_minutes", "0",
+      "Overrides update.check_interval_hours when > 0 (https channels and "
+      "releases). A file:// channel is checked every DB poll regardless" },
     { "update.asset", "",
       "Release asset to install (empty = pick by this build's architecture)" },
     { "update.installed_tag", "",

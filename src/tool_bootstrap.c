@@ -154,7 +154,7 @@ int tool_create_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
 
 static const char *INSTALL_UPDATE_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
-    "\"tag\":{\"type\":\"string\",\"description\":\"Release tag to install; omit for the newest release the daemon's check has seen\"},"
+    "\"tag\":{\"type\":\"string\",\"description\":\"Release tag (vX.Y.Z) or pre-release channel build (pre-N) to install; omit for the newest one the daemon's check has seen\"},"
     "\"reason\":{\"type\":\"string\",\"description\":\"Shown to the approver — what is new, why now\"}"
     "}}";
 

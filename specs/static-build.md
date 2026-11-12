@@ -7,7 +7,7 @@ Two ways to build cclaw, on purpose:
 | libc | host's, dynamic | musl, static |
 | libcurl + TLS | system `libcurl.so` | pinned curl + mbedTLS, linked in |
 | Runs on | the machine that built it | any Linux kernel of that architecture |
-| Used by | developers, `make test`, CI `test`/`compat` jobs | CI `release-build`, GitHub releases, `cclaw update` |
+| Used by | developers, `make test`, CI `test`/`compat`/`no-containment` jobs | CI `release-build`, GitHub releases, `cclaw update` |
 
 A release binary asks the host for nothing but kernel syscalls and a CA
 bundle. There is no glibc floor and no "which libcurl does this distro ship":
@@ -43,7 +43,8 @@ the cost of not depending on the host's copy.
   thing did: `libcclaw_net.so`, built with the build machine's glibc and
   `LD_PRELOAD`ed into the host's programs inside the sandbox. v0.6.0 shipped
   it needing glibc 2.38, and `ld.so` then refused to start every sandboxed
-  shell command on Debian 12 and Amazon Linux 2023. It is gone; sandboxed
+  shell command on Debian 12 and Amazon Linux 2023. v0.6.0 was withdrawn, and
+  v0.6.1 is the first release with static binaries. The library is gone; sandboxed
   programs reach the network through the proxy variables only
   ([shell-networking.md](shell-networking.md)), which also makes the sandboxed
   shell work the same on glibc and musl hosts.
@@ -74,6 +75,6 @@ the cost of not depending on the host's copy.
 | `i586` | `i686-linux-gnu-gcc -march=i586` | Pentium (no CMOV/SSE) |
 | `armv5te` | `arm-linux-gnueabi-gcc -march=armv5te` | ARM926, soft float |
 
-Artifact names (`cclaw-linux-<target>`) are what `default_asset()` in
+Artifact names (`cclaw-linux-<target>`) are what `update_default_asset()` in
 `src/update.c` asks a release for. CI smoke-tests each artifact under
 qemu-user with the baseline CPU pinned where qemu can model it.

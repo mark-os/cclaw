@@ -50,10 +50,8 @@ Shipped: server-rendered session/agent/model/channel/grant/approval views
 - Runs as sub-agent on schedule (cron)
 
 ## Cross-compile for Legacy Embedded Targets
-armel dynamic cross-compile works in practice (Pogoplug V4 runs it, via
-env-var `CC`/`BUILDDIR` overrides). Still future:
-- A declared Makefile cross target instead of ad-hoc env overrides
-- musl static link option
+Shipped: static musl release builds per target, including `armv5te`
+(`scripts/build_static.sh`, [static-build.md](static-build.md)). Still future:
 - Reduced feature set for 128MB targets (build without QuickJS? smaller JS heap)
 
 ## Multi-model Routing
@@ -118,8 +116,8 @@ Gemini generateContent (`endpoint_type` in `llm_proc.c`).
 ### Shared memory blocks
 - Problem: memory_blocks are scoped by agent_name in cclaw.db — no cross-agent visibility
 - Approach: `shared_memory_blocks` table in cclaw.db (daemon-owned)
-- Read: agents get read-only access via `shared_memory_read` tool (or bind-mount cclaw.db ro)
-- Write: mediated by daemon — agent requests write via exit code 4 or a dedicated tool that posts to inbox
+- Read: agents get read-only access via a `shared_memory_read` tool (never a mount of cclaw.db: the DB is masked in every sandboxed profile)
+- Write: mediated by the daemon through a dedicated tool
 - Use cases: shared knowledge base, project context, team conventions, coordination state
 - Scoping: optional namespace/tag per block so agents can subscribe to relevant shared memory only
 
@@ -135,16 +133,15 @@ Gemini generateContent (`endpoint_type` in `llm_proc.c`).
 ### fetch() (foundation ✓)
 
 Synchronous fetch via `HTTP_PROXY` → net_shim loopback bridge, shipped with
-host grants enforced at the proxy and a 2MB response cap
-(`js_http_fetch.c`). Remaining:
-- Configurable timeout per request (hardcoded 30s today)
+host grants enforced at the proxy, a 2MB response cap and a per-request
+`timeout` option (default 30s, max 600s; `js_http_fetch.c`). Remaining:
 - Streaming for large responses
 
 ## JS Runtime Capabilities
 
 ### Heap Size
 
-4MB default for `js_eval` shipped (raised from 1MB after pogoplug session).
+8MB default for `js_eval`, set system-wide by config `js_heap_mb`.
 Still future:
 - Make heap configurable per-agent
 - Legacy ARM targets (128MB RAM): keep it tight, maybe 2MB max
@@ -172,7 +169,7 @@ Memory model:
 - jsmn token array: C malloc, outside JS heap (~16 bytes × num_tokens)
 - Result: only the extracted substring enters the JS heap
 
-This lets an agent extract fields from a 1.5MB response without blowing the 4MB
+This lets an agent extract fields from a 1.5MB response without blowing the 8MB
 heap — only the source string + small result are in the JS budget.
 
 Alternative: file-path mode that reads + tokenizes without ever loading the full
@@ -189,10 +186,10 @@ The agent's SQLite DB contains sessions, messages, tool results, sub-agent state
 
 - **Self-reflection**: query own conversation history, count tokens used, review past decisions
 - **Cross-session search**: FTS5 search over all sessions ("when did I last discuss X?")
-- **Sub-agent coordination**: check status of spawned agents without `check_agent` tool
+- **Sub-agent coordination**: check status of spawned agents without the `check_session` tool
 - **Analytics**: token usage over time, tool call frequency, error rates
 
-Implementation: inject `db.query(sql)` global that runs read-only queries against cclaw.db.
+Implementation: inject a `db.query(sql)` global that runs read-only queries against cclaw.db. The JS child has no DB (it is masked in every sandboxed profile), so the query must run in the trusted parent over a per-call bridge, as `LLM()` does ([js-llm.md](js-llm.md)) and as the `db_query` tool already does.
 
 - Read-only (no INSERT/UPDATE/DELETE from JS)
 - Or: separate `db.read(sql)` and `db.write(sql)` with write restricted to agent's own tables
@@ -215,7 +212,7 @@ Enables JS tools that behave differently based on context (e.g., a tool that's m
 
 ## HTTP Transport Abstraction
 
-Extract curl out of the agent process behind a swappable `HttpTransport` interface:
+Put the agent's HTTP calls behind a swappable `HttpTransport` interface:
 
 ```c
 typedef struct {
@@ -228,15 +225,11 @@ typedef struct {
 
 Implementations:
 - `http_transport_curl()` — direct libcurl (current, for standalone/testing/beefy hardware)
-- `http_transport_uds(fd)` — parent holds warm TLS connections, child talks plaintext over UDS
 - `http_transport_wasm()` — calls Workers `fetch()` host import for Cloudflare WASM target
 
-Benefits:
-- Pogoplug: eliminates per-turn TLS handshake (~800ms on ARMv5TE) — parent keeps connection warm
-- Cloudflare Workers: agent compiles to WASM without libcurl dependency
-- Same agent binary, different transport selected at startup via `CCLAW_HTTP_TRANSPORT` env
-
-Pattern mirrors existing shell networking proxy (shell→agent UDS) but one level up (agent→parent UDS).
+Benefit: the agent compiles to WASM without a libcurl dependency. (Warm TLS
+connections are no longer a motivation: LLM requests already run on
+long-lived worker threads that each own a `CURL*` handle.)
 
 ## Alternative Proxy Mechanisms for Static/Go/Rust Binaries
 
@@ -256,11 +249,11 @@ cooperation needed. Requires kernel ≥5.9 and is significantly more complex
 (~500 LOC). Currently listed as a non-goal in specs/sandbox-profiles.md.
 
 ### Helper-script wrapper
-Provide a `cclaw-fetch` binary in `/bin/` inside the namespace that speaks
-the proxy UDS protocol directly. The LLM is instructed to use `cclaw-fetch`
-instead of `curl`/`wget`. Anything not using the wrapper gets zero network
-(kernel-enforced). Simple but requires LLM cooperation and doesn't help tools
-like `git clone` that internally resolve + connect.
+Partly shipped: `net_shim`'s `connect <host> <port>` mode is a helper of this
+kind for programs that take a proxy *command* (ssh, git over ssh via
+`GIT_SSH_COMMAND`; [shell-networking.md](shell-networking.md)). A general
+`cclaw-fetch` wrapper would need LLM cooperation and does not help programs
+that ignore both proxy variables and proxy commands.
 
 ## Session Sweeper
 
@@ -417,6 +410,7 @@ them all — so the missing piece is **distribution**, not a new format.
 Prompt-surface quality (system prompts, tool descriptions, skills) is the
 cheapest layer for community contribution — which is another reason to treat
 prompts and skills as first-class reviewable artifacts, not polish.
+
 ## Autonomy Ladder / Commitments (review-6 F10 — extension-bundle candidate)
 
 OpenClaw's standout daily-driver UX: users dial autonomy up incrementally —

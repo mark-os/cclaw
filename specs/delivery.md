@@ -1,8 +1,7 @@
 # Delivery — one vocabulary for session boundaries, both edges
 
-Status: milestone 1 shipped 2026-08-04. Design history in
-`plan/projects/delivery-semantics.md` (agreed spec, grilled 2026-08-03).
-Milestone 2 (`session_send`/ping, reply-edge timeouts) is deferred there.
+Status: milestone 1 shipped 2026-08-04. Milestone 2 (`session_send`/ping,
+reply-edge timeouts) is deferred; `target_kind='session'` is reserved for it.
 
 Every outbound edge of a session is a `delivery_edges` row carrying an
 explicit policy from one shared vocabulary: the **standing parent edge**
@@ -96,10 +95,9 @@ failed:`. `source='agent_result'`, `source_ref=<child sid>` as before.
 
 ## Edge cases that are rules
 
-- **LLM-error turns never ship to chat** (unchanged): the error boundary
+- **LLM-error turns never ship to chat**: the error boundary
   evaluates with channel edges suppressed, cursor still advanced. Cron script
-  errors *do* ship to chat (also unchanged) — that boundary includes the
-  channel.
+  errors *do* ship to chat — that boundary includes the channel.
 - **Pause fail-notify**: the autonomy streak guard's trip resolves the paused
   session's one-shot reply edge with an error ("paused by autonomy guard") —
   a paused session never settles, and recovery never fires for a
@@ -112,7 +110,7 @@ failed:`. `source='agent_result'`, `source_ref=<child sid>` as before.
   reconcile delete the one-shot edges of calls they close
   (`drop_oneshot_edges_for_call`).
 
-## Migration (v42)
+## Migration (v42) — history
 
 `delivery_edges` created; every existing child got a standing parent edge
 frozen at `turn` — the contract it was launched under; the quiescent default

@@ -141,9 +141,10 @@ messages server-side and replays them on reconnect, so bridge downtime loses
 nothing end-to-end; only events received while no client polls *and* the
 buffer wraps are dropped (a poller 512 messages behind has bigger problems).
 
-Built by CI for each release target the same way cclaw itself is; the
-armv5te build is the reason the bridge exists (Pogoplug-class boxes). The
-binary is attached to cclaw releases as `whatsapp-bridge-linux-<arch>`.
+CI builds it for x64 (native) and armv5te (cross) in
+`.github/workflows/build.yml`; the armv5te build is the reason the bridge
+exists (Pogoplug-class boxes). The binary is attached to cclaw releases as
+`whatsapp-bridge-linux-<arch>`.
 
 ## The channel extension
 
@@ -151,7 +152,8 @@ binary is attached to cclaw releases as `whatsapp-bridge-linux-<arch>`.
 only, no persistent conn, no webhook. Config keys (see manifest):
 
 - `enabled` (0/1), `base_url` (default `http://127.0.0.1:8471`),
-  `api_token` (secret, optional), `admin_ids` (comma-separated JIDs).
+  `api_token` (secret, optional), `admin_ids` (comma-separated JIDs),
+  `allow_unknown` (0/1, accept unrouted senders via `default_agent`).
 - Poll loop: `GET /v1/events` with the persisted cursor
   (`channel_state` key `wa_cursor`); 25 s long-poll under the runner's 35 s
   poll timeout.

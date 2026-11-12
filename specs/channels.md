@@ -59,7 +59,7 @@ could wedge.
 Threshold resolution: `<ext>.deaf_timeout`, then the global
 `channel_deaf_timeout` (env `CCLAW_CHANNEL_DEAF_TIMEOUT`), then the built-in
 `CHANNEL_DEAF_TIMEOUT` (300s). Either key set to `0` turns the watchdog off.
-`cclaw doctor` prints the age of each channel's mark and the threshold in
+`cclaw --doctor` prints the age of each channel's mark and the threshold in
 force.
 
 ## Envelope schema (JS → C)
@@ -81,7 +81,7 @@ compatibility; all but `chat_id` optional):
 Facts only: the handler never makes authority decisions — extension JS is not
 a trust boundary.
 
-**The raw envelope never reaches session entries** (review-1 F19). The daemon
+**The raw envelope never reaches session entries.** The daemon
 extracts plain text before the inbox insert: bare `text` for DMs,
 `"<sender_name>: <text>"` for groups (attribution is load-bearing in
 explicit-mode groups). A payload with no `$.text` (custom channel emitting its
@@ -146,10 +146,14 @@ conversations; the FK refuses to delete a session a route still pins.
 
 ## Delivery modes
 
-`channel_routes.delivery_mode`:
+`channel_routes.delivery_mode` is the delivery-policy *template* for the
+pinned session's channel edge. The session freezes it onto its
+`delivery_edges` row at its first delivery boundary; the full policy
+vocabulary (`iteration`, `digest`, `turn`, `quiescent`, `explicit`) is in
+[delivery.md](delivery.md). `cclaw route add --mode` accepts two values:
 
-- **`auto`** (DM default): assistant turn output is inserted into
-  `channel_outbox` for the origin chat, as always.
+- **`auto`** (DM default, alias for `quiescent`): the final assistant message
+  of a turn is inserted into `channel_outbox` for the origin chat.
 - **`explicit`** (default for group-shaped ids at `route add`): turn output
   stays in the session; the agent speaks only via `channel_send`. This is the
   group listen-and-decide pattern — `mentioned`/`reply_to_me` are the engage
@@ -160,8 +164,8 @@ Gate-created pins start `auto` (the column default).
 ## Where routes come from
 
 Operator verbs (`cclaw route add`, dashboard `set_channel_route` /
-`attach_channel`) — or the agent itself: `request_config` action
-`request_changes` with a `routes` section (`["telegram:12345"]`,
+`attach_channel`) — or the agent itself: a `request_config` changes document
+with a `routes` section (`["telegram:12345"]`,
 approval-gated like every self-config write). Agent-requested routes are
 **first-come** (a chat already routed to another agent is refused — an agent
 must not capture another agent's chat), land with `delivery_mode='explicit'`
@@ -187,7 +191,7 @@ effect.
 
 Chats the gate accepts **without** a route take the channel's own filter,
 `channels.default_tool_filter` (`route add <channel> '*' <agent> --tools
-...`; NULL = unrestricted, the pre-existing behaviour). This is the
+...`; NULL = unrestricted). This is the
 attenuated tool set for a bot that is reachable server-wide — a Discord
 @mention from any public channel — while an explicitly routed chat keeps its
 own filter, or full authority if it has none.
@@ -206,7 +210,7 @@ room etiquette, house style, "you are in the #ops channel". It is *prompt
 text, not authority*: it can only change how the agent speaks, never what it
 may do (that stays in `grants` + `tool_filter`), which is why it is read live
 rather than frozen at session creation like the filter. Nothing is appended
-when it is NULL, and the request body is byte-identical to today's.
+when it is NULL, and the request body is then unchanged.
 
 ## Ambient debounce (Discord)
 
@@ -237,8 +241,8 @@ convention carries to any channel extension.
 
 Fixed schema `{channel, chat_id, message}` (+ `action: "list"` to enumerate
 reachable targets); text-only v1. **Routes are the allowlist, default-deny**:
-a target needs an exact `(channel, chat_id)` route resolving to the sending
-agent — by `agent_name` or through a pinned session the agent owns. A `'*'`
+a target needs an exact `(channel, chat_id)` route whose pinned session
+belongs to the sending agent (`send_target_allowed`, `src/tool_channel_send.c`). A `'*'`
 route grants no send authority; reaching a new target is an operator act
 (`cclaw route add`). The tool inserts an outbox row and returns
 `queued, outbox id N` — delivery is asynchronous with the existing
@@ -256,9 +260,11 @@ would sit pending forever. Absent key = assume duplex.
 ## Operator surface
 
 ```
-cclaw route add <channel> <chat_id> <agent> [--mode auto|explicit] [--session <id>] [--tools name,name,...]
+cclaw route add <channel> <chat_id> <agent> [--mode auto|explicit] [--session <id>] [--tools name,name,...] [--prompt <text>]
 cclaw route rm  <channel> <chat_id>
 cclaw route list
 ```
 
-Group-shaped (negative) chat ids default to `--mode explicit`.
+Group-shaped (negative) chat ids default to `--mode explicit`. Chat id `'*'`
+sets or clears `channels.default_agent` (and, with `--tools`,
+`channels.default_tool_filter`) instead of adding a route.

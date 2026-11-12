@@ -1,7 +1,9 @@
 # Provider Schemas
 
 Per-provider wire format for LLM API requests and responses (streaming and
-non-streaming). Distilled from Pi's production-tested parsers.
+non-streaming). Distilled from Pi's production-tested parsers. This file is
+wire reference. What CClaw itself sends and parses is in section 4 and
+[providers.md](providers.md).
 
 **Pi source files** (in `reference/pi/packages/ai/src/providers/`):
 - `openai-completions.ts` — OpenAI-compatible request building + streaming
@@ -61,7 +63,7 @@ Authorization: Bearer <key>
 | Together | `"reasoning": {"enabled": true}` + optional `"reasoning_effort"` |
 | z.ai / Qwen | `"enable_thinking": true` top-level |
 
-**Cache control (Anthropic via OpenRouter):**
+**Cache control (Anthropic via OpenRouter; CClaw does not send it):**
 ```json
 {"type": "text", "text": "...", "cache_control": {"type": "ephemeral"}}
 ```
@@ -378,6 +380,8 @@ cacheWrite = 0  (automatic caching, no write metric)
 
 ## 3. Anthropic Messages
 
+Not implemented in CClaw. Reference only.
+
 Used by: Anthropic direct, AWS Bedrock (via proxy), Fireworks (Anthropic-compat).
 
 ### Request
@@ -558,63 +562,21 @@ total = input + output + cacheRead + cacheWrite  (computed)
   the top-level `system` field. Mid-conversation system instructions must be
   carried as user-role content (CClaw's `'[system] '` prefix convention).
 - **Cache hash order**: tools → system → messages (prefix-based, like OpenAI).
-- **Implication for CClaw**: Add top-level `"cache_control": {"type": "ephemeral"}`
-  to Anthropic requests. The payload builder already produces a deterministic
-  prefix; this one field activates the cost savings. No per-block markers needed.
+- **Implication for CClaw** (if a native Anthropic builder is added): add the
+  top-level `"cache_control": {"type": "ephemeral"}`. The payload builder
+  already produces a deterministic prefix, so no per-block markers are needed.
 
 ---
 
 ## 4. CClaw Parser Design
 
-### Current State
-No streaming: LLM requests are blocking calls, and the complete response JSON
-is parsed with SQLite JSON1 in `src/llm_proc.c` (the old `sse_process_line()`
-SSE parser is gone). The refactor below predates that move and is kept for
-reference only — its jsmn-based approach is also superseded by the "one JSON
-parser where a db handle exists" rule (AGENTS.md).
+CClaw does not stream. LLM requests are blocking curl calls on a worker
+thread, and `src/llm_proc.c` parses the complete response JSON with SQLite
+JSON1. The streaming sections above are wire reference only. jsmn is not used
+on this path: the "one JSON parser where a db handle exists" rule applies
+(AGENTS.md).
 
-### Proposed Refactor (historical)
-Per-provider parsers using jsmn token traversal:
-
-```c
-typedef struct {
-    const char *text;       size_t text_len;
-    const char *reasoning;  size_t reasoning_len;
-    int is_thinking;
-    const char *tc_name;    size_t tc_name_len;
-    const char *tc_id;      size_t tc_id_len;
-    const char *tc_args;    size_t tc_args_len;
-    int tc_args_complete;   /* 1 for Gemini (full obj), 0 for OpenAI/Anthropic (fragment) */
-    const char *finish;     size_t finish_len;
-    int prompt_tokens;
-    int completion_tokens;
-    int cache_read_tokens;
-} SseChunk;
-
-int sse_parse_openai(const char *json, size_t len, jsmntok_t *tok, int ntok, SseChunk *out);
-int sse_parse_gemini(const char *json, size_t len, jsmntok_t *tok, int ntok, SseChunk *out);
-int sse_parse_anthropic(const char *event_type, const char *json, size_t len,
-                        jsmntok_t *tok, int ntok, SseChunk *out);
-```
-
-### Anthropic Framing
-
-Requires event-type capture (`event:` line). Extend SSE line splitter to:
-1. Track current event type
-2. On `data:` line, pass event type + data to parser
-
-### Non-Streaming Parsers
-
-Separate functions for full response parsing (no accumulation needed):
-
-```c
-int parse_response_openai(Arena *a, const char *json, size_t len, LlmResponse *out);
-int parse_response_gemini(Arena *a, const char *json, size_t len, LlmResponse *out);
-int parse_response_anthropic(Arena *a, const char *json, size_t len, LlmResponse *out);
-```
-
-### jsmn Token Budget
-- OpenAI chunks: ~64 tokens sufficient
-- Gemini chunks (multi-part): ~256 tokens
-- Anthropic events: ~64 tokens
-- Non-streaming full responses: dynamic (realloc if needed)
+The request body is the output of a SQL query in `src/llm_payload.c`, with two
+builders: OpenAI-compat and Gemini-native. CClaw sends `max_tokens` on the
+OpenAI-compat path. CClaw sends no `cache_control` markers; it relies on
+implicit prefix caching. Anthropic-native (section 3) is not implemented.

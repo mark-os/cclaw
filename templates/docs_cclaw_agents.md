@@ -54,8 +54,8 @@ A session's channel binding (`channel_name`/`chat_id`) is its origin — set
 when an inbound channel message creates the session, or attached by the
 operator. It is where approval prompts and turn output go. Agents don't
 rebind sessions; what an agent *can* request is a **send route** to a chat
-(`request_config` request_changes `routes` section), which authorizes
-`channel_send` to that target.
+(a `routes` section in a `request_config` changes document), which
+authorizes `channel_send` to that target.
 
 ## Creating new agents
 

@@ -1,59 +1,48 @@
 # Hooks — Lifecycle Event Dispatch
 
-Status: design. Captures the hook points, their inputs/outputs, and how they
-compose with the existing advance loop.
+Status: implemented for four events (`preAdvance`, `postAdvance`,
+`beforeToolCall`, `afterToolCall`). This file is the command contract. The
+handler contract summary is in
+[extensions.md](extensions.md#hook-handler-contract). Code:
+`src/hook_dispatch.c`, `src/extension.c` (`extension_load_hooks`).
 
 ---
 
-## 1. Motivation
+## 1. Design: structured command hooks
 
-Agents need to intercept and augment the turn cycle without modifying core C
-code. Current state:
+A hook intercepts the turn cycle without changing C code. A hook receives a
+small JSON `input` object and returns a small JSON object of **commands**. C
+validates each command and applies it with SQL. A hook never sees or rebuilds
+the full messages array.
 
-| Hook | Status | Can modify |
-|------|--------|-----------|
-| `beforeToolCall` (gate) | ✅ Landed | restrict only (deny/ask/allow) |
-| `afterToolCall` (observe) | ✅ Landed | nothing (side-effect only) |
-| `beforeRequest` | 🗑️ Deleted (was dead code, never wired) | was: full messages array |
-| `afterResponse` | ❌ Spec'd in extensions.md, not built | — |
-| `turnStart` / `turnEnd` | ❌ Spec'd, not built | — |
-
-The dead `beforeRequest` attempted to hand the hook the entire serialized
-messages array, let JS mutate it, and return a replacement body. Problems:
-
-1. Duplicates what `llm_payload.c`'s SQL already does.
-2. Hook must parse/rebuild a potentially huge array.
-3. Return value bypasses the SQL payload builder — two paths to the same output.
-
-This design replaces that approach with **structured command hooks**: small JSON
-in, targeted JSON commands out. The hook never sees or rebuilds the full
-context.
+Rationale: an earlier `beforeRequest` hook received the whole serialized
+messages array and returned a replacement body. It duplicated the SQL payload
+builder (`llm_payload.c`), forced the hook to parse a large array, and created
+a second path to the request body. It was never wired and is deleted.
 
 ---
 
-## 2. Hook Events (revised)
+## 2. Hook Events
 
 Six events are specified; **four are dispatched** (`preAdvance`, `postAdvance`,
-`beforeToolCall`, `afterToolCall`). `turnStart`/`turnEnd` are design headroom —
-not yet wired, and `extension_manifest_validate` **rejects** manifests that
-declare them (a registered hook that never fires is a silent lie). Each hook
-handler is a JS file evaluated in a fresh QJS context per dispatch. A handler that throws is skipped (logged); one broken hook never kills
-the turn.
+`beforeToolCall`, `afterToolCall`). `turnStart`/`turnEnd` are design headroom.
+They are not dispatched, and `extension_manifest_validate` **rejects**
+manifests that declare them (a registered hook that never fires is a silent
+lie). A hook handler file holds one function expression. Each dispatch
+evaluates it in a fresh QuickJS context and calls it with `input`. A handler
+that throws is skipped; one broken hook never stops the turn.
 
 | Event | When it fires | Input (JSON) | Output (JSON) | Chaining |
 |-------|---------------|--------------|---------------|----------|
-| `turnStart` | Entry to advance loop | `{session_id, agent}` | — (informational) | all run |
+| `turnStart` *(not dispatched)* | Entry to advance loop | `{session_id, agent}` | — (informational) | all run |
 | `preAdvance` | After context plan built, before `llm_payload.c` | see §3 | commands (see §4) | chained in load order |
 | `postAdvance` | After LLM response written to entries | see §3 | commands (see §4) | chained in load order |
 | `beforeToolCall` | After capability resolution, before exec | `{name, args}` | `{deny, ask, reason}\|{}` | most-restrictive wins |
 | `afterToolCall` | After tool exec, result available | `{name, args, result}` | `{result}\|{}` | chained; each sees previous |
-| `turnEnd` | Before advance loop exit | `{session_id, agent, stop_reason}` | — (informational) | all run |
+| `turnEnd` *(not dispatched)* | Before advance loop exit | `{session_id, agent, stop_reason}` | — (informational) | all run |
 
-**Changes from extensions.md:**
-- `beforeRequest` → `preAdvance` (name reflects what it actually intercepts)
-- `afterResponse` → `postAdvance` (symmetry; operates on DB entries, not raw HTTP)
-- `afterToolCall` gains result-replacement (was observe-only in C; spec already
-  had it — align implementation to spec)
+`preAdvance` replaces the deleted `beforeRequest`; `postAdvance` replaces the
+never-built `afterResponse` and acts on the DB entry, not the raw HTTP body.
 
 ---
 
@@ -77,9 +66,8 @@ The C dispatch function builds this from DB state before calling into QJS.
 }
 ```
 
-Enough context to decide *whether* to act, without paying serialization cost of
-the full history. If a hook needs entry content, it can query via the `db`
-global (read-only access to session entries — see §6).
+This is enough context to decide *whether* to act, without the cost of
+serializing the full history. Hooks have no DB access (see §6).
 
 ### `postAdvance` input
 
@@ -104,9 +92,9 @@ redact/transform must see it). Tool calls included when present.
 
 ## 4. Outputs (command pattern)
 
-Hooks return a JSON object of **commands**. Unknown keys are ignored (forward
-compat). An empty object `{}` or `void` means "no action." Commands are
-additive — they compose across chained hooks.
+Hooks return a JSON object of **commands**. Unknown keys are ignored. An empty
+object `{}` or no return value means "no action". Commands compose across
+chained hooks.
 
 ### `preAdvance` commands
 
@@ -123,7 +111,7 @@ additive — they compose across chained hooks.
 
 | Command | Effect |
 |---------|--------|
-| `inject` | Insert transient entries before the LLM call. `ephemeral: true` means not persisted after this turn (excluded from future context). Role must be `system` or `user`. |
+| `inject` | Add content before the LLM call. Role must be `system` or `user`. `ephemeral: true` writes a `hook_directives` row that applies to this request only. Without `ephemeral`, the content is appended as an entry. Injected content passes through the secret mask and scanner like any tool result. |
 | `suppress` | Entry IDs to exclude from this request's context window (not deleted — just hidden for this call). |
 | `pin` | Entry IDs that must appear in context even under token pressure. Protects the read-time cut only — compaction's keep boundary ignores pin, so a pinned entry old enough to compact is summarized like any other (see [memory.md](memory.md#context-window-management)). |
 | `set_data` | Patch the `data` JSON column on entries by ID. Merged via `json_patch`. |
@@ -139,25 +127,21 @@ additive — they compose across chained hooks.
 ```json
 {
   "transform_content": "Here's the file you requested [REDACTED]...",
-  "annotate": {"reviewed": true, "category": "file_ops"},
-  "inject_next": [
-    {"role": "system", "content": "Reminder: check permissions", "ephemeral": true}
-  ],
-  "notify": {"channel": "slack", "message": "Agent wrote a file"}
+  "annotate": {"reviewed": true, "category": "file_ops"}
 }
 ```
 
 | Command | Effect |
 |---------|--------|
-| `transform_content` | Replace the assistant entry's `content` in-place (DB UPDATE). Use for redaction/PII stripping. Original preserved in `data.original_content` if set. |
+| `transform_content` | Replace the assistant entry's `content` in place (DB UPDATE, `entries_fts` kept in sync). Use for redaction. The first transform stores the original in `data.original_content`. |
 | `annotate` | Merge into the entry's `data` JSON column. |
-| `inject_next` | Entries to prepend to the *next* advance cycle's context (ephemeral by default). Useful for injecting "you just did X, remember Y" steering. |
-| `notify` | Fire-and-forget notification. Dispatcher routes by channel name to the channel outbox. |
 
 **Constraints:**
-- `transform_content` cannot change the role or tool_calls structure.
-- `inject_next` is capped (max 3 entries, max 2048 chars total).
-- `notify` is best-effort; failure doesn't error the hook.
+- `transform_content` cannot change the role or the tool_calls structure.
+
+Not implemented: `inject_next` (steering for the next request) and `notify`
+(fire-and-forget message to a channel). A hook that returns them has no
+effect.
 
 ### `afterToolCall` commands
 
@@ -177,75 +161,76 @@ additive — they compose across chained hooks.
 
 ## 5. Execution Model
 
-Hooks run in the **agent process** (not forked), in a fresh QJS context per
-dispatch. This matches the existing `gate_tool_call` / `observe_tool_call`
-pattern.
+Hooks run in the **trusted process** (not forked), on the main poll thread, in
+a fresh QuickJS context per dispatch. `advance_session()` is a pure state
+machine. Payload build, HTTP and ingest run in `llm_proc.c` on a **worker
+thread** with its own DB connection. The hooks QuickJS runtime is
+main-thread-only, so:
 
-> **Correction (as built):** the diagram below is a simplification.
-> `advance_session()` is a pure state machine; payload build + HTTP + ingest run
-> in `llm_proc.c` on a **worker thread** with its own DB connection, while the
-> hooks QJS runtime is main-poll-thread-only. So `preAdvance` fires on the main
-> thread in `dispatch_llm_req()` (before worker submit) and its commands cross
-> the thread boundary **as DB state** (`hook_directives` rows + `entries.data`
-> flags), read by the worker's payload build and cleared at every `llm_req`
-> exit. `postAdvance` fires on the main thread at the worker-completion wake,
-> before `advance_session` consumes the result.
+- `preAdvance` fires on the main thread in `dispatch_llm_req()`
+  (`src/dispatch.c`), before the worker job is submitted. Its commands cross
+  the thread boundary **as DB state**: `hook_directives` rows and
+  `entries.data` flags. The worker's payload build reads them, and every
+  `llm_req` exit deletes the `hook_directives` rows.
+- `postAdvance` fires on the main thread at the worker-completion wake
+  (`src/main.c`), before `advance_session` consumes the result.
+- `beforeToolCall` fires after capability resolution, before execution.
+- `afterToolCall` fires after execution and after the secret scanner, before
+  the tool-result entry is written.
 
 ```
-advance_session()
-  ├─ build context plan
-  ├─ dispatch preAdvance hooks   ← NEW
-  │    └─ apply commands (inject/suppress/pin/set_data)
-  ├─ llm_payload.c assembles request (reads entries table)
-  ├─ LLM HTTP call (worker thread)
-  ├─ parse response, write entries
-  ├─ dispatch postAdvance hooks  ← NEW
-  │    └─ apply commands (transform/annotate/inject_next/notify)
-  ├─ if tool_use: dispatch beforeToolCall (existing)
-  │    └─ exec tool
-  │    └─ dispatch afterToolCall (existing, gains result replacement)
-  └─ loop or exit
+main thread                         worker thread
+  dispatch_llm_req()
+    preAdvance → hook_directives
+    submit llm_jobs row  ───────▶     llm_req(): build payload (reads
+                                        hook_directives), HTTP, write entries,
+                                        clear hook_directives
+  worker-completion wake  ◀───────
+    postAdvance → transform/annotate
+  advance_session()
+    tool_use: beforeToolCall → exec → secret scan → afterToolCall → write
 ```
 
 **Timing:** hooks are synchronous and blocking. A slow hook delays the turn.
-`setrlimit` on CPU time applies to the QJS eval (same as existing hooks).
-Future: add a per-hook `timeout_ms` field in the manifest (kill context on
-exceed, skip hook, log warning).
+The shared hooks runtime has a heap limit and an instruction-count interrupt
+(`js_runtime_create`, `src/tool_js.c`); there is no per-hook timeout.
 
-**DB access:** hooks get a read-only `db.query(sql, ...params)` global that
-can SELECT from `entries`, `sessions`, `config`, `memory_blocks` (the agent's own
-data). No writes through this path — mutations happen only via the returned
-command object, validated by C before application.
+**Loading:** `agent_setup_init` calls `extension_load_hooks` once. It loads
+the hooks of the agent's attached, enabled extensions that are published or
+owned by the agent, in `ORDER BY extension_name, event, path`.
+
+**DB access:** none. Mutations happen only through the returned command
+object, which C validates before it applies anything.
 
 ---
 
 ## 6. QJS Globals Available to Hooks
 
-All hooks share a base set of globals (same fresh-context-per-dispatch model):
+The hooks context (`QJS_PROFILE_HOOKS`, `src/qjs_helpers.c`) has reduced
+intrinsics: base objects, `eval`, `JSON` and `RegExp`. There is no `Promise`
+and no `console`.
 
 | Global | Type | Notes |
 |--------|------|-------|
-| `input` | object | The hook's input JSON (§3) |
-| `db.query(sql, ...params)` | function → array | Read-only SELECT on agent-visible tables |
-| `console.log(...)` | function | Captured to stderr / syslog |
-| `kv.get(key)` / `kv.set(key, val)` | function | Per-extension persistent key-value (future extension-scoped table — not the global `config` table, which is registry-only) |
+| `input` | object | The hook's input JSON (§3); also passed as the function argument |
 
-No `fs.*` (hooks run in-process, not sandboxed children — filesystem access is
-a tool concern). No `http_fetch` (hooks must not block on network; use `notify`
-command for async outbound).
+There is no `db`, `kv`, `fs`, `console` or `http_request`. Hooks run
+in-process, not in a sandboxed child, so filesystem and network access stay
+tool concerns. A `db.query` global and a per-extension `kv` store are possible
+future additions.
 
 ---
 
 ## 7. Registration
 
-Hooks are declared in the extension manifest (unchanged from extensions.md):
+Hooks are declared in the extension manifest:
 
 ```json
 {
   "hooks": [
-    {"event": "preAdvance", "handler": "inject_context.js"},
-    {"event": "postAdvance", "handler": "redact_pii.js"},
-    {"event": "afterToolCall", "handler": "audit.js"}
+    {"event": "preAdvance", "handler": "remind.qjs"},
+    {"event": "postAdvance", "handler": "redact_pii.qjs"},
+    {"event": "beforeToolCall", "handler": "gate.qjs"}
   ]
 }
 ```
@@ -263,9 +248,8 @@ CREATE TABLE IF NOT EXISTS hooks (
 );
 ```
 
-`extension_load_hooks()` already loads these into `ExtensionCtx.hooks[]` at
-turn start. The `HookEvent` enum gains `HOOK_PRE_ADVANCE` and
-`HOOK_POST_ADVANCE`; dispatch functions follow the `gate`/`observe` pattern.
+`extension_load_hooks()` reads each handler file into `ExtensionCtx.hooks[]`
+(one list per `HookEvent`).
 
 ---
 
@@ -275,7 +259,7 @@ turn start. The `HookEvent` enum gains `HOOK_PRE_ADVANCE` and
 |-------|---------------|------------|
 | `turnStart` / `turnEnd` | All run (order irrelevant) | — |
 | `preAdvance` | Chained in load order | Commands accumulate. Conflicting `suppress` vs `pin` on same ID: `pin` wins. |
-| `postAdvance` | Chained in load order | Last `transform_content` wins. `annotate` merges. `inject_next` accumulates (subject to cap). |
+| `postAdvance` | Chained in load order | Last `transform_content` wins. `annotate` merges. |
 | `beforeToolCall` | Most-restrictive wins | deny > ask > allow |
 | `afterToolCall` | Chained in load order | Each sees previous `result` |
 
@@ -285,102 +269,67 @@ turn start. The `HookEvent` enum gains `HOOK_PRE_ADVANCE` and
 
 - **No write access to DB from hooks.** All mutations go through the command
   object, validated by C. A hook cannot `INSERT INTO entries` directly.
-- **Ephemeral injection is capped.** `inject` and `inject_next` have a max
-  entry count and char budget to prevent context flooding.
+- **Injection is capped.** `inject` allows at most 3 entries and 2048 chars
+  per dispatch (`HOOK_INJECT_MAX_ENTRIES`, `HOOK_INJECT_MAX_CHARS`).
 - **`suppress` cannot hide the triggering user message.** Prevents a hook from
   silently dropping the user's instruction.
 - **`transform_content` preserves original.** Stored in `data.original_content`
   so redaction is auditable.
-- **`kv` is extension-scoped.** One extension cannot read/write another's
-  persistent state.
-- **Hook source is loaded from the installed extension path** (not draft
-  workspace). Only promoted extensions' hooks run. Draft hooks require explicit
-  `--test-hook` invocation (future).
+- **Hook source is loaded from the shared extension store** (not the draft
+  workspace). Only promoted extensions' hooks run.
 
 ---
 
-## 10. Migration from Dead Code
+## 10. Examples
 
-1. ~~Delete `hook_dispatch_before_request()` and `build_messages_json()` helper.~~ Done.
-2. ~~Delete `test_hook_dispatch.c` tests that exercise `before_request`.~~ Done.
-3. Add `HOOK_PRE_ADVANCE` and `HOOK_POST_ADVANCE` to `HookEvent` enum.
-4. Implement `hook_dispatch_pre_advance()` and `hook_dispatch_post_advance()`
-   following the command-return pattern.
-5. Wire dispatch calls into `advance_session()` at the points shown in §5.
-6. Update `afterToolCall` dispatch to consume `result` return and feed it
-   forward (currently ignores return value).
-7. Update extensions.md event table to match this doc.
+Each handler file is one function expression. Handler files must end in `.qjs`.
 
----
-
-## 11. Examples
-
-### Inject RAG context before each LLM call
+### Inject a reminder before each LLM call
 
 ```javascript
-// inject_context.js — preAdvance hook
-var results = db.query(
-    "SELECT content FROM memory_blocks WHERE agent_name=? ORDER BY updated_at DESC LIMIT 3",
-    input.agent
-);
-if (results.length > 0) {
-    var combined = results.map(function(r) { return r.content; }).join("\n---\n");
+// remind.qjs — preAdvance hook
+(function (input) {
+    if (input.pending_tool_calls > 0) return {};
     return {
-        inject: [{role: "system", content: "Relevant memory:\n" + combined, ephemeral: true}]
+        inject: [{role: "system", content: "Reply in under 200 words.", ephemeral: true}]
     };
-}
-return {};
+})
 ```
 
 ### Redact secrets from assistant output
 
 ```javascript
-// redact_pii.js — postAdvance hook
-var patterns = [
-    /sk-[a-zA-Z0-9]{20,}/g,
-    /ghp_[a-zA-Z0-9]{36}/g,
-    /AKIA[A-Z0-9]{16}/g
-];
-var content = input.content;
-var changed = false;
-for (var i = 0; i < patterns.length; i++) {
-    if (patterns[i].test(content)) {
-        content = content.replace(patterns[i], "[REDACTED]");
-        changed = true;
-    }
-}
-if (changed) {
-    return {transform_content: content, annotate: {redacted: true}};
-}
-return {};
+// redact_pii.qjs — postAdvance hook
+(function (input) {
+    var patterns = [/sk-[a-zA-Z0-9]{20,}/g, /ghp_[a-zA-Z0-9]{36}/g, /AKIA[A-Z0-9]{16}/g];
+    var content = input.content || "";
+    var out = content;
+    for (var i = 0; i < patterns.length; i++) out = out.replace(patterns[i], "[REDACTED]");
+    if (out === content) return {};
+    return {transform_content: out, annotate: {redacted: true}};
+})
 ```
 
-### Audit tool calls to channel outbox
+### Block a tool for review
 
 ```javascript
-// audit.js — afterToolCall hook
-if (input.name === "shell_exec" || input.name === "file_write") {
-    return {
-        notify: {channel: "telegram", message: input.agent + " called " + input.name}
-    };
-}
-return {};
+// gate.qjs — beforeToolCall hook
+(function (input) {
+    if (input.name === "shell_exec" && /rm -rf/.test(JSON.stringify(input.args)))
+        return {ask: true, reason: "destructive shell command"};
+    return {};
+})
 ```
 
 ---
 
-## 12. Open Questions
+## 11. Open Questions
 
 - **Should `preAdvance` see the context plan metadata** (which entries are
   planned for inclusion, estimated tokens per entry)? Useful for smart
   suppression but exposes internal context-window logic to hooks.
-- **Should `afterToolCall` result replacement compose with the secret scanner?**
-  Currently the scanner runs after `reap_children`. If a hook also transforms
-  the result, ordering matters. Proposed: scanner runs first (security
-  boundary), then hooks see the already-scanned result.
-- **`notify` routing** — does it go through the channel outbox table (existing
-  path), or a lighter sideband? Channel outbox requires a session_id; hook
-  notifications are session-scoped so this works, but feels heavyweight for a
-  log line.
-- **Hook testing CLI** — `cclaw --test-hook <event> <handler.js> [input.json]`
+- **`notify` routing** (if `notify` is built) — through the channel outbox
+  table, or a lighter sideband? The outbox requires a session_id; hook
+  notifications are session-scoped, so the outbox works.
+- **Hook testing CLI** — `cclaw --test-hook <event> <handler.qjs> [input.json]`
   to dry-run a hook against synthetic input without running a real turn.

@@ -1,6 +1,6 @@
 # The config document — one schema, read and written
 
-Status: M2 shipped. Design history in `plan/projects/config-doc.md`.
+Status: M2 shipped.
 
 CClaw has **one** vocabulary for an agent's configuration. `search_config`
 renders it (prose, or `format:json` — the canonical document), `request_config`
@@ -21,6 +21,9 @@ Four consumers interpret these names; a change to one is a change to all:
 ## Sections
 
 `request_config` takes `{changes, reason}` — no action field, no second mode.
+The parked approval stores the document as
+`{"action":"request_changes","changes":…,"reason":…}` in `approvals.args_json`;
+`request_changes` is that internal document name, not a tool argument.
 `changes` is an object; every key is optional, an unknown key is an error
 (typo-hostile by design — a silently dropped section is a config change that
 never happened and a receipt that says it did).

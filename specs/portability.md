@@ -56,7 +56,7 @@ policy for the "mediated" tiers is in fact enforced by that namespace:
 | Workspace and path grants, file tools | Mount namespace: an ungranted path is simply absent. `tool_file.c` opens whatever path it is given; `path_grant_hint` only words the error | No |
 | Workspace and path grants, JS `fs.*` | Mount namespace. `fs.readFile` is a bare `fopen` | No |
 | `cclaw.db` / `.cclaw_key` masking | Mount namespace (outside every mount set) | No |
-| Host allowlist, `web_fetch` and JS `http_fetch` | Network namespace: the only route out is `HTTP_PROXY` → `net_shim` → the broker's proxy → `host_decide()` | The decision is; the *forcing* is the namespace |
+| Host allowlist, `web_fetch` and JS `http_request` | Network namespace: the only route out is `HTTP_PROXY` → `net_shim` → the broker's proxy → `host_decide()` | The decision is; the *forcing* is the namespace |
 | Host allowlist, shell | Network namespace: the same `HTTP_PROXY` → `net_shim` → proxy path, for programs that honor the variables; the rest have no network | Same |
 
 So on a kernel without unprivileged user namespaces there are two outcomes
@@ -78,11 +78,12 @@ What is already in good shape:
   and child setup. `make CONTAIN=none` builds without the Linux backend. What
   remains Linux-specific outside it is `prctl(PR_SET_PDEATHSIG)` in
   `run_tool.c` and `channel.c`, and reading `/proc/self/exe`.
-- **Old kernels.** Outside `sandbox.c` the only post-3.x syscalls are
+- **Old kernels.** Outside `contain_linux.c` the only post-3.x syscalls are
   `getrandom` and `close_range`, and both fall back.
-- **One egress decision.** `host_decide()` in `proxy.c` is the single
-  implementation, with resolve-then-dial-literal against DNS rebinding
-  ([egress-filter.md](egress-filter.md)). Mediation must reuse it, not copy it.
+- **One egress decision.** `proxy_decide()` in `proxy.c` is the single
+  implementation — allowlist, one resolution, IP filter, and the literal
+  address to dial ([egress-filter.md](egress-filter.md)). It is a plain
+  function over the rule set. Mediation must reuse it, not copy it.
 
 ## Boundaries, by what the host offers
 

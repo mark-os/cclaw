@@ -1,8 +1,8 @@
 # Schema & Data Model
 
-Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` 5000ms). CLI and daemon are peers sharing one source of truth; per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped so a live peer's in-flight sessions are never stomped.
+Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v45 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v40 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into it).
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v53 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -112,7 +112,7 @@ here orders candidates.
 
 ## agent_models
 
-The whole routing policy (`plan/projects/model-routing.md`): an agent's
+The whole routing policy: an agent's
 candidates in `pos` order, nothing appended after the list. Health reorders it
 (degraded rows sink at selection), never empties it. `models` rows referenced
 here can't be deleted — fix lists first; `disabled` is the soft option.
@@ -150,7 +150,7 @@ route.
 
 ## llm_jobs
 
-Transient work queue. The daemon poll loop writes one row per LLM request; a worker thread claims it, runs the request, deletes on completion.
+Transient work queue. The daemon poll loop writes one row per LLM request or compaction. A worker thread runs the request and deletes the row when it completes (`src/llm_worker.c`). A row that exists means a worker holds or will hold that session.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -158,8 +158,8 @@ Transient work queue. The daemon poll loop writes one row per LLM request; a wor
 | `session_id` | INTEGER NOT NULL | |
 | `agent_name` | TEXT NOT NULL | FK → `agents(name)` ON UPDATE CASCADE |
 | `recall` | INTEGER NOT NULL DEFAULT 0 | whether to run FTS recall before this request |
-| `job_type` | INTEGER NOT NULL DEFAULT 0 | 0 = normal turn, others reserved |
-| `status` | TEXT NOT NULL DEFAULT 'pending' | pending / claimed / done |
+| `job_type` | INTEGER NOT NULL DEFAULT 0 | 0 = LLM request for a turn, 1 = compaction |
+| `status` | TEXT NOT NULL DEFAULT 'pending' | always `pending`; completion deletes the row |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 Index: `idx_llm_jobs_pending ON llm_jobs(status) WHERE status='pending'`.
@@ -176,11 +176,11 @@ Raw LLM response archive for forensics and debugging. One row per HTTP response 
 | `session_id` | INTEGER NOT NULL | |
 | `iteration_id` | INTEGER NOT NULL | the `entries.iteration_id` this request belongs to |
 | `model` | TEXT | |
-| `status` | TEXT NOT NULL | ok / empty / malformed / tool_markup / http_<code> / timeout / network_error |
+| `status` | TEXT NOT NULL | ok / empty / malformed / tool_markup / ingest_error / http_<code> / timeout / network_error |
 | `provider_id` | TEXT | provider's own response id (`$.id`), NULL if absent |
 | `upstream_provider` | TEXT | upstream backend that served it (`$.provider`, e.g. OpenRouter's `StreamLake`), NULL if absent — a different field from `provider_id` |
 | `body` | BLOB | JSONB when parseable, raw text otherwise |
-| `request_body` | BLOB | JSONB of sent payload (failures only); NULL on success |
+| `request_body` | BLOB | JSONB of the payload sent, on every archived row (ok and failure); subject to the same retention pruning |
 | `cached_tokens` | INTEGER | prompt tokens served from cache; NULL when unreported |
 | `cache_write_tokens` | INTEGER | prompt tokens written to cache; NULL when unreported |
 | `reasoning_tokens` | INTEGER | subset of completion tokens spent thinking |
@@ -218,12 +218,12 @@ Index: `idx_llm_responses_iteration ON llm_responses(session_id, iteration_id)`.
 
 ## extensions
 
-Shared extension registry. Each extension is a directory in `~/.cclaw/extensions/<name>` containing JS files for tools, hooks, and channels.
+Shared extension registry. Each extension is a directory in the shared store `~/.cclaw/extensions/<name>` that holds the manifest and the JS files for its tools, hooks, channels and scripts.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
-| `path` | TEXT NOT NULL | directory path |
+| `path` | TEXT NOT NULL | shared store directory |
 | `version` | TEXT DEFAULT '0.0.0' | |
 | `owner_agent` | TEXT | who promoted it ('system' for extensions shipped in the binary) |
 | `published` | INTEGER NOT NULL DEFAULT 0 | single publish flag |
@@ -255,7 +255,7 @@ Agent identity and per-agent config. Name is the primary key — no integer id.
 
 ## grants
 
-Normalized capability grants for agents. Replaces the old `agent_config` key-value approach with typed rows.
+Normalized capability grants for agents, one typed row per capability.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -287,7 +287,7 @@ Audit log for tool-call approvals. When a tool call is parked (`sessions.state` 
 | `park_reason` | TEXT | WHY it parked: `approval_required` or `sensitive_target` |
 | `args_json` | TEXT | |
 | `resolve` | TEXT NOT NULL DEFAULT 'rerun' | `rerun` = re-issue the frozen tool call on approval; `apply` = apply a capability grant (request_config) |
-| `state` | TEXT NOT NULL DEFAULT 'pending' | pending / approved / denied |
+| `state` | TEXT NOT NULL DEFAULT 'pending' | pending / approved / denied / consumed (`approval_consume`: an approved once-ticket after its frozen call ran) |
 | `decided_via` | TEXT | who/what resolved it |
 | `requested_at` | INTEGER DEFAULT (unixepoch()) | |
 | `expires_at` | INTEGER | park deadline; fail-closed deny if reached |
@@ -363,8 +363,8 @@ Channel processes managed by the daemon. The extension system writes these rows.
 | `name` | TEXT PRIMARY KEY | |
 | `extension_name` | TEXT NOT NULL DEFAULT '' | |
 | `prev_extension_name` | TEXT | revert target recorded by channel swap |
-| `type` | TEXT NOT NULL DEFAULT '' | telegram / webhook / custom |
-| `binary_path` | TEXT NOT NULL DEFAULT '' | path to channel process |
+| `type` | TEXT NOT NULL DEFAULT '' | the manifest's `$.channel.type` (`telegram`, `discord`, `whatsapp`, …) |
+| `binary_path` | TEXT NOT NULL DEFAULT '' | the channel's JS handler file in the shared store (`<store>/<$.channel.handler>`) |
 | `status` | TEXT NOT NULL DEFAULT 'draft' | see lifecycle below |
 | `pid` | INTEGER | daemon tracks the running process |
 | `default_agent` | TEXT | FK → `agents(name)`. Open-door policy: non-NULL = unrouted chats are accepted and get a new session for this agent; NULL = fail-closed |
@@ -403,7 +403,7 @@ channel-wide default lives on `channels.default_agent`.
 | `channel_name` | TEXT NOT NULL | |
 | `chat_id` | TEXT NOT NULL | Telegram chat id, Discord channel/DM id, … |
 | `session_id` | INTEGER NOT NULL | FK → `sessions(id)`; the pin IS the binding |
-| `delivery_mode` | TEXT NOT NULL DEFAULT 'auto' | `auto` = turn output auto-delivers to the origin chat; `explicit` = only `channel_send` |
+| `delivery_mode` | TEXT NOT NULL DEFAULT 'auto' | delivery-policy template for the pinned session's channel edge: `auto` (= `quiescent`) \| `iteration` \| `digest` \| `turn` \| `quiescent` \| `explicit`. Frozen onto the session's `delivery_edges` row at its first delivery boundary; later route edits do not apply to it. See [delivery.md](delivery.md) |
 | `tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. Frozen onto the pinned session at its creation (`route add --tools`); later route edits don't retro-apply |
 | `system_prompt_suffix` | TEXT | Appended to the pinned session's system prompt every turn (`route add --prompt`); NULL = nothing appended. Read live — unlike `tool_filter`, an edit takes effect on the next turn |
 | PRIMARY KEY | (channel_name, chat_id) | |
@@ -618,7 +618,7 @@ Workflow state table for tool-call tracking. Links a `type='tool_call'` entry to
 | `call_id` | TEXT NOT NULL | provider's tool_call_id |
 | `name` | TEXT NOT NULL | tool name (denormalized for fast queries) |
 | `result_entry_id` | INTEGER | links to the tool_result entry |
-| `status` | TEXT NOT NULL DEFAULT 'pending' | pending / running / done / awaiting_approval |
+| `status` | TEXT NOT NULL DEFAULT 'pending' | pending / running / background (a detached job; `resolved_by` holds the dispatching instance until completion) / done |
 | `resolved_by` | TEXT | |
 | `resolved_at` | INTEGER | |
 
@@ -714,7 +714,7 @@ Index: `idx_memory_entries_block ON memory_entries(agent_name, block_label, pos)
 
 ## inbox
 
-Durable inbound message queue. Survives crashes; atomic consumption via `BEGIN EXCLUSIVE`.
+Durable inbound message queue. Rows survive crashes. `inbox_consume_into_entries` consumes them atomically inside `BEGIN IMMEDIATE`.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -769,7 +769,7 @@ Daemon → channel process delivery queue.
 | `channel_name` | TEXT NOT NULL | |
 | `session_id` | INTEGER NOT NULL | |
 | `payload` | TEXT NOT NULL | JSON |
-| `status` | TEXT NOT NULL DEFAULT 'pending' | pending / delivered / failed |
+| `status` | TEXT NOT NULL DEFAULT 'pending' | pending / sending / delivered / `failed:<reason>` |
 | `attempts` | INTEGER NOT NULL DEFAULT 0 | delivery retry counter |
 | `next_attempt_at` | INTEGER NOT NULL DEFAULT 0 | retry backoff gate |
 | `deliver_mode` | INTEGER NOT NULL DEFAULT 0 | degradation ladder: 0 = formatted (platform rich text), 1 = plain (see below) |
@@ -975,9 +975,9 @@ Sessions stamp `owner_instance` here; owner-scoped recovery reclaims only sessio
 2. **DB-driven state machine** — `advance_session()` reads DB state, decides next action; worker threads notify via pipe; no shared-memory IPC.
 3. **Owner-scoped recovery** — `sessions.owner_instance` + `processes` table lets peers coexist safely; a crash orphans only that process's sessions.
 4. **Split columns over JSON** — SQLite `json_object()` builds wire JSON directly from columns; metadata columns enable plan-pass queries without overflow page loads.
-5. **INTEGER ids** — faster joins, smaller indexes, natural ordering.
+5. **INTEGER ids for rows, names for entities** — sessions, entries and queues use integer ids (fast joins, natural ordering); agents, extensions and channels are keyed by name (see String keys above).
 6. **parent_id tree** — supports branching (Pi model); walk leaf→root via recursive CTE.
 7. **Inbox/outbox as tables** — durable queues; survive crashes; atomic consumption.
 8. **Agent scoping** — `agent_name` column on sessions, memory_blocks, grants scopes data per-agent within the shared DB.
-9. **Grants not config** — typed grant rows with expiry replace the old key-value `agent_config` approach; `approval_mode` + `expires_at` enable fine-grained time-bounded authority.
+9. **Grants not config** — authority is typed grant rows; `approval_mode` + `expires_at` give fine-grained, time-bounded authority.
 10. **Extensions as paths** — DB stores definition + path, never code; JS lives in files.

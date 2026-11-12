@@ -8,7 +8,8 @@ description: How CClaw channels work — the channel extension component, activa
 A channel connects CClaw to an outside surface (Telegram, a webhook, a custom
 feed). Channels are shipped as the `channel` component of an extension: a
 QuickJS handler file plus config keys, run by the daemon in a dedicated
-runner process (`cclaw --channel <name>`).
+runner process (`cclaw --channel <name>`). Telegram, Discord and WhatsApp ship
+built in.
 
 ## Anatomy
 
@@ -25,7 +26,8 @@ runner process (`cclaw --channel <name>`).
 
 The daemon launches a channel only when **all** hold:
 
-1. trust status is `active` (promotion / operator activation),
+1. trust status is `active` (promotion / operator activation; built-in
+   channels start `active`),
 2. `<ext>.enabled` resolves truthy,
 3. every config key flagged `required` resolves non-empty.
 
@@ -155,7 +157,8 @@ The agent can proactively send messages via the `channel_send` tool:
   `queued, outbox id N`.
 - Sends to the session's own origin chat in `auto` mode short-circuit (the
   reply already delivers there).
-- Ships **ungranted** — the operator grants it per agent.
+- It is in every agent's default grants, because the grant authorizes
+  nothing on its own: the route is the allowlist.
 
 ## Ingestion-only channels
 
@@ -212,8 +215,9 @@ Turn it on:
    MEMBERS / PRESENCE are not needed.)
 3. Invite the bot to your server with the *Send Messages* permission (and
    *Read Message History* for reply context).
-4. `set discord.admin_ids = <your user id>` and `discord.enabled = 1`, then
-   promote/activate the channel.
+4. Set `discord.admin_ids` to your user id and `discord.enabled` to `1` (env
+   `CCLAW_DISCORD_ADMIN_IDS` / `CCLAW_DISCORD_ENABLED`, or a `config` change).
+   The built-in channel is already active, so that is all it takes.
 
 Config keys beyond the standard `enabled`/`bot_token`/`admin_ids`/`base_url`:
 

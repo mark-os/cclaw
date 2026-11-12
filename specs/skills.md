@@ -8,7 +8,7 @@ cross-tool difference in the ecosystem is discovery location, not format.
 
 Implementation: `src/skills.c` (discovery + frontmatter + index),
 `src/agent_config.c` (`agent_build_system_prompt` injects the index),
-`src/main.c` file-tier dispatch (mounts skill dirs read-only).
+`src/dispatch.c` file-tier dispatch (mounts skill dirs read-only).
 
 ## Format
 
@@ -51,15 +51,14 @@ description, use file_read on its location to load the full instructions...
 ```
 
 The body is **never** injected up front — the model `file_read`s the
-location when a task matches. This replaced the old model (concatenate every
-`agents/<name>/skills/*.md` wholesale into the prompt), which taxed every
-turn with every skill. It also forces the storage decision: skill bodies
+location when a task matches, so a skill costs prompt space only for its
+index entry. This forces the storage decision: skill bodies
 must be real files at stable paths the file-tool sandbox can read — a
 DB-stored body would break both lazy loading and drop-in ecosystem compat.
 The DB stores nothing about standalone skills; discovery rescans at prompt
 build (a few `readdir`s).
 
-To make locations readable, the file-tier dispatch (`src/main.c`) appends
+To make locations readable, the file-tier dispatch (`src/dispatch.c`) appends
 the resolved skill dirs — plus the shared extension store, where attached
 extensions' skills live — to the child's read-only mounts, the same transient
 override pattern the JS tier uses for the extension store.
@@ -90,9 +89,9 @@ dirs shadow the per-agent dir, and both shadow extension skills.
   them, promote validates them (bundle-relative path, parseable frontmatter
   with a description), and the shared-store copy is what gets indexed —
   agent-immutable after promote, like handler code. Standalone and packaged
-  skills are the same artifact, differing only in discovery root. Still
-  future: surfacing "includes N skills — modifies system prompt" in a
-  promote-approval prompt.
+  skills are the same artifact, differing only in discovery root. The
+  promote approval counts the declared skills (`N skills`) with the other
+  contents (`src/tool_extension.c`).
 - Deliberately not implemented: OpenClaw's eligibility gating
   (`requires.bins/env/os`) and install specs. The sandbox makes host-binary
   checks misleading (present on host ≠ present in the child namespace);

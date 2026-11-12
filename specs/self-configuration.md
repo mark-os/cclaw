@@ -21,7 +21,7 @@ Companion specs: [trust.md](trust.md) (axis model), [config.md](config.md)
 | **Write (bulk/structured)** | agent → system | extension manifests via `extension_promote` — tools, hooks, channels, scripts, skills, config keys, **agents** | human approval with enumerated contents |
 | **Docs** | system → agent | builtin `cclaw-docs` skills extension (progressive disclosure via the skills index) | none (read-only knowledge) |
 
-Design invariants (from the architecture review, SELF-CONFIGURATION-REVIEW.md):
+Design invariants:
 
 - **Tools are the only agent-initiated write path.** Every change is a tool
   call in `entries` — audited, approvable, transactional. No file-based
@@ -33,10 +33,10 @@ Design invariants (from the architecture review, SELF-CONFIGURATION-REVIEW.md):
 
 ## `request_changes`
 
-`request_config` action `request_changes` takes a single `changes` JSON document — one human approval covers the whole batch. The document uses the **same grants dialect** as `extension.json`'s `$.agents[].grants` — two routes, one shape: extension manifests declare new named things; `request_changes` mutates the calling agent's own live state.
+`request_config` takes a single `changes` JSON document and an optional `reason`. One human approval covers the whole batch. `request_changes` is the name of the parked document (`approvals.args_json.action`), not a tool argument; [config-doc.md](config-doc.md) is the full contract. The document uses the **same grants dialect** as `extension.json`'s `$.agents[].grants`. Extension manifests declare new named things; a `request_config` document changes the calling agent's own live state.
 
 ```json
-{"action":"request_changes","changes":{
+{"changes":{
    "grants":{"tools":["name"],"hosts":[".example.com"],"read_paths":["/abs"],"write_paths":["/abs"]},
    "agent":{"models":["gemini-2.5-flash@gemini"],"max_iterations":40},
    "routes":["telegram:12345"],
@@ -52,7 +52,7 @@ Sections by scope — the approval prompt groups them the same way:
 |---------|-------|-----------|
 | `grants` | agent | `grants` rows for the caller |
 | `agent` | agent | the caller's own settings — `models` is a whole-list replace of the caller's `agent_models` routing order (first entry = primary); `max_iterations`/`shell_timeout` are columns on its `agents` row |
-| `routes` | agent | session + `channel_routes` pin (`channel:chat_id`, first-come, `explicit` delivery; no wildcards — channel defaults are operator config) |
+| `routes` | agent | session + `channel_routes` pin (`channel:chat_id`, first-come, `delivery_mode='explicit'`; no wildcards — channel defaults are operator config) |
 | `config` | **system** | global `config` table |
 | `provider` | **system** | `providers` upsert — transport only (endpoint + credential name) |
 | `models` | **system** | `models` upsert per entry — register, update, or disable by canonical id |
@@ -232,13 +232,13 @@ path that create-then-tune workflows need, since a definition is otherwise
 immutable to agents once applied.
 
 - **Authorization**: the caller must be the target itself or its creator
-  (`agents.created_by`). Pre-v30 agents have NULL `created_by` — operator-only,
-  the conservative reading of unknown provenance.
+  (`agents.created_by`). An agent with NULL `created_by` (operator-created) is
+  operator-only.
 - **Same caps as creation, against the caller**: `sandbox_profile` never
   looser than the caller's; every added grant ⊆ the caller's live grants.
   Grants are **additive-only** — removal is an operator act. A self-update's
   grant adds are no-ops by construction, so authority *expansion* remains
-  exclusively `request_changes` (escalation) and the delegation/escalation
+  exclusively `request_config` (escalation) and the delegation/escalation
   split survives.
 - **Overlay semantics, typo-hostile**: provided fields overwrite
   (`description`, `system_prompt`, models — canonical `models.id` only —
@@ -282,13 +282,11 @@ install (JSON1 over the validated file), not by diffing the DB after.
 
 ## Config resolution
 
-[config.md](config.md) is part of this effort (phase 4): the uniform
-`env(CCLAW_<KEY>) ?? value ?? default` rule, `secret`/`required` flags on
-config keys, channel activation as config, and the builtin telegram bundle's
-real manifest. Once landed, "configure a channel" = attach/enable the
-extension + set its config keys — which is why the `configure_channel` tool
-is deleted rather than implemented: it was a stub whose job decomposed into
-existing primitives (`extension_attach` + `request_changes` config section + secrets).
+[config.md](config.md) defines the uniform `env(CCLAW_<KEY>) ?? value ??
+default` rule, the `secret`/`required` flags on config keys, and channel
+activation as config. To configure a channel, attach and enable the extension
+and set its config keys (`extension_attach` + the `config` section of a
+`request_config` document + secrets). There is no `configure_channel` tool.
 
 ## Docs: self-knowledge as skills
 
@@ -300,7 +298,7 @@ builtin, containing operational how-tos distilled from specs/:
 
 | Skill | Covers |
 |-------|--------|
-| `configuring-cclaw` | config registry, search_config, request_config request_changes document (scoped sections), env precedence |
+| `configuring-cclaw` | config registry, search_config, the request_config changes document (scoped sections), env precedence |
 | `extending-cclaw` | manifest format, draft→promote→publish→attach, handler contracts, JS dialect limits |
 | `creating-agents` | agent-definition schema, creation caps, clone_from, the escalate-then-delegate two-step, manifest `agents[]` packaging — top-level because agent creation is a headline capability |
 | `cclaw-agents` | roster, launch_agent / check_session delegation, session↔agent↔channel binding, when to *offer* creating an agent |
@@ -321,7 +319,7 @@ extensions** (attached + enabled) and **Agent roster** (name + description)
 
 All five phases are implemented:
 
-1. `request_changes` action (`src/tool_request_config.c`).
+1. `request_config` changes document (`src/tool_request_config.c`).
 2. `agent_definition_apply` (`src/agent_define.c`) + real `create_agent`;
    `configure_channel` deleted.
 3. `agents[]` manifest component + promote enumeration

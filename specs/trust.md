@@ -3,7 +3,9 @@
 The model doc: what we defend against, where each boundary actually lives, and
 which mechanism owns which question. Companions: [security.md](security.md)
 (secret handling, DLP, defense-in-depth), [sandbox-profiles.md](sandbox-profiles.md)
-(the containment bundles), [egress-filter.md](egress-filter.md) (proxy host rules).
+(the containment bundles), [egress-filter.md](egress-filter.md) (proxy host rules),
+[portability.md](portability.md) (layers, and what a host without a
+containment backend gets).
 
 ## The four axes
 
@@ -13,13 +15,13 @@ prevent.
 
 | Axis | Question | Mechanism | Enforced by |
 |------|----------|-----------|-------------|
-| **Containment** | What can a tool child touch if it misbehaves? | `agents.sandbox_profile` → policy bundle | kernel (namespaces, rlimits, netns+proxy) |
+| **Containment** | What can a tool child touch if it misbehaves? | `agents.sandbox_profile` → policy bundle | containment backend: kernel (namespaces, rlimits, netns+proxy) on Linux; nothing under `host` |
 | **Authority** | What is this agent allowed to do? | `grants` rows (kind/value, `approval_mode`, `expires_at`) | dispatch gate in the trusted process |
 | **Escalation** | Does this call need a human right now? | `approvals` park/resolve (`rerun`/`apply`), `request_config` | dispatch gate + channel/CLI approver |
 | **Sensitivity** | Is this *target* special regardless of grants? | `sensitive_targets` labels + `secret_hosts` bindings | dispatch gate + proxy deny |
 
-Containment is kernel-enforced and coarse. Authority is additive: absence of a
-grant is the denial. Escalation is per-call. Sensitivity is the one place a
+Containment is kernel-enforced and coarse, and exists only where a backend
+can impose it. Authority is additive: absence of a grant is the denial. Escalation is per-call. Sensitivity is the one place a
 label *subtracts* from standing authority, and it is exactly two rules — a
 pair (known-sensitive vs unknown-plus-credential); neither may be
 "simplified" away without the other:
@@ -139,6 +141,14 @@ still provides, and why it stays mandatory (fail-closed, `host` excepted):
 
 The real security boundary on such a box moves up to the authority/escalation
 layer. The kernel cannot enforce intent.
+
+Under `host` (chosen per agent, or the only option on a host without a
+containment backend) the first four rows of the table below do not hold: the
+tool child acts as the user running cclaw, with direct network access. The
+authority, escalation and sensitivity gates still run in dispatch, but the
+proxy half of rules 1 and 2 (deny labels, credential narrowing) does not,
+because no proxy is started. See
+[portability.md](portability.md#boundaries-by-what-the-host-offers).
 
 ## Where each boundary lives
 

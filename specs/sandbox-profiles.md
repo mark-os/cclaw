@@ -2,14 +2,22 @@
 
 `agents.sandbox_profile` selects a **sandbox policy bundle** — containment only.
 It carries no authority: which tools an agent may call and which hosts it may
-reach are governed by the `grants` table, never by the level. Complements
-specs/security.md (secret handling, defense-in-depth) and specs/egress-filter.md
-(proxy host rules).
+reach are governed by the `grants` table, never by the profile. Complements
+[security.md](security.md) (secret handling, defense-in-depth),
+[egress-filter.md](egress-filter.md) (proxy host rules) and
+[portability.md](portability.md) (containment as layer 3, and what a host
+without a containment backend gets).
 
 Resolution happens in ONE place: `sandbox_policy_from_profile()`
 (`src/sandbox.c`), called from `agent_setup_init()` (`src/agent_setup.c`),
 which fills the `SandboxProfile` used by every sandboxed tool tier (shell,
 web, js, file — all via the `--run-tool` broker, `src/run_tool.c`).
+
+`src/sandbox.c` holds the policy and the child setup. The mechanism that
+establishes the boundary is the containment backend (`src/contain.h`), chosen
+at build time: `make CONTAIN=linux` (default, `src/contain_linux.c`:
+namespaces, mounts, the proxy wiring) or `make CONTAIN=none`
+(`src/contain_none.c`: no boundary, so only `host` runs tools).
 
 ## Policy bundles
 
@@ -63,9 +71,9 @@ writable or every toolchain fails on its cache.
 
 **`PATH`** is the agent's workspace-local bin dirs (`$HOME/.local/bin`,
 `$HOME/.cargo/bin`, `$HOME/bin`) followed by the system dirs including
-`/usr/local/bin` and `/usr/local/go/bin`. It was `/bin:/usr/bin`, which made
-every real toolchain invisible — `node`, `go`, `cargo` and `rustc` all install
-outside those two directories.
+`/usr/local/bin` and `/usr/local/go/bin`. Real toolchains (`node`, `go`,
+`cargo`, `rustc`) install outside `/bin:/usr/bin`, so a shorter `PATH` hides
+them.
 
 **`/tmp` is a bind of the agent's own scratch directory on the host**, not a
 directory on the (deliberately tiny) root tmpfs and not a tmpfs we size
@@ -113,20 +121,26 @@ Under `--daemon` there is no meaningful user CWD, so the child starts in the
 agent workspace instead.
 
 - **Unknown or NULL values fall through to `standard`.** There is no
-  `bootstrap` level, and no `trusted` level any more — both are treated like
+  `bootstrap` profile and no `trusted` profile — both are treated like
   any other unknown value (→ standard, which is strictly tighter than the old
   `trusted`). A DB stamped before schema v34 has its `trusted` rows rewritten
   to `standard` by the forward patch. The seeded default agent (`Assistant`)
   is `standard`.
-- **clean allowlist env**: `clearenv()`, then only PATH, TMPDIR,
-  `CCLAW_PROXY_SOCK`, and `CCLAW_SECRET_*` injections. Replaces the
-  blacklist scrub used by `host` (which is inherit-minus-blacklist:
-  names containing API_KEY/APIKEY/TOKEN/SECRET/PASSWORD/CREDENTIALS are
-  dropped, `CCLAW_SECRET_*` re-injected as the deliberate channel).
-- **network none** (`restricted`): no `CCLAW_PROXY_SOCK` in the child, no
-  proxy started; the empty netns then has zero egress.
+- **clean allowlist env**: the environment is wiped, then only `PATH`,
+  `TMPDIR` and `HOME` are set. Additions by tier: network tiers get
+  `CCLAW_PROXY_SOCK` and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`,
+  `ALL_PROXY`, `NO_PROXY`, and their lowercase forms); the shell tier also
+  gets `CCLAW_CONNECT` and `GIT_SSH_COMMAND`
+  ([shell-networking.md](shell-networking.md)); JS gets `CCLAW_LLM_SOCK`
+  except under `restricted`; a shell child gets the `CCLAW_SECRET_*` values
+  its command references. `host` uses a blacklist scrub instead
+  (inherit-minus-blacklist: `CCLAW_*` names and names containing
+  API_KEY/APIKEY/TOKEN/SECRET/PASSWORD/CREDENTIALS are dropped,
+  `CCLAW_SECRET_*` re-injected as the deliberate channel).
+- **network none** (`restricted`): no proxy is started and no proxy socket
+  or proxy variable reaches the child; the empty netns then has zero egress.
 - **grant-path bind mounts**: `read_path`/`write_path` grants add bind
-  mounts on top of the bundle (`src/sandbox.c` `sandbox_apply_namespace`);
+  mounts on top of the bundle (`contain_enter()`, `src/contain_linux.c`);
   they extend *visibility*, chosen per-agent via the approval flow
   (`request_config` → `apply_grant`), and are refreshed per dispatch batch.
   A grant may name a **single file** or a directory (`bind_path_into` creates
@@ -139,13 +153,16 @@ agent workspace instead.
 
 ## Fail-closed rule
 
-Every level except `host` **requires** the namespace. If `unshare`/
-`pivot_root` fails, the child prints an error and exits 126 instead of
-degrading — a runtime failure must
-not grant what only `host` may grant. `host` never attempts the sandbox; it
-is the explicit opt-out, per-agent via `agents.sandbox_profile` or session-wide
-via `--trust-host` (sets `CCLAW_SANDBOX_PROFILE=host`). Sandbox on/off is derived
-from the level; there is no separate sandbox knob.
+Every profile except `host` **requires** the containment backend. If
+`contain_enter()` cannot establish the boundary (`unshare`/`pivot_root`
+fails on Linux; always under `CONTAIN=none`), the child prints an error and
+exits 126 instead of degrading. A runtime failure must not grant what only
+`host` may grant. `host` never attempts the sandbox; it is the explicit
+opt-out, per-agent via `agents.sandbox_profile` or session-wide via
+`--trust-host` (sets `CCLAW_SANDBOX_PROFILE=host`). Sandbox on/off is derived
+from the profile; there is no separate sandbox knob. `contain_probe()` answers
+"can this host contain a child" ahead of time, and `cclaw --doctor` `[layers]`
+reports it per agent ([portability.md](portability.md)).
 
 ## Interaction with other axes (do not conflate)
 

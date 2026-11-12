@@ -27,7 +27,10 @@ curl -H "Authorization: Bearer {{SECRET:GITHUB_TOKEN}}" https://api.github.com/u
   plus `save_secret_path: "$.field"` if the result is JSON — to that same
   call. The value is stored encrypted without entering your context.
 - `secret_create {name}` — mint a new random credential (stored encrypted;
-  you get only the `{{SECRET:name}}` placeholder back).
+  you get only the `{{SECRET:name}}` placeholder back). Not a baseline grant:
+  the default agent has it, others request it.
+- The operator can store one directly with `cclaw secret set NAME` or through
+  the environment. Ask them to; never ask for the value in chat.
 
 Secrets have scopes (`system` vs agent) and host bindings — a secret may only
 be submitted to hosts it is bound to. A call using an unbound secret (or

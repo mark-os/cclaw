@@ -8,7 +8,7 @@ agent's context; intermediate calls burn provider tokens but not context.
 `web_search` (extensions/gemini-search) is the reference example: grounded
 search in ~20 lines, no endpoint URL, no key, no `{{SECRET}}`.
 
-Design doc: `plan/projects/llm-core.md` (untracked). LLM is a callable
+LLM is a callable
 namespace (all-caps, like `XML`): future shapes — `LLM.embed`,
 `LLM.transcribe`, `LLM.batch` — hang off the same global as the core grows
 them.
@@ -70,7 +70,7 @@ sandboxed child asserting anything.
   narrows within the list and can never widen it.
 - **Children never see keys.** Not "held C-side" — absent from the process.
 - **No egress widening.** The child's allowlist is untouched; completions
-  never leave the parent. Profiles with `net_mode=1` (restricted) get no
+  never leave the parent. The `restricted` profile (`net_mode=1`, no network) gets no
   bridge socket at all — no packets on the child's behalf, whoever sends
   them.
 - **Spend is metered**: `llm_max_calls_per_tool` per call,

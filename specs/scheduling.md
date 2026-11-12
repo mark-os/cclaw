@@ -1,7 +1,6 @@
 # Scheduling — Session Concurrency Gates
 
-Status: shipped 2026-08-03. Design history in
-`plan/projects/session-concurrency-gates.md` (agreed spec, same date).
+Status: shipped 2026-08-03.
 
 Related: [delivery.md](delivery.md) — what a session's turn boundaries *ship*
 (per-edge delivery policy, quiescence) lives there; both contracts meet at
@@ -105,11 +104,11 @@ stamp means a human typed it — same classification the streak guard uses,
 ## Retry path
 
 No new machinery. A deferred session keeps its unconsumed inbox rows /
-unanswered leaf, so `session_sweep_inbox` (main.c, daemon tick) re-advances it
+unanswered leaf, so `session_sweep_inbox` (`src/sweep.c`, daemon tick) re-advances it
 every `POLL_DB_INTERVAL` — the correctness backstop, shared with the streak
 guard and refused-dispatch parks. For latency (and for the CLI, which has no
-sweep), a deferral also lands the session in main.c's capacity-stall list
-(`g_stalled`, the CHILD_MAX park pattern): a reap, LLM-worker completion, or
+sweep), a deferral also lands the session in the capacity-stall list
+(`g_stalled` in `src/dispatch.c`, the CHILD_MAX park pattern): a reap, LLM-worker completion, or
 tool-thread completion — the events that free a resource — drains the list and
 re-advances. Still over a ceiling → the session just re-enters it. The list is
 an ephemeral scheduling hint, never a source of truth; overflow means

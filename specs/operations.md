@@ -6,7 +6,7 @@ file; restore is swapping it back with the daemon stopped. The one piece of
 state *outside* the DB is the secret-encryption key (`<db-dir>/.cclaw_key`).
 
 Implementation: `db_backup_to()` (`src/db.c`) does the snapshot; the
-`cclaw backup` verb (`src/main.c`, `backup_main`) wraps it; the operator-facing
+`cclaw backup` verb (`backup_main`, `src/cli_verbs.c`) wraps it; the operator-facing
 prompt surface is the shipped `backup-restore` skill
 (`templates/docs_backup_restore.md`). Restore is documented here and in the
 skill — deliberately not a verb (swapping a live DB would corrupt it). The one
@@ -21,7 +21,7 @@ Writes a consistent single-file snapshot with `VACUUM INTO`:
   transaction, so it captures committed state including committed WAL content,
   with no torn write. A session caught mid-turn (e.g. `llm_running`) is
   captured as-is; on restore, restart recovery (`db_recover_stale_sessions`,
-  see [error-handling.md] / review-5 F8) reconciles it — the snapshot only has
+  see [error-handling.md]) reconciles it — the snapshot only has
   to be internally consistent, which it is.
 - **No writer lockout.** WAL lets the snapshot's read transaction coexist with
   a busy writer; a concurrent turn keeps writing while the backup runs.
@@ -39,7 +39,7 @@ the binary.
 
 Manual procedure, daemon stopped:
 
-1. Stop the daemon (`systemctl --user stop cclaw`, or signal the process).
+1. Stop the daemon (`systemctl --user stop cclaw`; for a system install `systemctl stop cclaw` or `/etc/init.d/cclaw stop`; or signal the process).
 2. Move the snapshot over the DB: `mv <snapshot> <db>`.
 3. **Delete the WAL siblings**: `rm -f <db>-wal <db>-shm`. Mandatory — a stale
    `-wal` from the old DB would be replayed onto the restored file and corrupt

@@ -4,10 +4,11 @@
 
 All provider configuration lives in `cclaw.db`:
 - `providers` table: name, base_url, endpoint_type, api_key_env — **transport only**
-- `models` table: canonical id (`model@provider`), context_window, max_output_tokens, capabilities, routing priority/status
+- `models` table: canonical id (`model@provider`), context_window, max_output_tokens, capabilities, effort_map, health status
+- `agent_models` table: each agent's routing list, in `pos` order
 - `secrets` table (scope `system`): encrypted API keys, named by the provider's `api_key_env` (e.g. `OPENROUTER_API_KEY`)
 
-Agents ⊥ store provider keys. Keys decrypted at runtime, injected to worker threads and tool children via env vars.
+Agents never store provider keys. The trusted process decrypts a key when it loads config and uses it on its LLM worker threads. Provider keys never reach tool children (see Security Model below).
 
 ## Supported Providers
 
@@ -20,9 +21,9 @@ Agents ⊥ store provider keys. Keys decrypted at runtime, injected to worker th
 | Cerebras | `CEREBRAS_API_KEY` | Direct, OpenAI-compat. Wants `max_tokens` (not `max_completion_tokens`) — which is already what CClaw sends. `reasoning_effort` values differ per model family, so the effort mapping is per-model, not global. |
 | Anthropic | `ANTHROPIC_API_KEY` | **Not implemented.** Anthropic's native API is a different wire format (top-level `system`, content blocks, `tool_use`/`tool_result`) and would need a third builder in `llm_payload.c`. Scoped out 2026-08-20; reach Claude models via OpenRouter until then. |
 
-Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows themselves change only via the approval-gated `request_config` action `request_changes` (the `provider` section of the changes document) or operator SQL. A provider document is **transport only**; models are registered separately through the `models` section by canonical `model@provider` id, and the provider must already exist. Per-request routing joins `models → providers`, so a provider row without a models row is unreachable outside the empty-table fallback — one document can define the provider, register a model on it, and adopt it via `agent.models: ["model@provider", ...]` (the full replacement routing order). `providers.default_model` is fresh-install seed sugar only (`templates/seed.sql`), never a registration path.
+Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows change only through the `provider` section of an approval-gated `request_config` changes document ([config-doc.md](config-doc.md)), or through operator SQL. A provider document is **transport only**; models are registered separately through the `models` section by canonical `model@provider` id, and the provider must already exist. Per-request routing joins `models → providers`, so a provider row without a models row is unreachable outside the empty-table fallback — one document can define the provider, register a model on it, and adopt it via `agent.models: ["model@provider", ...]` (the full replacement routing order). `providers.default_model` is fresh-install seed sugar only (`templates/seed.sql`), never a registration path.
 
-A provider whose `api_key_env` resolves to no key (neither env var nor system-scope secret) has **all of its models skipped at request time** — `request_changes` therefore refuses such a document up front, and a canonicalized provider document preserves an existing row's `api_key_env` verbatim, empty string included (a deliberately keyless local gateway must survive a provider edit).
+A provider whose `api_key_env` resolves to no key (neither env var nor system-scope secret) has **all of its models skipped at request time** — `request_config` therefore refuses such a document up front, and a canonicalized provider document preserves an existing row's `api_key_env` verbatim, empty string included (a deliberately keyless local gateway must survive a provider edit).
 
 The skip is no longer silent. A candidate named by an agent's
 routing list (`agent_models`) and dropped for an unresolvable key logs at WARN
@@ -39,7 +40,18 @@ half of the same defect the apply-time probe covers for the agent
 
 ## Provider Fallback Chain
 
-The `providers` table rows ordered by `priority` — row 0 is primary, the rest are the fallback chain. On 5xx/timeout from the primary, the next row is tried. Fallback API keys resolve the same way as the primary: env var named by `api_key_env`, then the encrypted `secrets` row (scope `system`) under that name.
+Routing does not walk the `providers` table. Each request walks the agent's
+`agent_models` list in `pos` order (`load_candidates`, `src/llm_proc.c`).
+Health reorders that list and a failure moves to the next candidate; the
+policy is in [error-handling.md](error-handling.md). A candidate whose
+provider key does not resolve drops out, as described above.
+
+`providers.priority` has one remaining use: at config load, the first
+provider in `priority` order whose key resolves becomes `cfg->provider`.
+`llm_req()` uses it only for the synthetic candidate it builds when the agent
+has no routable model row. Every key resolves the same way: the env var named
+by `api_key_env`, then the encrypted `secrets` row (scope `system`) under that
+name.
 
 ## Wire Format Differences
 
@@ -130,15 +142,17 @@ UPDATE models SET effort_map='{"format":"gemini-budget",
 
 - Provider API keys stored encrypted in the `secrets` table with scope `system` (ChaCha20-Poly1305 AEAD). System scope is excluded from the agent-facing snapshot: `{{SECRET:OPENROUTER_API_KEY}}` does not resolve, and the key is never injected into tool children.
 - Decryption key: `<dir of cclaw.db>/.cclaw_key` (32 bytes, mode 0600, daemon-only)
-- Decrypted at startup → loaded into config, available to worker threads
-- Agent uses key for LLM calls, key lives only in process memory
+- Decrypted by the trusted process and held only in its memory; used by LLM worker threads
 - `shell_exec` children have provider-native env vars (e.g. `OPENROUTER_API_KEY`) unset before exec
-- Agent ⊥ has access to `.cclaw_key` file (daemon-only, not exposed to agents)
-- Provider changes are approval-gated: the `provider` section of `request_config` action `request_changes` parks for human approval; the upsert happens in the trusted parent on approve (savepoint-wrapped, all-or-nothing with any co-batched grants/config). The approval args carry only the secret's *name* (`api_key_env`) — never key material. (The old `configure_provider` tool applied inline, letting a granted agent silently repoint `base_url` at an attacker — deleted, schema v28.)
+- Agents have no access to the `.cclaw_key` file: every sandboxed profile masks it
+- Provider changes are approval-gated: a `request_config` document with a `provider` section parks for human approval; the upsert happens in the trusted parent on approve (savepoint-wrapped, all-or-nothing with any co-batched grants/config). The approval args carry only the secret's *name* (`api_key_env`) — never key material. (The old `configure_provider` tool applied inline, letting a granted agent silently repoint `base_url` at an attacker — deleted, schema v28.)
 
 ## Future: OAuth (Device Code)
 
-If CClaw needs subscription-based access (ChatGPT Plus, Claude Pro):
+Not planned. The survey and the current decision (no subscription
+integration for Claude) are in
+[subscription-providers.md](subscription-providers.md). If subscription-based
+access is revisited:
 - OAuth 2.0 Device Authorization Grant (RFC 8628)
 - Works headless: show URL + code, user approves on phone/laptop
 - Tokens stored encrypted in the `secrets` table (scope `system`)

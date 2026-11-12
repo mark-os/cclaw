@@ -1,34 +1,32 @@
 # Tool Execution Model — Unified `--run-tool` Entry, Tier Dispatch, Shared Network Broker
 
-Status: spec. Target architecture for the sandboxed tool tiers (file, web,
-shell). Supersedes the current split where `tool_shell_handler` runs in a
-**fork-only** (no-exec) broker child of the multithreaded daemon.
-
-This note pins the shared structure both network tiers sit on, so the
-shell-broker extraction and the web tier land against one frozen target.
+Status: **as built.** The structure every sandboxed tool tier (file, shell,
+web, js) runs on: one re-exec'd `--run-tool` entry point, a tier descriptor,
+and one shared helper for the network tiers. The boundary itself is the
+containment backend ([portability.md](portability.md), layer 3;
+[sandbox-profiles.md](sandbox-profiles.md)); this note covers the processes
+around it. All phases in §9 are done.
 
 ---
 
-## 1. The problem this fixes
+## 1. Why every tier execs first (rationale)
 
 The daemon is multithreaded: poll-loop thread + elastic LLM worker pool (each
 worker owns its own `sqlite3*` + `CURL*`, runs blocking `llm_req`) + civetweb
 threads. Any of these may hold a malloc-arena / sqlite / curl / stdio lock at
 any instant.
 
-Today `fork_tool_exec` does `fork()` (no exec) from this daemon to create the
-shell broker, and `tool_shell_handler` then runs **handler logic in that
-fork-only image**. A fork-only child of a multithreaded process has one thread
-but inherits **all locks in whatever state they were at the fork instant** —
-including locks held by *other* daemon threads, now frozen with no owner. The
-broker's first `malloc` (in `proxy_bind`, JSON parse, etc.) can deadlock.
-"Single-threaded" (thread count) ≠ "clean lock state". The fork-only broker has
-the former, not the latter.
+A fork-only child of a multithreaded process has one thread but inherits
+**all locks in whatever state they were at the fork instant** — including
+locks held by *other* daemon threads, now frozen with no owner. Its first
+`malloc` (in `proxy_bind`, a parse, etc.) can deadlock. "Single-threaded"
+(thread count) ≠ "clean lock state". The shell broker was once such a
+fork-only child.
 
 `execve` is the only operation that discards inherited locks — it throws away
 the whole address space and builds a fresh one. Therefore **every process that
 runs real (allocating) logic after forking from the daemon must exec first.**
-The file tier already does this. Shell does not. This note makes it uniform.
+Every tier now does.
 
 ---
 
@@ -98,8 +96,9 @@ everything else is shared in one helper (`serve_network_child`):
 ```
 serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
                     unsigned char *body, size_t body_len):
-    proxy_bind(&proxy, agent_dir, blob.host_rules, blob.cidr_rules)
-        // bind while single-threaded, BEFORE the fork below
+    proxy_bind(&proxy, agent_dir, q->host_rules, q->deny_rules)
+        // bind while single-threaded, BEFORE the fork below;
+        // skipped under host (no sandbox) and restricted (no network)
     pid = fork()                         // safe: this image is sterile/1-thread
     if child:
         setpgid(0,0)
@@ -129,11 +128,11 @@ Per-tier inputs to the helper:
 | /proc       | absent          | absent                       | absent                       | present (PID ns backs it)    |
 | proxy reach | n/a             | net_shim + HTTP_PROXY (curl is ours) | net_shim + HTTP_PROXY (qjs http_request uses curl) | net_shim + HTTP_PROXY; `connect` mode for ssh (untrusted subprocess tree) |
 
-Invariant restated: **/proc present IFF PID namespace present.** Mount set
-contains the proxy socket IFF the tier runs untrusted subprocesses that dial
-network themselves (shell only — web's own curl and js's qjs `http_request` use
-HTTP_PROXY to the shim, no socket in the mount set required beyond what
-reachability needs).
+Invariant restated: **/proc present IFF PID namespace present.** Every
+network tier gets the proxy socket bind-mounted at one fixed in-boundary path,
+plus `net_shim` listening on loopback; the proxy variables point at the shim.
+Only the shell tier, which runs foreign subprocess trees, also gets the
+`connect` helper for ssh.
 
 Adding a future network tier = a new `(skip_pid_ns, run_fn)` pair plugged into
 the table. No new process mode, no new exec, no new drain/proxy code.
@@ -189,7 +188,7 @@ field order. Fields by tier (additive over file):
   the child can bind-mask `.cclaw_key` and the DB family out of any granted
   mount; see [security.md](security.md). Dropping it silently disables the
   mask, which is why `test/test_sandbox_key_mask.c` guards it.)
-- web/shell: `host_rules[]` (exact/suffix), `agent_dir` (for proxy socket; the broker partitions grants into host/CIDR rules at `proxy_bind`)
+- web/shell/js: `host_rules[]` (exact/suffix), `deny_rules[]` (sensitivity labels), `agent_dir` (for the proxy socket; the broker partitions grants into host/CIDR rules at `proxy_bind`)
 - shell: `command` (with secrets already interpolated by the daemon parent), `secrets[]` (minimal name/value set for env injection)
 - shell/web/js: `timeout` — the call's budget in seconds. Each tool takes a
   `timeout` argument (defaults 60 shell / 60 web / 120 js), clamped by the
@@ -209,9 +208,10 @@ the same SQLite parse — an unparseable policy blocks the call
 (`POLICY_ERROR`), never fails open.
 
 **Secrets**: resolved by the **daemon parent** before the blob is written. The
-sterile `--run-tool`/broker holds no key and never interpolates. This replaces
-shell's current `explicit_bzero`-after-fork dance: parent interpolates → blob
-carries resolved values → child consumes → no other process retains them.
+sterile `--run-tool`/broker holds no key and never interpolates: parent
+interpolates → blob carries resolved values → child consumes. The broker
+`explicit_bzero`s its copy of the command, the secrets and the blob right after
+the fork, and the parent wipes its own.
 
 ### Response frame (fd 3, child → parent)
 
@@ -244,17 +244,18 @@ and no DB. Only the proxy config + request blob cross fd 3.
 
 ---
 
-## 8. What stays unchanged
+## 8. What the broker move left unchanged
 
-- Deny-by-default egress; `decide()` pipeline (host rules → resolve → IP/CIDR
-  floor → metadata carve-out, enforced on BOTH resolve and numeric-CONNECT
-  paths). The broker runs `decide()` exactly as today.
+- Deny-by-default egress; the `proxy_decide()` pipeline (host rules → resolve →
+  IP/CIDR floor → metadata carve-out, enforced for a numeric target and for
+  every address a hostname resolves to).
 - `proxy_bind` / `proxy_serve` split (bind single-threaded, serve after the
-  fork), bless set + TTL, resolve-then-dial-literal anti-TOCTOU/rebind. Reused
+  fork), resolve-then-dial-literal anti-TOCTOU/rebind. Reused
   verbatim — they move INTO the exec'd broker, their logic is untouched.
-- net_shim as the dumb CONNECT forwarder (structurally no resolver → per-hop
-  hostname gating is real). Every tier reaches it the same way: proxy
-  variables; the shell tier also gets `connect` mode for ssh.
+- net_shim as the dumb forwarder for CONNECT tunnels and plain-HTTP requests
+  (structurally no resolver → per-hop hostname gating is real). Every tier
+  reaches it the same way: proxy variables; the shell tier also gets
+  `connect` mode for ssh.
 - Crash-only discipline: the broker is a per-call disposable PROCESS — SIGKILL
   on timeout reclaims proxy threads, relays, fds, memory. (A thread could not
   provide this — isolation requires a process.)
@@ -278,7 +279,7 @@ and no DB. Only the proxy config + request blob cross fd 3.
    per-hop `decide()`.
 3. ✅ **Add js as the third network-tier pair** (2026-06).
    `tool_js_tier_run` (QuickJS eval, `http_request` via curl + HTTP_PROXY) on
-   the same `serve_network_child` path. Dispatch in `src/main.c` for both
+   the same `serve_network_child` path. Dispatch in `src/dispatch.c` for both
    `js_eval` and JS-defined extension tools routes through the `SBX_JS` tier.
 4. file tier already on the exec'd path; shares `run_tool_verify_clean` and the
    tier-descriptor dispatch (no separate code path).

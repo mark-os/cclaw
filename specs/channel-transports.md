@@ -10,7 +10,7 @@ the JS↔C envelope; this one covers **how bytes reach the handler**.
 
 ## The four transport shapes
 
-A channel needs bytes to move in one of four shapes. Three predate this spec:
+A channel needs bytes to move in one of four shapes:
 
 | Shape | Owner | Mechanism | JS surface |
 |-------|-------|-----------|------------|
@@ -33,9 +33,8 @@ are chunked into messages; the protocol on top is always the handler's job.
 | `ws` (default) | WebSocket (WS/WSS) | `CONNECT_ONLY=2` + `curl_ws_recv/send` | Discord Gateway, Slack Socket Mode, realtime voice |
 | `raw` | TCP, optionally TLS | `CONNECT_ONLY=1` + `curl_easy_recv/send` | IRC, XMPP, MQTT, line/length-framed protocols |
 
-`raw` is a **planned second framing**, not part of the first cut — but the C
-structure is built around framing from day one so `raw` is a branch, not a
-rewrite. Ship `ws`; add `raw` when a channel needs it.
+Only `ws` is implemented. `raw` is a planned second framing; the C structure
+selects on framing, so `raw` is a new branch, not a rewrite.
 
 ### Host functions (JS → C)
 
@@ -98,8 +97,8 @@ no channel protocol needs it (Discord's heartbeat interval is ~41 s).
 ## Loop integration (C responsibilities)
 
 - Each open conn contributes its `CURLINFO_ACTIVESOCKET` fd to the runner's
-  `extra[]` pollfd array (today: outbox FIFO + request UDS; grows by
-  `CR_CONN_MAX`).
+  `extra[]` pollfd array (outbox FIFO + request UDS + up to `CR_CONN_MAX`
+  conns).
 - Drain each conn **unconditionally every iteration**, not just when the fd
   polls readable: a `CONNECT_ONLY` handle can hold frames already read off the
   socket into curl's own buffer (e.g. a Discord `HELLO` that arrived *during*
@@ -173,12 +172,12 @@ to the fixed gateway.
 > provider); it exists only as an escape hatch and, like a broad suffix, is an
 > operator-review responsibility, not a code-enforced limit.
 
-Phase-1 tests run against a loopback pin, so the primitive and its test suite land
-independent of any of this.
+The tests run against a loopback pin, so they do not depend on any real
+provider host.
 
 ## Manifest: transport capability declaration
 
-The `channel` block gains an optional `transports` array — **advisory and
+The `channel` block has an optional `transports` array — **advisory and
 validated, never the source of truth for endpoints** (URLs are runtime values:
 `resume_gateway_url`, per-number callbacks, `/sync` tokens). Values:
 `poll`, `webhook`, `persistent`.
@@ -208,6 +207,21 @@ because the compile-time view lies:
   impossible — nothing in the API says where a message ends. 8.13.0 put the
   type on every fragment and redefined `CURLWS_CONT` as "more to come", which
   is the contract `conn_recv_drain` reads.
+
+### Which builds have it
+
+Release binaries are static and carry libcurl 8.23 with WS/WSS enabled, so
+`persistent` channels work in every release binary. A source build links the
+system libcurl, so availability depends on the host:
+
+- libcurl older than 7.86.0 has no WebSocket API at all. `src/channel_runner.c`
+  and `src/util.c` carry compile-time stand-ins so the build still succeeds;
+  `curl_ws_available()` returns 0 and a `persistent` channel is refused at
+  activation.
+- libcurl 7.86.0 to 8.12.x, or any libcurl built without ws: refused at
+  activation, as above.
+
+`cclaw --doctor` reports `websockets: available` or `unavailable`.
 
 ## Non-goals (v1)
 

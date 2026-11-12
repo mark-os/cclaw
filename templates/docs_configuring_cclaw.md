@@ -42,7 +42,8 @@ one approval covers the whole document:
    "routes": ["telegram:12345"],
    "config": {"registered.key": "value"},
    "provider": {"provider": "gemini"},
-   "models": [{"id": "gemini-2.5-flash@gemini", "context_window": 1000000}]
+   "models": [{"id": "gemini-2.5-flash@gemini", "context_window": 1000000}],
+   "secret_bindings": {"GITHUB_TOKEN": ["api.github.com"]}
  }, "reason": "why you need these"}
 ```
 
@@ -81,6 +82,9 @@ one approval covers the whole document:
   fields you omit keep their current values. One document can therefore define
   a provider, register a model on it, and adopt it via
   `agent.models: ["<model>@<provider>", ...]`.
+- `secret_bindings`: `{"NAME": ["host", ...]}` binds a saved secret to the
+  hosts it may be sent to. A call that uses a secret on an unbound host is
+  denied with the missing pair named; see the cclaw-secrets-memory skill.
 
 The document is a PATCH against what `search_config` shows: `agent.*` fields
 replace, `grants.*` add, `models`/`provider` upsert, and

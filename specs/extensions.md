@@ -17,10 +17,7 @@ of each:
 
 The extension is the **unit** — the thing you install, enable, disable, uninstall,
 and publish. Every capability it provides carries its `extension_name`, so the set
-is always known and removable as a whole. This is the property the earlier
-implementation lacked: tools were discovered by *executing* JS that called
-`cclaw.registerTool()` and scraping the resulting globals, so nothing remembered
-which extension a tool came from and an extension had no runtime identity.
+is always known and removable as a whole.
 
 **The manifest declares the contents; nothing registers itself by running.** See
 [Why declarative, not `registerTool`](#why-declarative-not-registertool).
@@ -44,20 +41,20 @@ directory.
       "parameters": { "type": "object",
         "properties": { "lat": {"type":"number"}, "lon": {"type":"number"} },
         "required": ["lat","lon"] },
-      "handler": "forecast.js",
+      "handler": "forecast.qjs",
       "hosts": ["api.weather.gov"],
       "policy": null
     }
   ],
 
   "hooks": [
-    { "event": "beforeToolCall", "handler": "guard.js" }
+    { "event": "beforeToolCall", "handler": "guard.qjs" }
   ],
 
-  "channel": { "type": "telegram", "handler": "channel.js" },
+  "channel": { "type": "telegram", "handler": "channel.qjs" },
 
   "scripts": [
-    { "name": "morning_report", "handler": "report.js", "schedule": "0 7 * * *" }
+    { "name": "morning_report", "handler": "report.qjs", "schedule": "0 7 * * *" }
   ],
 
   "skills": [ "skills/forecast-format" ],
@@ -134,7 +131,7 @@ under the agent's `host` grants, unchanged.
 
 This is the channel model (`egress_hosts` pinned by the runner) extended to
 tools: one rule everywhere. Mechanically it is a third input to
-`call_egress_build()` (`src/main.c`), the function that already narrows a call
+`call_egress_build()` (`src/dispatch.c`), the function that already narrows a call
 below the agent's standing grants for sensitivity and credential binding —
 declared hosts pick the *base* list, secret-binding still narrows it, and the
 sensitivity deny rules still apply.
@@ -281,20 +278,19 @@ At agent setup, the registry is materialized for the current agent:
 SELECT t.name, t.description, t.parameters_json, t.path, t.policy
   FROM tools t
   JOIN agent_extensions ae ON ae.extension_name = t.extension_name
+  JOIN extensions e ON e.name = t.extension_name
  WHERE ae.agent_name = ?1 AND ae.enabled = 1
    AND (e.published = 1 OR e.owner_agent = ?1);
 ```
 
-Built-in C tools register as today; extension tools come from this join. Hooks load
+Built-in C tools register in C; extension tools come from this join. Hooks load
 the same way from the `hooks` table. **No JS is evaluated at load time** — loading
 is parsing JSON-derived rows, not running extension code. The only JS execution is
-when a tool *runs* (fork child) or a hook *fires* (fresh context). This deletes the
-entire eval-and-scrape subsystem (`__cclaw_api`, `__cclaw_tools[]` accumulation,
-`process_registered_tools`/`process_registered_hooks`).
+when a tool *runs* (fork child) or a hook *fires* (fresh context).
 
 Because the registry is derived from the DB, a tool promoted **mid-session** becomes
 callable the same session: on a registry lookup miss, dispatch re-runs this query
-for the *advancing* agent and retries (`dispatch_tool_inner`, src/main.c) —
+for the *advancing* agent and retries (`dispatch_tool_inner`, src/dispatch.c) —
 no restart, no parallel in-memory state. The reload is idempotent
 (already-registered names are skipped) and touches the registry only on the
 event-loop thread. This mirrors `agent_setup_refresh_caps()`, which already
@@ -371,7 +367,7 @@ returns a JSON object of **commands** that C validates and applies — see
 Deferred for now: `inject_next` and `notify` (postAdvance commands), and the
 `db.query`/`kv`/`console.log` hook globals — hooks act on their `input` JSON only.
 
-A hook that throws during dispatch is skipped (logged); one broken hook must not
+A hook that throws during dispatch is skipped; one broken hook must not
 kill the turn.
 
 Caveat: `suppress` is not sequence-checked — hiding an individual `tool_result`
@@ -401,7 +397,7 @@ All handlers optional except `onInit`. A request shape is
 | `onInit()` | startup | `{poll?: Req}` — optional first long-poll shape |
 | `onPoll({status, body, error})` | long-poll completed | `{poll?: Req}` next shape; `{poll: null}` stops |
 | `onRequest(req)` | daemon proxies an inbound HTTP request over UDS | `{status?, body?}` (or a body string) |
-| `onOutbox({id, session_id, payload})` | agent message ready to deliver | nothing — send via `cclaw.send` |
+| `onOutbox({id, session_id, payload})` | agent message ready to deliver | nothing — send via `channel.send` |
 
 `onPoll` must return the next poll shape synchronously — an async `onPoll`'s
 pending promise carries no `.poll`, which would stop polling. Handlers may
@@ -448,22 +444,22 @@ loop; the await suspends the JS continuation, never the thread) or
 Incoming (webhook):
   platform POSTs https://daemon/hook/<channel>
     → daemon forwards envelope over <db>.<channel>.sock
-    → runner: onRequest(req) verifies, parses, cclaw.emit(...)
+    → runner: onRequest(req) verifies, parses, channel.emit(...)
     → reply {status, body} relayed to the platform
-    → daemon reads channel_events, routes to agent inbox, forks agent
+    → daemon reads channel_events, routes to the session inbox, wakes the session
 Incoming (long-poll):
-  C loop completes the poll shape → onPoll(result) → cclaw.emit(...) → next shape
+  C loop completes the poll shape → onPoll(result) → channel.emit(...) → next shape
 Outgoing:
   agent turn completes → daemon INSERT channel_outbox(pending) + FIFO wake
-    → runner marks 'sending', onOutbox(item) → cclaw.send(..., {outbox_id, final:1})
-    → C loop sends in order; final 2xx → 'delivered', any failure → 'failed'
+    → runner marks 'sending', onOutbox(item) → channel.send({..., outbox_id, final:1})
+    → C loop sends in order; final 2xx → 'delivered', any failure → 'failed:<reason>'
 ```
 
 ## Scripts
 
 A script is a JS handler run as a forked child on a schedule — the low-ceremony
 path. The canonical example: *"send me a weather report every morning."* The agent
-writes `report.js`, and either runs it ad hoc or declares `"schedule": "0 7 * * *"`
+writes `report.qjs`, and either runs it ad hoc or declares `"schedule": "0 7 * * *"`
 so promotion seeds a `cron` row. No tool, no channel, no promotion ladder required
 for a one-off. An extension exists only when the user wants a reusable, named,
 publishable capability (an `nws` extension with a `get_forecast` tool) rather than a
@@ -471,59 +467,17 @@ single scheduled script.
 
 ## Schema (cclaw.db)
 
-Deltas to the current schema; channel tables (`channel_events`, `channel_outbox`,
-`channel_state`, `channel_routes`) are unchanged — see [schema.md](schema.md).
-
-```sql
--- extension = the installable unit
-CREATE TABLE extensions (
-  name        TEXT PRIMARY KEY,
-  path        TEXT NOT NULL,            -- shared store dir: ~/.cclaw/extensions/<name>
-  version     TEXT DEFAULT '0.0.0',
-  owner_agent TEXT,                     -- who promoted it ('system' for extensions shipped in the binary)
-  published   INTEGER NOT NULL DEFAULT 0,  -- the single publish flag
-  enabled     INTEGER NOT NULL DEFAULT 1,
-  created_at  INTEGER NOT NULL DEFAULT (unixepoch())
-);
-
--- which agents have installed which extensions (+ per-agent config)
-CREATE TABLE agent_extensions (
-  agent_name     TEXT,
-  extension_name TEXT NOT NULL,
-  config         TEXT,
-  enabled        INTEGER NOT NULL DEFAULT 1,
-  PRIMARY KEY (agent_name, extension_name)
-);
-
--- tools: authoritative registry, provenance via extension_name
-CREATE TABLE tools (
-  name            TEXT PRIMARY KEY,
-  extension_name  TEXT,                 -- NULL for built-in C tools
-  description     TEXT,
-  parameters_json TEXT,
-  path            TEXT,                 -- handler file (in the shared store)
-  agent_name      TEXT,                 -- owner scope, NULL = global
-  policy          TEXT,
-  enabled         INTEGER NOT NULL DEFAULT 1,
-  egress_hosts    TEXT                  -- declared hosts; replaces agent grants
-);
-
--- hooks: same provenance model as tools (replaces the __cclaw_hooks scrape)
-CREATE TABLE hooks (
-  extension_name TEXT NOT NULL,
-  event          TEXT NOT NULL,         -- a dispatched hook event
-  path           TEXT NOT NULL,         -- handler file (in the shared store)
-  enabled        INTEGER NOT NULL DEFAULT 1,
-  PRIMARY KEY (extension_name, event, path)
-);
-```
-
-The `tools` table becomes the source of truth (it was previously written by
-`tools_sync_to_db` with no extension_name/path — a display mirror for C tools).
-Loading reads it; promote writes it.
+The extension tables are `extensions`, `agent_extensions`, `tools` and `hooks`;
+the column reference is [schema.md](schema.md#extensions) and the source of
+truth is `templates/schema.sql`. The channel tables (`channels`,
+`channel_events`, `channel_outbox`, `channel_state`, `channel_routes`) are in
+the same files. The `tools` table is the authoritative tool registry:
+`extension_name` and `path` carry provenance, promote writes it, and loading
+reads it.
 
 There is **one extension model**, not two. Extensions shipped in the binary
-(currently: the telegram channel) are installed at every daemon start via
+(the `telegram`, `discord` and `whatsapp` channels and the `cclaw-docs` skills
+bundle) are installed at every daemon start via
 `extension_install_builtin()`, which stages the embedded templates and runs
 them through the same `extension_install()` path as an agent's promote, under
 the reserved owner name `'system'` (agent names are PascalCase-enforced, so
@@ -628,7 +582,7 @@ promote/publish/attach operations. Hook dispatch loads from the manifest via
 `extension_load_hooks` (`src/extension.c`) — there is no `registerTool`/
 `registerHook` runtime scrape. The **channel component contract is also
 implemented** (`cclaw --channel`, the `channels`/`channel_*` tables, the
-`cclaw.*` channel API). The `skills[]` and `config[]` manifest sections are
+`channel.*` channel API). The `skills[]` and `config[]` manifest sections are
 implemented (validation + ingest in `src/extension_manifest.c`; extension
 skill discovery in `src/skills.c`).
 

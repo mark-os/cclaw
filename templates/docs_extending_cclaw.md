@@ -19,10 +19,14 @@ stores only definitions and paths.
    ("adds 2 tools, 1 skill…"). On approval it is installed into the shared
    store and its components registered. Your drafts never auto-promote.
 3. **Publish** (`extension_publish`) — makes an installed extension attachable
-   by other agents. No approval needed — you must own the extension, and
-   attaching never grants authority by itself.
-4. **Attach** — rows in `agent_extensions` link agents to extensions; attached
-   extensions load at agent startup (tools registered, skills indexed).
+   by other agents. You must own the extension. It is not a baseline grant:
+   the default agent has it, other agents request it with `request_config`,
+   and a grant of it can carry an approval gate (the `agent_approval_tools`
+   config key).
+4. **Attach** (`extension_attach`) — links an agent to a published extension
+   (or one it owns) through a row in `agent_extensions`. Attached extensions
+   load at agent startup (tools registered, skills indexed). Attaching never
+   grants authority: the extension's tools still need the agent's own grants.
 
 ## Manifest (`extension.json`)
 
@@ -50,7 +54,7 @@ must be one of `preAdvance`, `postAdvance`, `beforeToolCall`, `afterToolCall` �
 the manifest validator rejects anything else (there is no `session_start` or
 `turnStart` event). `config[]`
 keys register as `<name>.<key>` in the config registry. `agents[]` entries use
-the agent-definition schema (see the cclaw-agents skill); an entry whose name
+the agent-definition schema (see the creating-agents skill); an entry whose name
 already exists is skipped, never overwritten.
 
 ## Handler contract (QuickJS)
@@ -60,8 +64,8 @@ engine. The handler file is evaluated as a **function body** with the call's
 parsed arguments in scope as `args` — roughly `(function(args){ <file> })(args)`
 — so `return` your result string from the top level (a bare trailing expression
 evaluates to `undefined`). If nothing is returned, buffered `console.log`
-output becomes the result. No Node APIs, no `require`/`import`, no event loop;
-use the provided host bridges:
+output becomes the result. No Node APIs, no `require`/`import`, no event loop,
+no `Atomics`; use the provided host bridges:
 
 - `http_request(url[, {method, body, headers:{Name:Value}, markdownify, timeout}])` —
   synchronous HTTP, returns `{status, body}`; on transport failure it returns
@@ -73,8 +77,12 @@ use the provided host bridges:
   tool child, so the cap is what stops a slow endpoint becoming a hang. Raise
   it only for calls that are legitimately slow (an LLM-backed search that
   grounds a query can take a minute from a small box), not as a blanket retry.
-- `fs.readFile` / `fs.writeFile` / `fs.readdir` / `fs.stat` / `fs.cwd` —
-  workspace-scoped file access.
+- `fs.readFile` / `fs.writeFile` / `fs.readdir` / `fs.stat` / `fs.lstat` /
+  `fs.cwd` — workspace-scoped file access.
+- `LLM(prompt[, {system, model, max_tokens, temperature, timeout}])` — a
+  completion from your own model routing list, returned as a string. Only
+  what your handler returns enters your context, so you can map it over data
+  or chain calls without spending context on the intermediate results.
 - `XML.parse(str)` (alias `xml.parse`) — parse XML/RSS/Atom/sitemaps into a
   plain object, the JSON.parse of XML. Reach for it instead of regex.
 
@@ -123,7 +131,7 @@ use the provided host bridges:
   arrives interpolated.
 
 Keep handlers small and side-effect free where possible — network egress
-still goes through the credential proxy and host allow-list.
+still goes through the egress proxy and your host grants.
 
 ## Skills
 

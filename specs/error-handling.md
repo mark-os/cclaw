@@ -4,16 +4,15 @@ LLM API calls fail in many ways. This doc classifies failure modes, defines reco
 
 ## Principles
 
-- Agent turn always ends w/ DB write (entry or error entry)
-- `get_response_text(db, session_id)` resolves deliverable text from branch — sole source of truth for all channels
-- Retry ! ⊥ mutate session state — re-stream same request from DB
-- Errors that exhaust retries → write `stop_reason=error` entry → agent exits 0 (turn complete, error is the response)
-- Channel delivery reads final state from DB post-exit — never from in-flight memory
+- Every LLM request ends with a DB write: an assistant entry or an error entry.
+- A retry does not change session state. It resends the same request, rebuilt from the DB.
+- When the selection loop has no candidate left, `llm_req()` writes an entry with `stop_reason=error`. The turn is then complete, and the error text is its response.
+- Delivery reads the final state from the DB, never from in-flight memory. `get_response_text(db, session_id)` resolves the final-message text from the branch (see Response Resolution).
 
 ## Error Classification Table
 
 The whole policy lives in one selection loop in `llm_req()` (`src/llm_proc.c`),
-and **degradation IS the retry policy** (plan/projects/model-routing.md R3):
+and **degradation IS the retry policy**:
 each pass picks the first candidate in the agent's routing list
 (`agent_models`, pos order) that isn't skipped for this request, isn't inside
 an error cooldown, and hasn't hit `health_fail_threshold` attempts locally. A
@@ -55,7 +54,7 @@ Three outcome classes exist:
 | E13 | other 4xx | remaining non-2xx | skip candidate (400: also degrade) | no | "provider rejected the request" |
 | E14 | DB error during ingest | SQLITE_BUSY on our side | **turn aborts** | no | "DB contention during response ingest (SQLITE_BUSY) — check logs" |
 
-**Operator messaging** (model-routing.md R6): there is no per-degrade notice.
+**Operator messaging**: there is no per-degrade notice.
 After each success, the model that served is compared to the agent's previous
 success (from `llm_responses`); on any change one notice names the new server
 and the cause (knob: `notify_model_change`, default on). All-models-down error
@@ -86,12 +85,12 @@ one all-degraded desperation attempt), the turn fails with the message above.
 ## Response Resolution
 
 `get_response_text(db, session_id)`:
-1. Walk branch backward from leaf
-2. Return first assistant entry w/ non-empty content
-3. Stop at user boundary (⊥ leak previous turn)
-4. Return NULL if nothing found → channel delivers nothing (silent failure)
+1. Walk the branch backward from the leaf.
+2. Return the first assistant entry with non-empty content (not `tool_call` or `reasoning`).
+3. Stop at the first user entry, so text from a previous turn never leaks.
+4. Return NULL if nothing is found. The channel then delivers nothing.
 
-Note: OpenClaw concatenates ALL non-empty assistant texts from turn as fallback; we return last non-empty only. Revisit if needed.
+The `digest` delivery policy concatenates assistant prose instead; see [delivery.md](delivery.md).
 
 ## Entry Write Rules
 
@@ -132,38 +131,34 @@ cap. No dmesg parsing, no probe run.
 
 ## Async Considerations
 
-Agent turn lifecycle:
-1. Worker thread: llm_req() → write entry to DB → notify main
-2. Main thread: advance_session() → dispatch tools or deliver response
+Iteration lifecycle:
+1. Worker thread: `llm_req()` writes the response entry to the DB and notifies the main thread through the worker pipe.
+2. Main thread: `advance_session()` dispatches tools or delivers the response.
 
-The agent always writes a final entry before completion. The delivery layer reads from DB. There is no in-flight state to lose — everything is persisted before advancing.
+Everything is persisted before the session advances, so there is no in-flight state to lose.
 
-Exception: transient-failure attempts (E1–E4, E6, E7, E10) happen WITHIN llm_req (no re-dispatch). The selection loop simply moves through the agent's list internally. From the main loop's perspective, the turn just takes longer.
+Transient-failure attempts (E1–E4, E6, E7, E10) happen inside `llm_req()`, with no re-dispatch. The selection loop moves through the agent's list internally. For the main loop, the iteration only takes longer.
 
 ## Log Levels & Observability
 
-Implemented via `LOG_*` macros in `include/log.h`. All output → stderr → pipe → parent.
+Implemented by the `LOG_*` macros in `src/log.h` (`src/log.c`). Every message
+goes to syslog (`openlog("cclaw", LOG_PID, LOG_USER)`), with a logfmt suffix
+from the thread-local context (`session=`, `turn=`, `agent=`). There is no
+libsystemd dependency; journald receives the messages through syslog.
 
-| level | env value | what's logged | destination |
-|-------|-----------|---------------|-------------|
-| error | `error` | errors only | stderr → syslog/terminal |
-| info (default) | `info` | + turn start/end, warnings | stderr → syslog/terminal |
-| debug | `debug` | + tool dispatch, LLM timing, context plan stats, retry decisions, response shapes | stderr → syslog/terminal |
-| trace | `trace` | + full req/resp JSON | stderr → syslog/terminal |
+| level | value | what is logged |
+|-------|-------|----------------|
+| error | `error` | errors only |
+| warn | `warn` | + warnings |
+| info (default) | `info` | + turn start/end |
+| debug | `debug` | + tool dispatch, LLM timing, context plan stats, retry decisions, response shapes |
+| trace | `trace` | + full request/response JSON (tagged `trace=1`) |
 
-`CCLAW_LOG_LEVEL` env var, injected at fork (no DB key).
-CLI `--log-level=trace` enables full req/resp JSON. CLI `-v`/`--debug` tees stderr pipe to terminal.
+The level comes from `CCLAW_LOG_LEVEL`, or from the CLI flags `-v`/`--debug`
+(debug), `-vv`/`--trace` (trace) and `--log-level=LEVEL`. A flag overrides the
+env var and is exported to child processes through `CCLAW_LOG_LEVEL`.
 
-Format: `HH:MM:SS.mmm [LEVEL] message\n` — parseable by syslog and grep.
-
-## CLI/Daemon Logging Parity
-
-**Daemon mode:**
-- `pipe(stderr)` → parent drains → syslog (`LOG_DAEMON` facility; `sd_journal_send` if journald available)
-- `pipe(stdout)` → /dev/null (response delivered from DB post-exit)
-
-**CLI mode:**
-- `pipe(stderr)` → parent drains → tee to terminal (if log_level ≥ debug, e.g. `-v`/`--debug`)
-- stdout: inherited by child (goes directly to terminal for streaming display)
-
-**Design principle:** stderr = structured logs (daemon persists via syslog). stdout = user content (display only).
+**Destinations.** The interactive CLI (not `--daemon`, not `--channel`) also
+writes each message to stderr as `cclaw[<pid>]: <message>`. The daemon and
+channel runners write to syslog only. A sandboxed `--run-tool` child writes to
+syslog only. Stdout carries user content only.

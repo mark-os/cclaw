@@ -21,6 +21,9 @@ Don't create agents for one-off work; use your own session or `launch_agent`
 with no name (self-spawn worker). Check the roster in `search_config` first —
 don't duplicate an existing agent.
 
+`create_agent` is not a baseline grant: the default agent (`Assistant`) has
+it, and other agents request it with `request_config` like any other tool.
+
 ## Before you build
 
 "Make me a weather agent" names an outcome, not a shape. An agent is durable —
@@ -67,9 +70,10 @@ Only `name` is required (PascalCase). Everything else defaults sensibly.
 `clone_from` copies an existing agent's row, grants, and extensions first,
 then overlays the fields you set — "like Assistant but with X" is one field.
 
-Models are canonical ids exactly as `search_config` lists them (typically
-`model@provider`) — a bare model name is refused, since the same name can
-exist on more than one provider.
+Models are canonical ids exactly as `search_config` lists them — a bare model
+name is refused, since the same name can exist on more than one provider.
+Seeded models look like `openrouter/deepseek/deepseek-v4-flash`; models
+registered through `request_config` look like `model@provider`.
 
 ## Creation caps — and the two-step when you hit them
 
@@ -85,7 +89,7 @@ These are hard refusals, not clamps. **Creating an agent is delegation**
 deliberately lives elsewhere. If the child needs a grant you lack, do the
 two-step:
 
-1. `request_config` action `request_changes` — request the grant for
+1. `request_config` with a changes document — request the grant for
    *yourself* (one document, one approval).
 2. After it's granted, retry `create_agent` bequeathing it.
 
@@ -105,7 +109,7 @@ creation, applied against you:
 
 - Fields overlay: `description`, `system_prompt` (full replacement text),
   `models` (an ordered array of registered model ids within your own routing
-  list — the new agent's full routing order; omit to inherit your list),
+  list — the agent's full new routing order),
   `sandbox_profile` (never looser than yours), `max_iterations`,
   `shell_timeout`. Absent fields keep their value; unknown keys are errors.
 - `grants` **adds** (each must be one you hold) — it never removes. Removing
@@ -126,8 +130,9 @@ sees old behavior only through you.
 - `check_session {session_id}` — a delegated session's state, and its final
   text once idle. A live progress peek, not a way to wait.
 - Channel access: the new agent sends only where a `channel_routes` row
-  resolves to it. Routes are requested via `request_changes`
-  (`routes: ["telegram:12345"]`) by the agent itself, or set by the operator.
+  resolves to it. Routes are requested by the agent itself with a
+  `request_config` changes document (`routes: ["telegram:12345"]`), or set
+  by the operator.
 - Every agent gets a disabled `heartbeat` cron job (a bare wake every 30
   minutes, no payload) it can later enable.
 

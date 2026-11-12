@@ -69,8 +69,9 @@ state would be a lie.
    `<workspace>/.tool_results/<session>/<call_id>.log` — bounded by disk,
    readable live from inside the sandbox (`tail`/`file_read`; the same
    `.tool_results` home as spill files). The log carries stdout-level trust
-   only: it is rw inside the job's own sandbox. `ps` structurally cannot
-   see jobs — each runs in its own PID namespace.
+   only: it is rw inside the job's own sandbox. Under a sandboxed
+   profile `ps` structurally cannot see jobs — each runs in its own PID
+   namespace.
 3. **Ambient status**: a `<background_jobs>` section in the frozen turn
    context (id, command snippet, age, log path, howto). Frozen with the
    block — mid-turn freshness is pull-based (log, `check_session`).
@@ -117,8 +118,9 @@ there is no second, weaker writer of results.
 
 ## Caps (the real rails)
 
-`agent_max_depth` 2 · `AGENT_MAX_PER_PARENT` 8 · `AGENT_MAX_TOTAL` 16 ·
-`CHILD_MAX` 48 · `job_timeout_max` 3600s · `max_iterations` per turn ·
+`agent_max_depth` 2 · `session_max_active` 20 (in-flight sub-agent sessions,
+launch gate) · `session_max_concurrent` 10 (sessions doing work at once; over
+it, autonomous turns defer) · `CHILD_MAX` 48 · `job_timeout_max` 3600s · `max_iterations` per turn ·
 `max_autonomous_turn_streak` cross-turn. The worker tool filter narrows
 visibility, never authority (grants ∩ filter, both enforced at dispatch);
 the default worker list is rendered into launch_agent's description so a

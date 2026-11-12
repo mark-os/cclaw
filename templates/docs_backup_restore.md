@@ -57,7 +57,9 @@ more. If you copy off-box, prefer the *encrypted* DB as-is — see the key file.
 Restore is a deliberate manual procedure, not a verb — swapping the live DB
 under a running daemon would corrupt it. Steps:
 
-1. **Stop the daemon** (`systemctl --user stop cclaw`, or signal the process).
+1. **Stop the daemon** (`systemctl --user stop cclaw` for a user install;
+   `systemctl stop cclaw` or `/etc/init.d/cclaw stop` for `cclaw install
+   --system`).
 2. **Move the snapshot over the DB**: `mv <snapshot> <db>`.
 3. **Delete the WAL siblings**: `rm -f <db>-wal <db>-shm`. This is not optional —
    a stale `-wal` from the old DB would be replayed onto the restored file and
@@ -69,6 +71,10 @@ its sessions are reclaimed automatically on start. State restored from an older
 snapshot may reference workspace files that have since changed — that is
 expected; the snapshot restores conversation and config state, not the
 filesystem around it.
+
+To undo a `cclaw update`, use `cclaw rollback` instead of this procedure: it
+restores the snapshot `cclaw update` took (`<db>.preupdate`) together with the
+previous binary, and does the swap itself only when nothing has the DB open.
 
 ## The key file (back this up separately, once)
 

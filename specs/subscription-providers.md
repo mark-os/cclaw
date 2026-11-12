@@ -116,8 +116,7 @@ on top of plan limits in April 2026 and hasn't reversed it.
 
 ## Cost of the sanctioned route in cclaw (`claude -p` subprocess)
 
-Recorded here for when this is revisited — see the fuller writeup in this
-conversation's history:
+Recorded here for when this is revisited:
 
 - New `endpoint_type`: worker thread writes a `stream-json` line to a child's
   stdin, reads streamed JSON lines back, instead of building/parsing an HTTP

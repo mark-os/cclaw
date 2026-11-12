@@ -19,7 +19,7 @@ Where a block renders is its `placement`:
 - `system`: baked into the system prompt once per session (`agent_config.c`). Reserve for stable identity content — the system prompt stays byte-identical across turns, so provider prompt caching keeps working, but every edit invalidates the whole cached prefix on the next session render. The base Assistant's seeded `AGENT` and `USER` blocks use this placement.
 
 - **Unit**: labeled block with character limit
-- **Default blocks**: created by agent via `memory_create` tool (or pre-seeded by daemon at agent creation)
+- **Default blocks**: created by the agent with the `memory_create` tool, or seeded at agent creation from the agent definition's `memory_blocks[]` (a `value` there becomes entry 1)
 - **Agent-editable**: via `memory_add`, `memory_edit`, `memory_delete` tools
 - **Read-only option**: `read_only=1` → visible but agent tools reject edits
 - **Scoped per-agent**: `agent_name` column isolates blocks; persists across all sessions for that agent. `NULL` = global block, visible to every agent.
@@ -29,21 +29,14 @@ Key insight from Letta: memory management is a **tool-use problem**. The agent d
 
 ## Schema (in cclaw.db)
 
-```sql
-CREATE TABLE memory_blocks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_name TEXT,                    -- NULL = global (shared across agents)
-    label TEXT NOT NULL,
-    value TEXT NOT NULL DEFAULT '',
-    description TEXT,
-    char_limit INTEGER NOT NULL DEFAULT 5000,
-    read_only INTEGER NOT NULL DEFAULT 0,
-    placement TEXT NOT NULL DEFAULT 'system',  -- 'system' | 'context'
-    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    UNIQUE(agent_name, label)
-);
-```
+Two tables; the column reference is [schema.md](schema.md#memory_blocks).
+
+- `memory_blocks` — the container: `agent_name` (NULL = global), `label`,
+  `description`, `char_limit`, `read_only`, `placement`. A block has no text
+  column.
+- `memory_entries` — the content: numbered lines (`pos`, `text`) keyed by
+  `(agent_name, block_label)`. `memory_add`/`memory_edit`/`memory_delete`
+  write here, and the render paths read only these rows.
 
 ## Recall (entries + FTS5)
 

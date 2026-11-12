@@ -166,7 +166,13 @@ jobs:
 
       - name: Build and smoke-test in i386 container
         run: |
-          docker run --rm --platform linux/386 -v "$PWD":/src -w /src \
+          # seccomp=unconfined: since the ubuntu-26.04 runner image (Docker
+          # 29, kernel 7.0) the default seccomp profile blocks the syscall
+          # 32-bit glibc uses for DNS, so apt cannot resolve deb.debian.org.
+          # Throwaway container building our own code — no isolation lost
+          # that matters here.
+          docker run --rm --platform linux/386 --security-opt seccomp=unconfined \
+            -v "$PWD":/src -w /src \
             i386/debian:bookworm bash -c '
               set -e
               apt-get update

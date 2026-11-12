@@ -8,6 +8,7 @@
 
 #include <stddef.h>
 #include <sys/types.h>
+#include <pthread.h>
 
 /* Read a whole file into a malloc'd, NUL-terminated buffer. out_len (if
  * non-NULL) receives the byte count, excluding the NUL. Returns NULL on
@@ -75,5 +76,15 @@ int split_and_trim(char *s, char **out, int max);
  * subprocess. Declaring this in channel_runner.h dragged channel.o and
  * dashboard.o into that test and broke the link on main.c's resolve_approval. */
 int curl_ws_available(void);
+
+/* The one place threads are created. The stack size is named rather than left
+ * to the libc: glibc's default follows RLIMIT_STACK (8M), musl's is ~128K, so
+ * code that fits on one overflows on the other with no warning. Pages are
+ * committed only when touched, so the reservation is free. detached != 0
+ * creates the thread detached. Returns pthread_create's result. */
+#ifndef CCLAW_THREAD_STACK
+#define CCLAW_THREAD_STACK (1024 * 1024)
+#endif
+int thread_spawn(pthread_t *t, int detached, void *(*fn)(void *), void *arg);
 
 #endif

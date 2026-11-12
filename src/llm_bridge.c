@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
+#include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -166,7 +167,7 @@ LlmBridge *llm_bridge_start(const char *agent_dir, const char *db_path,
         return NULL;
     }
     b->running = 1;
-    if (pthread_create(&b->thread, NULL, bridge_thread, b) != 0) {
+    if (thread_spawn(&b->thread, 0, bridge_thread, b) != 0) {
         close(b->listen_fd);
         unlink(b->sock_path);
         free(b->db_path);

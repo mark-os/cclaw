@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include "util.h"
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
@@ -69,15 +70,11 @@ static int pool_push(const WorkItem *item) {
     if (g_pool.idle == 0 && g_pool.active < g_pool.max) {
         g_pool.active++;
         pthread_t t;
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        if (pthread_create(&t, &attr, worker_fn, NULL) != 0) {
+        if (thread_spawn(&t, 1, worker_fn, NULL) != 0) {
             g_pool.active--;   /* rollback: no thread reached the exit point */
             LOG_INFO_("llm_worker thread_spawn_fail active=%d max=%d",
                  g_pool.active, g_pool.max);
         }
-        pthread_attr_destroy(&attr);
     }
     pthread_cond_signal(&g_pool.cond);
     pthread_mutex_unlock(&g_pool.mtx);
@@ -236,11 +233,7 @@ int llm_worker_start(const char *db_path, int max_threads) {
     /* Pre-start one thread — fail closed if it can't be created */
     g_pool.active = 1;
     pthread_t t;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    int cr = pthread_create(&t, &attr, worker_fn, NULL);
-    pthread_attr_destroy(&attr);
+    int cr = thread_spawn(&t, 1, worker_fn, NULL);
     if (cr != 0) {
         g_pool.active = 0;
         pthread_mutex_destroy(&g_pool.mtx);

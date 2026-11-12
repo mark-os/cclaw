@@ -10,6 +10,7 @@
 #include "unicode_normalize.h"
 #include <fcntl.h>
 #include <pthread.h>
+#include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -149,11 +150,7 @@ int tool_thread_spawn(const ToolThreadJob *job) {
     pthread_mutex_unlock(&g_mtx);
 
     pthread_t t;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    int cr = pthread_create(&t, &attr, tool_thread_fn, copy);
-    pthread_attr_destroy(&attr);
+    int cr = thread_spawn(&t, 1, tool_thread_fn, copy);
     if (cr != 0) {
         pthread_mutex_lock(&g_mtx);
         g_in_flight--;

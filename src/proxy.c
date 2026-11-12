@@ -11,6 +11,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
+#include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -740,10 +741,7 @@ static void *proxy_loop(void *arg) {
         ca->fd = client;
 
         pthread_t t;
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        if (pthread_create(&t, &attr, conn_thread, ca) != 0) {
+        if (thread_spawn(&t, 1, conn_thread, ca) != 0) {
             pthread_mutex_lock(&ctx->blessed_mu);
             ctx->conn_active--;
             if (ctx->conn_active == 0)
@@ -752,7 +750,6 @@ static void *proxy_loop(void *arg) {
             close(client);
             free(ca);
         }
-        pthread_attr_destroy(&attr);
     }
 
     return NULL;
@@ -851,7 +848,7 @@ fail:
 int proxy_serve(ProxyContext *ctx) {
     if (ctx->listen_fd < 0) return -1;
     ctx->running = 1;
-    if (pthread_create(&ctx->thread, NULL, proxy_loop, ctx) != 0) {
+    if (thread_spawn(&ctx->thread, 0, proxy_loop, ctx) != 0) {
         ctx->running = 0;
         return -1;
     }

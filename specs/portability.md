@@ -1,8 +1,8 @@
 # Portability — layers, and what each needs from the host
 
-Status: **direction, partly built.** The goal and the layer model are settled.
-The "as built" column says what the code does today; the gaps are listed at
-the end as ordered work. Nothing here changes behaviour by itself.
+Status: **direction.** The goal and the layer model are how the code should
+be organised; "As built" says what it does today. Nothing here changes
+behaviour by itself.
 
 ## Goal
 
@@ -34,9 +34,9 @@ Two ways to get a binary, both supported on purpose:
 | 4 | **Shell** | Arbitrary programs (`shell_exec`) | Layer 3, or the operator's explicit `host` opt-out |
 | 5 | **Daemon** | Channels, cron, webhooks, multi-agent | `fork`/`exec` of the cclaw binary itself, signals |
 
-Layer 2 is the bare-minimum *useful* offering: an agent that can read and
-write its workspace, fetch allowed hosts, run and author JavaScript tools, and
-reconfigure itself — with no shell.
+Layers 1 and 2 are the bare-minimum useful offering: an agent that can read
+and write files, fetch from the network, run and author JavaScript tools, and
+reconfigure itself — whether or not it has a shell.
 
 Layers 2 and 4 differ in how policy can be enforced. **Mediation** is
 enforcement inside cclaw, possible wherever cclaw's code is the actor.
@@ -80,33 +80,51 @@ What is already in good shape:
   implementation, with resolve-then-dial-literal against DNS rebinding
   ([egress-filter.md](egress-filter.md)). Mediation must reuse it, not copy it.
 
+## Boundaries, by what the host offers
+
+- **Host with a containment backend** (Linux with unprivileged user
+  namespaces): everything in [security.md](security.md) and
+  [sandbox-profiles.md](sandbox-profiles.md) holds. Every tool call, JS
+  included, runs in a forked, namespaced child.
+- **Host without one** (old kernels, vendor kernels built without user
+  namespaces, Android): the `host` profile is the answer, and it means what it
+  says. The agent acts as the user running cclaw: any file that user can read,
+  including cclaw's own database and key; any host on the network; the shell.
+  Agents are not isolated from each other, so a sub-agent has the same reach
+  as its parent. The device is the boundary, and the network boundary is the
+  operator's firewall.
+
+That second case is a supported way to run cclaw, not a degraded one: a
+lightweight agent loop on a device given over to it. What it must never be is
+a surprise — a sandboxed profile still fails closed rather than sliding into
+it.
+
 ## Work, in order
 
-1. **Path policy in code.** One function answers "may this call read / write
-   this path": canonicalise (symlinks, `..`), then workspace, CWD mount,
-   read/write grants, and an unconditional refusal of the DB and key files.
-   File tools and JS `fs.*` call it before every open.
-2. **Egress without a network namespace.** The web and JS tiers keep using the
-   broker's proxy; what changes is how their libcurl reaches it when there is
-   no namespace to run `net_shim` in. The decision function is not duplicated.
-3. **A mediated mode.** Layers 1–2 run without a namespace, enforced by (1)
-   and (2); the shell is refused. This replaces "everything exits 126" as the
-   answer for a host with no containment backend. See open decisions.
-4. **Containment as a backend.** `sandbox.c` behind a small interface
-   (`linux-ns`, `none`), so a platform with its own sandbox supplies its own.
-5. **`--doctor` reports layers.** For each layer: in force or not, enforced by
+1. **Make "no containment here" a first-class answer.** Today a fresh install
+   on such a host gets the `standard` profile and every tool call exits 126.
+   First run and `--doctor` should say what the device cannot do, what `host`
+   means, and how to choose it.
+2. **Containment as a backend.** `sandbox.c` behind a small interface
+   (`linux-ns`, `none`), so the tool tiers and the broker stop knowing about
+   namespaces and a platform with its own sandbox can supply its own.
+3. **`--doctor` reports layers.** For each layer: in force or not, enforced by
    what, and what the host is missing.
+
+## Placeholders — layer 2 enforced without a namespace
+
+Not planned work. Recorded so the code leaves room for it.
+
+- **Egress for `web_fetch` and JS.** The proxy is ordinary socket code and
+  needs no namespace; only *forcing* traffic through it does. cclaw's own
+  libcurl can simply be pointed at it, which would give these two tiers a real
+  host allowlist on any host. The shell cannot be forced this way: proxy
+  environment variables are advice a program is free to ignore.
+- **Path policy in code.** One function deciding "may this call read / write
+  this path" for file tools and JS `fs.*`, in place of relying on what is
+  mounted.
 
 ## Open decisions
 
-- **How mediated mode is chosen.** Recommended: an explicit `sandbox_profile`
-  value, so a transient `unshare` failure can never silently weaken a
-  sandboxed agent, with `--doctor` telling the operator to set it when the
-  probe fails. The alternative is choosing it automatically at startup.
-- **Whether the path policy also applies inside the namespace.** Applying it
-  everywhere means one code path that is always exercised, but file tools
-  could then no longer read the read-only system directories the sandbox
-  mounts (`/usr`, `/etc`). Applying it only in mediated mode keeps today's
-  behaviour and leaves the new check exercised only by tests and old devices.
 - **The preload shim on musl hosts** ([static-build.md](static-build.md)) —
-  a layer 4 question, unaffected by the above.
+  a layer 4 question.

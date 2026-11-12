@@ -384,7 +384,7 @@ static void check_layers(sqlite3 *db, const Config *cfg) {
     if (contained) {
         print_ok("containment", contain_backend());
     } else {
-        snprintf(d, sizeof(d), "%s unavailable — %s", contain_backend(), why);
+        snprintf(d, sizeof(d), "%s — %s", contain_backend(), why);
         print_fail("containment", d);
     }
     layer_tools(db, contained);

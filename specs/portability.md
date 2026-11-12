@@ -72,8 +72,12 @@ and nothing between them:
 
 What is already in good shape:
 
-- **The Linux-only seam is narrow.** Namespace, mount and `prctl` calls live
-  in `sandbox.c`, `run_tool.c`, `channel.c` and the `--doctor` probe.
+- **The containment mechanism is one file.** `src/contain.h` is the backend
+  interface (name, probe, enter, egress); `contain_linux.c` implements it with
+  namespaces and `contain_none.c` with nothing. `sandbox.c` holds only policy
+  and child setup. `make CONTAIN=none` builds without the Linux backend. What
+  remains Linux-specific outside it is `prctl(PR_SET_PDEATHSIG)` in
+  `run_tool.c` and `channel.c`, and reading `/proc/self/exe`.
 - **Old kernels.** Outside `sandbox.c` the only post-3.x syscalls are
   `getrandom` and `close_range`, and both fall back.
 - **One egress decision.** `host_decide()` in `proxy.c` is the single
@@ -101,15 +105,14 @@ it.
 
 ## Work, in order
 
-1. **Make "no containment here" a first-class answer.** Today a fresh install
-   on such a host gets the `standard` profile and every tool call exits 126.
-   First run and `--doctor` should say what the device cannot do, what `host`
-   means, and how to choose it.
-2. **Containment as a backend.** `sandbox.c` behind a small interface
-   (`linux-ns`, `none`), so the tool tiers and the broker stop knowing about
-   namespaces and a platform with its own sandbox can supply its own.
-3. **`--doctor` reports layers.** For each layer: in force or not, enforced by
-   what, and what the host is missing.
+Done: one probe for "can this host contain a child" (`contain_probe`),
+`--doctor` `[layers]`, and containment as a backend (`CONTAIN=linux|none`).
+
+1. **Make "no containment here" a first-class answer at first run.** A fresh
+   install on such a host still gets the `standard` profile and every tool
+   call exits 126; `--doctor` now explains it, first run does not.
+2. **Platform backends.** A build for a platform with its own sandbox
+   (Android) starts from `contain_none.c`.
 
 ## Placeholders — layer 2 enforced without a namespace
 

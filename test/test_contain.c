@@ -29,7 +29,10 @@ int main(void) {
 
     char why[160] = "stale";
     int ok = contain_probe(why, sizeof(why));
-    ASSERT(ok == really_contains(), "probe agrees with a real unshare");
+    if (strcmp(contain_backend(), "linux-ns") == 0)
+        ASSERT(ok == really_contains(), "probe agrees with a real unshare");
+    else
+        ASSERT(ok == 0, "a build without a backend never claims to contain");
     if (ok) ASSERT(why[0] == '\0', "no reason given on success");
     else    ASSERT(why[0] != '\0', "a reason is given on failure");
     printf("  backend=%s contained=%d%s%s\n", contain_backend(), ok,

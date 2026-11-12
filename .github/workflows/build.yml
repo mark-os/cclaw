@@ -69,6 +69,32 @@ jobs:
           curl-config --version
           make all
 
+  no-containment:
+    name: no-containment (CONTAIN=none, build + doctor)
+    # The build for hosts and platforms where cclaw cannot contain a child
+    # itself (specs/portability.md). Keeps namespace code from creeping back
+    # into shared files, and checks --doctor says what such a build can do.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev xxd
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: make -j"$(nproc)" CONTAIN=none all
+
+      - name: No namespace code is linked
+        run: |
+          ! nm build/cclaw | grep -E ' [Tt] (sandbox_setup_static_egress|sandbox_mask_state_files|bind_path_into)$'
+
+      - name: Doctor reports the missing layer
+        run: |
+          export CCLAW_DB_PATH="$RUNNER_TEMP/cclaw.db" OPENROUTER_API_KEY=sk-or-v1-invalid-ci-smoke-key
+          ./build/cclaw --doctor | tee "$RUNNER_TEMP/doctor.txt"
+          grep -q 'FAIL containment: none' "$RUNNER_TEMP/doctor.txt"
+
   release-build:
     name: release (${{ matrix.target }}, static musl)
     runs-on: ubuntu-latest
@@ -250,7 +276,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [test, compat, release-build, whatsapp-bridge]
+    needs: [test, compat, no-containment, release-build, whatsapp-bridge]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

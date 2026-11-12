@@ -1,9 +1,11 @@
 #ifndef CCLAW_SANDBOX_H
 #define CCLAW_SANDBOX_H
 
-/* The namespace sandbox: builds the child's isolation (namespaces, rlimits,
- * env scrub, mounts) and resolves a sandbox_profile string into the policy
- * fields. Shared by every --run-tool tier. Fail-closed by design.
+/* Sandbox policy and child setup: resolves a sandbox_profile string into the
+ * policy fields, plans the mounts, and prepares the tool child (environment,
+ * rlimits, working directory). The boundary itself is the containment
+ * backend's job (contain.h) — nothing here knows how it is built. Shared by
+ * every --run-tool tier. Fail-closed by design.
  */
 
 #include <limits.h>

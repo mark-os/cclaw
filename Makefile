@@ -1,5 +1,8 @@
 CC      ?= cc
 PRELOAD_CC ?= $(CC)
+# Containment backend (specs/portability.md, layer 3): linux = namespaces,
+# none = no boundary of our own (contained profiles refuse; host still runs).
+CONTAIN  ?= linux
 # -Wformat-security is not in -Wall/-Wextra. Debian and Ubuntu turn it on
 # through their hardening defaults, so CI enforces it whether we ask or not;
 # Amazon Linux does not, which let a genuine format-string bug sit on master
@@ -29,7 +32,7 @@ BUILDDIR := build
 # binary) does not — so if the mode changed since the last build, wipe build/
 # before anything compiles. Runs at parse time (not as a recipe prerequisite)
 # so it can't lose an ordering race with rules that also touch build/.
-BUILD_TAG := $(CC)|$(EXTRA_CFLAGS)|$(PRELOAD_CC)
+BUILD_TAG := $(CC)|$(EXTRA_CFLAGS)|$(PRELOAD_CC)|$(CONTAIN)
 BUILD_TAGFILE := $(BUILDDIR)/.buildtag
 ifneq ($(wildcard $(BUILD_TAGFILE)),)
 ifneq ($(shell cat $(BUILD_TAGFILE)),$(BUILD_TAG))
@@ -40,7 +43,7 @@ endif
 $(shell mkdir -p $(BUILDDIR) && echo "$(BUILD_TAG)" > $(BUILD_TAGFILE))
 
 TEMPLATES := $(wildcard templates/*)
-SRC      := $(filter-out src/preload_net.c src/net_shim.c,$(wildcard src/*.c))
+SRC      := $(filter-out src/preload_net.c src/net_shim.c $(filter-out src/contain_$(CONTAIN).c,$(wildcard src/contain_*.c)),$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 # Recursive (=): TEST_BIN/INTEG_BIN/E2E_BIN are defined below; expansion
 # happens at the -include site after all of them exist. Test binaries compile
@@ -118,7 +121,7 @@ $(addprefix $(BUILDDIR)/,main.o doctor.o tool_bootstrap.o update.o update_channe
 $(BUILDDIR)/%.o: src/%.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -c -o $@ $<
 
-$(BUILDDIR)/sandbox.o: $(BUILDDIR)/preload_blob.h $(BUILDDIR)/net_shim_blob.h
+$(BUILDDIR)/contain_linux.o: $(BUILDDIR)/preload_blob.h $(BUILDDIR)/net_shim_blob.h
 
 $(BUILDDIR)/sqlite3.o: vendor/sqlite3/sqlite3.c | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -c -o $@ $<

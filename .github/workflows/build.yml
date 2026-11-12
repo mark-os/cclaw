@@ -8,6 +8,11 @@ on:
     branches: [master]
   workflow_dispatch: {}
 
+env:
+  # libcurl built from source by the WS transport job and the glibc-baseline
+  # release builds (scripts/ci-build-baseline.sh).
+  CURL_VERSION: 8.21.0
+
 jobs:
   linux-x64:
     name: linux-x64 (native)
@@ -20,7 +25,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev xxd
 
       - name: Allow unprivileged user namespaces
-        # ubuntu-latest (24.04) restricts CLONE_NEWUSER via AppArmor by
+        # Ubuntu runners restrict CLONE_NEWUSER via AppArmor by
         # default; cclaw's namespace sandbox (and its tests) need it.
         run: |
           if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
@@ -36,6 +41,15 @@ jobs:
       - name: Integration tests
         run: make test-integration
 
+      - name: Build release binary (glibc 2.31 baseline)
+        # The steps above test with the runner's toolchain. The shipped binary
+        # is rebuilt on debian:bullseye so it runs on any glibc >= 2.31 —
+        # see scripts/ci-build-baseline.sh.
+        run: |
+          curl -sSfLo curl-${CURL_VERSION}.tar.gz https://curl.se/download/curl-${CURL_VERSION}.tar.gz
+          docker run --rm -e CURL_VERSION -v "$PWD":/src -w /src \
+            debian:bullseye scripts/ci-build-baseline.sh
+
       - name: Package
         # Strip + zip so every target unpacks to the same binary name —
         # install is "download, unzip, ./cclaw" regardless of target.
@@ -45,6 +59,7 @@ jobs:
           chmod +x dist/cclaw
           (cd dist && zip -q cclaw-linux-x64.zip cclaw)
           mv dist/cclaw dist/cclaw-linux-x64
+          scripts/check-glibc-floor.sh dist/cclaw-linux-x64 2.31
 
       - uses: actions/upload-artifact@v4
         with:
@@ -80,6 +95,15 @@ jobs:
       - name: Integration tests
         run: make test-integration
 
+      - name: Build release binary (glibc 2.31 baseline)
+        # The steps above test with the runner's toolchain. The shipped binary
+        # is rebuilt on debian:bullseye so it runs on any glibc >= 2.31 —
+        # see scripts/ci-build-baseline.sh.
+        run: |
+          curl -sSfLo curl-${CURL_VERSION}.tar.gz https://curl.se/download/curl-${CURL_VERSION}.tar.gz
+          docker run --rm -e CURL_VERSION -v "$PWD":/src -w /src \
+            debian:bullseye scripts/ci-build-baseline.sh
+
       - name: Package
         # Strip + zip so every target unpacks to the same binary name —
         # install is "download, unzip, ./cclaw" regardless of target.
@@ -89,6 +113,7 @@ jobs:
           chmod +x dist/cclaw
           (cd dist && zip -q cclaw-linux-arm64.zip cclaw)
           mv dist/cclaw dist/cclaw-linux-arm64
+          scripts/check-glibc-floor.sh dist/cclaw-linux-arm64 2.31
 
       - uses: actions/upload-artifact@v4
         with:
@@ -124,8 +149,6 @@ jobs:
             --without-nghttp2 --without-libssh2 >/dev/null
           make -j"$(nproc)" >/dev/null
           sudo make install >/dev/null
-        env:
-          CURL_VERSION: 8.21.0
 
       - name: Allow unprivileged user namespaces
         run: |
@@ -165,16 +188,18 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build and smoke-test in i386 container
+        # bullseye (glibc 2.31) for the same compatibility floor as the 64-bit
+        # builds — see scripts/ci-build-baseline.sh.
         run: |
-          docker run --rm --platform linux/386 -v "$PWD":/src -w /src \
-            i386/debian:bookworm bash -c '
-              set -e
-              apt-get update
-              apt-get install -y build-essential libcurl4-openssl-dev xxd git
-              git config --global --add safe.directory /src
-              make all
-              make smoke
-            '
+          curl -sSfLo curl-${CURL_VERSION}.tar.gz https://curl.se/download/curl-${CURL_VERSION}.tar.gz
+          # seccomp=unconfined: since the ubuntu-26.04 runner image (Docker
+          # 29, kernel 7.0) the default seccomp profile blocks the syscall
+          # 32-bit glibc uses for DNS, so apt cannot resolve its mirrors.
+          # Throwaway container building our own code — no isolation lost
+          # that matters here.
+          docker run --rm --platform linux/386 --security-opt seccomp=unconfined \
+            -e CURL_VERSION -v "$PWD":/src -w /src \
+            i386/debian:bullseye bash -c 'scripts/ci-build-baseline.sh && make smoke'
 
       - name: Package
         run: |
@@ -183,6 +208,7 @@ jobs:
           chmod +x dist/cclaw
           (cd dist && zip -q cclaw-linux-x86.zip cclaw)
           mv dist/cclaw dist/cclaw-linux-x86
+          scripts/check-glibc-floor.sh dist/cclaw-linux-x86 2.31
 
       - uses: actions/upload-artifact@v4
         with:
@@ -204,6 +230,8 @@ jobs:
           platforms: arm
 
       - name: Build in armel container
+        # Stays on bookworm (glibc floor 2.35): the bullseye baseline builds
+        # libcurl from source, which is too slow under qemu-arm emulation.
         # Build the target, then run the actual binary (not the unit-test
         # harness) under qemu-arm as a live smoke check: --version proves
         # dynamic linking against the emulated armel libcurl.so works,
@@ -246,6 +274,7 @@ jobs:
           chmod +x dist/cclaw
           (cd dist && zip -q cclaw-linux-armv5te.zip cclaw)
           mv dist/cclaw dist/cclaw-linux-armv5te
+          scripts/check-glibc-floor.sh dist/cclaw-linux-armv5te 2.35
 
       - uses: actions/upload-artifact@v4
         with:

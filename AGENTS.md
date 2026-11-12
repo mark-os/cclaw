@@ -121,7 +121,7 @@ of finding out.
 - **Production deploy**: any Linux box — small EC2 instances, embedded SoCs, old and new architectures (ARM64, ARMv7, ARMv5TE, x86_64, RISC-V)
 - **Known target**: Pogoplug V4 (ARMv5TE, 128MB RAM, Debian Bookworm armel)
 
-**Build/release considerations**: CClaw vendors everything except libcurl (dynamic link to system `libcurl.so`). Multi-arch releases need per-platform builds with the target's cross-compiler + matching libcurl.
+**Build/release considerations**: a source build (`make`) vendors everything except libcurl (dynamic link to system `libcurl.so`). Release binaries are a separate build: static musl with a pinned curl + mbedTLS inside, cross-compiled per target by `scripts/build_static.sh` — see [specs/static-build.md](specs/static-build.md).
 
 ## Memory Model
 
@@ -389,7 +389,7 @@ Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
 | jsmn | JSON tokenizer (db-less corners, e.g. channel-harness scenarios) | Yes |
 | yxml | SAX XML parser (`XML.parse()` global in js_eval + channel runner) | Yes |
 | SQLite 3.53 | Persistence, FTS5, JSON functions | Yes |
-| libcurl | HTTP client (LLM API, Telegram) | System (dynamic link) |
+| libcurl | HTTP client (LLM API, Telegram) | System (dynamic link); release builds link a pinned curl + mbedTLS statically |
 | civetweb | Embedded HTTP server (webhooks, dashboard) | Yes |
 | QuickJS | JS plugin engine (runtime tool creation, extensions) | Yes |
 

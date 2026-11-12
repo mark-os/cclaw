@@ -53,7 +53,7 @@ CClaw vendors everything except libcurl:
 | QuickJS | JS plugin engine |
 | Monocypher | Encryption |
 
-**Runtime dependency:** `libcurl.so` (system-provided, dynamically linked). Available on every Linux distribution, every architecture.
+**Runtime dependency:** none for a release binary — it is statically linked (musl, with libcurl and TLS inside) and needs only a CA certificate bundle on the host. A source build links the system `libcurl.so` instead.
 
 **Build dependency:** a C11 compiler. That's it.
 

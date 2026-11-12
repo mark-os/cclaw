@@ -29,8 +29,10 @@ case "$target" in
     x64)     cross=;                   musl_arch=x86_64;  archflags= ;;
     arm64)   cross=aarch64-linux-gnu-; musl_arch=aarch64; archflags= ;;
     # i586, not the i686 Debian's toolchain defaults to: no CMOV/SSE, so VIA C3
-    # and Geode thin clients can run it. musl and the deps get the same flag.
-    i586)    cross=i686-linux-gnu-;    musl_arch=i386;    archflags="-march=i586 -mtune=generic" ;;
+    # and Geode thin clients can run it. musl and the deps get the same flags.
+    # -fcf-protection=none: Ubuntu's GCC turns CET on by default, and its
+    # ENDBR instructions are multi-byte NOPs an i586 does not have.
+    i586)    cross=i686-linux-gnu-;    musl_arch=i386;    archflags="-march=i586 -mtune=generic -fcf-protection=none" ;;
     armv5te) cross=arm-linux-gnueabi-; musl_arch=arm;     archflags="-march=armv5te -mfloat-abi=soft" ;;
     *) echo "usage: $0 <x64|arm64|i586|armv5te> [make-target...]" >&2; exit 2 ;;
 esac

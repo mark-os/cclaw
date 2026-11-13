@@ -100,6 +100,10 @@ through the same rails:
    the binary to `.prev` — only if `.prev` can open the database as it now is;
    otherwise the guard stays passive and tells the agent to suggest
    `cclaw rollback`. The bad build is kept as `<self>.bad`.
+   A daemon that shuts down in order (SIGTERM, SIGUSR2) takes its own start
+   back off the count, so restarting it by hand inside the window is not
+   mistaken for a crash; a start counts only when the daemon it started died
+   without shutting down.
 
 Every exit writes `update.last` (`{tag, at, outcome}`), which `--doctor`
 shows: `ok`, `installed_no_daemon`, `installed_restart_pending`,

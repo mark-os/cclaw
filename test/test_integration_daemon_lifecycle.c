@@ -317,6 +317,51 @@ int main(void) {
     unlink(REEXEC_BIN);
     unlink(REEXEC_BIN ".bad");
 
+    /* ── deliberate restarts are not a crash loop ──
+     * Four starts inside the window, each ended by SIGTERM: an operator
+     * restarting the daemon by hand. Every orderly shutdown takes its start
+     * back, so the guard must never fire — .prev stays, no .bad appears. */
+    printf("  clean_restarts_do_not_revert... ");
+    if (system("cp build/cclaw " REEXEC_BIN
+               " && cp build/cclaw " REEXEC_BIN ".prev") != 0) FAIL("cp");
+    {
+        sqlite3 *adb = NULL;
+        if (sqlite3_open(DB_PATH, &adb) != SQLITE_OK) FAIL("arm open");
+        update_verify_arm(adb, "vclean");
+        sqlite3_close(adb);
+    }
+    for (int start = 1; start <= 4; start++) {
+        pid_t cp = spawn_daemon_from(REEXEC_BIN);
+        if (cp < 0) FAIL("fork");
+        if (wait_registered(cp, NULL) != cp) {
+            stop_daemon(cp);
+            FAIL("clean-restart daemon never registered");
+        }
+        stop_daemon(cp);
+    }
+    if (access(REEXEC_BIN ".prev", F_OK) != 0 ||
+        access(REEXEC_BIN ".bad", F_OK) == 0)
+        FAIL("orderly restarts were counted as a crash loop");
+    {
+        sqlite3 *vdb = NULL;
+        int starts = -1;
+        if (sqlite3_open_v2(DB_PATH, &vdb, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+            sqlite3_stmt *ms = NULL;
+            if (sqlite3_prepare_v2(vdb, "SELECT json_extract(value,'$.starts')"
+                                        " FROM config WHERE key='update.verify'"
+                                        " AND json_valid(value)",
+                                   -1, &ms, NULL) == SQLITE_OK &&
+                sqlite3_step(ms) == SQLITE_ROW)
+                starts = sqlite3_column_int(ms, 0);
+            sqlite3_finalize(ms);
+            sqlite3_close(vdb);
+        }
+        if (starts != 0) FAIL("marker should still be armed with 0 starts");
+    }
+    printf("PASS (4 SIGTERM restarts, guard quiet, marker still armed)\n");
+    unlink(REEXEC_BIN);
+    unlink(REEXEC_BIN ".prev");
+
     /* ── and stays passive when there is nothing to revert to ── */
     printf("  crash_loop_no_prev_stays_up... ");
     if (system("cp build/cclaw " REEXEC_BIN) != 0) FAIL("cp");
@@ -349,6 +394,6 @@ int main(void) {
     unlink(DB_PATH);
     unlink(DB_PATH "-wal");
     unlink(DB_PATH "-shm");
-    printf("7/7 passed\n");
+    printf("8/8 passed\n");
     return 0;
 }

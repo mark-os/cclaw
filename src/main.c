@@ -493,6 +493,7 @@ static int run_daemon(char *db_path) {
     web_stop();
     child_sigchld_teardown();
     wake_close(); wake_fifo_close(fifo_fd, db_path);
+    update_verify_clean_exit(proc_db());
     process_unregister(proc_db(), proc_instance_id());
     cron_set_script_runner(NULL);
     proc_set_tool_setup(NULL);

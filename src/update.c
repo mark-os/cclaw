@@ -218,13 +218,13 @@ int update_schema_ok(const char *range, int db_version, char *why, size_t cap) {
         return 0;
     }
     if (db_version < cand_min) {
-        snprintf(why, cap, "this database is schema v%d but the new build only "
+        snprintf(why, cap, "this database is schema v%d but that build only "
                            "patches forward from v%d — it would refuse to open it",
                  db_version, cand_min);
         return 0;
     }
     if (db_version > cand_cur) {
-        snprintf(why, cap, "this database is schema v%d and the new build only "
+        snprintf(why, cap, "this database is schema v%d and that build only "
                            "knows up to v%d — that is a downgrade",
                  db_version, cand_cur);
         return 0;
@@ -624,7 +624,14 @@ static int update_install_file(sqlite3 *db, const char *self, const char *path) 
  * still open this database, because schema patches are forward-only and a
  * revert that strands the DB is worse than the crash loop — then re-execs
  * into the restored build and tells the default agent what happened. A
- * healthy deployment pays one config read per boot for this. */
+ * healthy deployment pays one config read per boot for this.
+ *
+ * A start is evidence of a crash only if the daemon it started then died. A
+ * daemon that shuts down in order (SIGTERM, SIGUSR2 — an operator restarting
+ * it to pick up config) takes its own start back off the count
+ * (update_verify_clean_exit), so three deliberate restarts inside the window
+ * are not reported as a crash loop. A build that dies during startup, is
+ * killed, or exits on a fatal error never reaches that call and stays counted. */
 
 static char *default_agent_name(sqlite3 *db);
 static int64_t recent_session(sqlite3 *db, const char *agent);
@@ -759,6 +766,16 @@ int update_verify_startup(sqlite3 *db) {
              UPDATE_VERIFY_WINDOW / 60, badpath);
     update_verify_notify(db, note);
     return 1;   /* caller re-execs into the restored build */
+}
+
+void update_verify_clean_exit(sqlite3 *db) {
+    /* max(0, …): the daemon the updater replaces was started before the
+     * marker was armed and has no start of its own to take back. */
+    sqlite3_exec(db,
+        "UPDATE config SET value = json_set(value, '$.starts',"
+        "  max(0, COALESCE(json_extract(value,'$.starts'),0) - 1))"
+        " WHERE key='update.verify' AND value<>'' AND json_valid(value)",
+        NULL, NULL, NULL);
 }
 
 void update_verify_tick(sqlite3 *db) {

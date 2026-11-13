@@ -98,6 +98,11 @@ void update_verify_arm(sqlite3 *db, const char *tag);
  * otherwise. Daemon-only. */
 int update_verify_startup(sqlite3 *db);
 
+/* An orderly daemon shutdown takes this daemon's start back off an armed
+ * marker: a deliberate restart is not a crash. Called on the graceful
+ * shutdown path only, while the DB is still open. */
+void update_verify_clean_exit(sqlite3 *db);
+
 /* Clear the marker after a healthy UPDATE_VERIFY_WINDOW of uptime. Cheap;
  * called from the daemon's periodic tick. */
 void update_verify_tick(sqlite3 *db);

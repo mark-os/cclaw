@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db_response.h"
+#include "config.h"
 #include "config_registry.h"
 #include "db.h"
 #include "llm.h"
@@ -97,6 +98,53 @@ static const char SCALAR_GEMINI[] =
     " NULL,"
     " json_extract(?1,'$.usageMetadata.thoughtsTokenCount')";
 
+static const char SCALAR_ANTHROPIC[] =
+    "SELECT"
+    /* A refusal is a 200 whose content may be empty; say so in the entry
+     * rather than leave a silent error turn. */
+    " COALESCE("
+    "   (SELECT group_concat(json_extract(value,'$.text'), char(10))"
+    "      FROM json_each(?1,'$.content')"
+    "      WHERE json_extract(value,'$.type') = 'text'),"
+    "   CASE WHEN json_extract(?1,'$.stop_reason') = 'refusal' THEN"
+    "     '[the model declined this request' ||"
+    "     COALESCE(': ' || json_extract(?1,'$.stop_details.category'), '') || ']' END),"
+    " CASE json_extract(?1,'$.stop_reason')"
+    "   WHEN 'end_turn' THEN 'stop' WHEN 'stop_sequence' THEN 'stop'"
+    "   WHEN 'pause_turn' THEN 'stop' WHEN 'max_tokens' THEN 'length'"
+    "   WHEN 'model_context_window_exceeded' THEN 'length'"
+    "   WHEN 'tool_use' THEN 'tool_calls' WHEN 'refusal' THEN 'content_filter'"
+    "   ELSE json_extract(?1,'$.stop_reason') END,"
+    /* Display text only — empty unless the request asked for summaries
+     * (thinking.display); replay reads column 8, never this. */
+    " (SELECT group_concat(json_extract(value,'$.thinking'), char(10))"
+    "    FROM json_each(?1,'$.content')"
+    "    WHERE json_extract(value,'$.type') = 'thinking'"
+    "      AND json_extract(value,'$.thinking') != ''),"
+    /* Anthropic's input_tokens EXCLUDES cache reads and writes; every other
+     * provider's prompt count includes them, and so do the limiter and the
+     * context accounting that read this column. Normalized here. */
+    " json_extract(?1,'$.usage.input_tokens')"
+    "   + COALESCE(json_extract(?1,'$.usage.cache_read_input_tokens'),0)"
+    "   + COALESCE(json_extract(?1,'$.usage.cache_creation_input_tokens'),0),"
+    " json_extract(?1,'$.usage.output_tokens'),"
+    " NULL,"
+    " NULL,"
+    /* Shape check: a message object with a content array. The array may
+     * legitimately be empty (refusal, or max_tokens spent on thinking), so
+     * report 1 rather than its length. */
+    " CASE WHEN json_extract(?1,'$.type') = 'message'"
+    "       AND json_type(?1,'$.content') = 'array' THEN 1 END,"
+    /* The whole content array, verbatim, whenever it carries thinking: the
+     * signature covers the block's position among its siblings, so replay
+     * needs the original array, not the thinking blocks alone. */
+    " CASE WHEN EXISTS (SELECT 1 FROM json_each(?1,'$.content')"
+    "     WHERE json_extract(value,'$.type') IN ('thinking','redacted_thinking'))"
+    "   THEN json_extract(?1,'$.content') END,"
+    " json_extract(?1,'$.usage.cache_read_input_tokens'),"
+    " json_extract(?1,'$.usage.cache_creation_input_tokens'),"
+    " json_extract(?1,'$.usage.output_tokens_details.thinking_tokens')";
+
 /* Tool-call rows, columns: 0 id (NULL for Gemini), 1 name, 2 arguments. */
 static const char TC_OPENAI[] =
     "SELECT json_extract(value,'$.id'),"
@@ -111,6 +159,13 @@ static const char TC_GEMINI[] =
     " FROM json_each(?1,'$.candidates[0].content.parts')"
     " WHERE json_extract(value,'$.functionCall') IS NOT NULL";
 
+static const char TC_ANTHROPIC[] =
+    "SELECT json_extract(value,'$.id'),"
+    " json_extract(value,'$.name'),"
+    " json_extract(value,'$.input')"
+    " FROM json_each(?1,'$.content')"
+    " WHERE json_extract(value,'$.type') = 'tool_use'";
+
 /* Tag a freshly inserted type='reasoning' entry with everything replay needs:
  * who produced it (provider+model — a model switch strips the replay, pi's
  * rule) and the verbatim wire artifact under $.blob. The blob is always where
@@ -120,14 +175,17 @@ static const char TC_GEMINI[] =
  *   gemini_parts      blob = [{fn, sig}, …]  (native thoughtSignature)
  *   reasoning_details blob = the provider's array, byte-for-byte
  *   reasoning_content blob = the bare string (DeepSeek-style)
+ *   anthropic_content blob = the response's whole content array
  * Best-effort: the entry is already durable, a failure here just means no
  * replay for that iteration. */
-static void reasoning_meta_set(sqlite3 *db, int64_t entry_id, int gemini,
+static void reasoning_meta_set(sqlite3 *db, int64_t entry_id, EndpointType ep,
                                const char *model, const char *blob_json,
                                const char *text) {
-    const char *fmt = gemini ? "gemini_parts"
-                             : (blob_json ? "reasoning_details" : "reasoning_content");
-    if (gemini && !blob_json) return;   /* nothing replayable on this path */
+    const char *fmt = ep == ENDPOINT_GEMINI    ? "gemini_parts"
+                    : ep == ENDPOINT_ANTHROPIC ? "anthropic_content"
+                    : (blob_json ? "reasoning_details" : "reasoning_content");
+    /* Only the OpenAI-compat path can replay bare text. */
+    if (ep != ENDPOINT_OPENAI && !blob_json) return;
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
             "UPDATE entries SET reasoning_meta = json_object("
@@ -136,7 +194,7 @@ static void reasoning_meta_set(sqlite3 *db, int64_t entry_id, int gemini,
             " WHERE id = ?1", -1, &s, NULL) != SQLITE_OK)
         return;
     sqlite3_bind_int64(s, 1, entry_id);
-    sqlite3_bind_text(s, 2, gemini ? "gemini" : "openai", -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, endpoint_type_name(ep), -1, SQLITE_STATIC);
     sqlite3_bind_text(s, 3, model ? model : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(s, 4, fmt, -1, SQLITE_STATIC);
     if (blob_json) sqlite3_bind_text(s, 5, blob_json, -1, SQLITE_STATIC);
@@ -290,7 +348,10 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
     if (out) memset(out, 0, sizeof(*out));
     if (!db || !body) return LLM_RESP_MALFORMED;
 
-    int gemini = (ep == ENDPOINT_GEMINI);
+    const char *scalar_sql = ep == ENDPOINT_GEMINI    ? SCALAR_GEMINI
+                           : ep == ENDPOINT_ANTHROPIC ? SCALAR_ANTHROPIC : SCALAR_OPENAI;
+    const char *tc_sql = ep == ENDPOINT_GEMINI    ? TC_GEMINI
+                       : ep == ENDPOINT_ANTHROPIC ? TC_ANTHROPIC : TC_OPENAI;
 
     /* ── Parse the body once into a JSONB blob. Every read below binds the
      * blob (no re-parse), and the same blob is archived. Keep this statement
@@ -315,7 +376,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
     /* ── Scalar fields: bind the blob, hold the statement open so the
      * extracted column pointers stay valid through the entry inserts. ── */
     sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, gemini ? SCALAR_GEMINI : SCALAR_OPENAI, -1, &s, NULL) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(db, scalar_sql, -1, &s, NULL) != SQLITE_OK) {
         /* Our-side failure — archive the (valid) body for forensics + recovery. */
         archive_store(db, session_id, iteration_id, model, "ingest_error", blob, blen, 1, request_body, NULL);
         sqlite3_finalize(j);
@@ -361,7 +422,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
      * empty-stop path), then rewind for the insert pass. ── */
     sqlite3_stmt *tc = NULL;
     int tc_count = 0;
-    if (sqlite3_prepare_v2(db, gemini ? TC_GEMINI : TC_OPENAI, -1, &tc, NULL) == SQLITE_OK) {
+    if (sqlite3_prepare_v2(db, tc_sql, -1, &tc, NULL) == SQLITE_OK) {
         sqlite3_bind_blob(tc, 1, blob, blen, SQLITE_STATIC);
         while (sqlite3_step(tc) == SQLITE_ROW) tc_count++;
         sqlite3_reset(tc);
@@ -413,7 +474,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
                                           NULL, NULL, 0,
                                           STOP_REASON_NONE, model, 0, 0, 0);
         if (r_id > 0)
-            reasoning_meta_set(db, r_id, gemini, model, replay_blob, replay_text);
+            reasoning_meta_set(db, r_id, ep, model, replay_blob, replay_text);
     }
 
     int64_t asst_id = entry_append_typed(db, session_id, iteration_id, "assistant_message", part++,

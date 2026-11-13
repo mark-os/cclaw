@@ -9,6 +9,11 @@
  * Returns heap-allocated Config, or NULL on failure. */
 Config *config_load(sqlite3 *cclaw_db);
 
+/* providers.endpoint_type <-> EndpointType. Anything unrecognized (including
+ * NULL) is the OpenAI-compatible default, as it always was. */
+EndpointType endpoint_type_parse(const char *s);
+const char *endpoint_type_name(EndpointType ep);
+
 /* Render system prompt with template vars {session_id}, {date}, {workspace}.
  * Returns heap-allocated string. Caller must free. */
 char *config_render_system_prompt(const Config *cfg, int64_t session_id);

@@ -27,6 +27,17 @@ INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, defa
 INSERT OR IGNORE INTO models(id, provider_name, model, capabilities)
   VALUES('gemini/gemini-3.5-flash-lite', 'gemini', 'gemini-3.5-flash-lite', '["text","image","audio"]');
 
+-- ═══ Anthropic (native Messages API; llm_build_url appends /messages) ═══
+-- Last in priority, so a key in the environment never changes which provider
+-- an existing install defaults to. max_output_tokens is left NULL: the payload
+-- builder's own floor applies (thinking is billed against it). No capabilities
+-- either: the media picker is not key-filtered and breaks ties by id, so an
+-- "image" tag here would route a fresh install's images to a keyless provider.
+INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)
+  VALUES('anthropic', 'https://api.anthropic.com/v1', 'anthropic', 'ANTHROPIC_API_KEY', 'claude-sonnet-5-5', 150);
+INSERT OR IGNORE INTO models(id, provider_name, model, context_window)
+  VALUES('anthropic/claude-sonnet-5-5', 'anthropic', 'claude-sonnet-5-5', 1000000);
+
 -- ═══ Known providers (no keys shipped — inert until their key exists) ═══
 -- Endpoints sourced from the OpenClaw and Hermes default provider catalogs
 -- (production OpenAI-compatible chat completions only). Low priority:

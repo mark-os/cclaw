@@ -367,7 +367,7 @@ static int run_daemon(char *db_path) {
               proc_cfg()->provider.name ? proc_cfg()->provider.name : "(builtin)",
               proc_cfg()->provider.model ? proc_cfg()->provider.model : "(unset)",
               proc_cfg()->provider.base_url ? proc_cfg()->provider.base_url : "(unset)",
-              proc_cfg()->provider.endpoint_type == ENDPOINT_GEMINI ? "gemini" : "openai",
+              endpoint_type_name(proc_cfg()->provider.endpoint_type),
               proc_cfg()->workspace ? proc_cfg()->workspace : "(unset)",
               proc_cfg()->db_path ? proc_cfg()->db_path : "(unset)",
               proc_cfg()->provider.api_key_source ? proc_cfg()->provider.api_key_source

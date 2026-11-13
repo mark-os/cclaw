@@ -355,6 +355,167 @@ static const char SQL_GEMINI_FULL[] =
      * which RFC 7386 merges into the one above rather than replacing it. */
     ")), json(?7)), " SQL_REQUEST_EXTRA("?6") ");";
 
+/* ── Anthropic Messages ────────────────────────────────────────────
+ *
+ * Content is always an array of typed blocks; an iteration's assistant text
+ * and tool calls are one assistant message, and all of that iteration's tool
+ * results are one user message (the API reads split results as "don't call
+ * tools in parallel"). Adjacent same-role messages are legal — the API merges
+ * them — so the context block and '[system] ' notes ride as their own user
+ * messages exactly as in the other two builders. Empty text blocks are a 400,
+ * hence the guards: an assistant message with nothing to say is dropped. */
+
+#define SQL_ANTHROPIC_TEXT(role, expr) \
+    "json_object('role','" role "','content'," \
+    "  json_array(json_object('type','text','text'," expr ")))"
+
+#define SQL_CACHE_MARK "json('{\"type\":\"ephemeral\"}')"
+
+static const char SQL_ANTHROPIC_MESSAGES[] =
+    "WITH seq(pos, msg) AS MATERIALIZED ("
+    "  SELECT MIN(p.pos),"
+    "    CASE"
+    "      WHEN e.type IN ('assistant_message','tool_call','reasoning') THEN"
+    "        (SELECT CASE WHEN json_array_length(c) > 0"
+    "                  THEN json_object('role','assistant','content',json(c)) END"
+    "         FROM (SELECT COALESCE("
+    /* Thinking replay. The API binds a thinking block's signature to
+     * everything that preceded it, and wants the block back in its original
+     * position among the text and tool_use blocks — so what is replayed is
+     * the response's whole content array, verbatim, not a reconstruction.
+     * Only within the turn that produced it: the context block moves at every
+     * turn boundary, which is an edit to the prefix those signatures cover,
+     * while inside a turn the prefix is byte-stable (the mid-turn invariant).
+     * Dropping the blocks of earlier turns is a leading run, which the API
+     * allows. A model switch (?3) falls through to the reconstruction below,
+     * as does any iteration that carried no thinking. */
+    "           (SELECT json_extract(r.reasoning_meta,'$.blob') FROM entries r"
+    "             WHERE r.session_id=?1 AND r.iteration_id=e.iteration_id"
+    "               AND r.type='reasoning'"
+    "               AND json_extract(r.reasoning_meta,'$.format')='anthropic_content'"
+    "               AND json_extract(r.reasoning_meta,'$.model')=?3"
+    "               AND r.turn_id=(SELECT MAX(et.turn_id) FROM _plan pt"
+    "                               JOIN entries et ON et.id=pt.entry_id)"
+    "             LIMIT 1),"
+    "           (SELECT json_group_array(json(part)) FROM ("
+    "              SELECT CASE e2.type"
+    "                WHEN 'assistant_message' THEN"
+    "                  CASE WHEN COALESCE(e2.content,'') != ''"
+    "                  THEN json_object('type','text','text',e2.content) END"
+    "                WHEN 'tool_call' THEN"
+    "                  json_object('type','tool_use','id',e2.tool_call_id,"
+    "                    'name',e2.tool_name,"
+    "                    'input',CASE WHEN json_valid(e2.content) THEN json(e2.content)"
+    "                              ELSE json('{}') END)"
+    "                END AS part"
+    "              FROM _plan p2 JOIN entries e2 ON e2.id=p2.entry_id AND e2.session_id=?1"
+    "              WHERE e2.iteration_id=e.iteration_id"
+    "                AND e2.type IN ('assistant_message','tool_call')"
+    "              ORDER BY e2.part_index"
+    "            ) WHERE part IS NOT NULL)) AS c))"
+    "      WHEN e.type = 'tool_result' THEN"
+    "        json_object('role','user','content',"
+    "          json_group_array(json(json_patch("
+    "            json_object('type','tool_result','tool_use_id',e.tool_call_id,"
+    "                        'content'," SQL_WRAP_TOOL_CONTENT "),"
+    "            CASE WHEN e.is_error THEN json_object('is_error',json('true'))"
+    "                 ELSE '{}' END)) ORDER BY p.pos))"
+    "      WHEN e.type = 'user_message' THEN "
+             SQL_ANTHROPIC_TEXT("user", "COALESCE(NULLIF(e.content,''),'(empty message)')")
+    /* Same universal convention as the other builders: no mid-array system
+     * role; the note rides as a '[system] '-prefixed user message. */
+    "      WHEN e.type = 'system' THEN "
+             SQL_ANTHROPIC_TEXT("user", "'[system] ' || COALESCE(e.content,'')")
+    "      WHEN e.type = 'compaction' THEN "
+             SQL_ANTHROPIC_TEXT("user",
+                 "'[Summary of earlier conversation]' || char(10) || COALESCE(e.content,'')")
+    "      WHEN e.type = 'cron_result' THEN "
+             SQL_ANTHROPIC_TEXT("assistant", SQL_CRON_RESULT_TEXT)
+    "    END"
+    "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
+    /* Three disjoint key ranges: an iteration's assistant parts, that
+     * iteration's tool results, and every other entry on its own (ids are
+     * positive — see SQL_GEMINI_CONTENTS for the collision this avoids). */
+    "  GROUP BY CASE"
+    "    WHEN e.type IN ('assistant_message','tool_call','reasoning') THEN -2*e.iteration_id"
+    "    WHEN e.type = 'tool_result' THEN -2*e.iteration_id - 1"
+    "    ELSE e.id END"
+    /* Session context at the turn boundary — see SQL_OPENAI_MESSAGES. */
+    "  UNION ALL"
+    "  SELECT COALESCE("
+    "      (SELECT MAX(pu.pos) FROM _plan pu JOIN entries eu"
+    "         ON eu.id = pu.entry_id AND eu.type = 'user_message'),"
+    "      (SELECT MIN(pp.pos) FROM _plan pp)) - 0.5, "
+           SQL_ANTHROPIC_TEXT("user", "?2")
+    "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
+    /* Ephemeral hook injects at the absolute tail, always as user: a trailing
+     * assistant message is a prefill, which current models reject. */
+    "  UNION ALL"
+    "  SELECT 1000000+hd.id, "
+           SQL_ANTHROPIC_TEXT("user",
+               "CASE WHEN hd.role='system' THEN '[system] ' || hd.content"
+               "     ELSE COALESCE(NULLIF(hd.content,''),'(empty message)') END")
+    "  FROM hook_directives hd WHERE hd.session_id = ?1 AND hd.kind = 'inject'"
+    "), live AS (SELECT pos, msg FROM seq WHERE msg IS NOT NULL),"
+    /* Prompt-cache breakpoints. Anthropic caching is opt-in and keyed on the
+     * exact prefix up to a marked block, and the context block's move at each
+     * turn boundary changes everything after its old position. So the stable
+     * prefix ends at the last message before the newest user_message: marking
+     * it writes the entry the NEXT turn reads, and marking the same spot one
+     * user_message back reads the entry the PREVIOUS turn wrote (the API only
+     * looks ~20 blocks behind a marker on its own — a long tool loop is more
+     * than that). Within a turn the request-level marker in SQL_ANTHROPIC_FULL
+     * follows the growing tail. That is 4 markers with the system prompt's,
+     * the API's limit. */
+    " bp(pos) AS (SELECT (SELECT MAX(l.pos) FROM live l WHERE l.pos < u.pos - 0.5)"
+    "   FROM (SELECT pu.pos FROM _plan pu JOIN entries eu ON eu.id = pu.entry_id"
+    "          WHERE eu.type = 'user_message' ORDER BY pu.pos DESC LIMIT 2) u)"
+    "SELECT json_group_array(json(CASE WHEN pos IN (SELECT pos FROM bp)"
+    "    THEN json_set(msg,'$.content[#-1].cache_control'," SQL_CACHE_MARK ")"
+    "    ELSE msg END) ORDER BY pos)"
+    " FROM live;";
+
+static const char SQL_ANTHROPIC_TOOLS[] =
+    "SELECT json_group_array("
+    /* input_schema must say type:object; a parameterless tool's '{}' doesn't. */
+    "  json_object('name',t.name,'description'," SQL_TOOL_DESCRIPTION ","
+    "    'input_schema',json_patch('{\"type\":\"object\"}',"
+    "                              COALESCE(t.parameters_json,'{}')))"
+    ") FROM tools t"
+    " WHERE t.enabled=1"
+    "   AND (t.agent_name IS NULL OR t.agent_name=?1)"
+    "   AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2)));";
+
+/* Same parameters as SQL_OPENAI_FULL, plus ?9 = the routed models.id.
+ *
+ * max_tokens is mandatory here and also pays for thinking, which current
+ * models cannot turn off — the global 4096 default would regularly be spent
+ * before any visible text. The model row's max_output_tokens wins when set.
+ *
+ * thinking.block_binding: a thinking block replayed after its prefix changed
+ * is a 400 on accounts where the check is enforced. Replay is scoped so that
+ * should not happen (see SQL_ANTHROPIC_MESSAGES), but an ephemeral hook inject
+ * or a mid-turn context cut can still edit the prefix, and losing one block's
+ * reasoning beats losing the turn. Every drop is reported in the response's
+ * input_transformations, archived in llm_responses. A model that predates
+ * adaptive thinking needs request_extra {"thinking":null}. */
+static const char SQL_ANTHROPIC_FULL[] =
+    "SELECT json_patch(json_patch(json_patch('{}', json_object("
+    "  'model', ?1,"
+    "  'max_tokens', COALESCE((SELECT max_output_tokens FROM models"
+    "                           WHERE id=?9 AND max_output_tokens > 0),"
+    "                         MAX(?4, 16000)),"
+    "  'system', CASE WHEN ?2 IS NOT NULL OR ?6 IS NOT NULL THEN"
+    "    json_array(json_object('type','text',"
+    "      'text', COALESCE(?2,'') || COALESCE(char(10) || char(10) || ?6, ''),"
+    "      'cache_control'," SQL_CACHE_MARK ")) END,"
+    "  'messages', json(?3),"
+    "  'tools', CASE WHEN json_array_length(?5) > 0 THEN json(?5) ELSE NULL END,"
+    "  'thinking', json('{\"type\":\"adaptive\",\"block_binding\":"
+    "                     {\"prefix_mismatch_behavior\":\"drop_block\"}}'),"
+    "  'cache_control'," SQL_CACHE_MARK
+    ")), json(?8)), " SQL_REQUEST_EXTRA("?7") ");";
+
 /* ── Reasoning effort (M5) ─────────────────────────────────────────
  *
  * The knob is a level name on the routing entry (agent_models.reasoning_effort);
@@ -397,6 +558,7 @@ static const char SQL_EFFORT_FRAGMENT[] =
     "      json_object('thinkingConfig', json_object('thinkingLevel', val)))"
     "  WHEN 'gemini-budget' THEN json_object('generationConfig',"
     "      json_object('thinkingConfig', json_object('thinkingBudget', val)))"
+    "  WHEN 'anthropic' THEN json_object('output_config', json_object('effort', val))"
     /* 'openrouter' and anything unrecognized: the unified nested object.
      * OpenRouter spells "don't think" as enabled:false, not effort:'off'. */
     "  ELSE CASE WHEN lvl='off' THEN json_object('reasoning', json_object('enabled', json('false')))"
@@ -413,6 +575,12 @@ static const char EFFORT_DEFAULT_OPENAI[] =
 static const char EFFORT_DEFAULT_GEMINI[] =
     "{\"format\":\"gemini-level\",\"levels\":{\"off\":\"OFF\",\"minimal\":\"MINIMAL\","
     "\"low\":\"LOW\",\"medium\":\"MEDIUM\",\"high\":\"HIGH\"}}";
+/* Anthropic's effort ladder starts at 'low' and has no 'off' (current models
+ * always think), so 'off' clamps up to 'minimal'. Its xhigh/max sit above our
+ * ladder — a model row's own effort_map can point 'high' at one of them. */
+static const char EFFORT_DEFAULT_ANTHROPIC[] =
+    "{\"format\":\"anthropic\",\"levels\":{\"minimal\":\"low\","
+    "\"low\":\"low\",\"medium\":\"medium\",\"high\":\"high\"}}";
 
 /* The JSON object to merge into the request body for this route's effort
  * level, or NULL when nothing should be sent (no level set, or the model
@@ -425,8 +593,10 @@ char *llm_effort_fragment(sqlite3 *db, const ProviderConfig *prov) {
     if (prov->model_id) sqlite3_bind_text(s, 1, prov->model_id, -1, SQLITE_STATIC);
     else sqlite3_bind_null(s, 1);
     sqlite3_bind_text(s, 2, prov->reasoning_effort, -1, SQLITE_STATIC);
-    sqlite3_bind_text(s, 3, prov->endpoint_type == ENDPOINT_GEMINI
-                              ? EFFORT_DEFAULT_GEMINI : EFFORT_DEFAULT_OPENAI,
+    sqlite3_bind_text(s, 3,
+                      prov->endpoint_type == ENDPOINT_GEMINI    ? EFFORT_DEFAULT_GEMINI
+                    : prov->endpoint_type == ENDPOINT_ANTHROPIC ? EFFORT_DEFAULT_ANTHROPIC
+                    : EFFORT_DEFAULT_OPENAI,
                       -1, SQLITE_STATIC);
     char *r = NULL;
     if (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_type(s, 0) != SQLITE_NULL) {
@@ -744,14 +914,19 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
             return -1;
         }
     } else {
-        char *messages = query_text(db, SQL_OPENAI_MESSAGES, session_id, context_text,
-                                    replay_model);
+        /* OpenAI and Anthropic share one parameter list; only the SQL differs. */
+        int anthropic = (cfg->provider.endpoint_type == ENDPOINT_ANTHROPIC);
+        char *messages = query_text(db, anthropic ? SQL_ANTHROPIC_MESSAGES
+                                                  : SQL_OPENAI_MESSAGES,
+                                    session_id, context_text, replay_model);
         if (!messages) messages = strdup("[]");
-        char *tools_json = query_tools(db, SQL_OPENAI_TOOLS, agent_name,
-                                       allowed_tools, worker_tools);
+        char *tools_json = query_tools(db, anthropic ? SQL_ANTHROPIC_TOOLS
+                                                     : SQL_OPENAI_TOOLS,
+                                       agent_name, allowed_tools, worker_tools);
 
         sqlite3_stmt *full;
-        if (sqlite3_prepare_v2(db, SQL_OPENAI_FULL, -1, &full, NULL) != SQLITE_OK) {
+        if (sqlite3_prepare_v2(db, anthropic ? SQL_ANTHROPIC_FULL : SQL_OPENAI_FULL,
+                               -1, &full, NULL) != SQLITE_OK) {
             free(messages); free(tools_json);
             free(agent_name); free(allowed_tools); free(suffix); free(worker_tools); free(effort);
             return -1;
@@ -769,6 +944,8 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         if (cfg->provider.name) sqlite3_bind_text(full, 7, cfg->provider.name, -1, SQLITE_TRANSIENT);
         else sqlite3_bind_null(full, 7);
         sqlite3_bind_text(full, 8, effort ? effort : "{}", -1, SQLITE_TRANSIENT);
+        if (anthropic && cfg->provider.model_id)
+            sqlite3_bind_text(full, 9, cfg->provider.model_id, -1, SQLITE_STATIC);
 
         free(messages); free(tools_json);
 

@@ -75,12 +75,6 @@ Gemini generateContent (`endpoint_type` in `llm_proc.c`).
   sessions over slow links (Pogoplug class). Needs a per-session sync cursor
   column back (the v32-dropped `last_synced_entry_id`, reborn with an actual
   reader), plus desync/expiry handling (cursor invalid → full resend).
-- **Anthropic Messages API** (native `endpoint_type`): we won't support
-  Anthropic's OpenAI-compat `/v1/chat/completions` layer (explicitly
-  non-production: no prompt caching, `strict`/`response_format` silently
-  ignored, system-message hoisting, no thinking output). Native Messages is
-  the only path; once that adapter lands, an `anthropic` provider row
-  (`ANTHROPIC_API_KEY`) joins seed.sql.
 - **OAuth provider auth**: the reference projects authenticate several
   providers via OAuth rather than static keys — Hermes: Nous Portal
   (device-code flow), OpenAI Codex / xAI / Qwen (external redirect),
@@ -90,8 +84,8 @@ Gemini generateContent (`endpoint_type` in `llm_proc.c`).
   supports device-based auth. Token refresh belongs in the credential
   layer next to `db_secret_get_system`, not in per-provider C.
 - Related: **reasoning replay** (TODO.md) — replaying stored `reasoning`
-  entries in tool loops (DeepSeek R1 `reasoning_content`, Anthropic thinking
-  blocks) belongs in `llm_payload.c` as a per-model capability flag.
+  entries in tool loops (DeepSeek R1 `reasoning_content`; Anthropic thinking
+  blocks are done) belongs in `llm_payload.c` as a per-model capability flag.
 
 ## Search & Long-term Memory
 

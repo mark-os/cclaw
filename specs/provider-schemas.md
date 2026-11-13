@@ -380,7 +380,11 @@ cacheWrite = 0  (automatic caching, no write metric)
 
 ## 3. Anthropic Messages
 
-Not implemented in CClaw. Reference only.
+Implemented (`endpoint_type='anthropic'`) — what CClaw actually sends, and why,
+is in [providers.md](providers.md#anthropic-messages). This section is the
+wire reference it was built from; the request example predates the current
+API version (`anthropic-version: 2026-10-21`, adaptive thinking only on
+current models, no `stream`).
 
 Used by: Anthropic direct, AWS Bedrock (via proxy), Fireworks (Anthropic-compat).
 
@@ -557,14 +561,17 @@ total = input + output + cacheRead + cacheWrite  (computed)
   available at 2× base cost for infrequent requests.
 - **Top-level `system` field is cached prefix**: Changing it invalidates
   the entire cache for everything that follows.
-- **No system role in `messages[]`, at any tier**: Anthropic's Messages API
-  has only `user` and `assistant` roles; system content lives exclusively in
-  the top-level `system` field. Mid-conversation system instructions must be
-  carried as user-role content (CClaw's `'[system] '` prefix convention).
+- **System role in `messages[]` is model-dependent**: older models accept only
+  `user` and `assistant` there; some current ones (Sonnet 5.5, Opus 4.8+) also
+  take an appended `role: "system"` message. CClaw does not use it — one
+  convention for every provider and model: mid-conversation system content
+  rides as user-role content with the `'[system] '` prefix.
 - **Cache hash order**: tools → system → messages (prefix-based, like OpenAI).
-- **Implication for CClaw** (if a native Anthropic builder is added): add the
-  top-level `"cache_control": {"type": "ephemeral"}`. The payload builder
-  already produces a deterministic prefix, so no per-block markers are needed.
+- **Implication for CClaw**: the top-level marker alone is not enough. The
+  prefix is deterministic *within* a turn, but the session context block moves
+  at each turn boundary, so everything after its old position stops matching.
+  The builder adds explicit markers at the stable-prefix boundary — see
+  [providers.md](providers.md#anthropic-messages).
 
 ---
 
@@ -576,7 +583,8 @@ JSON1. The streaming sections above are wire reference only. jsmn is not used
 on this path: the "one JSON parser where a db handle exists" rule applies
 (AGENTS.md).
 
-The request body is the output of a SQL query in `src/llm_payload.c`, with two
-builders: OpenAI-compat and Gemini-native. CClaw sends `max_tokens` on the
-OpenAI-compat path. CClaw sends no `cache_control` markers; it relies on
-implicit prefix caching. Anthropic-native (section 3) is not implemented.
+The request body is the output of a SQL query in `src/llm_payload.c`, with
+three builders: OpenAI-compat, Gemini-native and Anthropic Messages. CClaw
+sends `max_tokens` on the OpenAI-compat and Anthropic paths. Only the
+Anthropic builder sends `cache_control` markers (its caching is opt-in); the
+other two rely on implicit prefix caching.

@@ -77,7 +77,8 @@ everything:
   on failure; actively-degraded models are sidelined but the walk is never
   emptied; success/failure feeds the same health counters as turn traffic.
 - **Body in SQL**: one prepared statement per wire format (OpenAI chat /
-  native Gemini `generateContent`), llm_payload.c style. Merge order:
+  native Gemini `generateContent` / Anthropic Messages, which takes no
+  `temperature` and defaults `max_tokens` to 16000), llm_payload.c style. Merge order:
   cclaw-built fields ← provider `request_extra` + effort fragment ← caller
   `opts.extra` (caller wins). RFC-7386 `json_patch` null-removal is what
   makes optional fields disappear.

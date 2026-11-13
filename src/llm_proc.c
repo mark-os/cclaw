@@ -113,7 +113,7 @@ static int load_candidates(sqlite3 *db, const char *agent_name,
         v = (const char *)sqlite3_column_text(s, 2); snprintf(c->base_url, sizeof(c->base_url), "%s", v ? v : "");
         v = (const char *)sqlite3_column_text(s, 3); snprintf(c->api_key_env, sizeof(c->api_key_env), "%s", v ? v : "");
         v = (const char *)sqlite3_column_text(s, 4);
-        c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
+        c->endpoint_type = endpoint_type_parse(v);
         c->context_window = sqlite3_column_int(s, 5);
         if (c->context_window <= 0) c->context_window = 128000;
         v = (const char *)sqlite3_column_text(s, 6);
@@ -162,7 +162,7 @@ int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, 
         v = (const char *)sqlite3_column_text(s, 2); snprintf(c->base_url, sizeof(c->base_url), "%s", v ? v : "");
         v = (const char *)sqlite3_column_text(s, 3); snprintf(c->api_key_env, sizeof(c->api_key_env), "%s", v ? v : "");
         v = (const char *)sqlite3_column_text(s, 4);
-        c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
+        c->endpoint_type = endpoint_type_parse(v);
         c->context_window = sqlite3_column_int(s, 5);
         if (c->context_window <= 0) c->context_window = 128000;
         v = (const char *)sqlite3_column_text(s, 6);
@@ -348,6 +348,9 @@ static char *probe_build_body(sqlite3 *db, EndpointType ep, const char *model) {
         ? "SELECT json_object('contents', json_array(json_object("
           "  'role','user','parts', json_array(json_object('text','ping')))),"
           " 'generationConfig', json_object('maxOutputTokens', 1))"
+        /* Anthropic and OpenAI agree on this much: model, messages, and a
+         * max_tokens of 1 (an always-thinking Claude answers it with an empty
+         * content array and stop_reason max_tokens — still a 200). */
         : "SELECT json_object('model', ?1, 'messages',"
           " json_array(json_object('role','user','content','ping')),"
           " 'max_tokens', 1)";
@@ -416,7 +419,8 @@ int llm_probe_agent(sqlite3 *db, const char *agent_name, int64_t session_id,
         goto done;
     }
 
-    const char *headers[] = { "Content-Type: application/json", auth, NULL };
+    const char *headers[LLM_HEADERS_MAX];
+    llm_build_headers(&pcfg, auth, NULL, headers);
     HttpResponse resp = {0};
     int probe_timeout = (int)config_get_int(db, "llm_probe_timeout");
     if (probe_timeout <= 0) probe_timeout = LLM_PROBE_TIMEOUT_SEC;
@@ -513,7 +517,8 @@ static int llm_attempt(sqlite3 *db, ModelCandidate *m, const char *body,
     char *auth = llm_build_auth_header(&c);
     int status = LLM_ATTEMPT_UNBUILDABLE;
     if (body && url && auth) {
-        const char *headers[] = { "Content-Type: application/json", auth, NULL };
+        const char *headers[LLM_HEADERS_MAX];
+        llm_build_headers(&c, auth, NULL, headers);
         HttpRequestOpts opts = {
             .url = url, .method = "POST", .headers = headers, .body = body,
             .timeout = timeout, .curl_handle = curl,
@@ -654,15 +659,40 @@ static const char *SQL_JSBODY_GEMINI =
     "  json(?4)),"
     "  COALESCE(json_extract(?3,'$.extra'), '{}'))";
 
-/* Completion text out of either format's 2xx body: openai
- * choices[0].message.content, else gemini parts joined with newlines
- * (grounded responses arrive as several parts). */
-static const char *SQL_JSBODY_TEXT =
+/* Anthropic: system is a top-level string, max_tokens is mandatory (and pays
+ * for thinking too, hence the generous default), and sampling parameters are
+ * rejected outright on this API version — opts.temperature is not forwarded. */
+static const char *SQL_JSBODY_ANTHROPIC =
+    "SELECT json_patch(json_patch(json_patch("
+    "  json_object('model', ?1,"
+    "    'max_tokens', COALESCE(json_extract(?3,'$.max_tokens'), 16000),"
+    "    'messages',"
+    "    (SELECT json_group_array(json_object("
+    "       'role', CASE json_extract(value,'$.role')"
+    "                 WHEN 'assistant' THEN 'assistant' ELSE 'user' END,"
+    "       'content', json_extract(value,'$.content')))"
+    "     FROM json_each(?2)"
+    "     WHERE json_extract(value,'$.role') <> 'system')),"
+    "  json_object('system',"
+    "    (SELECT group_concat(json_extract(value,'$.content'), char(10) || char(10))"
+    "     FROM json_each(?2)"
+    "     WHERE json_extract(value,'$.role') = 'system'))),"
+    "  json(?4)),"
+    "  COALESCE(json_extract(?3,'$.extra'), '{}'))";
+
+/* The assistant text of a 2xx body, whichever wire format produced it: openai
+ * choices[0].message.content, gemini parts joined with newlines (grounded
+ * responses arrive as several parts), anthropic text blocks likewise. Shared
+ * by the LLM() bridge, compaction and media transcription. */
+static const char *SQL_RESPONSE_TEXT =
     "SELECT COALESCE("
     "  json_extract(?1,'$.choices[0].message.content'),"
     "  (SELECT group_concat(json_extract(value,'$.text'), char(10))"
     "   FROM json_each(?1,'$.candidates[0].content.parts')"
-    "   WHERE json_extract(value,'$.text') IS NOT NULL))"
+    "   WHERE json_extract(value,'$.text') IS NOT NULL),"
+    "  (SELECT group_concat(json_extract(value,'$.text'), char(10))"
+    "   FROM json_each(?1,'$.content')"
+    "   WHERE json_extract(value,'$.type') = 'text'))"
     " WHERE json_valid(?1)";
 
 /* One-column one-row SELECT → malloc'd text (NULL when no row/NULL). */
@@ -813,8 +843,10 @@ char *llm_request(sqlite3 *db, const char *agent_name,
         }
         const char *bb[] = { m->model, messages, opts,
                              cand_extra ? cand_extra : "{}" };
-        char *body = sql_text(db, m->endpoint_type == ENDPOINT_GEMINI
-                                    ? SQL_JSBODY_GEMINI : SQL_JSBODY_OPENAI,
+        char *body = sql_text(db,
+                              m->endpoint_type == ENDPOINT_GEMINI    ? SQL_JSBODY_GEMINI
+                            : m->endpoint_type == ENDPOINT_ANTHROPIC ? SQL_JSBODY_ANTHROPIC
+                            : SQL_JSBODY_OPENAI,
                               bb, 4);
         char *kept = NULL;
         if (archived) {
@@ -837,7 +869,7 @@ char *llm_request(sqlite3 *db, const char *agent_name,
                             fails.len ? "; " : "", m->id);
             } else if (status >= 200 && status < 300 && resp.data) {
                 const char *tb[] = { resp.data };
-                char *text = sql_text(db, SQL_JSBODY_TEXT, tb, 1);
+                char *text = sql_text(db, SQL_RESPONSE_TEXT, tb, 1);
                 if (text && text[0]) {
                     char sid[32];
                     snprintf(sid, sizeof(sid), "%d", status);
@@ -1111,7 +1143,8 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
         char session_hdr[64];
         snprintf(session_hdr, sizeof(session_hdr), "x-session-id: cclaw-%lld", (long long)session_id);
-        const char *headers[] = { "Content-Type: application/json", auth, session_hdr, NULL };
+        const char *headers[LLM_HEADERS_MAX];
+        llm_build_headers(&route_cfg, auth, session_hdr, headers);
 
         /* One attempt. Classification (specs/error-handling.md):
          *   transient (E1/E2/E3/E4/E6/E10) -> count toward the model's
@@ -1341,25 +1374,12 @@ err:
 
 /* ── Compaction: LLM-driven session summarization ─────────────── */
 
-/* Pull the assistant text out of a response body (OpenAI or Gemini).
+/* Pull the assistant text out of a response body, any wire format.
  * Returns a malloc'd string the caller frees, or NULL if absent. */
-static char *extract_content(sqlite3 *db, EndpointType ep, const char *body) {
+static char *extract_content(sqlite3 *db, const char *body) {
     if (!body) return NULL;
-    const char *sql = (ep == ENDPOINT_GEMINI)
-        ? "SELECT group_concat(json_extract(value,'$.text'), char(10))"
-          " FROM json_each(?1,'$.candidates[0].content.parts')"
-          " WHERE json_extract(value,'$.text') IS NOT NULL"
-        : "SELECT json_extract(?1,'$.choices[0].message.content')";
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_text(s, 1, body, -1, SQLITE_STATIC);
-    char *r = NULL;
-    if (sqlite3_step(s) == SQLITE_ROW) {
-        const char *t = (const char *)sqlite3_column_text(s, 0);
-        if (t) r = strdup(t);
-    }
-    sqlite3_finalize(s);
-    return r;
+    const char *binds[] = { body };
+    return sql_text(db, SQL_RESPONSE_TEXT, binds, 1);
 }
 
 /* The mechanical carry-over (E2): the commitments a prose summary is most
@@ -1515,8 +1535,9 @@ static int compaction_attempt(sqlite3 *db, CURL *curl, int64_t session_id,
      * would then fail silently forever while the session kept growing.
      * extract_content() is already endpoint-aware; this is the request half
      * of the same split (same pattern as media_build_body). */
-    int gemini = (cfg->provider.endpoint_type == ENDPOINT_GEMINI);
-    /* ?1 model (OpenAI only — Gemini takes the model in the URL),
+    EndpointType ep = cfg->provider.endpoint_type;
+    int gemini = (ep == ENDPOINT_GEMINI);
+    /* ?1 model (not Gemini — it takes the model in the URL),
      * ?2 max tokens, ?3 system prompt, ?4 excerpt */
     const char *csql = gemini
         ? "SELECT json_object("
@@ -1524,6 +1545,11 @@ static int compaction_attempt(sqlite3 *db, CURL *curl, int64_t session_id,
           "  'contents', json_array(json_object('role','user',"
           "    'parts', json_array(json_object('text',?4)))),"
           "  'generationConfig', json_object('maxOutputTokens',?2));"
+        : ep == ENDPOINT_ANTHROPIC
+        /* max_tokens also pays for thinking here, which the current models
+         * cannot switch off — ?2 alone would truncate the summary itself. */
+        ? "SELECT json_object('model',?1,'max_tokens',?2+4096,'system',?3,"
+          "'messages',json_array(json_object('role','user','content',?4)));"
         : "SELECT json_object('model',?1,'max_tokens',?2,'messages',json_array("
           "json_object('role','system','content',?3),"
           "json_object('role','user','content',?4)));";
@@ -1561,7 +1587,8 @@ static int compaction_attempt(sqlite3 *db, CURL *curl, int64_t session_id,
         return -1;
     }
 
-    const char *headers[] = { "Content-Type: application/json", auth, NULL };
+    const char *headers[LLM_HEADERS_MAX];
+    llm_build_headers(cfg, auth, NULL, headers);
 
     HttpResponse resp = {0};
     HttpRequestOpts opts = {
@@ -1586,7 +1613,7 @@ static int compaction_attempt(sqlite3 *db, CURL *curl, int64_t session_id,
     }
 
     /* Extract the summary text from the response body */
-    char *summary = extract_content(db, cfg->provider.endpoint_type, resp.data);
+    char *summary = extract_content(db, resp.data);
     http_response_free(&resp);
 
     if (!summary) {
@@ -1770,7 +1797,19 @@ char *transcribe_build_body(sqlite3 *db, EndpointType ep, const char *model,
               "    json_object('text', ?1),"
               "    json_object('inlineData', json_object("
               "      'mimeType', ?2, 'data', ?3))))))";
-    else if (is_image)
+    else if (ep == ENDPOINT_ANTHROPIC && is_image)
+        sql = "SELECT json_object('model', ?4, 'max_tokens', 16000,"
+              " 'messages', json_array(json_object("
+              "  'role','user','content', json_array("
+              "    json_object('type','image','source', json_object("
+              "      'type','base64','media_type', ?2, 'data', ?3)),"
+              "    json_object('type','text','text', ?1)))))";
+    else if (ep == ENDPOINT_ANTHROPIC) {
+        /* The Messages API takes no audio input. No body = this candidate is
+         * unbuildable, and the caller moves on to the next capable model. */
+        free(b64);
+        return NULL;
+    } else if (is_image)
         sql = "SELECT json_object('model', ?4, 'messages', json_array(json_object("
               "  'role','user','content', json_array("
               "    json_object('type','text','text', ?1),"
@@ -1912,8 +1951,7 @@ int llm_transcribe(sqlite3 *db, CURL *curl, int64_t job_id) {
             }
 
             if (status >= 200 && status < 300) {
-                transcript = extract_content(db, (EndpointType)m->endpoint_type,
-                                             resp.data);
+                transcript = extract_content(db, resp.data);
                 http_response_free(&resp);
                 if (transcript && !transcript[0]) { free(transcript); transcript = NULL; }
                 if (transcript) {

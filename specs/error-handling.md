@@ -103,6 +103,10 @@ failure, a failed cron script, and a failed turn on an `explicit` chat.
 | an admin chat | the operator destination (often this same chat) | nothing more |
 | a non-admin chat | the operator destination | the generic line |
 
+A "model not available" error (E12) carries one extra line in the operator's
+copy, pointing at `/admin`: the agent that would normally be asked to switch
+models is the one that cannot answer.
+
 If the channel has neither `admin_chats` nor `admin_ids`, there is no operator
 to send the error to. The error stays in the log and in `entries`, a WARN line
 says so, and the chat still gets the generic line.

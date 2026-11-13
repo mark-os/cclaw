@@ -619,6 +619,24 @@ static void test_error_goes_to_operator(void) {
     assert(scalar(db, to_admin, d) == 1);
     assert(scalar(db, to_chat, d) == 0);
 
+    /* A retired model: the operator's copy points at the dashboard, and the
+     * hint does not defeat the repeat check. */
+    const char *hinted =
+        "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1"
+        " AND json_extract(payload,'$.text') LIKE 'error: model not available"
+        " [resp #%' || char(10) || '/admin opens the dashboard to switch models.';";
+    sqlite3_exec(db, "UPDATE inbox SET created_at = created_at - 10;",
+                 NULL, NULL, NULL);
+    inbox_insert(db, d, "discord", NULL, "hi again");
+    run_failed_turn(db, d, "error: model not available [resp #20]");
+    assert(scalar(db, hinted, d) == 1);
+    sqlite3_exec(db, "UPDATE inbox SET created_at = created_at - 10;",
+                 NULL, NULL, NULL);
+    inbox_insert(db, d, "cron", NULL, "tick");
+    run_failed_turn(db, d, "error: model not available [resp #21]");
+    assert(scalar(db, hinted, d) == 1);
+    assert(scalar(db, to_chat, d) == 0);
+
     /* Not recorded yet (no message since the column existed): a chat whose
      * id is an admin id is an admin chat; any other is not. */
     int64_t t1 = session_create(db, "tg-admin", "default", -1, 0);

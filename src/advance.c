@@ -343,13 +343,19 @@ static void error_notify(sqlite3 *db, const char *channel, int64_t session_id,
     if (!admin_chat) chat_error_line(db, channel, session_id, chat_id);
     /* The operator's copy is queued last, so it is the session's newest
      * outbox row — the one error_is_repeat reads. */
-    size_t cap = strlen(text) + 96;
-    char *full = malloc(cap);
+    /* A retired model (E12) is fixed by configuration, not by waiting, and
+     * the agent that would be asked to fix it is the one that cannot answer:
+     * point at the one surface that still works. */
+    static const char gone[] = "error: model not available";
+    const char *hint = strncmp(text, gone, sizeof(gone) - 1) == 0
+        ? "\n/admin opens the dashboard to switch models." : "";
     char *agent = db_scalar_text(db,
         "SELECT agent_name FROM sessions WHERE id=?1;", session_id);
+    size_t cap = strlen(text) + strlen(hint) + (agent ? strlen(agent) : 1) + 64;
+    char *full = malloc(cap);
     if (full) {
-        snprintf(full, cap, "%s (agent %s, session #%lld)", text,
-                 agent ? agent : "?", (long long)session_id);
+        snprintf(full, cap, "%s (agent %s, session #%lld)%s", text,
+                 agent ? agent : "?", (long long)session_id, hint);
         if (channel_operator_queue(db, channel, session_id, full) == 0)
             LOG_WARN_("advance error not delivered: channel %s has no"
                       " admin_chats or admin_ids session=%lld", channel,

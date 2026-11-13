@@ -376,6 +376,20 @@ static void test_channel_events_admin_is_sender(void) {
     int64_t sid = test_session_find(db, "dsc", "dm_1", "Assistant");
     assert(sid > 0);
     assert(test_inbox_count(db, sid) == 1);
+    /* ...and the chat is recorded as an admin's own: a DM with an admin. */
+    assert(test_scalar_count(db,
+        "SELECT chat_is_admin FROM sessions WHERE chat_id='dm_1';") == 1);
+    /* The same admin speaking in a group: other people read it, so not. */
+    test_event_insert(db, "dsc", "message",
+        "{\"chat_id\":\"grp_1\",\"text\":\"hi all\",\"sender_id\":\"u_admin\","
+        "\"sender_name\":\"Op\",\"chat_type\":\"group\"}");
+    channel_consume_events(db);
+    assert(test_session_find(db, "dsc", "grp_1", "Assistant") > 0);
+    assert(test_scalar_count(db,
+        "SELECT chat_is_admin FROM sessions WHERE chat_id='grp_1';") == 0);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM sessions WHERE chat_id='grp_1'"
+        " AND chat_is_admin IS NULL;") == 0);
 
     /* Inverse (positive control for the denial): a stranger speaking in a
      * chat whose id equals the admin's user id gets no authority. */

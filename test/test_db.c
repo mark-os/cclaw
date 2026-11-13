@@ -633,7 +633,7 @@ static void test_schema_patch_v47(void) {
         "ALTER TABLE llm_responses DROP COLUMN cost;"
         "ALTER TABLE providers DROP COLUMN request_extra;"
         "ALTER TABLE llm_responses DROP COLUMN upstream_provider;"
-        "ALTER TABLE sessions DROP COLUMN chat_type;"
+        "ALTER TABLE sessions DROP COLUMN chat_is_admin;"
         "ALTER TABLE sessions DROP COLUMN chat_error_notice_at;"
         "ALTER TABLE agent_models DROP COLUMN reasoning_effort;"
         "ALTER TABLE models DROP COLUMN effort_map;"
@@ -716,7 +716,7 @@ static void test_schema_patch_v48(void) {
     assert(sqlite3_exec(db,
         "ALTER TABLE entries DROP COLUMN reasoning_meta;"
         /* v49/v50/v51 sit above this step: shed their columns too. */
-        "ALTER TABLE sessions DROP COLUMN chat_type;"
+        "ALTER TABLE sessions DROP COLUMN chat_is_admin;"
         "ALTER TABLE sessions DROP COLUMN chat_error_notice_at;"
         "ALTER TABLE agent_models DROP COLUMN reasoning_effort;"
         "ALTER TABLE models DROP COLUMN effort_map;"
@@ -759,7 +759,7 @@ static void test_schema_patch_v50(void) {
         "ALTER TABLE providers DROP COLUMN request_extra;"
         "ALTER TABLE llm_responses DROP COLUMN upstream_provider;"
         /* v51 sits above this step: shed its columns too. */
-        "ALTER TABLE sessions DROP COLUMN chat_type;"
+        "ALTER TABLE sessions DROP COLUMN chat_is_admin;"
         "ALTER TABLE sessions DROP COLUMN chat_error_notice_at;"
         "ALTER TABLE agent_models DROP COLUMN reasoning_effort;"
         "ALTER TABLE models DROP COLUMN effort_map;"
@@ -799,7 +799,7 @@ static void test_schema_patch_v51(void) {
     assert(db != NULL);
 
     assert(sqlite3_exec(db,
-        "ALTER TABLE sessions DROP COLUMN chat_type;"
+        "ALTER TABLE sessions DROP COLUMN chat_is_admin;"
         "ALTER TABLE sessions DROP COLUMN chat_error_notice_at;"
         "ALTER TABLE agent_models DROP COLUMN reasoning_effort;"
         "ALTER TABLE models DROP COLUMN effort_map;"

@@ -1013,16 +1013,21 @@ void channel_consume_events(sqlite3 *db) {
             {
                 sqlite3_stmt *ts;
                 if (sqlite3_prepare_v2(db,
-                        /* chat_type rides the same envelope ('dm' | 'group'). */
+                        /* chat_is_admin rides along: a DM whose other party
+                         * is one of the channel's admins. In a group other
+                         * people read the chat, so it is never an admin chat,
+                         * whoever is speaking. */
                         "UPDATE sessions SET"
                         "  chat_title=COALESCE(json_extract(?2,'$.chat_title'), chat_title),"
-                        "  chat_type=COALESCE(json_extract(?2,'$.chat_type'), chat_type)"
+                        "  chat_is_admin=(?3 AND COALESCE(json_extract(?2,'$.chat_type'),'dm')='dm')"
                         " WHERE id=?1"
                         "   AND (chat_title IS NOT COALESCE(json_extract(?2,'$.chat_title'), chat_title)"
-                        "     OR chat_type IS NOT COALESCE(json_extract(?2,'$.chat_type'), chat_type))",
+                        "     OR chat_is_admin IS NOT"
+                        "        (?3 AND COALESCE(json_extract(?2,'$.chat_type'),'dm')='dm'))",
                         -1, &ts, NULL) == SQLITE_OK) {
                     sqlite3_bind_int64(ts, 1, sid);
                     sqlite3_bind_text(ts, 2, payload, -1, SQLITE_STATIC);
+                    sqlite3_bind_int(ts, 3, channel_id_is_admin(db, ch_name, sender));
                     sqlite3_step(ts);
                     sqlite3_finalize(ts);
                 }

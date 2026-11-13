@@ -701,11 +701,11 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "  decided_via TEXT NOT NULL,"
       "  created_at  INTEGER NOT NULL DEFAULT (unixepoch()));",
       NULL },
-    /* v55: what kind of chat a session is bound to, and when that chat last
-     * got the generic "can't respond" line — a failed turn in a group sends
-     * the specific error to the operator, not to the group. */
+    /* v55: whether a session's chat is an operator's own, and when the chat
+     * last got the generic "can't respond" line — a failed turn sends the
+     * specific error to the operator and never to a non-admin chat. */
     { 55,
-      "ALTER TABLE sessions ADD COLUMN chat_type TEXT;"
+      "ALTER TABLE sessions ADD COLUMN chat_is_admin INTEGER;"
       "ALTER TABLE sessions ADD COLUMN chat_error_notice_at INTEGER;",
       NULL },
 };

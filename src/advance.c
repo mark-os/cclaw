@@ -286,12 +286,12 @@ static int error_is_repeat(sqlite3 *db, const char *channel, int64_t session_id,
     return dup;
 }
 
-/* The generic line a group gets when a turn fails: at most once per
- * group_error_notice_hours for the chat — counted per chat, across its
+/* The generic line a non-admin chat gets when a turn fails: at most once per
+ * chat_error_notice_hours for the chat — counted per chat, across its
  * sessions, and kept on the session row because outbox rows are pruned. */
-static void group_error_line(sqlite3 *db, const char *channel, int64_t session_id,
-                             const char *chat_id) {
-    int hours = config_get_int(db, "group_error_notice_hours");
+static void chat_error_line(sqlite3 *db, const char *channel, int64_t session_id,
+                            const char *chat_id) {
+    int hours = config_get_int(db, "chat_error_notice_hours");
     if (hours <= 0) return;
     sqlite3_stmt *st;
     int due = 0;
@@ -306,7 +306,7 @@ static void group_error_line(sqlite3 *db, const char *channel, int64_t session_i
         sqlite3_finalize(st);
     }
     if (!due) return;
-    char *line = config_get(db, "group_error_text");
+    char *line = config_get(db, "chat_error_text");
     if (line && line[0]) {
         outbox_to_chat(db, channel, session_id, chat_id, line);
         if (sqlite3_prepare_v2(db,
@@ -320,30 +320,34 @@ static void group_error_line(sqlite3 *db, const char *channel, int64_t session_i
     free(line);
 }
 
-/* A turn ended in an error. Who hears what:
- *   - The error text is for the operator. It goes to the channel's admins
- *     (channel_notify_operator). With no admins configured, a DM is taken to
- *     be the operator's own chat and gets it; a group does not.
- *   - A group never sees error text. It gets the generic line, rate-limited.
- * A chat whose type is not known yet (no message since the column existed)
- * is treated as a DM. */
+/* A turn ended in an error. The one distinction is who reads the chat:
+ *   - The error text is for the operator. It goes to the channel's admins as
+ *     a direct message (channel_notify_operator) and to nobody else. For an
+ *     admin's own chat that is the same place the question came from.
+ *   - Any other chat — a group, a DM with a non-admin — gets the generic
+ *     line, rate-limited, and never the error text.
+ * An admin chat is sessions.chat_is_admin, recorded from the last message.
+ * Before a message has recorded it, a chat whose id is itself an admin id
+ * (a Telegram DM) counts; anything else does not. */
 static void error_notify(sqlite3 *db, const char *channel, int64_t session_id,
                          const char *chat_id, const char *text) {
     if (error_is_repeat(db, channel, session_id, text)) return;
 
-    char *type = db_scalar_text(db, "SELECT chat_type FROM sessions WHERE id=?1;",
-                                session_id);
-    int group = type && strcmp(type, "group") == 0;
-    free(type);
-    char *admins = channel_config_get(db, channel, "admin_ids");
-    int has_admins = admins && admins[strspn(admins, " ,")] != '\0';
-    free(admins);
+    int64_t flag = db_scalar_i64(db,
+        "SELECT COALESCE(chat_is_admin, -1) FROM sessions WHERE id=?1;", session_id, -1);
+    int admin_chat = flag >= 0 ? flag == 1
+                               : channel_id_is_admin(db, channel, chat_id);
 
-    if (group) group_error_line(db, channel, session_id, chat_id);
+    if (!admin_chat) chat_error_line(db, channel, session_id, chat_id);
     /* The operator's copy is queued last, so it is the session's newest
      * outbox row — the one error_is_repeat reads. */
-    if (has_admins) channel_notify_operator(db, NULL, session_id, text);
-    else if (!group) outbox_to_chat(db, channel, session_id, chat_id, text);
+    char *admins = channel_config_get(db, channel, "admin_ids");
+    if (admins && admins[strspn(admins, " ,")] != '\0')
+        channel_notify_operator(db, NULL, session_id, text);
+    else
+        LOG_WARN_("advance error not delivered: channel %s has no admin_ids"
+                  " session=%lld", channel, (long long)session_id);
+    free(admins);
 }
 
 /* One outbox row toward the session's bound chat (deliver_response's shape).

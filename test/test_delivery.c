@@ -506,9 +506,9 @@ static void run_failed_turn(sqlite3 *db, int64_t sid, const char *err) {
     advance_session(db, sid, 25);
 }
 
-/* A failed turn: the error text goes to the operator (the channel's admins),
- * a group gets one generic line at most once per group_error_notice_hours
- * and never the error text. */
+/* A failed turn: the error text goes to the operator (the channel's admins)
+ * and nowhere else. A chat that is not an admin's own gets one generic line
+ * at most once per chat_error_notice_hours, and never the error text. */
 static void test_error_goes_to_operator(void) {
     sqlite3 *db = open_seeded();
     assert(sqlite3_exec(db,
@@ -526,20 +526,20 @@ static void test_error_goes_to_operator(void) {
         " AND json_extract(payload,'$.chat_id')='777'"
         " AND json_extract(payload,'$.to_user')=1"
         " AND json_extract(payload,'$.text') LIKE 'error: all models failed%';";
-    const char *leaks =         /* error text in the session's own chat */
-        "SELECT COUNT(*) FROM channel_outbox o JOIN sessions s ON s.id=o.session_id"
-        " WHERE o.session_id=?1 AND json_extract(o.payload,'$.chat_id')=s.chat_id"
-        " AND json_extract(o.payload,'$.to_user') IS NULL"
-        " AND json_extract(o.payload,'$.text') LIKE 'error:%';";
+    const char *leaks =         /* error text anywhere but the admins' DMs */
+        "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1"
+        " AND json_extract(payload,'$.to_user') IS NULL"
+        " AND json_extract(payload,'$.text') LIKE 'error:%';";
 
+    /* A group: not an admin chat, even when an admin is in it. */
     int64_t g = session_create(db, "grp", "default", -1, 0);
     assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
-                            " chat_id='g1', chat_type='group' WHERE name='grp';",
+                            " chat_id='g1', chat_is_admin=0 WHERE name='grp';",
                         NULL, NULL, NULL) == SQLITE_OK);
     inbox_insert(db, g, "discord", NULL, "alice: hi");
     run_failed_turn(db, g, "error: all models failed [resp #1]");
     assert(scalar(db, to_admin, g) == 1);        /* operator: the real error */
-    assert(scalar(db, to_chat, g) == 1);         /* group: the generic line */
+    assert(scalar(db, to_chat, g) == 1);         /* chat: the generic line */
     assert(scalar(db, leaks, g) == 0);           /* never the error text */
     char *line = db_scalar_text(db,
         "SELECT json_extract(payload,'$.text') FROM channel_outbox"
@@ -556,18 +556,18 @@ static void test_error_goes_to_operator(void) {
     run_failed_turn(db, g, "error: all models failed [resp #2]");
     assert(scalar(db, to_admin, g) == 1);
 
-    /* After a human message: the operator hears again, the group does not —
+    /* After a human message: the operator hears again, the chat does not —
      * it is still inside its day. */
     inbox_insert(db, g, "discord", NULL, "bob: hello?");
     run_failed_turn(db, g, "error: all models failed [resp #3]");
     assert(scalar(db, to_admin, g) == 2);
     assert(scalar(db, to_chat, g) == 1);
 
-    /* The limit is per chat: a new session in the same group is inside it
-     * too. A day later the group hears once more. */
+    /* The limit is per chat: a new session in the same chat is inside it
+     * too. A day later the chat hears once more. */
     int64_t g2 = session_create(db, "grp2", "default", -1, 0);
     assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
-                            " chat_id='g1', chat_type='group' WHERE name='grp2';",
+                            " chat_id='g1', chat_is_admin=0 WHERE name='grp2';",
                         NULL, NULL, NULL) == SQLITE_OK);
     inbox_insert(db, g2, "discord", NULL, "carol: anyone?");
     run_failed_turn(db, g2, "error: all models failed [resp #4]");
@@ -581,13 +581,13 @@ static void test_error_goes_to_operator(void) {
     assert(scalar(db, to_chat, g2) == 1);
     assert(scalar(db, leaks, g2) == 0);
 
-    /* An explicit group never auto-ships an answer, but a failure still
-     * reaches the operator and the group still gets its line. */
+    /* An explicit chat never auto-ships an answer, but a failure still
+     * reaches the operator and the chat still gets its line. */
     int64_t x = session_create(db, "xgrp", "default", -1, 0);
     char rsql[320];
     snprintf(rsql, sizeof(rsql),
         "UPDATE sessions SET channel_name='discord', chat_id='g2',"
-        " chat_type='group' WHERE id=%lld;"
+        " chat_is_admin=0 WHERE id=%lld;"
         "INSERT INTO channel_routes(channel_name, chat_id, session_id,"
         " delivery_mode) VALUES('discord','g2',%lld,'explicit');",
         (long long)x, (long long)x);
@@ -598,27 +598,53 @@ static void test_error_goes_to_operator(void) {
     assert(scalar(db, to_chat, x) == 1);
     assert(scalar(db, leaks, x) == 0);
 
-    /* A DM on a channel with admins: the admins get it, the chat nothing. */
-    int64_t d = session_create(db, "dm", "default", -1, 0);
+    /* A DM with someone who is not an admin is treated like the group. */
+    int64_t u = session_create(db, "userdm", "default", -1, 0);
     assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
-                            " chat_id='d1', chat_type='dm' WHERE name='dm';",
+                            " chat_id='d-user', chat_is_admin=0 WHERE name='userdm';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    inbox_insert(db, u, "discord", NULL, "hi");
+    run_failed_turn(db, u, "error: all models failed [resp #7]");
+    assert(scalar(db, to_admin, u) == 1);
+    assert(scalar(db, to_chat, u) == 1);
+    assert(scalar(db, leaks, u) == 0);
+
+    /* An admin's own DM: the error as a direct message, no generic line. */
+    int64_t d = session_create(db, "admindm", "default", -1, 0);
+    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
+                            " chat_id='d-admin', chat_is_admin=1 WHERE name='admindm';",
                         NULL, NULL, NULL) == SQLITE_OK);
     inbox_insert(db, d, "discord", NULL, "hi");
-    run_failed_turn(db, d, "error: all models failed [resp #7]");
+    run_failed_turn(db, d, "error: all models failed [resp #8]");
     assert(scalar(db, to_admin, d) == 1);
     assert(scalar(db, to_chat, d) == 0);
 
-    /* No admins configured. A DM is taken to be the operator's own chat and
-     * gets the error text; a group gets its line and no error text. */
+    /* Not recorded yet (no message since the column existed): a chat whose
+     * id is an admin id is an admin chat; any other is not. */
+    int64_t t1 = session_create(db, "tg-admin", "default", -1, 0);
+    int64_t t2 = session_create(db, "tg-other", "default", -1, 0);
+    assert(sqlite3_exec(db,
+        "UPDATE sessions SET channel_name='discord', chat_id='777' WHERE name='tg-admin';"
+        "UPDATE sessions SET channel_name='discord', chat_id='555' WHERE name='tg-other';",
+        NULL, NULL, NULL) == SQLITE_OK);
+    inbox_insert(db, t1, "discord", NULL, "hi");
+    run_failed_turn(db, t1, "error: all models failed [resp #9]");
+    assert(scalar(db,
+        "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1;", t1) == 1);
+    assert(scalar(db, to_admin, t1) == 1);
+    inbox_insert(db, t2, "discord", NULL, "hi");
+    run_failed_turn(db, t2, "error: all models failed [resp #10]");
+    assert(scalar(db, to_admin, t2) == 1);
+    assert(scalar(db, to_chat, t2) == 1);
+
+    /* No admins configured: there is nobody to send the error to. The chat
+     * still gets its line and never the error text. */
     set_cfg(db, "discord.admin_ids", "");
     sqlite3_exec(db, "DELETE FROM channel_outbox;"
                      "UPDATE sessions SET chat_error_notice_at=NULL;",
                  NULL, NULL, NULL);
-    inbox_insert(db, d, "discord", NULL, "hi again");
-    run_failed_turn(db, d, "error: all models failed [resp #8]");
-    assert(scalar(db, leaks, d) == 1);
     inbox_insert(db, g, "discord", NULL, "alice: again");
-    run_failed_turn(db, g, "error: all models failed [resp #9]");
+    run_failed_turn(db, g, "error: all models failed [resp #11]");
     assert(scalar(db, to_chat, g) == 1);
     assert(scalar(db, leaks, g) == 0);
 

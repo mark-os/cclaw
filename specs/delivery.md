@@ -95,8 +95,8 @@ failed:`. `source='agent_result'`, `source_ref=<child sid>` as before.
 
 ## Edge cases that are rules
 
-- **A failed turn never ships its error text to a group**: the error text goes
-  to the operator, and a group gets a rate-limited generic line. The rule and
+- **A failed turn ships its error text to the operator only**: a chat that is
+  not an admin's own gets a rate-limited generic line. The rule and
   its table are in
   [error-handling.md](error-handling.md#a-turn-that-ends-in-an-error). An
   LLM-error boundary evaluates with channel edges suppressed (no answer

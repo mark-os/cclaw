@@ -74,24 +74,36 @@ system notice. It answers a message, and it goes to the session's chat.
 
 ### A turn that ends in an error
 
-The error text is for the operator. A group chat never gets it.
-`error_notify()` (advance.c) applies this rule to every failed turn: an LLM
+The error text is for the operator. No other reader gets it. The one
+distinction is who reads the chat, not what kind of chat it is.
+
+An **admin chat** is a chat whose only reader is an operator: a direct message
+whose other party is one of the channel's `admin_ids`. Every other chat is a
+**non-admin chat**: a group (even with an admin in it), and a direct message
+with anyone else.
+
+`error_notify()` (advance.c) applies the rule to every failed turn: an LLM
 failure, a failed cron script, and a failed turn on an `explicit` chat.
 
-| The chat is | The channel has `admin_ids` | The error text goes to | The chat gets |
-|-------------|-----------------------------|------------------------|---------------|
-| a group | yes | the admins, as a direct message | the generic line |
-| a group | no | nobody (it is in the log and in `entries`) | the generic line |
-| a DM | yes | the admins, as a direct message | nothing |
-| a DM | no | the chat (it is taken to be the operator's own) | the error text |
+| The chat is | The error text goes to | The chat gets |
+|-------------|------------------------|---------------|
+| an admin chat | the admins, as a direct message (for this admin, the same chat) | nothing more |
+| a non-admin chat | the admins, as a direct message | the generic line |
 
-The generic line is `group_error_text` (default "Sorry, I can't provide a
+If the channel has no `admin_ids`, there is no operator to send the error to.
+The error stays in the log and in `entries`, a WARN line says so, and the chat
+still gets the generic line.
+
+The generic line is `chat_error_text` (default "Sorry, I can't provide a
 response right now."). A chat gets it at most once per
-`group_error_notice_hours` (default 24; 0 = never). The limit is per chat, not
+`chat_error_notice_hours` (default 24; 0 = never). The limit is per chat, not
 per session: `sessions.chat_error_notice_at` holds the time, and the check
-takes the newest value over all sessions of the chat. The chat type comes from
-`sessions.chat_type`, which the channel runner reports with each message; a
-chat with no type yet is treated as a DM.
+takes the newest value over all sessions of the chat.
+
+`sessions.chat_is_admin` records which kind the chat is. The daemon sets it
+from each incoming message (`chat_type` is `dm` and `sender_id` is an admin).
+Until a message has set it, a chat whose id is itself an admin id counts as an
+admin chat (a Telegram DM); any other chat does not.
 
 Repeats are suppressed. If the newest outbox row of the session is the same
 error (compared up to the `[resp #N]` citation) and no human message arrived

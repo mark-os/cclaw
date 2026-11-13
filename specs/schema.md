@@ -436,8 +436,8 @@ channel-wide default lives on `channels.default_agent`.
 | `channel_name` | TEXT | originating channel |
 | `chat_id` | TEXT | originating chat id |
 | `chat_title` | TEXT | display name of the bound chat as observed by the channel runner (`#general @ My Server`, `DM with alice`); injected into the system prompt so the bot knows where it is chatting. Display only — sends always address by `chat_id`. NULL until a runner reports a name |
-| `chat_type` | TEXT | `dm` or `group`, as the channel runner reported it with the last message (v55). NULL until a message arrives. Decides who gets the error of a failed turn ([error-handling.md](error-handling.md#a-turn-that-ends-in-an-error)) |
-| `chat_error_notice_at` | INTEGER | Unix time this session last sent its chat the generic "can't respond" line (v55). The once-per-`group_error_notice_hours` limit reads the newest value over all sessions of the chat |
+| `chat_is_admin` | INTEGER | 1 = the chat's only reader is an operator (a DM whose other party is one of the channel's `admin_ids`); 0 = any other chat. Set from each incoming message (v55); NULL until one arrives. Decides whether a failed turn sends the chat the generic line ([error-handling.md](error-handling.md#a-turn-that-ends-in-an-error)) |
+| `chat_error_notice_at` | INTEGER | Unix time this session last sent its chat the generic "can't respond" line (v55). The once-per-`chat_error_notice_hours` limit reads the newest value over all sessions of the chat |
 | `parent_session_id` | INTEGER DEFAULT -1 | sub-agent parent (-1 = top-level) |
 | `parent_tool_call_id` | TEXT | the tool_call that spawned this sub-session |
 | `depth` | INTEGER NOT NULL DEFAULT 0 | sub-agent nesting depth |

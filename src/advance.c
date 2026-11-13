@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "advance.h"
+#include "channel_api.h"
 #include "config.h"
 #include "config_registry.h"
 #include "context.h"       /* truncate_and_spill */
@@ -826,23 +827,12 @@ static int64_t streak_refuse(sqlite3 *db, int64_t session_id, const StreakGate *
              g->streak);
     streak_note(db, session_id, "tripped", text);
 
-    /* Same INSERT shape deliver_response uses; no-op for a session with no
-     * chat binding. No FIFO wake from here — advance.c has no db_path (that
-     * is proc.c's proc_cfg()), and the channel runner re-drains its outbox on
-     * every ~1s loop iteration, which is soon enough for a once-per-trip
-     * notice. */
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db,
-            "INSERT INTO channel_outbox(channel_name, session_id, payload)"
-            " SELECT channel_name, id,"
-            "        json_object('chat_id', COALESCE(chat_id,'0'), 'text', ?2)"
-            "   FROM sessions WHERE id=?1 AND channel_name IS NOT NULL;",
-            -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(st, 1, session_id);
-        sqlite3_bind_text(st, 2, text, -1, SQLITE_STATIC);
-        sqlite3_step(st);
-        sqlite3_finalize(st);
-    }
+    /* To the operator, not the chat (channel_notify_operator); no-op for a
+     * session with no chat binding. No FIFO wake from here — advance.c has
+     * no db_path (that is proc.c's proc_cfg()), and the channel runner
+     * re-drains its outbox on every ~1s loop iteration, which is soon enough
+     * for a once-per-trip notice. */
+    channel_notify_operator(db, NULL, session_id, text);
 
     /* Pause fail-notify (specs/delivery.md): a paused session never settles,
      * so a parent parked on a blocking launch of this session would wait
@@ -853,6 +843,7 @@ static int64_t streak_refuse(sqlite3 *db, int64_t session_id, const StreakGate *
      * a human revives the session. */
     int64_t wake = 0;
     char oref[192] = {0};
+    sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "SELECT target_ref FROM delivery_edges WHERE session_id=?1"
             " AND one_shot=1 AND target_kind='tool_call' LIMIT 1;",

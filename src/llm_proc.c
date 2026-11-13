@@ -1181,7 +1181,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             else
                 snprintf(text, sizeof(text),
                          "now serving via %s (was %s)", served_id, prev_id);
-            channel_notify_session(db, cfg->db_path, session_id, text);
+            channel_notify_operator(db, cfg->db_path, session_id, text);
         }
     }
 
@@ -1556,7 +1556,7 @@ void compaction_record_outcome(sqlite3 *db, const char *db_path,
              "around %d tokens; older turns invisible to the model until "
              "compaction recovers.",
              (long long)session_id, budget_tokens);
-    channel_notify_session(db, db_path, session_id, text);
+    channel_notify_operator(db, db_path, session_id, text);
 }
 
 int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agent_name) {

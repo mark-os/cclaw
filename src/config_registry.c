@@ -140,7 +140,7 @@ static const ConfigDef s_defs[] = {
     { "health_cooldown_sec", "300",
       "Seconds a degraded model sinks below healthy candidates before retry" },
     { "notify_model_change", "1",
-      "Notify the operator's channel when the model serving an agent changes (1 = on)" },
+      "Notify the channel's admins when the model serving an agent changes (1 = on)" },
     { "llm_response_archive_max", "500",
       "llm_responses rows kept, ok and failures counted separately (0 = archiving off, negative = keep all)" },
     { "inbox_retention_sec", "604800",

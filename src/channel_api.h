@@ -76,10 +76,14 @@ int channel_outbox_fifo_open(const char *db_path, const char *channel_name);
 void channel_outbox_fifo_close(int fd, const char *db_path, const char *channel_name);
 int channel_outbox_wake(const char *db_path, const char *channel_name);
 
-/* Queue an operator-facing notice to the channel chat bound to session_id
- * (no-op for channel-less sessions). Used for routing events — model
- * degradation, fallback — that must reach the human, not the model. */
-int channel_notify_session(sqlite3 *db, const char *db_path, int64_t session_id,
-                           const char *text);
+/* Queue a system notice about session_id for the operator: routing events
+ * (model fallback, recovery), failing compaction, an auto-paused cron job —
+ * things the human running the box must see and the model must not. It goes
+ * to the admins of the session's channel (`admin_ids`, as a direct message),
+ * never to the session's chat, which may be a group. A channel with no
+ * admins configured falls back to the session's own chat. No-op for
+ * channel-less sessions. */
+int channel_notify_operator(sqlite3 *db, const char *db_path, int64_t session_id,
+                            const char *text);
 
 #endif

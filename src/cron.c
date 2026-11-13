@@ -814,7 +814,7 @@ static void pause_job(sqlite3 *db, const DueJob *j, const char *detail) {
     if (owner == 0) return;
     /* Two audiences, two notices: the agent gets the recipe it can actually
      * execute (fix + re-set the job); the CLI --doctor pointer is operator
-     * advice and goes to the session's channel chat instead. */
+     * advice and goes to the channel's admins instead. */
     char text[768];
     snprintf(text, sizeof(text),
              "cron job '%s' is paused: %d consecutive fires failed. Last error: %s. "
@@ -827,7 +827,7 @@ static void pause_job(sqlite3 *db, const DueJob *j, const char *detail) {
              "⚠ cron job '%s' auto-paused after %d consecutive failures — "
              "'cclaw --doctor' lists paused jobs.",
              j->name ? j->name : "?", CRON_FAIL_STREAK);
-    channel_notify_session(db, sqlite3_db_filename(db, "main"), owner, op_text);
+    channel_notify_operator(db, sqlite3_db_filename(db, "main"), owner, op_text);
     wake_session(owner);
 }
 

@@ -1048,25 +1048,44 @@ static void test_chat_status_command(void) {
     printf("PASS\n");
 }
 
-/* channel_notify_session: outbox row lands for channel-bound sessions,
- * silently no-ops for channel-less ones (CLI, sub-agents). */
-static void test_notify_session(void) {
+/* channel_notify_operator: a system notice goes to the channel's admins as
+ * a direct message, never to the session's chat; with no admins configured
+ * it falls back to the session's chat; channel-less sessions no-op. */
+static void test_notify_operator(void) {
     setup();
     sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
 
+    test_gate_channel_seed(db, "mychannel", "");
     int64_t bound = session_create(db, "s-bound", "testagent", -1, 0);
-    sqlite3_exec(db, "UPDATE sessions SET channel_name='mychannel', chat_id='42'"
+    sqlite3_exec(db, "UPDATE sessions SET channel_name='mychannel', chat_id='group-42'"
                      " WHERE name='s-bound';", NULL, NULL, NULL);
     int64_t bare = session_create(db, "s-bare", "testagent", -1, 0);
 
-    assert(channel_notify_session(db, NULL, bound, "model degraded") == 0);
-    assert(channel_notify_session(db, NULL, bare, "model degraded") == 0);
+    /* No admins configured: the session's own chat. */
+    assert(channel_notify_operator(db, NULL, bound, "model degraded") == 0);
+    assert(channel_notify_operator(db, NULL, bare, "model degraded") == 0);
     assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_outbox;") == 1);
     assert(test_scalar_count(db,
         "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='mychannel'"
-        " AND json_extract(payload,'$.chat_id')='42'"
+        " AND json_extract(payload,'$.chat_id')='group-42'"
+        " AND json_extract(payload,'$.to_user') IS NULL"
         " AND json_extract(payload,'$.text')='model degraded';") == 1);
+
+    /* Admins configured: one direct message each, nothing to the chat. */
+    sqlite3_exec(db, "DELETE FROM channel_outbox;", NULL, NULL, NULL);
+    test_gate_channel_seed(db, "mychannel", "111, 222");
+    assert(channel_notify_operator(db, NULL, bound, "model degraded") == 0);
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_outbox;") == 2);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM channel_outbox"
+        " WHERE json_extract(payload,'$.chat_id')='group-42';") == 0);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='mychannel'"
+        " AND json_extract(payload,'$.chat_id') IN ('111','222')"
+        " AND json_extract(payload,'$.to_user')=1"
+        " AND json_extract(payload,'$.text') LIKE"
+        "     'model degraded (agent testagent, session #%)';") == 2);
 
     db_close(db);
     cleanup();
@@ -1337,8 +1356,8 @@ int main(void) {
     printf("  chat_status_command... ");
     test_chat_status_command();
 
-    printf("  notify_session... ");
-    test_notify_session();
+    printf("  notify_operator... ");
+    test_notify_operator();
 
     printf("  tool_filter_exact_route... ");
     test_tool_filter_exact_route();

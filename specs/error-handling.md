@@ -54,7 +54,26 @@ Three outcome classes exist:
 | E13 | other 4xx | remaining non-2xx | skip candidate (400: also degrade) | no | "provider rejected the request" |
 | E14 | DB error during ingest | SQLITE_BUSY on our side | **turn aborts** | no | "DB contention during response ingest (SQLITE_BUSY) — check logs" |
 
-**Operator messaging**: there is no per-degrade notice.
+### Operator notices
+
+A system notice is a message the daemon writes itself, about the system, for
+the person who runs it. There are four: the model serving an agent changed,
+a session's compaction keeps failing, a cron job was auto-paused, and a
+session hit its autonomous-turn limit. `channel_notify_operator()` sends
+each one.
+
+A system notice goes to the admins of the session's channel (`admin_ids`), as
+a direct message, and names the agent and session. It does not go to the
+session's chat: that chat can be a group, and its members are not the
+operator. Approval prompts use the same destination. If the channel has no
+`admin_ids`, the notice goes to the session's chat. A session with no channel
+gets no notice.
+
+Two messages are not system notices and still go to the session's chat: the
+error text that ends a failed turn (it is the turn's response), and the
+"message deferred" reply to a rate-limited or over-budget request.
+
+There is no per-degrade notice.
 After each success, the model that served is compared to the agent's previous
 success (from `llm_responses`); on any change one notice names the new server
 and the cause (knob: `notify_model_change`, default on). All-models-down error

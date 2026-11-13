@@ -19,6 +19,17 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 
+EndpointType endpoint_type_parse(const char *s) {
+    if (s && strcmp(s, "gemini") == 0) return ENDPOINT_GEMINI;
+    if (s && strcmp(s, "anthropic") == 0) return ENDPOINT_ANTHROPIC;
+    return ENDPOINT_OPENAI;
+}
+
+const char *endpoint_type_name(EndpointType ep) {
+    return ep == ENDPOINT_GEMINI ? "gemini"
+         : ep == ENDPOINT_ANTHROPIC ? "anthropic" : "openai";
+}
+
 static char *str_dup(const char *s) {
     if (!s) return NULL;
     size_t len = strlen(s) + 1;
@@ -252,7 +263,7 @@ Config *config_load(sqlite3 *db) {
                 v = (const char *)sqlite3_column_text(ps, 1);
                 p->base_url = v ? strdup(v) : strdup(CCLAW_DEF_BASE_URL);
                 v = (const char *)sqlite3_column_text(ps, 2);
-                p->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
+                p->endpoint_type = endpoint_type_parse(v);
                 v = (const char *)sqlite3_column_text(ps, 3);
                 if (v && v[0]) {
                     const char *key_val = getenv(v);
@@ -355,13 +366,11 @@ Config *config_load(sqlite3 *db) {
          * OpenAI framing. A one-way override silently kept the Gemini wire
          * format and produced no diagnostic. */
         const char *v = getenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
-        if (v && strcmp(v, "gemini") == 0)
-            cfg->provider.endpoint_type = ENDPOINT_GEMINI;
-        else if (v && strcmp(v, "openai") == 0)
-            cfg->provider.endpoint_type = ENDPOINT_OPENAI;
+        if (v && strcmp(v, endpoint_type_name(endpoint_type_parse(v))) == 0)
+            cfg->provider.endpoint_type = endpoint_type_parse(v);
         else if (v && v[0])
-            LOG_WARN_("CCLAW_PROVIDER_ENDPOINT_TYPE='%s' is not 'openai' or "
-                      "'gemini' — ignored", v);
+            LOG_WARN_("CCLAW_PROVIDER_ENDPOINT_TYPE='%s' is not 'openai', "
+                      "'gemini' or 'anthropic' — ignored", v);
     }
 
     /* compaction env overrides */

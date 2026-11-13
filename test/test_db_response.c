@@ -433,6 +433,87 @@ static void test_rate_limit_cache_discount(void) {
     printf(" OK\n");
 }
 
+/* Test: Anthropic Messages — content blocks flatten into the same entries,
+ * usage is normalized to cache-inclusive, and a response that thought keeps
+ * its whole content array for replay. */
+static void test_ingest_anthropic(void) {
+    printf("  test_ingest_anthropic...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    const char *body =
+        "{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+        "{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"SIG\"},"
+        "{\"type\":\"text\",\"text\":\"Checking.\"},"
+        "{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"shell_exec\","
+        " \"input\":{\"command\":\"ls\"},\"caller\":{\"type\":\"direct\"}}],"
+        "\"stop_reason\":\"tool_use\","
+        "\"usage\":{\"input_tokens\":4,\"cache_read_input_tokens\":16000,"
+        " \"cache_creation_input_tokens\":200,\"output_tokens\":90,"
+        " \"output_tokens_details\":{\"thinking_tokens\":48}}}";
+    TypedIngestResult ir;
+    assert(db_ingest_response(db, sid, 20, "claude@anthropic", ENDPOINT_ANTHROPIC,
+                              body, NULL, 0, &ir) == LLM_RESP_OK);
+    assert(ir.prompt_tokens == 16204);     /* 4 + 16000 read + 200 written */
+    assert(ir.completion_tokens == 90);
+    assert(usage_col_i(db, "cached_tokens", 20) == 16000);
+    assert(usage_col_i(db, "cache_write_tokens", 20) == 200);
+    assert(usage_col_i(db, "reasoning_tokens", 20) == 48);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE type='assistant_message'"
+                          " AND content='Checking.' AND stop_reason=3;") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE type='tool_call'"
+                          " AND tool_call_id='toolu_1' AND tool_name='shell_exec'"
+                          " AND json_extract(content,'$.command')='ls';") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM tool_calls WHERE call_id='toolu_1';") == 1);
+
+    sqlite3_stmt *s;
+    assert(strcmp(meta_str(db, "$.format", &s), "anthropic_content") == 0);
+    sqlite3_finalize(s);
+    assert(strcmp(meta_str(db, "$.provider", &s), "anthropic") == 0);
+    sqlite3_finalize(s);
+    assert(strcmp(meta_str(db, "$.blob[0].signature", &s), "SIG") == 0);
+    sqlite3_finalize(s);
+    assert(strcmp(meta_str(db, "$.blob[2].caller.type", &s), "direct") == 0);
+    sqlite3_finalize(s);
+
+    /* No thinking: nothing to replay, so no reasoning entry at all. */
+    const char *plain =
+        "{\"type\":\"message\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],"
+        "\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":9,\"output_tokens\":2}}";
+    assert(db_ingest_response(db, sid, 21, "claude@anthropic", ENDPOINT_ANTHROPIC,
+                              plain, NULL, 0, &ir) == LLM_RESP_OK);
+    assert(ir.prompt_tokens == 9);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE type='reasoning';") == 1);
+
+    /* Thinking spent the whole max_tokens: an empty content array is a valid
+     * response (a length stop), not a malformed one. */
+    const char *spent =
+        "{\"type\":\"message\",\"content\":[],\"stop_reason\":\"max_tokens\","
+        "\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}";
+    assert(db_ingest_response(db, sid, 22, "claude@anthropic", ENDPOINT_ANTHROPIC,
+                              spent, NULL, 0, &ir) == LLM_RESP_OK);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE iteration_id=22"
+                          " AND type='assistant_message' AND stop_reason=2;") == 1);
+
+    /* A refusal is a 200 with nothing in it: the entry says what happened. */
+    const char *refused =
+        "{\"type\":\"message\",\"content\":[],\"stop_reason\":\"refusal\","
+        "\"stop_details\":{\"type\":\"refusal\",\"category\":\"cyber\"},"
+        "\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}";
+    assert(db_ingest_response(db, sid, 23, "claude@anthropic", ENDPOINT_ANTHROPIC,
+                              refused, NULL, 0, &ir) == LLM_RESP_OK);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE iteration_id=23"
+                          " AND content='[the model declined this request: cyber]';") == 1);
+
+    /* An API error object is not a message. */
+    assert(db_ingest_response(db, sid, 24, "claude@anthropic", ENDPOINT_ANTHROPIC,
+               "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}",
+               NULL, 0, &ir) == LLM_RESP_MALFORMED);
+
+    db_close(db);
+    printf(" OK\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_db_response:\n");
@@ -446,6 +527,7 @@ int main(void) {
     test_usage_bare_block();
     test_usage_deepseek_spelling();
     test_usage_gemini();
+    test_ingest_anthropic();
     test_rate_limit_cache_discount();
     printf("  ALL PASSED\n");
     return 0;

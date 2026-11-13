@@ -135,6 +135,21 @@ static int handle_completions(struct mg_connection *conn, void *cbdata) {
     return status;
 }
 
+/* Anthropic Messages: the real API rejects a request without its version and
+ * key headers before looking at the body, so the mock does too — otherwise a
+ * transport that forgot them would pass against the mock and 400 in the field. */
+static int handle_messages(struct mg_connection *conn, void *cbdata) {
+    if (!mg_get_header(conn, "anthropic-version") || !mg_get_header(conn, "x-api-key")) {
+        static const char err[] =
+            "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\","
+            "\"message\":\"mock: anthropic-version and x-api-key are required\"}}";
+        mg_printf(conn, "HTTP/1.1 400 Error\r\nContent-Type: application/json\r\n"
+                        "Content-Length: %d\r\n\r\n%s", (int)sizeof(err) - 1, err);
+        return 400;
+    }
+    return handle_completions(conn, cbdata);
+}
+
 int mock_server_start(void) {
     mg_init_library(0);
 
@@ -148,6 +163,7 @@ int mock_server_start(void) {
     if (!s_ctx) return -1;
 
     mg_set_request_handler(s_ctx, "/v1/chat/completions", handle_completions, NULL);
+    mg_set_request_handler(s_ctx, "/v1/messages", handle_messages, NULL);
     /* Gemini endpoint pattern. Wildcard-prefixed because a real Gemini
      * base_url carries a version segment ('/v1beta'), so the path is
      * /v1beta/models/<model>:generateContent — a bare "/models/" prefix only

@@ -19,7 +19,7 @@ Agents never store provider keys. The trusted process decrypts a key when it loa
 | DeepSeek | `DEEPSEEK_API_KEY` | Direct. Cheapest for DeepSeek models. |
 | OpenAI | `OPENAI_API_KEY` | Direct. |
 | Cerebras | `CEREBRAS_API_KEY` | Direct, OpenAI-compat. Wants `max_tokens` (not `max_completion_tokens`) — which is already what CClaw sends. `reasoning_effort` values differ per model family, so the effort mapping is per-model, not global. |
-| Anthropic | `ANTHROPIC_API_KEY` | **Not implemented.** Anthropic's native API is a different wire format (top-level `system`, content blocks, `tool_use`/`tool_result`) and would need a third builder in `llm_payload.c`. Scoped out 2026-08-20; reach Claude models via OpenRouter until then. |
+| Anthropic | `ANTHROPIC_API_KEY` | Direct, native Messages API (`endpoint_type='anthropic'`). Sent as `x-api-key`. Seeded with `anthropic/claude-sonnet-5-5`. See [Anthropic Messages](#anthropic-messages). |
 
 Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows change only through the `provider` section of an approval-gated `request_config` changes document ([config-doc.md](config-doc.md)), or through operator SQL. A provider document is **transport only**; models are registered separately through the `models` section by canonical `model@provider` id, and the provider must already exist. Per-request routing joins `models → providers`, so a provider row without a models row is unreachable outside the empty-table fallback — one document can define the provider, register a model on it, and adopt it via `agent.models: ["model@provider", ...]` (the full replacement routing order). `providers.default_model` is fresh-install seed sugar only (`templates/seed.sql`), never a registration path.
 
@@ -55,26 +55,97 @@ name.
 
 ## Wire Format Differences
 
-CClaw implements **two** request builders (`src/llm_payload.c`): OpenAI-compat
-chat completions (OpenRouter, OpenAI, DeepSeek, Cerebras, …) and Gemini-native
-(`generateContent`). Anthropic's native format is **not** implemented — it is
-future work requiring a third builder. Everything else reaches CClaw through
-OpenRouter's normalization.
+CClaw implements **three** request builders (`src/llm_payload.c`), selected by
+`providers.endpoint_type`: `openai` — OpenAI-compat chat completions
+(OpenRouter, OpenAI, DeepSeek, Cerebras, …); `gemini` — Gemini-native
+`generateContent`; `anthropic` — the Anthropic Messages API. Everything else
+reaches CClaw through OpenRouter's normalization.
 
 | Provider | Format | Tool Call Style | Tool Result Style |
 |----------|--------|----------------|-------------------|
 | OpenAI/OR | `choices[0].message` | `tool_calls[].function.arguments` (stringified) | `role: "tool"` |
 | Google | `Content[].parts` | `functionCall.args: {}` (object) | `functionResponse` in user |
-| Anthropic *(not implemented)* | Content blocks | `type: "tool_use", input: {}` (object) | Wrapped in user message |
+| Anthropic | `content[]` blocks | `type: "tool_use", input: {}` (object) | `tool_result` blocks, one user message per iteration |
 
-**System-role convention (both builders)**: only the leading system prompt
-carries the system role (`messages[0]` / `systemInstruction`). All other
+**System-role convention (all builders)**: only the leading system prompt
+carries the system role (`messages[0]` / `systemInstruction` / top-level
+`system`). All other
 system-originated content — mid-turn `type='system'` entries, compaction
 summaries, hook injects — is emitted as a `'[system] '`-prefixed **user**
 message on every provider. No builder ever emits a non-leading `role: system`.
 
 Key: OpenAI is the odd one out — `arguments` is a string. Everyone else uses objects.
 CClaw stores `args` as object in `tool_calls` column (provider-neutral). OpenAI emitter stringifies at wire time.
+
+## Anthropic Messages
+
+`POST <base_url>/messages` with `x-api-key`, `anthropic-version: 2026-10-21`
+and `anthropic-beta: thinking-binding-controls-2026-08-01`
+(`llm_build_headers`, `src/llm_transport.c`). A `providers` row plus a `models`
+row is all the setup there is; the seed ships both, inert until
+`ANTHROPIC_API_KEY` resolves:
+
+```sql
+-- route an agent to it (or use a request_config document's agent.models)
+UPDATE agent_models SET model_id='anthropic/claude-sonnet-5-5'
+ WHERE agent_name='Assistant' AND pos=0;
+```
+
+What the builder does that the other two don't, and why:
+
+- **`max_tokens` is always sent, floor 16000.** The API requires it, and on
+  current models it also pays for thinking, which cannot be switched off — the
+  global 4096 default would regularly be spent before any visible text.
+  `models.max_output_tokens`, when set on the routed row, wins.
+- **Thinking is replayed verbatim, but only inside the turn that produced
+  it.** A thinking block's signature covers everything before it — `system`,
+  `tools`, every earlier message — and the block must come back in its
+  original position, so what is stored (`reasoning_meta.format =
+  'anthropic_content'`) and replayed is the response's whole `content` array.
+  CClaw's session context block moves at every turn boundary, which is an edit
+  to that prefix; inside a turn the prefix is byte-stable (the mid-turn
+  invariant). So blocks from earlier turns are dropped (a leading run, which
+  the API permits) and the current turn's go back untouched. A model switch
+  falls back to rebuilding the message from entries, without thinking.
+- **`thinking.block_binding.prefix_mismatch_behavior: "drop_block"`.** On
+  accounts where the binding check is enforced, replaying a block after its
+  prefix changed is a 400. The scoping above should prevent that, but an
+  ephemeral hook inject or a mid-turn context cut can still edit the prefix,
+  and losing one block's reasoning beats losing the turn. Every drop is
+  reported in the response's `input_transformations`, archived with the body:
+
+  ```sql
+  SELECT id, json_extract(body,'$.input_transformations') FROM llm_responses
+   WHERE json_array_length(body,'$.input_transformations') > 0;
+  ```
+- **Prompt caching is opt-in, so the builder opts in** with four markers (the
+  API's limit): the system prompt; the request-level marker, which follows the
+  growing tail inside a turn; and the last message before each of the two
+  newest user messages. That last pair exists because of the same moving
+  context block — the stable prefix ends just before it, so one marker writes
+  the entry the next turn reads and the other reads the entry the previous
+  turn wrote. `llm_responses.cached_tokens` / `cache_write_tokens` show it
+  working. Changing an agent's tool set invalidates everything (tools are the
+  head of the prefix).
+- **Usage is normalized.** Anthropic's `input_tokens` excludes cache reads and
+  writes; the stored prompt count adds them back, so `usage_in` means the same
+  thing on every provider.
+- **A refusal** (`stop_reason: "refusal"`, HTTP 200) becomes an error-stop
+  assistant entry whose text names the category. No server-side fallback is
+  requested; the routing list is CClaw's fallback mechanism.
+- **No sampling parameters.** This API version rejects `temperature` at any
+  value, so `LLM()`'s `opts.temperature` is not forwarded on this format.
+- **No audio.** A media job needing transcription skips an Anthropic
+  candidate; images work.
+
+`providers.request_extra` remains the last word, and RFC 7386 `null` removes a
+key, which covers the model-specific cases without code:
+
+| Want | `request_extra` |
+|------|-----------------|
+| A model that predates adaptive thinking (Haiku 4.5 and older) | `{"thinking": null}` |
+| Readable reasoning summaries in `reasoning` entries (with `save_reasoning`) | `{"thinking": {"display": "summarized"}}` |
+| No prompt caching | `{"cache_control": null}` (the per-block markers remain) |
 
 ## Reasoning Effort
 
@@ -104,6 +175,7 @@ budgets. A level that is missing or `null` is *unsupported by this model*.
 | `deepseek` | `{"thinking": {"type": "enabled"\|"disabled"}}` — driven by the level *name* after clamping (`off` → disabled, anything else → enabled); the map's values only mark which levels exist |
 | `gemini-level` | `generationConfig.thinkingConfig.thinkingLevel` (string) |
 | `gemini-budget` | `generationConfig.thinkingConfig.thinkingBudget` (integer) |
+| `anthropic` | `{"output_config": {"effort": <value>}}` |
 
 An unrecognized `format` falls back to `openrouter`.
 
@@ -119,7 +191,10 @@ nothing.
 mapped. OpenAI-compat gets `openrouter` format (that traffic is overwhelmingly
 OpenRouter, which converts its unified `reasoning.effort` to whatever the
 backend wants); the Gemini endpoint gets `gemini-level` with the uppercased
-level name.
+level name; the Anthropic endpoint gets `anthropic` with `minimal` and `low`
+both sending `low` and no `off` (current models always think, so `off` clamps
+up). Anthropic's `xhigh` and `max` sit above CClaw's ladder — a model row's own
+map can point `high` at one of them.
 
 **Precedence.** The mapped fragment is merged into the request body *before*
 `providers.request_extra`, so a provider's `request_extra` still overrides or

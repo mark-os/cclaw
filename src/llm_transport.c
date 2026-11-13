@@ -22,7 +22,8 @@ char *llm_build_url(const Config *cfg) {
         return url;
     }
 
-    const char *path = "/chat/completions";
+    const char *path = cfg->provider.endpoint_type == ENDPOINT_ANTHROPIC
+                           ? "/messages" : "/chat/completions";
     size_t plen = strlen(path);
     char *url = malloc(blen + plen + 1);
     if (!url) return NULL;
@@ -32,19 +33,33 @@ char *llm_build_url(const Config *cfg) {
 }
 
 char *llm_build_auth_header(const Config *cfg) {
-    size_t key_len = cfg->provider.api_key ? strlen(cfg->provider.api_key) : 0;
-    if (cfg->provider.endpoint_type == ENDPOINT_GEMINI) {
-        size_t cap = 16 + key_len + 1;
-        char *h = malloc(cap);
-        if (!h) return NULL;
-        snprintf(h, cap, "x-goog-api-key: %s", cfg->provider.api_key ? cfg->provider.api_key : "");
-        return h;
-    }
-    size_t cap = 22 + key_len + 1;
+    const char *key = cfg->provider.api_key ? cfg->provider.api_key : "";
+    const char *fmt = cfg->provider.endpoint_type == ENDPOINT_GEMINI    ? "x-goog-api-key: %s"
+                    : cfg->provider.endpoint_type == ENDPOINT_ANTHROPIC ? "x-api-key: %s"
+                    : "Authorization: Bearer %s";
+    size_t cap = strlen(fmt) + strlen(key) + 1;
     char *h = malloc(cap);
     if (!h) return NULL;
-    snprintf(h, cap, "Authorization: Bearer %s", cfg->provider.api_key ? cfg->provider.api_key : "");
+    snprintf(h, cap, fmt, key);
     return h;
+}
+
+int llm_build_headers(const Config *cfg, const char *auth, const char *extra,
+                      const char *out[LLM_HEADERS_MAX]) {
+    int n = 0;
+    out[n++] = "Content-Type: application/json";
+    out[n++] = auth;
+    if (extra) out[n++] = extra;
+    if (cfg->provider.endpoint_type == ENDPOINT_ANTHROPIC) {
+        /* The version pins the request/response shape this build was written
+         * against. The beta lets the body set thinking.block_binding (see
+         * SQL_ANTHROPIC_FULL in llm_payload.c) and makes every response report
+         * dropped thinking blocks in input_transformations. */
+        out[n++] = "anthropic-version: 2026-10-21";
+        out[n++] = "anthropic-beta: thinking-binding-controls-2026-08-01";
+    }
+    out[n] = NULL;
+    return n;
 }
 
 int llm_is_context_overflow(const char *body) {
@@ -52,5 +67,6 @@ int llm_is_context_overflow(const char *body) {
     return (strstr(body, "context_length_exceeded") != NULL ||
             strstr(body, "maximum context length") != NULL ||
             strstr(body, "too many tokens") != NULL ||
+            strstr(body, "prompt is too long") != NULL ||   /* Anthropic */
             strstr(body, "context window") != NULL);
 }

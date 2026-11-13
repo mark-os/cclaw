@@ -1699,6 +1699,156 @@ static void test_midturn_system_entry_converts_to_user(void) {
     printf("  PASS test_midturn_system_entry_converts_to_user\n");
 }
 
+/* ── Anthropic Messages ─────────────────────────────────────────── */
+
+/* One JSON path out of a body as a malloc'd string (NULL when absent). */
+static char *body_get(sqlite3 *db, const char *body, const char *path) {
+    sqlite3_stmt *s;
+    const char *v = json_get_str(db, body, path, &s);
+    char *r = v ? strdup(v) : NULL;
+    sqlite3_finalize(s);
+    return r;
+}
+
+static void expect_path(sqlite3 *db, const char *body, const char *path, const char *want) {
+    char *v = body_get(db, body, path);
+    if (!want ? v != NULL : (!v || strcmp(v, want) != 0)) {
+        fprintf(stderr, "FAIL %s: got %s, want %s\n", path, v ? v : "(absent)",
+                want ? want : "(absent)");
+        abort();
+    }
+    free(v);
+}
+
+static const char ANTHROPIC_TOOL_RESPONSE[] =
+    "{\"type\":\"message\",\"content\":["
+    "{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"SIG\"},"
+    "{\"type\":\"text\",\"text\":\"Looking.\"},"
+    "{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":\"shell_exec\","
+    " \"input\":{\"command\":\"ls\"},\"caller\":{\"type\":\"direct\"}}],"
+    "\"stop_reason\":\"tool_use\",\"usage\":{\"input_tokens\":5,\"output_tokens\":7}}";
+
+/* The request shape: top-level system as a cached block, block-array content,
+ * a max_tokens that leaves room for thinking, and the binding/caching fields. */
+static void test_anthropic_payload(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid;
+    setup_session(db, &sid);
+
+    LlmPayload p;
+    build_body(db, sid, (char *)"claude-sonnet-5-5", ENDPOINT_ANTHROPIC, &p);
+    expect_path(db, p.body, "$.model", "claude-sonnet-5-5");
+    expect_path(db, p.body, "$.max_tokens", "16000");   /* not the 1024 passed in */
+    expect_path(db, p.body, "$.system[0].text", "You are helpful.");
+    expect_path(db, p.body, "$.system[0].cache_control.type", "ephemeral");
+    expect_path(db, p.body, "$.cache_control.type", "ephemeral");
+    expect_path(db, p.body, "$.thinking.type", "adaptive");
+    expect_path(db, p.body, "$.thinking.block_binding.prefix_mismatch_behavior",
+                "drop_block");
+    expect_path(db, p.body, "$.messages[0].role", "user");
+    expect_path(db, p.body, "$.messages[0].content[0].type", "text");
+    expect_path(db, p.body, "$.messages[0].content[0].text", "Hello \"world\"\nLine2\ttab");
+    expect_path(db, p.body, "$.messages[1].role", "assistant");
+    expect_path(db, p.body, "$.messages[1].content[0].text", "Hi there!");
+    expect_path(db, p.body, "$.messages[2]", NULL);
+    expect_path(db, p.body, "$.temperature", NULL);
+    expect_path(db, p.body, "$.stream", NULL);
+    llm_payload_release(&p);
+
+    /* The model row's own output cap wins over the floor. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO models(id, provider_name, model, max_output_tokens)"
+        " VALUES('big@anthropic','anthropic','claude-sonnet-5-5',64000);",
+        NULL, NULL, NULL) == SQLITE_OK);
+    build_body_routed(db, sid, (char *)"claude-sonnet-5-5", (char *)"big@anthropic",
+                      ENDPOINT_ANTHROPIC, &p);
+    expect_path(db, p.body, "$.max_tokens", "64000");
+    llm_payload_release(&p);
+
+    /* Tools: flat name/description/input_schema, and the default effort map. */
+    assert(sqlite3_exec(db,
+        "INSERT OR REPLACE INTO tools(name, description, parameters_json, enabled)"
+        " VALUES('noargs','takes nothing','{}',1);"
+        "INSERT OR IGNORE INTO grants(agent_name,kind,value)"
+        " VALUES('default','tool','noargs');", NULL, NULL, NULL) == SQLITE_OK);
+    Config base = {0};
+    base.provider.model = "claude-sonnet-5-5";
+    base.context_window = 128000;
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &base, 0, &plan) == 0);
+    char *v = effort_probe(db, sid, &plan, ENDPOINT_ANTHROPIC, NULL, "off",
+                           "$.output_config.effort");
+    assert(v && strcmp(v, "low") == 0); free(v);   /* no 'off': clamps up */
+    v = effort_probe(db, sid, &plan, ENDPOINT_ANTHROPIC, NULL, "high",
+                     "$.tools[0].input_schema.type");
+    assert(v && strcmp(v, "object") == 0); free(v);
+    v = effort_probe(db, sid, &plan, ENDPOINT_ANTHROPIC, NULL, "high", "$.tools[0].name");
+    assert(v && strcmp(v, "noargs") == 0); free(v);
+    context_plan_free(&plan);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_anthropic_payload\n");
+}
+
+/* Thinking goes back verbatim — whole content array, original order — but only
+ * to the model that produced it and only inside the turn that produced it. */
+static void test_anthropic_thinking_replay(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = seed_tool_iteration(db, (char *)"claude@anthropic", ENDPOINT_ANTHROPIC,
+                                      ANTHROPIC_TOOL_RESPONSE);
+    /* A second result for the same iteration, this one an error. */
+    entry_append_typed(db, sid, 2, "tool_result", 10, "boom", "c2", "shell_exec",
+                       1, STOP_REASON_NONE, NULL, 0, 0, 0);
+
+    LlmPayload p;
+    build_body_routed(db, sid, (char *)"claude-sonnet-5-5", (char *)"claude@anthropic",
+                      ENDPOINT_ANTHROPIC, &p);
+    expect_path(db, p.body, "$.messages[1].role", "assistant");
+    expect_path(db, p.body, "$.messages[1].content[0].type", "thinking");
+    expect_path(db, p.body, "$.messages[1].content[0].signature", "SIG");
+    expect_path(db, p.body, "$.messages[1].content[1].text", "Looking.");
+    expect_path(db, p.body, "$.messages[1].content[2].caller.type", "direct");
+    /* Both results in ONE user message, in order. */
+    expect_path(db, p.body, "$.messages[2].role", "user");
+    expect_path(db, p.body, "$.messages[2].content[0].type", "tool_result");
+    expect_path(db, p.body, "$.messages[2].content[0].tool_use_id", "c1");
+    expect_path(db, p.body, "$.messages[2].content[0].content", "file1");
+    expect_path(db, p.body, "$.messages[2].content[0].is_error", NULL);
+    expect_path(db, p.body, "$.messages[2].content[1].tool_use_id", "c2");
+    expect_path(db, p.body, "$.messages[2].content[1].is_error", "1");
+    expect_path(db, p.body, "$.messages[3]", NULL);
+    llm_payload_release(&p);
+
+    /* Another model: rebuilt from entries, no thinking, no response-only fields. */
+    build_body_routed(db, sid, (char *)"claude-opus-5-5", (char *)"opus@anthropic",
+                      ENDPOINT_ANTHROPIC, &p);
+    expect_path(db, p.body, "$.messages[1].content[0].type", "text");
+    expect_path(db, p.body, "$.messages[1].content[1].type", "tool_use");
+    expect_path(db, p.body, "$.messages[1].content[1].id", "c1");
+    expect_path(db, p.body, "$.messages[1].content[1].input.command", "ls");
+    expect_path(db, p.body, "$.messages[1].content[1].caller", NULL);
+    expect_path(db, p.body, "$.messages[1].content[2]", NULL);
+    llm_payload_release(&p);
+
+    /* Next turn, same model: the earlier turn's thinking is gone (its prefix
+     * is about to change), and the last message of that turn — the stable
+     * prefix boundary — carries the cache breakpoint. */
+    Message next = {.role = ROLE_USER, .content = "and now?"};
+    entry_append_with_iteration(db, sid, &next, 3);
+    build_body_routed(db, sid, (char *)"claude-sonnet-5-5", (char *)"claude@anthropic",
+                      ENDPOINT_ANTHROPIC, &p);
+    expect_path(db, p.body, "$.messages[1].content[0].type", "text");
+    expect_path(db, p.body, "$.messages[1].content[1].type", "tool_use");
+    expect_path(db, p.body, "$.messages[2].content[0].cache_control", NULL);
+    expect_path(db, p.body, "$.messages[2].content[1].cache_control.type", "ephemeral");
+    expect_path(db, p.body, "$.messages[3].content[0].text", "and now?");
+    expect_path(db, p.body, "$.messages[3].content[0].cache_control", NULL);
+    llm_payload_release(&p);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_anthropic_thinking_replay\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_llm_payload:\n");
@@ -1715,6 +1865,8 @@ int main(void) {
     test_payload_with_tools();
     test_compaction_entry_in_payload();
     test_midturn_system_entry_converts_to_user();
+    test_anthropic_payload();
+    test_anthropic_thinking_replay();
     test_cron_result_in_payload();
     test_network_hosts_query_time_wrap();
     test_hook_inject_directive();

@@ -114,7 +114,8 @@ typedef enum {
 /* provider endpoint type (wire format) */
 typedef enum {
     ENDPOINT_OPENAI = 0,    /* OpenAI-compatible chat completions (default) */
-    ENDPOINT_GEMINI         /* Native Gemini generateContent format */
+    ENDPOINT_GEMINI,        /* Native Gemini generateContent format */
+    ENDPOINT_ANTHROPIC      /* Native Anthropic Messages API */
 } EndpointType;
 
 /* Provider/model config */
@@ -128,7 +129,7 @@ typedef struct {
     char *model;
     int max_tokens;         /* max response tokens */
     CacheHints cache_hints; /* prompt cache control */
-    EndpointType endpoint_type; /* wire format (openai or gemini) */
+    EndpointType endpoint_type; /* wire format — see endpoint_type_name() */
     /* Reasoning-effort knob for the candidate being built, as routed:
      * model_id keys models.effort_map, reasoning_effort is the requested
      * level. Both NULL on the synthetic/default candidate — and a NULL

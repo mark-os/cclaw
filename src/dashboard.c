@@ -225,6 +225,7 @@ static void render_providers_models(Buf *b) {
                    " <select name=endpoint_type>"
                    "<option value=openai>openai</option>"
                    "<option value=gemini>gemini</option>"
+                   "<option value=anthropic>anthropic</option>"
                    "<option value=responses>responses</option>"
                    "<option value=gemini_interactions>gemini_interactions</option>"
                    "</select>"

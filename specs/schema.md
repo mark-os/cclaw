@@ -73,7 +73,7 @@ LLM API endpoints. Multiple providers enable fallback routing.
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
 | `base_url` | TEXT NOT NULL | |
-| `endpoint_type` | TEXT NOT NULL DEFAULT 'openai' | openai / gemini |
+| `endpoint_type` | TEXT NOT NULL DEFAULT 'openai' | openai / gemini / anthropic |
 | `api_key_env` | TEXT NOT NULL DEFAULT '' | env var name holding the key |
 | `default_model` | TEXT | fresh-install seed sugar only — models are registered in `models` |
 | `priority` | INTEGER NOT NULL DEFAULT 0 | lower = preferred |
@@ -95,7 +95,7 @@ here orders candidates.
 | `context_window` | INTEGER | |
 | `max_output_tokens` | INTEGER | |
 | `capabilities` | TEXT DEFAULT '[]' | JSON array of capability tags |
-| `effort_map` | TEXT | JSON: how this model spells reasoning effort on the wire — `{"format": "openrouter\|openai\|deepseek\|gemini-level\|gemini-budget", "levels": {level: wire value}}`. A missing/null level is unsupported and clamps to the nearest supported one. NULL = the endpoint default. See [providers.md](providers.md#reasoning-effort) |
+| `effort_map` | TEXT | JSON: how this model spells reasoning effort on the wire — `{"format": "openrouter\|openai\|deepseek\|gemini-level\|gemini-budget\|anthropic", "levels": {level: wire value}}`. A missing/null level is unsupported and clamps to the nearest supported one. NULL = the endpoint default. See [providers.md](providers.md#reasoning-effort) |
 | `status` | TEXT NOT NULL DEFAULT 'healthy' | healthy / degraded / disabled |
 | `degraded_until` | INTEGER | unixepoch cooldown; NULL while degraded = config-degraded (missing key) |
 | `total_requests` | INTEGER DEFAULT 0 | lifetime counter |
@@ -193,10 +193,10 @@ OpenAI-compat (OpenRouter, DeepSeek), and Gemini-native — and `cached_tokens` 
 a **subset** of it, never an addend. Reported spellings, all COALESCEd at
 ingestion: `usage.prompt_tokens_details.cached_tokens` /
 `usage.prompt_cache_hit_tokens` (DeepSeek-direct) /
-`usageMetadata.cachedContentTokenCount` (Gemini). Anthropic-native, if it ever
-lands, is **cache-exclusive** (`cache_read_input_tokens` is *additional* to
-`input_tokens`) and must be normalized to the inclusive convention at ingestion
-rather than stored raw. Gemini completion tokens are stored as
+`usageMetadata.cachedContentTokenCount` (Gemini). Anthropic-native is
+**cache-exclusive** on the wire (`cache_read_input_tokens` and
+`cache_creation_input_tokens` are *additional* to `input_tokens`), so ingestion
+stores their sum and the convention holds there too. Gemini completion tokens are stored as
 `candidatesTokenCount + thoughtsTokenCount` (thoughts is a sibling, not
 included in candidates).
 
@@ -560,7 +560,7 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 ### entries.reasoning_meta
 
 `{provider, model, format, blob}` on `type='reasoning'` entries. `provider`
-(`openai`/`gemini`) and `model` name who produced the reasoning; the payload
+(`openai`/`gemini`/`anthropic`) and `model` name who produced the reasoning; the payload
 builder replays it only when the requesting model matches, so a model switch
 strips it (reasoning is model-bound). `format` says what `blob` is and how it
 goes back on the wire:
@@ -570,6 +570,7 @@ goes back on the wire:
 | `reasoning_details` | OpenRouter's `reasoning_details` array, verbatim | `reasoning_details` on the assistant message — order and every field preserved; this is how Gemini's `thoughtSignature` survives the OpenAI-compat envelope |
 | `reasoning_content` | the bare reasoning string | `reasoning_content` on the assistant message (DeepSeek's rule after a tool-call turn) |
 | `gemini_parts` | `[{fn, sig}, …]` | `thoughtSignature` on the matching replayed `functionCall` part |
+| `anthropic_content` | the response's whole `content` array, verbatim | the assistant message's `content`, in place of the one rebuilt from entries — within the producing turn only (see [providers.md](providers.md#anthropic-messages)) |
 
 The blob — not `entries.content` — is what replay reads: `save_reasoning`
 governs whether the *display* text is kept, while the wire requirement holds

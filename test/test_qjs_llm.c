@@ -449,6 +449,47 @@ static void test_images_openai_body(void) {
     PASS();
 }
 
+/* And on the Anthropic Messages API: a base64 image block. A message with
+ * plain string content is passed through as it was. */
+static void test_images_anthropic_body(void) {
+    TEST("images_anthropic_body");
+    MockHttp m = { .nconn = 1, .resp = {
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+        "{\"content\":[{\"type\":\"text\",\"text\":\"a cat\"}]}" } };
+    pthread_t tid;
+    if (mock_http_start(&m, &tid) != 0) { FAIL("mock"); return; }
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+        "INSERT OR REPLACE INTO providers(name, base_url, endpoint_type, api_key_env)"
+        " VALUES('pc','http://127.0.0.1:%d/v1','anthropic','TEST_LLM_KEY');"
+        "INSERT OR REPLACE INTO models(id, provider_name, model)"
+        " VALUES('m-ant','pc','claude-test');"
+        "DELETE FROM agent_models WHERE agent_name='t';"
+        "INSERT INTO agent_models(agent_name,model_id,pos) VALUES('t','m-ant',0);",
+        m.port);
+    seed(sql);
+    char *r = req("t",
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"earlier\"},"
+        "{\"role\":\"assistant\",\"content\":\"ok\"},"
+        "{\"role\":\"user\",\"content\":\"describe\"}],"
+        "\"images\":[{\"mime\":\"image/jpeg\",\"data\":\"QUJD\"}]}");
+    mock_http_stop(&m, tid);
+    if (!r || !strstr(r, "\"text\":\"a cat\"")) { FAIL(r ? r : "NULL"); free(r); return; }
+    free(r);
+    const char *c = m.captured[0];
+    if (!strstr(c, "{\"role\":\"user\",\"content\":\"earlier\"}") ||
+        !strstr(c, "{\"type\":\"text\",\"text\":\"describe\"}") ||
+        !strstr(c, "{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+                   "\"media_type\":\"image/jpeg\",\"data\":\"QUJD\"}}") ||
+        strstr(c, "image_url")) {
+        FAIL("anthropic image body wrong"); printf("    got: %.800s\n", c); return;
+    }
+    if (archived_request_has("QUJD") || !archived_request_has("base64 chars]")) {
+        FAIL("archive should drop the image bytes"); return;
+    }
+    PASS();
+}
+
 /* Refusals: a file that is not an image (child side, by its bytes), and a
  * request whose image fields could not have come from the stub (parent side
  * — the child is sandboxed code, so the parent checks again). */
@@ -513,6 +554,7 @@ int main(void) {
     test_images_gemini_via_bridge();
     test_images_openai_body();
     test_images_refused();
+    test_images_anthropic_body();
     unlink(IMG_PATH);
 
     sqlite3_close(g_db);

@@ -662,17 +662,38 @@ static const char *SQL_JSBODY_GEMINI =
 /* Anthropic: system is a top-level string, max_tokens is mandatory (and pays
  * for thinking too, hence the generous default), and sampling parameters are
  * rejected outright on this API version — opts.temperature is not forwarded. */
+/* One message's content for Anthropic. A string passes through. An array is
+ * OpenAI content parts (the form opts.images takes, see SQL_JSLLM_ATTACH): a
+ * data: image URL becomes a base64 image block, any other image URL a url
+ * block (this API fetches those itself), the rest text blocks. */
+#define JSBODY_ANTHROPIC_CONTENT \
+    "CASE json_type(m.value,'$.content') WHEN 'array' THEN" \
+    " (SELECT json_group_array(json(CASE" \
+    "    WHEN json_extract(p.value,'$.image_url.url') LIKE 'data:%;base64,%' THEN" \
+    "      json_object('type','image','source', json_object('type','base64'," \
+    "        'media_type', substr(json_extract(p.value,'$.image_url.url'), 6," \
+    "                        instr(json_extract(p.value,'$.image_url.url'),';') - 6)," \
+    "        'data', substr(json_extract(p.value,'$.image_url.url')," \
+    "                  instr(json_extract(p.value,'$.image_url.url'),',') + 1)))" \
+    "    WHEN json_extract(p.value,'$.image_url.url') IS NOT NULL THEN" \
+    "      json_object('type','image','source', json_object('type','url'," \
+    "        'url', json_extract(p.value,'$.image_url.url')))" \
+    "    ELSE json_object('type','text'," \
+    "           'text', COALESCE(json_extract(p.value,'$.text'),''))" \
+    "  END)) FROM json_each(m.value,'$.content') p)" \
+    " ELSE json_extract(m.value,'$.content') END"
+
 static const char *SQL_JSBODY_ANTHROPIC =
     "SELECT json_patch(json_patch(json_patch("
     "  json_object('model', ?1,"
     "    'max_tokens', COALESCE(json_extract(?3,'$.max_tokens'), 16000),"
     "    'messages',"
     "    (SELECT json_group_array(json_object("
-    "       'role', CASE json_extract(value,'$.role')"
+    "       'role', CASE json_extract(m.value,'$.role')"
     "                 WHEN 'assistant' THEN 'assistant' ELSE 'user' END,"
-    "       'content', json_extract(value,'$.content')))"
-    "     FROM json_each(?2)"
-    "     WHERE json_extract(value,'$.role') <> 'system')),"
+    "       'content', " JSBODY_ANTHROPIC_CONTENT "))"
+    "     FROM json_each(?2) m"
+    "     WHERE json_extract(m.value,'$.role') <> 'system')),"
     "  json_object('system',"
     "    (SELECT group_concat(json_extract(value,'$.content'), char(10) || char(10))"
     "     FROM json_each(?2)"
@@ -843,17 +864,16 @@ char *llm_request(sqlite3 *db, const char *agent_name,
         }
         const char *bb[] = { m->model, messages, opts,
                              cand_extra ? cand_extra : "{}" };
-        char *body = sql_text(db,
-                              m->endpoint_type == ENDPOINT_GEMINI    ? SQL_JSBODY_GEMINI
-                            : m->endpoint_type == ENDPOINT_ANTHROPIC ? SQL_JSBODY_ANTHROPIC
-                            : SQL_JSBODY_OPENAI,
-                              bb, 4);
+        const char *body_sql =
+              m->endpoint_type == ENDPOINT_GEMINI    ? SQL_JSBODY_GEMINI
+            : m->endpoint_type == ENDPOINT_ANTHROPIC ? SQL_JSBODY_ANTHROPIC
+            : SQL_JSBODY_OPENAI;
+        char *body = sql_text(db, body_sql, bb, 4);
         char *kept = NULL;
         if (archived) {
             const char *kb[] = { m->model, archived, opts,
                                  cand_extra ? cand_extra : "{}" };
-            kept = sql_text(db, m->endpoint_type == ENDPOINT_GEMINI
-                                  ? SQL_JSBODY_GEMINI : SQL_JSBODY_OPENAI, kb, 4);
+            kept = sql_text(db, body_sql, kb, 4);
         }
         free(effort); free(cand_extra);
 

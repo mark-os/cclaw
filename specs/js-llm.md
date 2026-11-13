@@ -46,7 +46,7 @@ child's own sandboxed view of the filesystem, and spliced into the request
 text. It is never a JS value, so the engine's heap limit does not bound it.
 The type comes from the file's first bytes, not its name. The parent checks
 the type and the encoding again (the child is sandboxed code), then builds
-the provider's form: content parts with a `data:` URL for the OpenAI format,
+the provider's form: content parts with a `data:` URL for the OpenAI format, image blocks for Anthropic,
 `inlineData` parts for Gemini. Total image bytes per call are capped at
 `LLM_IMAGES_MAX` (15 MB), which follows the roughly 20 MB of inline data
 providers accept. The copy of the request kept in `llm_responses` has the

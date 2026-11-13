@@ -562,18 +562,78 @@ static const char *SQL_JSBODY_OPENAI =
     "  json(?4)),"
     "  COALESCE(json_extract(?3,'$.extra'), '{}'))";
 
+/* One message's content as Gemini parts. A string is one text part. An array
+ * is OpenAI content parts (the form images take, see SQL_JSLLM_ATTACH): text
+ * parts map across, and a data: image URL becomes inlineData. Gemini cannot
+ * fetch an http(s) image URL from this field, so that case is said in text
+ * rather than sent as something the provider would reject. */
+#define JSBODY_GEMINI_PARTS \
+    "CASE json_type(m.value,'$.content') WHEN 'array' THEN" \
+    " (SELECT json_group_array(json(CASE" \
+    "    WHEN json_extract(p.value,'$.image_url.url') LIKE 'data:%;base64,%' THEN" \
+    "      json_object('inlineData', json_object(" \
+    "        'mimeType', substr(json_extract(p.value,'$.image_url.url'), 6," \
+    "                      instr(json_extract(p.value,'$.image_url.url'),';') - 6)," \
+    "        'data', substr(json_extract(p.value,'$.image_url.url')," \
+    "                  instr(json_extract(p.value,'$.image_url.url'),',') + 1)))" \
+    "    WHEN json_extract(p.value,'$.image_url.url') IS NOT NULL THEN" \
+    "      json_object('text', '[image at ' || json_extract(p.value,'$.image_url.url')" \
+    "        || ' was not sent: download it to a file and pass it in opts.images]')" \
+    "    ELSE json_object('text', COALESCE(json_extract(p.value,'$.text'),''))" \
+    "  END)) FROM json_each(m.value,'$.content') p)" \
+    " ELSE json_array(json_object('text', json_extract(m.value,'$.content'))) END"
+
+/* opts.images: attach the images to the last user message, in the OpenAI
+ * content-parts form both body builders read. ?1 messages, ?2 images
+ * ([{mime,data}], data = base64). NULL when there is no user message. */
+static const char *SQL_JSLLM_ATTACH =
+    "SELECT json_group_array(json(CASE WHEN m.key ="
+    "    (SELECT max(u.key) FROM json_each(?1) u"
+    "      WHERE json_extract(u.value,'$.role')='user')"
+    "  THEN json_patch(m.value, json_object('content',"
+    "    (SELECT json_group_array(json(part)) FROM ("
+    "       SELECT json_object('type','text','text',"
+    "                json_extract(m.value,'$.content')) AS part"
+    "        WHERE json_type(m.value,'$.content')='text'"
+    "       UNION ALL SELECT p.value FROM json_each(m.value,'$.content') p"
+    "        WHERE json_type(m.value,'$.content')='array'"
+    "       UNION ALL SELECT json_object('type','image_url','image_url',"
+    "         json_object('url','data:' || json_extract(i.value,'$.mime')"
+    "           || ';base64,' || json_extract(i.value,'$.data')))"
+    "        FROM json_each(?2) i))))"
+    "  ELSE m.value END))"
+    " FROM json_each(?1) m"
+    " WHERE EXISTS (SELECT 1 FROM json_each(?1) u"
+    "                WHERE json_extract(u.value,'$.role')='user')";
+
+/* The images with their bytes left out — for the copy of the request kept in
+ * llm_responses, which is read by people and need not hold megabytes. */
+static const char *SQL_JSLLM_IMAGES_STUB =
+    "SELECT json_group_array(json_object('mime', json_extract(value,'$.mime'),"
+    "  'data', '[' || length(json_extract(value,'$.data')) || ' base64 chars]'))"
+    " FROM json_each(?1)";
+
+/* The child is sandboxed code: accept only the four image types and only
+ * base64 text, since both are spliced into a data: URL. Rows = bad images. */
+static const char *SQL_JSLLM_IMAGES_BAD =
+    "SELECT 1 FROM json_each(?1)"
+    " WHERE json_extract(value,'$.mime') IS NULL"
+    "    OR json_extract(value,'$.mime') NOT IN"
+    "       ('image/jpeg','image/png','image/gif','image/webp')"
+    "    OR json_type(value,'$.data') IS NOT 'text'"
+    "    OR json_extract(value,'$.data') GLOB '*[^A-Za-z0-9+/=]*' LIMIT 1";
+
 static const char *SQL_JSBODY_GEMINI =
     "SELECT json_patch(json_patch(json_patch("
     /* base: contents only — the always-present part */
     "  json_object("
     "    'contents',"
     "    (SELECT json_group_array(json_object("
-    "       'role', CASE json_extract(value,'$.role')"
+    "       'role', CASE json_extract(m.value,'$.role')"
     "                 WHEN 'assistant' THEN 'model' ELSE 'user' END,"
-    "       'parts', json_array(json_object("
-    "                  'text', json_extract(value,'$.content')))))"
-    "     FROM json_each(?2)"
-    "     WHERE json_extract(value,'$.role') <> 'system')),"
+    "       'parts', " JSBODY_GEMINI_PARTS "))"
+    "     FROM json_each(?2) m"
+    "     WHERE json_extract(m.value,'$.role') <> 'system')),"
     /* optionals ride a patch so a NULL value REMOVES the key (RFC 7386)
      * instead of shipping a literal null the provider may reject */
     "  json_object("
@@ -653,6 +713,37 @@ char *llm_request(sqlite3 *db, const char *agent_name,
             "malformed request: need {messages:[{role,content},...]}");
     }
 
+    /* Images (opts.images, read and encoded by the child) join the last user
+     * message. `archived` is the same conversation with the image bytes left
+     * out; it is what llm_responses keeps. NULL = no images, archive the body. */
+    char *archived = NULL;
+    {
+        const char *rb[] = { request_json };
+        char *images = sql_text(db,
+            "SELECT json_extract(?1,'$.images')"
+            " WHERE json_array_length(?1,'$.images') > 0", rb, 1);
+        if (images) {
+            const char *ib[] = { images };
+            char *bad = sql_text(db, SQL_JSLLM_IMAGES_BAD, ib, 1);
+            char *stub = bad ? NULL : sql_text(db, SQL_JSLLM_IMAGES_STUB, ib, 1);
+            const char *ab[] = { messages, images };
+            const char *sb[] = { messages, stub ? stub : "[]" };
+            char *with = bad ? NULL : sql_text(db, SQL_JSLLM_ATTACH, ab, 2);
+            archived = with ? sql_text(db, SQL_JSLLM_ATTACH, sb, 2) : NULL;
+            free(stub); free(images);
+            if (!with || !archived) {
+                free(with); free(archived); free(messages); free(opts);
+                char *r = llm_request_fail(db, bad
+                    ? "opts.images: each image must be a JPEG, PNG, GIF or WebP file"
+                    : "opts.images needs a user message to attach to");
+                free(bad);
+                return r;
+            }
+            free(messages);
+            messages = with;
+        }
+    }
+
     Config *cfg = config_load(db);
     if (cfg && !rate_limit_check(db, cfg->token_rate_limit)) {
         config_free(cfg); free(messages); free(opts);
@@ -725,11 +816,19 @@ char *llm_request(sqlite3 *db, const char *agent_name,
         char *body = sql_text(db, m->endpoint_type == ENDPOINT_GEMINI
                                     ? SQL_JSBODY_GEMINI : SQL_JSBODY_OPENAI,
                               bb, 4);
+        char *kept = NULL;
+        if (archived) {
+            const char *kb[] = { m->model, archived, opts,
+                                 cand_extra ? cand_extra : "{}" };
+            kept = sql_text(db, m->endpoint_type == ENDPOINT_GEMINI
+                                  ? SQL_JSBODY_GEMINI : SQL_JSBODY_OPENAI, kb, 4);
+        }
         free(effort); free(cand_extra);
 
         {
             HttpResponse resp = {0};
-            int status = llm_attempt(db, m, body, body, timeout, NULL,
+            int status = llm_attempt(db, m, body, archived ? kept : body,
+                                     timeout, NULL,
                                      "jsllm", source ? source : "?",
                                      session_id, iteration_id, &resp);
 
@@ -770,9 +869,10 @@ char *llm_request(sqlite3 *db, const char *agent_name,
             http_response_free(&resp);
         }
         free(body);
+        free(kept);
     }
 
-    free(messages); free(opts);
+    free(messages); free(opts); free(archived);
     if (response) { buf_free(&fails); return response; }
     char *trail = buf_take(&fails);
     char msg[768];

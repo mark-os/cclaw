@@ -10,10 +10,7 @@
 #include "approval.h"
 #include "wake.h"
 #include "web.h"
-#include <arpa/inet.h>
 #include <fcntl.h>
-#include <ifaddrs.h>
-#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -721,29 +718,11 @@ static int handle_admin_locked(struct mg_connection *conn) {
 
 char *dashboard_url(sqlite3 *db) {
     char *tok = config_get(db, "web_admin_token");
-    if (!tok || !tok[0]) {
-        free(tok);
-        return NULL;
-    }
-    /* Config precedence is env > DB (the daemon resolves web_port the same way). */
-    const char *env_port = getenv("CCLAW_WEB_PORT");
-    int port = (env_port && env_port[0]) ? atoi(env_port)
-                                         : config_get_int(db, "web_port");
-    char host[INET_ADDRSTRLEN] = "127.0.0.1";
-    struct ifaddrs *ifa = NULL;
-    if (getifaddrs(&ifa) == 0) {
-        for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
-            if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
-            struct sockaddr_in *sin = (struct sockaddr_in *)(void *)p->ifa_addr;
-            if ((ntohl(sin->sin_addr.s_addr) >> 24) == 127) continue;
-            inet_ntop(AF_INET, &sin->sin_addr, host, sizeof(host));
-            break;
-        }
-        freeifaddrs(ifa);
-    }
-    size_t n = strlen(tok) + sizeof(host) + 48;
-    char *url = malloc(n);
-    if (url) snprintf(url, n, "http://%s:%d/admin?token=%s", host, port, tok);
+    char *base = (tok && tok[0]) ? config_web_base_url(db) : NULL;
+    size_t n = base ? strlen(base) + strlen(tok) + 32 : 0;
+    char *url = base ? malloc(n) : NULL;
+    if (url) snprintf(url, n, "%s/admin?token=%s", base, tok);
+    free(base);
     free(tok);
     return url;
 }

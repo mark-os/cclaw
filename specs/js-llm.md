@@ -23,10 +23,40 @@ LLM(prompt, {
   model: "gemini",                // substring-match against the routing list
   max_tokens: 1024, temperature: 0,
   timeout: 90,                    // secs per attempt (default 120, max 600)
+  images: ["photo.jpg"],          // files the model should look at
   extra: {...},                   // merged into the provider body last
   full: true                      // -> {text, model, id, status, body}
 })
 ```
+
+### Images
+
+`opts.images` is a list of file paths (JPEG, PNG, GIF, WebP). They are
+attached to the last user message. Use `opts.model` to pick a model that can
+see: a model that cannot returns an empty completion, which counts as a
+failure, so the walk moves on to the next model in the routing list.
+
+```js
+http_request(url, {save_to: "post.jpg"});          // binary goes to a file
+LLM("What does this show?", {images: ["post.jpg"], model: "gemini"});
+```
+
+The file is read and base64-encoded by the C stub in the tool child, in the
+child's own sandboxed view of the filesystem, and spliced into the request
+text. It is never a JS value, so the engine's heap limit does not bound it.
+The type comes from the file's first bytes, not its name. The parent checks
+the type and the encoding again (the child is sandboxed code), then builds
+the provider's form: content parts with a `data:` URL for the OpenAI format,
+`inlineData` parts for Gemini. Total image bytes per call are capped at
+`LLM_IMAGES_MAX` (15 MB), which follows the roughly 20 MB of inline data
+providers accept. The copy of the request kept in `llm_responses` has the
+image bytes replaced by their length.
+
+A script may also pass OpenAI content parts itself
+(`content: [{type:"text",...},{type:"image_url",image_url:{url:"data:..."}}]`).
+They pass through unchanged to an OpenAI-format provider and are translated
+for Gemini. An `http(s)` image URL is not fetched for Gemini; the model is
+told the image was not sent.
 
 Throws on total failure with a per-candidate trail (`"m1: http 503 …; m2:
 timed out"`); immediately when `opts.model` matches nothing — LLM() can only

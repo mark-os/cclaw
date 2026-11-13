@@ -50,6 +50,12 @@ void config_env_name(const char *key, char *buf, size_t cap);
  * NULL if the key is unregistered and has no row. */
 char *config_get(sqlite3 *db, const char *key);
 int config_get_int(sqlite3 *db, const char *key);
+
+/* Where people reach this daemon's web server, with no trailing slash:
+ * web_public_url when the operator set one (a tunnel, a proxy, a DNS name —
+ * only they know), else http://<first non-loopback IPv4>:<web_port>. The
+ * base of every link the daemon hands out. Malloc'd; NULL on OOM. */
+char *config_web_base_url(sqlite3 *db);
 double config_get_double(sqlite3 *db, const char *key);
 
 /* Set (or clear, with value == NULL) the override for a registered key.

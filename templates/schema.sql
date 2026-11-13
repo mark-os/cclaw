@@ -642,6 +642,20 @@ CREATE TABLE IF NOT EXISTS approval_decisions (
   created_at  INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
+-- Files an agent has put behind a link (share_file). The token in the URL is
+-- the whole capability: whoever has it can read that one file until the row
+-- expires. `path` is the file as resolved when it was shared; the web server
+-- serves it only while the file opened at that path still resolves to it.
+-- Nothing is copied — the row is the share, and expiry is just the clock.
+CREATE TABLE IF NOT EXISTS shares (
+  token      TEXT PRIMARY KEY,
+  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,
+  path       TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  expires_at INTEGER NOT NULL
+);
+
 -- ═══ Sensitivity axis (specs/trust.md) ═══
 -- Operator-owned labels on TARGETS, global (not per-agent). The one place a
 -- label subtracts from authority: a sensitive host always escalates, and no

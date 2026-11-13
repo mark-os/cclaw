@@ -11,12 +11,17 @@
  * CCLAW_LLM_SOCK.
  *
  * Protocol: one request per connection. 4-byte LE length + JSON
- * ({"messages":[...],"opts":{...}}) in; 4-byte LE length + JSON
+ * ({"messages":[...],"opts":{...},"images":[{mime,data}]?}) in; 4-byte LE length + JSON
  * ({"ok":true,...} | {"ok":false,"error":...}) out. */
 
 #include <stdint.h>
 
-#define LLM_BRIDGE_REQ_MAX (256 * 1024)
+/* Sized for opts.images: providers accept about 20 MB of inline image data
+ * per request, and base64 is 4/3 of the file. LLM_IMAGES_MAX is the file
+ * bytes the child will read; the request cap is that, encoded, plus the
+ * conversation. Both follow the provider's limit, not this machine's speed. */
+#define LLM_IMAGES_MAX     (15u * 1024 * 1024)
+#define LLM_BRIDGE_REQ_MAX (LLM_IMAGES_MAX / 3 * 4 + 1024 * 1024)
 
 typedef struct LlmBridge LlmBridge;
 

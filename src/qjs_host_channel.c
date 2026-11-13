@@ -193,6 +193,40 @@ static SendReq *send_req_from_js(JSContext *ctx, JSValueConst o) {
     r->body = get_str_prop(ctx, (JSValue)o, "body");
     r->timeout = get_int_prop(ctx, (JSValue)o, "timeout", 0);
     js_headers_to_strv(ctx, o, &r->headers, &r->n_headers);
+
+    /* file: {path, field, name, mime} + form: {name: value, ...} — a
+     * multipart upload (see SendReq). */
+    JSValue f = JS_GetPropertyStr(ctx, o, "file");
+    if (JS_IsObject(f)) {
+        r->file_path = get_str_prop(ctx, f, "path");
+        r->file_field = get_str_prop(ctx, f, "field");
+        r->file_name = get_str_prop(ctx, f, "name");
+        r->file_mime = get_str_prop(ctx, f, "mime");
+    }
+    JS_FreeValue(ctx, f);
+    JSValue form = JS_GetPropertyStr(ctx, o, "form");
+    JSPropertyEnum *tab = NULL;
+    uint32_t n = 0;
+    if (r->file_path && JS_IsObject(form) &&
+        JS_GetOwnPropertyNames(ctx, &tab, &n, form,
+                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+        r->form = calloc((size_t)n * 2 + 1, sizeof(char *));
+        for (uint32_t i = 0; r->form && i < n; i++) {
+            const char *k = JS_AtomToCString(ctx, tab[i].atom);
+            JSValue v = JS_GetProperty(ctx, form, tab[i].atom);
+            const char *val = JS_ToCString(ctx, v);
+            if (k && val) {
+                r->form[r->n_form * 2] = strdup(k);
+                r->form[r->n_form * 2 + 1] = strdup(val);
+                r->n_form++;
+            }
+            if (k) JS_FreeCString(ctx, k);
+            if (val) JS_FreeCString(ctx, val);
+            JS_FreeValue(ctx, v);
+        }
+        JS_FreePropertyEnum(ctx, tab, n);
+    }
+    JS_FreeValue(ctx, form);
     return r;
 }
 

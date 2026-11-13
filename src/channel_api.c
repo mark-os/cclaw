@@ -167,9 +167,48 @@ int channel_reset_outbox(ChannelCtx *ctx) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
+int channel_media_dir(const char *db_path, const char *channel,
+                      char *out, size_t cap) {
+    if (!channel || !channel[0] || strchr(channel, '/')) return -1;
+    const char *dbp = db_path ? db_path : ".";
+    const char *slash = strrchr(dbp, '/');
+    int n = slash ? snprintf(out, cap, "%.*s/media", (int)(slash - dbp), dbp)
+                  : snprintf(out, cap, "media");
+    if (n < 0 || (size_t)n >= cap) return -1;
+    mkdir(out, 0700);
+    int m = snprintf(out + n, cap - (size_t)n, "/%s", channel);
+    if (m < 0 || (size_t)m >= cap - (size_t)n) return -1;
+    mkdir(out, 0700);
+    return 0;
+}
+
+/* A file row (channel_send's `file`) owns a copy in the media spool. Once
+ * the row is delivered or has failed for good, nothing will read the copy
+ * again. Only a path inside this channel's own spool is ever removed. */
+static void outbox_file_remove(ChannelCtx *ctx, int64_t id) {
+    char dir[1024];
+    sqlite3_stmt *s;
+    if (channel_media_dir(ctx->db_path, ctx->channel_name, dir, sizeof(dir)) != 0 ||
+        sqlite3_prepare_v2(ctx->db,
+            "SELECT json_extract(payload,'$.file.path') FROM channel_outbox"
+            " WHERE id=? AND channel_name=?;", -1, &s, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_int64(s, 1, id);
+    sqlite3_bind_text(s, 2, ctx->channel_name, -1, SQLITE_STATIC);
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *path = (const char *)sqlite3_column_text(s, 0);
+        size_t dl = strlen(dir);
+        if (path && strncmp(path, dir, dl) == 0 && path[dl] == '/' &&
+            !strchr(path + dl + 1, '/'))
+            unlink(path);
+    }
+    sqlite3_finalize(s);
+}
+
 /* Mark delivered */
 int channel_ack_outbox(ChannelCtx *ctx, int64_t id) {
     if (!ctx) return -1;
+    outbox_file_remove(ctx, id);
     const char *sql =
         "UPDATE channel_outbox SET status='delivered', acked_at=unixepoch()"
         " WHERE id=? AND channel_name=?;";
@@ -232,7 +271,10 @@ int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error) {
     int flipped = sqlite3_changes(ctx->db);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
-    if (flipped > 0) notify_send_failure(ctx, id, status_buf);
+    if (flipped > 0) {
+        outbox_file_remove(ctx, id);
+        notify_send_failure(ctx, id, status_buf);
+    }
     return 0;
 }
 

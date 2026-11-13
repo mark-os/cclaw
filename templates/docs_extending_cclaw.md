@@ -67,7 +67,7 @@ evaluates to `undefined`). If nothing is returned, buffered `console.log`
 output becomes the result. No Node APIs, no `require`/`import`, no event loop,
 no `Atomics`; use the provided host bridges:
 
-- `http_request(url[, {method, body, headers:{Name:Value}, markdownify, timeout}])` —
+- `http_request(url[, {method, body, headers:{Name:Value}, markdownify, timeout, save_to, max_bytes}])` —
   synchronous HTTP, returns `{status, body}`; on transport failure it returns
   `{status: -1, body: "", error}` instead of throwing (`body` is always a
   string). `markdownify: true` converts an HTML
@@ -77,12 +77,20 @@ no `Atomics`; use the provided host bridges:
   tool child, so the cap is what stops a slow endpoint becoming a hang. Raise
   it only for calls that are legitimately slow (an LLM-backed search that
   grounds a query can take a minute from a small box), not as a blanket retry.
+  `body` is text only — a binary response (image, PDF, archive) throws rather
+  than hand you a corrupted string. Download those with `save_to: 'name.jpg'`:
+  the bytes stream straight to that file and the call returns
+  `{status, path, bytes}`. `max_bytes` caps the file (default 64 MiB); a
+  non-2xx answer leaves no file and returns the error text in `body`.
 - `fs.readFile` / `fs.writeFile` / `fs.readdir` / `fs.stat` / `fs.lstat` /
   `fs.cwd` — workspace-scoped file access.
-- `LLM(prompt[, {system, model, max_tokens, temperature, timeout}])` — a
+- `LLM(prompt[, {system, model, max_tokens, temperature, timeout, images}])` — a
   completion from your own model routing list, returned as a string. Only
   what your handler returns enters your context, so you can map it over data
   or chain calls without spending context on the intermediate results.
+  `images: ['photo.jpg']` attaches image files (JPEG, PNG, GIF, WebP) for the
+  model to look at — this is how you see a picture you downloaded. Pick a
+  model that can see with `model`.
 - `XML.parse(str)` (alias `xml.parse`) — parse XML/RSS/Atom/sitemaps into a
   plain object, the JSON.parse of XML. Reach for it instead of regex.
 

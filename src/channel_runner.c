@@ -21,6 +21,10 @@
  *   channel.send(Req + {outbox_id?, final?}) — outbox-tracked delivery (and
  *     fire-and-forget without outbox_id); an outbox send is acked on final
  *     2xx, failed/retried otherwise.
+ *   Upload (send or http): Req + {file: {path, field?, name?, mime?},
+ *     form?: {name: value}} posts multipart/form-data — the form fields, then
+ *     the file. `path` is an outbox payload's file.path (a file in this
+ *     channel's media spool, nothing else); curl reads it from disk.
  *
  * argv: channel_runner <db_path> <channel_name> */
 #ifndef _GNU_SOURCE
@@ -258,6 +262,9 @@ void send_req_free(SendReq *r) {
     if (!r) return;
     free(r->method); free(r->url); free(r->body);
     free(r->save_to);
+    free(r->file_path); free(r->file_field); free(r->file_name); free(r->file_mime);
+    for (int i = 0; i < r->n_form * 2; i++) free(r->form[i]);
+    free(r->form);
     if (r->js_ctx) {
         JS_FreeValue(r->js_ctx, r->p_resolve);
         JS_FreeValue(r->js_ctx, r->p_reject);
@@ -292,26 +299,11 @@ char *channel_save_path(const char *name) {
         return NULL;
     /* Media spool lives next to the DB: <db_dir>/media/<channel>/<name>.
      * Harness scratch DBs land it in /tmp, the real daemon in ~/.cclaw. */
-    const char *dbp = g_ctx->db_path ? g_ctx->db_path : ".";
-    const char *slash = strrchr(dbp, '/');
     char dir[1024];
-    int wn;
-    if (slash)
-        wn = snprintf(dir, sizeof(dir), "%.*s/media", (int)(slash - dbp), dbp);
-    else
-        wn = snprintf(dir, sizeof(dir), "media");
-    if (wn < 0 || (size_t)wn >= sizeof(dir)) {
-        LOG_ERROR_("channel_runner: media dir path truncated (db_path too long)");
+    if (channel_media_dir(g_ctx->db_path, g_ctx->channel_name, dir, sizeof(dir)) != 0) {
+        LOG_ERROR_("channel_runner: media dir path truncated");
         return NULL;
     }
-    mkdir(dir, 0700);
-    size_t used = strlen(dir);
-    wn = snprintf(dir + used, sizeof(dir) - used, "/%s", g_ctx->channel_name);
-    if (wn < 0 || (size_t)wn >= sizeof(dir) - used) {
-        LOG_ERROR_("channel_runner: media dir path truncated (channel name too long)");
-        return NULL;
-    }
-    mkdir(dir, 0700);
     char *out = NULL;
     if (asprintf(&out, "%s/%s", dir, name) < 0) return NULL;
     return out;
@@ -375,6 +367,7 @@ static struct {
 
 /* One in-flight send at a time preserves per-channel ordering */
 static SendReq *g_send_active;
+static curl_mime *g_send_mime;       /* multipart body of the active upload */
 static CURL *g_send_easy;
 static Buf g_send_resp;
 static struct curl_slist *g_send_hdrs;
@@ -538,15 +531,61 @@ static void poll_start(void) {
     g_poll.active = 1;
 }
 
+/* Turn the request into a multipart upload of r->file_path. Returns NULL on
+ * success, else why not. The file must be one of this channel's own spool
+ * files: the path arrives in an outbox payload, and a channel handler has no
+ * business reading anything else off the host. */
+static const char *attach_upload(CURL *c, const SendReq *r) {
+    char dir[1024];
+    if (channel_media_dir(g_ctx->db_path, g_ctx->channel_name, dir, sizeof(dir)) != 0)
+        return "no media spool";
+    size_t dl = strlen(dir);
+    if (strncmp(r->file_path, dir, dl) != 0 || r->file_path[dl] != '/' ||
+        strchr(r->file_path + dl + 1, '/'))
+        return "file is not in this channel's media spool";
+    if (access(r->file_path, R_OK) != 0) return "file is gone from the media spool";
+
+    curl_mime *mime = curl_mime_init(c);
+    if (!mime) return "out of memory";
+    int bad = 0;
+    for (int i = 0; i < r->n_form; i++) {
+        curl_mimepart *p = curl_mime_addpart(mime);
+        bad |= !p || curl_mime_name(p, r->form[i * 2]) != CURLE_OK ||
+               curl_mime_data(p, r->form[i * 2 + 1], CURL_ZERO_TERMINATED) != CURLE_OK;
+    }
+    curl_mimepart *fp = curl_mime_addpart(mime);
+    bad |= !fp ||
+           curl_mime_name(fp, r->file_field ? r->file_field : "file") != CURLE_OK ||
+           curl_mime_filedata(fp, r->file_path) != CURLE_OK ||
+           (r->file_name && curl_mime_filename(fp, r->file_name) != CURLE_OK) ||
+           (r->file_mime && curl_mime_type(fp, r->file_mime) != CURLE_OK);
+    if (bad) { curl_mime_free(mime); return "cannot build the upload"; }
+    curl_easy_setopt(c, CURLOPT_MIMEPOST, mime);
+    g_send_mime = mime;
+    return NULL;
+}
+
 static void send_start_next(JSContext *ctx) {
     if (g_send_active) return;
     SendReq *r = send_queue_pop();
     if (!r) return;
-    g_send_easy = make_easy(r->method, r->url, r->body, r->headers, r->n_headers,
+    /* An upload carries its body as multipart; a string body beside it would
+     * make make_easy claim JSON. */
+    g_send_easy = make_easy(r->method, r->url, r->file_path ? NULL : r->body,
+                            r->headers, r->n_headers,
                             r->timeout > 0 ? r->timeout : CR_SEND_TIMEOUT,
                             &g_send_resp, &g_send_hdrs);
-    if (!g_send_easy) {
-        if (r->outbox_id > 0) channel_fail_outbox(g_ctx, r->outbox_id, "curl init failed");
+    const char *refused = !g_send_easy ? "curl init failed"
+                        : r->file_path ? attach_upload(g_send_easy, r) : NULL;
+    if (refused) {
+        if (g_send_easy) {
+            curl_easy_cleanup(g_send_easy); g_send_easy = NULL;
+            curl_slist_free_all(g_send_hdrs); g_send_hdrs = NULL;
+        }
+        if (r->outbox_id > 0) {
+            send_queue_drop_outbox(r->outbox_id);
+            channel_fail_outbox(g_ctx, r->outbox_id, refused);
+        }
         if (r->js_ctx) send_req_settle(ctx, r, 0, NULL, NULL, 0, "request refused");
         send_req_free(r);
         return;
@@ -1374,6 +1413,8 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
                 curl_multi_remove_handle(g_multi, g_send_easy);
                 curl_easy_cleanup(g_send_easy);
                 curl_slist_free_all(g_send_hdrs);
+                curl_mime_free(g_send_mime);     /* after the handle using it */
+                g_send_mime = NULL;
                 g_send_easy = NULL;
                 g_send_hdrs = NULL;
                 send_req_free(r);
@@ -1390,6 +1431,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     buf_free(&g_poll.resp);
     if (g_send_easy) { curl_multi_remove_handle(g_multi, g_send_easy); curl_easy_cleanup(g_send_easy); }
     curl_slist_free_all(g_send_hdrs);
+    curl_mime_free(g_send_mime);
     if (g_save.f) { fclose(g_save.f); g_save.f = NULL; }
     send_req_free(g_send_active);
     buf_free(&g_send_resp);

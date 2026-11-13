@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include "tool_channel_send.h"
+#include "channel_api.h"
 #include "tools.h"
 #include "db.h"
 #include "test_util.h"
@@ -165,6 +166,128 @@ int main(void) {
     assert(r && strstr(r, "error:"));
     free(r);
     printf("PASS\n");
+
+    /* A successful send is not a failed tool call. */
+    printf("  success_is_not_an_error... ");
+    int failed = 0;   /* the dispatcher presets it; a handler only ever sets it */
+    ToolEntry *te = tools_lookup(&reg, "channel_send");
+    r = te->handler("{\"channel\":\"telegram\",\"chat_id\":\"-500\",\"message\":\"ok\"}",
+                    te->user_data, &failed);
+    assert(r && strstr(r, "queued") && failed == 0);
+    free(r);
+    printf("PASS\n");
+
+    /* ── file: a workspace file, copied into the channel's media spool ── */
+    static const unsigned char png[] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
+                                         0x00, 0xFF, 0x00, 0x80 };
+    const char *WS = "/tmp/test_tool_channel_send_ws";
+    assert(system("rm -rf /tmp/test_tool_channel_send_ws &&"
+                  " mkdir -p /tmp/test_tool_channel_send_ws/sub &&"
+                  " ln -s /etc/hostname /tmp/test_tool_channel_send_ws/leak.txt &&"
+                  " ln -s /etc /tmp/test_tool_channel_send_ws/etc &&"
+                  " : > /tmp/test_tool_channel_send_ws/empty.bin") == 0);
+    FILE *pf = fopen("/tmp/test_tool_channel_send_ws/sub/my pic.png", "wb");
+    assert(pf && fwrite(png, 1, sizeof(png), pf) == sizeof(png) && fclose(pf) == 0);
+    ctx.workspace = WS;
+    ctx.db_path = DB_PATH;
+
+    printf("  file_queued_as_spool_copy... ");
+    r = call(&reg, &ctx, "Alice", 11,
+        "{\"channel\":\"telegram\",\"chat_id\":\"42\",\"file\":\"sub/my pic.png\","
+        "\"message\":\"look\"}");
+    assert(r && strstr(r, "queued, outbox id") && strstr(r, "image/png"));
+    free(r);
+    /* caption, not text: a handler that predates files must fail the row */
+    assert(qcount(db,
+        "SELECT COUNT(*) FROM channel_outbox WHERE"
+        " json_extract(payload,'$.caption')='look'"
+        " AND json_extract(payload,'$.text') IS NULL"
+        " AND json_extract(payload,'$.file.name')='my_pic.png'"
+        " AND json_extract(payload,'$.file.mime')='image/png'"
+        " AND json_extract(payload,'$.file.path') LIKE '/tmp/media/telegram/out-%'") == 1);
+    char *spool = db_scalar_text(db,
+        "SELECT json_extract(payload,'$.file.path') FROM channel_outbox"
+        " WHERE json_extract(payload,'$.file') IS NOT NULL AND id > ?;", 0);
+    assert(spool);
+    unsigned char got[64];
+    FILE *sf = fopen(spool, "rb");
+    assert(sf);
+    size_t gn = fread(got, 1, sizeof(got), sf);
+    fclose(sf);
+    assert(gn == sizeof(png) && memcmp(got, png, gn) == 0);
+    printf("PASS\n");
+
+    /* The agent's own auto-mode chat: text would double-post, a file would
+     * not — the reply never carries one. */
+    printf("  file_to_own_auto_chat... ");
+    r = call(&reg, &ctx, "Alice", 10, "{\"file\":\"sub/my pic.png\"}");
+    assert(r && strstr(r, "queued, outbox id"));
+    free(r);
+    printf("PASS\n");
+
+    /* Outside the workspace, by any spelling: the check is on the file that
+     * was opened, so a symlink (to a file, or as a directory on the way) and
+     * a plain absolute path are all the same refusal. Nothing is queued. */
+    printf("  file_outside_workspace_refused... ");
+    int before = qcount(db, "SELECT COUNT(*) FROM channel_outbox");
+    const char *outside[] = {
+        "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"leak.txt\"}",
+        "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"etc/hostname\"}",
+        "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"/etc/hostname\"}",
+        "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"../test_tool_channel_send.db\"}",
+    };
+    for (size_t i = 0; i < sizeof(outside) / sizeof(outside[0]); i++) {
+        failed = 0;
+        ctx.session_id = 11;
+        r = te->handler(outside[i], te->user_data, &failed);
+        assert(r && failed == 1 && strstr(r, "outside your workspace"));
+        free(r);
+    }
+    r = call(&reg, &ctx, "Alice", 11,
+        "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"empty.bin\"}");
+    assert(r && strstr(r, "is empty"));
+    free(r);
+    r = call(&reg, &ctx, "Alice", 11,
+        "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"sub\"}");
+    assert(r && strstr(r, "not a regular file"));
+    free(r);
+    r = call(&reg, &ctx, "Alice", 11,
+        "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"absent.png\"}");
+    assert(r && strstr(r, "cannot open"));
+    free(r);
+    assert(qcount(db, "SELECT COUNT(*) FROM channel_outbox") == before);
+    printf("PASS\n");
+
+    printf("  file_over_limit_refused... ");
+    assert(sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value)"
+                            " VALUES('channel_send_file_max_bytes','4');",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    r = call(&reg, &ctx, "Alice", 11,
+        "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"sub/my pic.png\"}");
+    assert(r && strstr(r, "the limit is 4"));
+    free(r);
+    printf("PASS\n");
+
+    /* The spool copy lives exactly as long as its row can still be sent. */
+    printf("  spool_copy_removed_when_row_settles... ");
+    ChannelCtx *cc = channel_ctx_open(DB_PATH, "telegram");
+    assert(cc && access(spool, F_OK) == 0);
+    int64_t fid = db_scalar_i64(db,
+        "SELECT MIN(id) FROM channel_outbox"
+        " WHERE json_extract(payload,'$.file') IS NOT NULL AND id > ?;", 0, -1);
+    int64_t fid2 = db_scalar_i64(db,
+        "SELECT MAX(id) FROM channel_outbox"
+        " WHERE json_extract(payload,'$.file') IS NOT NULL AND id > ?;", 0, -1);
+    char *spool2 = db_scalar_text(db,
+        "SELECT json_extract(payload,'$.file.path') FROM channel_outbox WHERE id=?;", fid2);
+    assert(fid > 0 && fid2 > fid && spool2 && access(spool2, F_OK) == 0);
+    assert(channel_ack_outbox(cc, fid) == 0 && access(spool, F_OK) != 0);
+    assert(channel_fail_outbox(cc, fid2, "refused by platform") == 0 &&
+           access(spool2, F_OK) != 0);
+    channel_ctx_free(cc);
+    free(spool); free(spool2);
+    printf("PASS\n");
+    assert(system("rm -rf /tmp/test_tool_channel_send_ws") == 0);
 
     tools_free(&reg);
     db_close(db);

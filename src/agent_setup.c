@@ -175,9 +175,12 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->chan_send_ctx.db = db;
     setup->chan_send_ctx.db_path = cfg->db_path;
     setup->chan_send_ctx.session_id = session_id;
+    setup->chan_send_ctx.workspace = cfg->workspace;
     snprintf(setup->chan_send_ctx.agent_name, sizeof(setup->chan_send_ctx.agent_name),
              "%s", agent_name ? agent_name : "");
     tool_channel_send_register(&setup->reg, &setup->chan_send_ctx);
+    /* share_file — same per-call identity (agent, session, workspace). */
+    tool_share_register(&setup->reg, &setup->chan_send_ctx);
 
     /* Agent launch + status check. Available in both CLI and daemon: both run
      * the same event loop with a wake pipe, so a spawned child advances and a
@@ -294,6 +297,8 @@ static void workspace_refresh(AgentSetup *setup, const char *agent) {
     /* cron_set's script paths are workspace-relative, and the file must exist
      * when the job is set — so it has to be the advancing agent's workspace. */
     setup->cron_ctx.workspace = setup->workspace_buf;
+    /* channel_send's `file` is a file of the sending agent, nobody else's. */
+    setup->chan_send_ctx.workspace = setup->workspace_buf;
 
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data)

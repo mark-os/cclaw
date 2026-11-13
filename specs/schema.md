@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v55 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v56 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -293,6 +293,22 @@ Audit log for tool-call approvals. When a tool call is parked (`sessions.state` 
 | `expires_at` | INTEGER | park deadline; fail-closed deny if reached |
 
 Index: `approvals_pending ON approvals(session_id, state) WHERE state='pending'`.
+
+## shares
+
+Files an agent has put behind a link with `share_file` (v56), served by the
+web server at `/share/<token>/<name>`. The row is the share: nothing is
+copied, and an expired row simply stops matching. Expired rows are deleted
+when the next share is created.
+
+| Column | Type | Meaning |
+|--------|------|---------|
+| `token` | TEXT PRIMARY KEY | 32 hex characters from `util_random`. The whole capability: holding it is what permits reading the file. |
+| `agent_name` | TEXT | The agent that shared it (cascades with the agent). |
+| `path` | TEXT | The file as resolved when it was shared. It is served only while the file opened at this path still resolves to this path. |
+| `name` | TEXT | Basename reduced to `[A-Za-z0-9._-]`, for the URL and `Content-Disposition`. |
+| `created_at` | INTEGER | Unix time of the share. |
+| `expires_at` | INTEGER | Unix time the link stops working. |
 
 ## approval_decisions
 

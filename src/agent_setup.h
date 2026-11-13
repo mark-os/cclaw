@@ -21,6 +21,7 @@
 #include "tool_web_fetch.h"
 #include "tool_secret_create.h"
 #include "tool_channel_send.h"
+#include "tool_share.h"
 #include "tool_session_condense.h"
 #include "proxy.h"
 #include "extension.h"

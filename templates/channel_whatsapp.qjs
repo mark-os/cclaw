@@ -122,6 +122,13 @@ function onOutbox(item) {
         channel.failOutbox(item.id, "JSON parse error");
         return;
     }
+    if (payload.file) {
+        // The bridge's /v1/send takes text only. Say so, so the agent is told
+        // (a failed row notifies the sending session) rather than left
+        // believing the file arrived.
+        channel.failOutbox(item.id, "the whatsapp channel cannot send files");
+        return;
+    }
     if (!payload.chat_id || !payload.text) {
         channel.failOutbox(item.id, "missing chat_id or text");
         return;

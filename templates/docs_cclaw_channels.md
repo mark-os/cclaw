@@ -147,7 +147,12 @@ for groups where attribution is load-bearing in explicit mode).
 
 The agent can proactively send messages via the `channel_send` tool:
 
-- Schema: `{channel, chat_id, message}` (text-only v1).
+- Schema: `{channel, chat_id, message, file}`.
+- `file` is a path in your workspace: the file is attached to the message
+  (an image shows inline) and `message` becomes its caption. This is how
+  you show someone a picture or hand them a document. It works to your own
+  chat too. Size limit: config `channel_send_file_max_bytes`. If the channel
+  cannot deliver it you get a system message saying so.
 - `action: "list"` enumerates reachable targets.
 - **Routes are the allowlist (default-deny):** a target needs a
   `(channel, chat_id)` route whose pinned session belongs to the sending
@@ -155,10 +160,21 @@ The agent can proactively send messages via the `channel_send` tool:
   new target requires `cclaw route add`.
 - Delivery is async: the tool inserts an outbox row and returns
   `queued, outbox id N`.
-- Sends to the session's own origin chat in `auto` mode short-circuit (the
-  reply already delivers there).
+- Text sent to the session's own origin chat in `auto` mode short-circuits
+  (the reply already delivers there); a `file` is always sent.
 - It is in every agent's default grants, because the grant authorizes
   nothing on its own: the route is the allowlist.
+
+## share_file tool
+
+`share_file {file, hours}` returns a temporary link to a file in your
+workspace, served by the daemon's web server. Use it for what a chat
+attachment cannot carry: a file over the channel's size limit, or a chat on
+a channel that takes no files. Anyone holding the link can read the file
+until it expires (default 24 hours). The link only works if the person can
+reach the daemon's web server — the operator sets `web_public_url` when that
+is through a tunnel or proxy. It is not in the default grants: ask for it
+with `request_config`.
 
 ## Ingestion-only channels
 

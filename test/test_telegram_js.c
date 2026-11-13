@@ -152,6 +152,24 @@ int main(void) {
     /* a lone dashes line (no pipe) is not a table delimiter */
     expect("md_not_table", "markdownToTelegramHtml('a | b\\n---')", "a | b\n---");
 
+    /* ── onOutbox file rows (channel_send's `file`) ──────────────────── */
+    /* An image goes as a photo with its caption; on the plain re-delivery
+     * (mode 1, after Telegram refused it as a photo) as a document. */
+    #define FILE_ROW(mime) "JSON.stringify({chat_id:5,caption:'look'," \
+        "file:{path:'/spool/out-1-pic.png',name:'pic.png',mime:'" mime "'}})"
+    #define SENT "var q=__sent[0]; [q.url.split('/').pop(), q.file.field," \
+        " q.file.path, q.file.name, q.form.chat_id, q.form.caption," \
+        " q.outbox_id, q.final, typeof q.body].join('|')"
+    expect("onOutbox_file_image_as_photo",
+        "onOutbox({id:7,payload:" FILE_ROW("image/png") ",mode:0});" SENT,
+        "sendPhoto|photo|/spool/out-1-pic.png|pic.png|5|look|7|1|undefined");
+    expect("onOutbox_file_image_plain_as_document",
+        "onOutbox({id:7,payload:" FILE_ROW("image/png") ",mode:1});" SENT,
+        "sendDocument|document|/spool/out-1-pic.png|pic.png|5|look|7|1|undefined");
+    expect("onOutbox_file_other_as_document",
+        "onOutbox({id:7,payload:" FILE_ROW("application/pdf") ",mode:0});" SENT,
+        "sendDocument|document|/spool/out-1-pic.png|pic.png|5|look|7|1|undefined");
+
     /* ── onOutbox end-to-end: mode ladder formatted → plain ─────────── */
     /* Mode 0 (formatted): body carries HTML + parse_mode. */
     expect_has("onOutbox_formatted_html",

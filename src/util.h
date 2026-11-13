@@ -33,6 +33,21 @@ int util_copy_file(const char *src, const char *dst, mode_t mode);
 /* Free space (MB) on the filesystem holding `path`; -1 if it cannot be measured. */
 long util_free_mb(const char *path);
 
+/* Open `path` for reading and prove the file that was opened lies inside
+ * `root`. For trusted code handed a path by something untrusted (the model
+ * naming a file in its workspace): the check is made on the open descriptor
+ * — the kernel is asked where it really is (/proc/self/fd) — so a symlink at
+ * any point is resolved before it is judged and nothing can be swapped
+ * between the check and the read. A relative path is taken from root.
+ * Returns the fd, with the resolved path in real[cap]; or -1 with errno set
+ * (EXDEV = the file exists but is outside root). */
+int util_open_inside(const char *root, const char *path, char *real, size_t cap);
+
+/* Media type from a file's first bytes: image/jpeg, image/png, image/gif,
+ * image/webp, application/pdf — or NULL. The name is whatever its author
+ * chose to call it; the bytes are what a viewer will decode. */
+const char *util_sniff_mime(const unsigned char *d, size_t n);
+
 /* Set O_NONBLOCK on fd. Best-effort — a failed fcntl leaves fd untouched. */
 void util_set_nonblock(int fd);
 

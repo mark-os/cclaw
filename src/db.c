@@ -708,6 +708,18 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "ALTER TABLE sessions ADD COLUMN chat_is_admin INTEGER;"
       "ALTER TABLE sessions ADD COLUMN chat_error_notice_at INTEGER;",
       NULL },
+    /* v56: shares — files an agent has put behind a link (share_file),
+     * served by the web server at /share/<token>. */
+    { 56,
+      "CREATE TABLE IF NOT EXISTS shares ("
+      "  token      TEXT PRIMARY KEY,"
+      "  agent_name TEXT NOT NULL REFERENCES agents(name)"
+      "             ON UPDATE CASCADE ON DELETE CASCADE,"
+      "  path       TEXT NOT NULL,"
+      "  name       TEXT NOT NULL,"
+      "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+      "  expires_at INTEGER NOT NULL);",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {

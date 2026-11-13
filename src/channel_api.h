@@ -2,6 +2,7 @@
 #define CCLAW_CHANNEL_API_H
 
 #include "sqlite3.h"
+#include <stddef.h>
 #include <stdint.h>
 
 /* Channel API — limited interface for channel processes.
@@ -44,6 +45,12 @@ int channel_dispatch_outbox(ChannelCtx *ctx, int64_t id);
 
 /* Startup recovery: 'sending' rows (crashed mid-send) back to 'pending'. */
 int channel_reset_outbox(ChannelCtx *ctx);
+
+/* The channel's media spool, <db_dir>/media/<channel>, created on demand:
+ * inbound downloads land here, and so do the copies of files an agent sends
+ * (channel_send's `file`). 0, or -1 if the path does not fit / cannot exist. */
+int channel_media_dir(const char *db_path, const char *channel,
+                      char *out, size_t cap);
 
 /* Mark outbox row as delivered. */
 int channel_ack_outbox(ChannelCtx *ctx, int64_t id);

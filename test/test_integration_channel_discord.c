@@ -278,6 +278,12 @@ static volatile int g_rest_stop = 0;
 static volatile int g_dm_open_seen = 0;
 static volatile int g_dm_msg_seen = 0;
 static volatile int g_bad_channel_post = 0;   /* POST to the raw user id */
+static volatile int g_file_upload_ok = 0;     /* multipart file post, bytes intact */
+
+/* An attachment as channel_send spools it: PNG signature, NULs, high bytes. */
+static const unsigned char FILE_BYTES[] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
+                                            0x00, 0xFF, 0x00, 0x80, 0xFE };
+#define SPOOL_FILE "/tmp/media/discord/out-test-pic.png"
 
 static void *mock_rest(void *arg) {
     (void)arg;
@@ -305,6 +311,16 @@ static void *mock_rest(void *arg) {
             if (strstr(req, "ping the admin")) g_dm_msg_seen = 1;
         } else if (strstr(req, "POST /api/v10/channels/adminuser/messages")) {
             g_bad_channel_post = 1;
+        } else if (strstr(req, "POST /api/v10/channels/filechan/messages")) {
+            /* headers are text; the body holds NULs, so search it by length */
+#define HAS(lit) (memmem(req, rn, lit, sizeof(lit) - 1) != NULL)
+            g_file_upload_ok =
+                strcasestr(req, "Content-Type: multipart/form-data") &&
+                HAS("name=\"payload_json\"") &&
+                HAS("{\"content\":\"a picture\"}") &&
+                HAS("name=\"files[0]\"; filename=\"pic.png\"") &&
+                HAS("Content-Type: image/png") &&
+                memmem(req, rn, FILE_BYTES, sizeof(FILE_BYTES));
         }
         char resp[512];
         int rl = snprintf(resp, sizeof(resp),
@@ -514,6 +530,44 @@ int main(void) {
         FAIL("admin outbox rows were not delivered");
     if (g_dm_open_seen) FAIL("DM channel was re-opened instead of cached");
     printf("  PASS: DM channel id is cached across notices\n");
+
+    /* A file row (channel_send's `file`): one multipart post with the caption
+     * and the file's exact bytes, read from the media spool by C; delivered,
+     * and the spool copy removed. A row naming a file outside the spool is
+     * failed without a request — the handler cannot make the runner read
+     * arbitrary host files. */
+    mkdir("/tmp/media", 0700);
+    mkdir("/tmp/media/discord", 0700);
+    FILE *sp = fopen(SPOOL_FILE, "wb");
+    if (!sp || fwrite(FILE_BYTES, 1, sizeof(FILE_BYTES), sp) != sizeof(FILE_BYTES) ||
+        fclose(sp) != 0)
+        FAIL("could not write the spool file");
+    if (sqlite3_exec(db,
+            "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"
+            " ('discord', 0, json_object('chat_id','filechan','caption','a picture',"
+            "   'file', json_object('path','" SPOOL_FILE "','name','pic.png',"
+            "                       'mime','image/png'))),"
+            " ('discord', 0, json_object('chat_id','filechan',"
+            "   'file', json_object('path','/etc/hostname','name','h','mime','text/plain')));",
+            NULL, NULL, NULL) != SQLITE_OK)
+        FAIL("could not queue the file outbox rows");
+    for (int i = 0; i < 80; i++) {
+        usleep(100000);
+        if (test_scalar_count_db(db,
+                "SELECT COUNT(*) FROM channel_outbox WHERE status IN ('pending','sending');") == 0)
+            break;
+    }
+    if (!g_file_upload_ok) FAIL("file was not uploaded as multipart with its bytes intact");
+    if (test_scalar_count_db(db,
+            "SELECT COUNT(*) FROM channel_outbox WHERE status='delivered'"
+            " AND json_extract(payload,'$.file.name')='pic.png';") != 1)
+        FAIL("file row was not acked");
+    if (access(SPOOL_FILE, F_OK) == 0) FAIL("spool copy was not removed after delivery");
+    if (test_scalar_count_db(db,
+            "SELECT COUNT(*) FROM channel_outbox WHERE status LIKE 'failed:%media spool%'"
+            " AND json_extract(payload,'$.file.path')='/etc/hostname';") != 1)
+        FAIL("a file outside the media spool was not refused");
+    printf("  PASS: file row uploads as multipart; a path outside the spool is refused\n");
 
     /* Ambient debounce: leading edge emits alone, the rest of the burst
      * arrives as ONE combined envelope carrying both lines with per-line

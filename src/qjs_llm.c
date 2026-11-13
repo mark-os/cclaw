@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qjs_llm.h"
+#include "llm_bridge.h"
+#include "util.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -144,6 +146,95 @@ static JSValue build_messages(JSContext *ctx, JSValueConst input,
         "LLM: pass a prompt string or {messages:[{role,content},...]}");
 }
 
+/* Image type from the file's first bytes — the name is the caller's claim,
+ * the bytes are what the provider will decode. NULL = not a supported image. */
+static const char *image_mime(const unsigned char *d, size_t n) {
+    const char *m = util_sniff_mime(d, n);
+    return (m && strncmp(m, "image/", 6) == 0) ? m : NULL;
+}
+
+/* opts.images (file paths) → the request with ,"images":[{mime,data}] added.
+ * The files are read and base64-encoded here in C and spliced into the JSON
+ * text, so an image is never a JS value: the engine's heap limit does not
+ * bound it, and the script cannot see or alter what is sent. Paths resolve
+ * in the child's own (sandboxed) view of the filesystem.
+ * Returns malloc'd JSON; NULL with errbuf set on failure; req_json's own
+ * copy when there are no images. */
+static char *splice_images(JSContext *ctx, JSValueConst opts,
+                           const char *req_json, char *errbuf, size_t errcap) {
+    uint32_t n = 0;
+    JSValue arr = JS_IsObject(opts) ? JS_GetPropertyStr(ctx, opts, "images")
+                                    : JS_UNDEFINED;
+    if (JS_IsString(arr)) {            /* images:'one.jpg' — the obvious slip */
+        JSValue one = JS_NewArray(ctx);
+        JS_SetPropertyUint32(ctx, one, 0, arr);
+        arr = one;
+    }
+    if (JS_IsArray(ctx, arr)) {
+        JSValue lv = JS_GetPropertyStr(ctx, arr, "length");
+        JS_ToUint32(ctx, &n, lv);
+        JS_FreeValue(ctx, lv);
+    } else if (!JS_IsUndefined(arr) && !JS_IsNull(arr)) {
+        JS_FreeValue(ctx, arr);
+        snprintf(errbuf, errcap, "opts.images must be an array of file paths");
+        return NULL;
+    }
+    if (n == 0) { JS_FreeValue(ctx, arr); return strdup(req_json); }
+
+    size_t rlen = strlen(req_json), len = rlen - 1, total = 0;   /* drop '}' */
+    size_t cap = rlen + 64;
+    char *out = malloc(cap);
+    if (out) memcpy(out, req_json, len);
+    for (uint32_t i = 0; out && i < n; i++) {
+        JSValue pv = JS_GetPropertyUint32(ctx, arr, i);
+        const char *path = JS_ToCString(ctx, pv);
+        JS_FreeValue(ctx, pv);
+        size_t flen = 0;
+        char *raw = path ? util_read_file(path, &flen) : NULL;
+        const char *mime = raw ? image_mime((const unsigned char *)raw, flen) : NULL;
+        total += flen;
+        if (!raw)
+            snprintf(errbuf, errcap, "opts.images: cannot read %.200s",
+                     path ? path : "(not a string)");
+        else if (!mime)
+            snprintf(errbuf, errcap, "opts.images: %.200s is not a JPEG, PNG, "
+                     "GIF or WebP image", path);
+        else if (total > LLM_IMAGES_MAX)
+            snprintf(errbuf, errcap, "opts.images: %zu bytes of images is over "
+                     "the %u-byte limit providers accept — downscale first",
+                     total, (unsigned)LLM_IMAGES_MAX);
+        char *b64 = errbuf[0] ? NULL
+                  : base64_encode((const unsigned char *)raw, flen);
+        free(raw);
+        if (path) JS_FreeCString(ctx, path);
+        if (!b64) {
+            if (!errbuf[0]) snprintf(errbuf, errcap, "out of memory");
+            free(out);
+            out = NULL;
+            break;
+        }
+        size_t blen = strlen(b64), need = len + blen + 96;
+        char *grown = need > cap ? realloc(out, cap = need * 2) : out;
+        if (!grown) { free(out); free(b64); out = NULL; break; }
+        out = grown;
+        len += (size_t)snprintf(out + len, cap - len,
+                                "%s{\"mime\":\"%s\",\"data\":\"",
+                                i == 0 ? ",\"images\":[" : ",", mime);
+        memcpy(out + len, b64, blen);
+        len += blen;
+        memcpy(out + len, "\"}", 2);
+        len += 2;
+        free(b64);
+    }
+    JS_FreeValue(ctx, arr);
+    if (!out) {
+        if (!errbuf[0]) snprintf(errbuf, errcap, "out of memory");
+        return NULL;
+    }
+    memcpy(out + len, "]}", 3);
+    return out;
+}
+
 static JSValue js_llm(JSContext *ctx, JSValueConst this_val,
                       int argc, JSValueConst *argv) {
     (void)this_val;
@@ -178,10 +269,16 @@ static JSValue js_llm(JSContext *ctx, JSValueConst this_val,
     const char *req_json = JS_ToCString(ctx, reqs);
     if (!req_json) { JS_FreeValue(ctx, reqs); return JS_EXCEPTION; }
 
-    const char *err = "bridge error";
-    char *resp = bridge_call(sock, req_json, &err);
+    char imgerr[320] = "";
+    char *wire = splice_images(ctx, opts, req_json, imgerr, sizeof(imgerr));
     JS_FreeCString(ctx, req_json);
     JS_FreeValue(ctx, reqs);
+    if (!wire)
+        return JS_ThrowTypeError(ctx, "LLM: %s", imgerr);
+
+    const char *err = "bridge error";
+    char *resp = bridge_call(sock, wire, &err);
+    free(wire);
     if (!resp)
         return JS_ThrowTypeError(ctx, "LLM: %s", err);
 

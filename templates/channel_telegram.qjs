@@ -164,6 +164,10 @@ function onOutbox(item) {
 
     var chatId = payload.chat_id;
     var text = payload.text;
+    if (chatId && payload.file) {
+        sendFile(chatId, payload.file, payload.caption, item.id, (item.mode || 0) >= 1);
+        return;
+    }
     if (!chatId || !text) {
         channel.failOutbox(item.id, "missing chat_id or text");
         return;
@@ -421,6 +425,27 @@ function tgOutbox(method, bodyObj, outboxId, isFinal) {
         body: JSON.stringify(bodyObj),
         outbox_id: outboxId,
         final: isFinal ? 1 : 0
+    });
+}
+
+// A file the agent sent (channel_send's `file`). An image goes as a photo so
+// it shows inline; Telegram refuses some images as photos (too large, odd
+// proportions) with a 4xx, and the C loop then re-delivers the row at mode 1,
+// where everything goes as a document — which Telegram takes as it is. C
+// reads the file from the media spool as it uploads.
+function sendFile(chatId, file, caption, outboxId, asDocument) {
+    var photo = !asDocument && /^image\/(jpeg|png|webp)$/.test(file.mime || "");
+    var form = { chat_id: String(chatId) };
+    if (caption) form.caption = caption.substring(0, 1024);
+    channel.send({
+        method: "POST",
+        url: config.base + "/bot" + config.token + "/" + (photo ? "sendPhoto" : "sendDocument"),
+        form: form,
+        file: { path: file.path, field: photo ? "photo" : "document",
+                name: file.name, mime: file.mime },
+        timeout: 600,
+        outbox_id: outboxId,
+        final: 1
     });
 }
 

@@ -358,6 +358,129 @@ static void test_call_cap(void) {
     PASS();
 }
 
+/* ── opts.images ── */
+
+#define IMG_PATH "/tmp/test_qjs_llm.png"
+#define NOT_IMG_PATH "/tmp/test_qjs_llm.txt"
+/* base64 of the 8-byte PNG signature begins with this */
+#define PNG_B64_HEAD "iVBORw0KGgo"
+
+static void write_file(const char *path, const void *d, size_t n) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(d, 1, n, f);
+    fclose(f);
+}
+
+static int archived_request_has(const char *needle) {
+    sqlite3_stmt *s;
+    int has = 0;
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT instr(json(request_body), ?1) > 0 FROM llm_responses"
+            " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, needle, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) has = sqlite3_column_int(s, 0);
+    }
+    sqlite3_finalize(s);
+    return has;
+}
+
+/* The whole path a script takes: LLM(prompt, {images:[file]}) in real QJS →
+ * the stub reads and encodes the file → bridge → a Gemini body with the
+ * image as inlineData beside the prompt. The archived request keeps the
+ * conversation but not the image bytes. */
+static void test_images_gemini_via_bridge(void) {
+    TEST("images_gemini_via_bridge");
+    static const unsigned char png[] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
+                                         0x00, 0x00, 0xFF, 0xFE, 0x80 };
+    write_file(IMG_PATH, png, sizeof(png));
+    MockHttp m = { .nconn = 1, .resp = { RESP_GEMINI } };
+    pthread_t tid;
+    if (mock_http_start(&m, &tid) != 0) { FAIL("mock"); return; }
+    route_two(1, m.port);
+    LlmBridge *b = llm_bridge_start(BRIDGE_DIR, DB_PATH, "t", "js:test", 7, 42);
+    if (!b) { FAIL("bridge start"); mock_http_stop(&m, tid); return; }
+    setenv("CCLAW_LLM_SOCK", llm_bridge_sock(b), 1);
+    int is_error = 0;
+    char *r = qjs_eval_run(
+        "LLM('what is this', {model:'gem', images:['" IMG_PATH "']})",
+        NULL, NULL, NULL, &is_error);
+    unsetenv("CCLAW_LLM_SOCK");
+    llm_bridge_stop(b);
+    mock_http_stop(&m, tid);
+    if (!r || is_error || !strstr(r, "part one")) { FAIL(r ? r : "NULL"); free(r); return; }
+    free(r);
+    const char *c = m.captured[0];
+    if (!strstr(c, "{\"text\":\"what is this\"}") ||
+        !strstr(c, "\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"" PNG_B64_HEAD)) {
+        FAIL("gemini image body wrong"); printf("    got: %.700s\n", c); return;
+    }
+    if (archived_request_has(PNG_B64_HEAD) || !archived_request_has("base64 chars]") ||
+        !archived_request_has("what is this")) {
+        FAIL("archive should keep the prompt and drop the image bytes"); return;
+    }
+    PASS();
+}
+
+/* The same images on an OpenAI-format provider: content parts with a data:
+ * URL; a message that is not the last user message is left as it was. */
+static void test_images_openai_body(void) {
+    TEST("images_openai_body");
+    MockHttp m = { .nconn = 1, .resp = { RESP_OPENAI } };
+    pthread_t tid;
+    if (mock_http_start(&m, &tid) != 0) { FAIL("mock"); return; }
+    route_two(m.port, 1);
+    char *r = req("t",
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"earlier\"},"
+        "{\"role\":\"assistant\",\"content\":\"ok\"},"
+        "{\"role\":\"user\",\"content\":\"describe\"}],"
+        "\"opts\":{\"model\":\"open\"},"
+        "\"images\":[{\"mime\":\"image/jpeg\",\"data\":\"QUJD\"}]}");
+    mock_http_stop(&m, tid);
+    if (!r || !strstr(r, "\"ok\":true")) { FAIL(r ? r : "NULL"); free(r); return; }
+    free(r);
+    const char *c = m.captured[0];
+    if (!strstr(c, "{\"role\":\"user\",\"content\":\"earlier\"}") ||
+        !strstr(c, "{\"type\":\"text\",\"text\":\"describe\"}") ||
+        !strstr(c, "{\"type\":\"image_url\",\"image_url\":"
+                   "{\"url\":\"data:image/jpeg;base64,QUJD\"}}")) {
+        FAIL("openai image body wrong"); printf("    got: %.700s\n", c); return;
+    }
+    PASS();
+}
+
+/* Refusals: a file that is not an image (child side, by its bytes), and a
+ * request whose image fields could not have come from the stub (parent side
+ * — the child is sandboxed code, so the parent checks again). */
+static void test_images_refused(void) {
+    TEST("images_refused");
+    write_file(NOT_IMG_PATH, "just text", 9);
+    route_two(1, 1);
+    LlmBridge *b = llm_bridge_start(BRIDGE_DIR, DB_PATH, "t", "js:test", 7, 42);
+    if (!b) { FAIL("bridge start"); return; }
+    setenv("CCLAW_LLM_SOCK", llm_bridge_sock(b), 1);
+    int e1 = 0, e2 = 0;
+    char *r1 = qjs_eval_run("LLM('q', {images:['" NOT_IMG_PATH "']})",
+                            NULL, NULL, NULL, &e1);
+    char *r2 = qjs_eval_run("LLM('q', {images:['/tmp/test_qjs_llm_absent.png']})",
+                            NULL, NULL, NULL, &e2);
+    unsetenv("CCLAW_LLM_SOCK");
+    llm_bridge_stop(b);
+    char *r3 = req("t", "{\"messages\":[{\"role\":\"user\",\"content\":\"q\"}],"
+                        "\"images\":[{\"mime\":\"text/html\",\"data\":\"QUJD\"}]}");
+    char *r4 = req("t", "{\"messages\":[{\"role\":\"user\",\"content\":\"q\"}],"
+                        "\"images\":[{\"mime\":\"image/png\",\"data\":\"a\\\"b\"}]}");
+    int ok = r1 && e1 && strstr(r1, "is not a JPEG") &&
+             r2 && e2 && strstr(r2, "cannot read") &&
+             r3 && strstr(r3, "\"ok\":false") && strstr(r3, "opts.images") &&
+             r4 && strstr(r4, "\"ok\":false") && strstr(r4, "opts.images");
+    if (!ok) printf("\n    r1=%s\n    r2=%s\n    r3=%s\n    r4=%s\n    ",
+                    r1 ? r1 : "NULL", r2 ? r2 : "NULL", r3 ? r3 : "NULL", r4 ? r4 : "NULL");
+    free(r1); free(r2); free(r3); free(r4);
+    unlink(NOT_IMG_PATH);
+    if (ok) PASS(); else FAIL("not refused");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_qjs_llm:\n");
@@ -387,6 +510,10 @@ int main(void) {
     test_bridge_error_throws();
     test_no_sock_throws();
     test_call_cap();
+    test_images_gemini_via_bridge();
+    test_images_openai_body();
+    test_images_refused();
+    unlink(IMG_PATH);
 
     sqlite3_close(g_db);
     unlink(DB_PATH); unlink(DB_PATH "-wal"); unlink(DB_PATH "-shm");

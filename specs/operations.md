@@ -182,3 +182,31 @@ Nothing is deleted: `<db>.failed-<tag>` keeps what the new build wrote, and
 answer to "can I delete this?".
 
 [error-handling.md]: error-handling.md
+
+## Shared files — `/share`
+
+`share_file` (an agent tool, not in the default grants) puts one workspace
+file behind a link: `<base>/share/<token>/<name>`, valid for the hours asked
+(default 24, capped by `share_max_hours`). It exists for what a chat
+attachment cannot carry — `channel_send`'s `file` is the direct way to show
+someone a picture. State is one row in `shares`
+([schema.md](schema.md#shares)); nothing is copied.
+
+- **`<base>` is `web_public_url`** when set, else
+  `http://<first non-loopback address>:<web_port>`. A daemon reached through
+  a tunnel or a reverse proxy has no way to know that address, so the
+  operator states it: `web_public_url` is the base of every link the daemon
+  hands out, `/admin` included.
+- **The token is the only authentication.** The link is meant to be opened
+  by whoever it was given to. Anything that is not a live share — unknown,
+  malformed, expired — gets the same 404.
+- **The path is re-checked on every request.** The agent can still write its
+  workspace, so the server opens the stored path, asks the kernel where the
+  descriptor really is, and serves it only if that is still the stored path.
+  A file replaced by a symlink, or a directory swapped on the way, is a 404,
+  not the new target.
+- **An agent's file never runs as a page.** `/admin` is on the same origin.
+  Images and PDFs (recognized by their bytes) and text are shown inline,
+  everything else is a download; every response carries
+  `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff` and
+  `Cache-Control: no-store`. An HTML file is served as `text/plain`.

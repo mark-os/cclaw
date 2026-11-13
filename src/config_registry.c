@@ -1,6 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE   /* getifaddrs */
 #include "config_registry.h"
 #include "db.h"
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -141,6 +145,12 @@ static const ConfigDef s_defs[] = {
       "Seconds a degraded model sinks below healthy candidates before retry" },
     { "notify_model_change", "1",
       "Notify the channel's admins when the model serving an agent changes (1 = on)" },
+    { "web_public_url", "",
+      "Address people reach this daemon's web server at, e.g. https://box.example.net — used in the links it hands out (/admin, shared files). Empty = http://<this host's address>:<web_port>" },
+    { "share_max_hours", "720",
+      "Longest a share_file link may live, in hours" },
+    { "channel_send_file_max_bytes", "10485760",
+      "Largest file channel_send will attach, in bytes (platforms differ: Discord takes 10 MB, Telegram 50 MB)" },
     { "chat_error_notice_hours", "24",
       "A failed turn sends a non-admin chat one generic line at most this often, in hours (0 = never); the error itself goes to the channel's admins" },
     { "chat_error_text", "Sorry, I can't provide a response right now.",
@@ -371,4 +381,37 @@ int config_set(sqlite3 *db, const char *key, const char *value) {
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+char *config_web_base_url(sqlite3 *db) {
+    /* What the operator says people reach it at (a tunnel, a reverse proxy,
+     * a DNS name) wins: only they know. Trailing slashes are dropped so
+     * callers can append a path. */
+    char *pub = config_get(db, "web_public_url");
+    if (pub && pub[0]) {
+        size_t n = strlen(pub);
+        while (n > 0 && pub[n - 1] == '/') pub[--n] = '\0';
+        if (n > 0) return pub;
+    }
+    free(pub);
+    /* Config precedence is env > DB (the daemon resolves web_port the same way). */
+    const char *env_port = getenv("CCLAW_WEB_PORT");
+    int port = (env_port && env_port[0]) ? atoi(env_port)
+                                         : config_get_int(db, "web_port");
+    char host[INET_ADDRSTRLEN] = "127.0.0.1";
+    struct ifaddrs *ifa = NULL;
+    if (getifaddrs(&ifa) == 0) {
+        for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
+            if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+            struct sockaddr_in *sin = (struct sockaddr_in *)(void *)p->ifa_addr;
+            if ((ntohl(sin->sin_addr.s_addr) >> 24) == 127) continue;
+            inet_ntop(AF_INET, &sin->sin_addr, host, sizeof(host));
+            break;
+        }
+        freeifaddrs(ifa);
+    }
+    size_t n = sizeof(host) + 32;
+    char *url = malloc(n);
+    if (url) snprintf(url, n, "http://%s:%d", host, port);
+    return url;
 }

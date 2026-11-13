@@ -14,6 +14,8 @@
 #include "db.h"
 #include <pthread.h>
 #include "approval.h"
+#include "tool_share.h"
+#include "tools.h"
 #include "proc.h"
 #include "test_util.h"
 
@@ -422,12 +424,174 @@ static void test_db_handle_owner(void) {
     printf("PASS: test_db_handle_owner\n");
 }
 
+/* ── /share/<token>: files an agent put behind a link ── */
+
+typedef struct { unsigned char d[8192]; size_t n; } Blob;
+
+static size_t blob_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
+    Blob *b = ud;
+    size_t t = size * nmemb, room = sizeof(b->d) - 1 - b->n;
+    if (t < room) room = t;
+    memcpy(b->d + b->n, ptr, room);
+    b->n += room;
+    b->d[b->n] = '\0';
+    return t;
+}
+
+/* GET url → status; headers (text) and body (bytes) captured. */
+static long share_get(const char *url, Blob *hdr, Blob *body) {
+    hdr->n = body->n = 0;
+    hdr->d[0] = body->d[0] = '\0';
+    CURL *c = curl_easy_init();
+    assert(c);
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, blob_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, body);
+    curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, blob_cb);
+    curl_easy_setopt(c, CURLOPT_HEADERDATA, hdr);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 5L);
+    long code = 0;
+    if (curl_easy_perform(c) == CURLE_OK)
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_cleanup(c);
+    return code;
+}
+
+static void put_file(const char *path, const void *d, size_t n) {
+    FILE *f = fopen(path, "wb");
+    assert(f && fwrite(d, 1, n, f) == n && fclose(f) == 0);
+}
+
+/* share_file's result is "<url>\nvalid for ..."; cut it to the URL. */
+static char *share(ToolRegistry *reg, const char *args, int *failed) {
+    ToolEntry *te = tools_lookup(reg, "share_file");
+    assert(te);
+    *failed = 0;
+    char *r = te->handler(args, te->user_data, failed);
+    assert(r);
+    if (!*failed) *strchr(r, '\n') = '\0';
+    return r;
+}
+
+#define SHARE_WS "/tmp/test_web_share_ws"
+
+static void test_share(void) {
+    static const unsigned char png[] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
+                                         0x00, 0xFF, 0x00, 0x80, 0xFE, 0x00 };
+    static const unsigned char blob[] = { 'x', 0x00, 0x01, 0x02, 0xFF };
+    const char *html = "<script>alert(document.cookie)</script>";
+    assert(system("rm -rf " SHARE_WS " && mkdir -p " SHARE_WS "/pics") == 0);
+    put_file(SHARE_WS "/pics/my pic.png", png, sizeof(png));
+    put_file(SHARE_WS "/page.html", html, strlen(html));
+    put_file(SHARE_WS "/data.bin", blob, sizeof(blob));
+
+    Config cfg = {0};
+    cfg.web_port = 19879;
+    cfg.db_path = "test_web_share.db";
+    test_db_clean(cfg.db_path);
+    sqlite3 *db = test_db_open(cfg.db_path);
+    assert(db);
+    test_seed_agent(db, "Sharer");
+    assert(sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES"
+                            " ('web_public_url','http://127.0.0.1:19879/'),"
+                            " ('share_max_hours','48');",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(web_start(&cfg, cfg.db_path) == 0);
+    usleep(50000);
+
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolChannelSendCtx ctx = { .db = db, .workspace = SHARE_WS };
+    snprintf(ctx.agent_name, sizeof(ctx.agent_name), "Sharer");
+    assert(tool_share_register(&reg, &ctx) == 0);
+    Blob *h = malloc(sizeof(Blob)), *b = malloc(sizeof(Blob));
+    assert(h && b);
+    int failed;
+
+    /* An image: the link is built on web_public_url (trailing slash dropped),
+     * and what comes back is the file, byte for byte, as an image. */
+    char *url = share(&reg, "{\"file\":\"pics/my pic.png\",\"hours\":1000}", &failed);
+    assert(!failed && strncmp(url, "http://127.0.0.1:19879/share/", 29) == 0);
+    assert(strlen(url) == 29 + 32 + strlen("/my_pic.png") &&
+           strcmp(url + 29 + 32, "/my_pic.png") == 0);
+    assert(share_get(url, h, b) == 200);
+    assert(b->n == sizeof(png) && memcmp(b->d, png, sizeof(png)) == 0);
+    assert(strstr((char *)h->d, "Content-Type: image/png"));
+    assert(strstr((char *)h->d, "Content-Security-Policy: sandbox"));
+    assert(strstr((char *)h->d, "X-Content-Type-Options: nosniff"));
+    /* hours is capped by share_max_hours */
+    assert(db_scalar_i64(db, "SELECT (max(expires_at) - unixepoch() + 30) / 3600"
+                             " FROM shares WHERE ? = 0;", 0, -1) == 48);
+    /* the name after the token is decoration: the token alone selects */
+    char bare[128];
+    snprintf(bare, sizeof(bare), "%.61s", url);
+    assert(share_get(bare, h, b) == 200 && b->n == sizeof(png));
+
+    /* The server also hosts /admin, so an agent's file must never run as a
+     * page: HTML is served as text, unknown binary as a download. */
+    char *hurl = share(&reg, "{\"file\":\"page.html\"}", &failed);
+    assert(!failed && share_get(hurl, h, b) == 200);
+    assert(strstr((char *)h->d, "Content-Type: text/plain"));
+    assert(!strstr((char *)h->d, "text/html"));
+    assert(b->n == strlen(html) && memcmp(b->d, html, b->n) == 0);
+    char *burl = share(&reg, "{\"file\":\"data.bin\"}", &failed);
+    assert(!failed && share_get(burl, h, b) == 200);
+    assert(strstr((char *)h->d, "Content-Type: application/octet-stream"));
+    assert(strstr((char *)h->d, "Content-Disposition: attachment"));
+    assert(b->n == sizeof(blob) && memcmp(b->d, blob, sizeof(blob)) == 0);
+
+    /* Not a live share: one answer for all of it. */
+    assert(share_get("http://127.0.0.1:19879/share/"
+                     "00000000000000000000000000000000/x", h, b) == 404);
+    assert(share_get("http://127.0.0.1:19879/share/nope", h, b) == 404);
+    assert(share_get("http://127.0.0.1:19879/share/", h, b) == 404);
+
+    /* The agent still owns the path. Once it leads somewhere else, the link
+     * serves nothing — not the new target, wherever that is. */
+    assert(system("rm " SHARE_WS "/page.html && ln -s /etc/hostname "
+                  SHARE_WS "/page.html") == 0);
+    assert(share_get(hurl, h, b) == 404);
+    assert(system("mv " SHARE_WS "/pics " SHARE_WS "/pics.real && ln -s /etc "
+                  SHARE_WS "/pics") == 0);
+    assert(share_get(url, h, b) == 404);
+    assert(system("rm " SHARE_WS "/pics && mv " SHARE_WS "/pics.real "
+                  SHARE_WS "/pics") == 0);
+    assert(share_get(url, h, b) == 200);
+
+    /* Expiry is the clock against the row. */
+    assert(sqlite3_exec(db, "UPDATE shares SET expires_at = unixepoch() - 1;",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(share_get(url, h, b) == 404 && share_get(burl, h, b) == 404);
+
+    /* Only the agent's own files can be shared; an expired row is swept by
+     * the next share. */
+    char *r = share(&reg, "{\"file\":\"/etc/hostname\"}", &failed);
+    assert(failed && strstr(r, "outside your workspace"));
+    free(r);
+    r = share(&reg, "{\"file\":\"pics\"}", &failed);
+    assert(failed && strstr(r, "not a regular file"));
+    free(r);
+    r = share(&reg, "{\"file\":\"data.bin\"}", &failed);
+    assert(!failed);
+    free(r);
+    assert(db_scalar_i64(db, "SELECT count(*) FROM shares WHERE ? = 0;", 0, -1) == 1);
+
+    free(url); free(hurl); free(burl); free(h); free(b);
+    tools_free(&reg);
+    web_stop();
+    db_close(db);
+    test_db_clean(cfg.db_path);
+    assert(system("rm -rf " SHARE_WS) == 0);
+    printf("PASS: test_share\n");
+}
+
 int main(void) {
     TEST_INIT();
     test_db_handle_owner();
     test_status_page();
     test_hook_proxy();
     test_admin_dashboard();
+    test_share();
     printf("All web tests passed.\n");
     return 0;
 }

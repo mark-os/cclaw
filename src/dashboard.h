@@ -17,7 +17,7 @@ int dashboard_register(struct mg_context *ctx, sqlite3 *db);
  * full session dump only to token holders. */
 int dashboard_auth_check(struct mg_connection *conn, int allow_query);
 
-/* Malloc'd "http://<first non-loopback IPv4>:<web_port>/admin?token=…", or
+/* Malloc'd "<config_web_base_url>/admin?token=…", or
  * NULL before the daemon has minted a token. Shared by `cclaw dashboard`
  * and the Telegram /admin command. */
 char *dashboard_url(sqlite3 *db);

@@ -242,8 +242,8 @@ convention carries to any channel extension.
 
 ## channel_send (outbound tool)
 
-Fixed schema `{channel, chat_id, message}` (+ `action: "list"` to enumerate
-reachable targets); text-only v1. **Routes are the allowlist, default-deny**:
+Fixed schema `{channel, chat_id, message, file}` (+ `action: "list"` to
+enumerate reachable targets). **Routes are the allowlist, default-deny**:
 a target needs an exact `(channel, chat_id)` route whose pinned session
 belongs to the sending agent (`send_target_allowed`, `src/tool_channel_send.c`). A `'*'`
 route grants no send authority; reaching a new target is an operator act
@@ -252,6 +252,38 @@ route grants no send authority; reaching a new target is an operator act
 pending→sending→delivered/failed progression. Sends to the session's own
 origin chat in `auto` mode short-circuit (the reply already delivers there).
 Ships **ungranted**; the operator grants it per agent.
+
+### Files
+
+`file` names a file in the sending agent's workspace; `message` is then its
+caption and may be omitted. This is how an agent shows a person a picture.
+
+- **The file is judged, then copied.** The tool runs in the trusted parent
+  and the path comes from the model, so it is opened with
+  `util_open_inside`: the check is made on the open descriptor
+  (`/proc/self/fd`), not on the path, so a symlink anywhere on the way is
+  resolved before it is judged and nothing can be swapped between the check
+  and the read. The bytes are copied to the channel's media spool
+  (`<db_dir>/media/<channel>/out-…`), which the agent cannot write. Size is
+  capped by `channel_send_file_max_bytes` (default 10 MB).
+- **The outbox row** is `{chat_id, caption, file: {path, name, mime}}` — no
+  `text`. A handler written before files existed therefore fails the row
+  ("missing chat_id or text") and the agent is told, instead of delivering
+  the caption alone. `mime` comes from the file's first bytes.
+- **The handler uploads it** with `channel.send({..., form, file})`
+  (multipart/form-data, see [extensions.md](extensions.md)). The runner
+  reads the file from disk as it sends and accepts only a path inside its
+  own channel's spool. Discord posts it as an attachment; Telegram sends an
+  image as a photo and falls back to a document on the plain re-delivery;
+  WhatsApp fails the row, because its bridge takes text only.
+- **The copy lives as long as the row can still be sent**:
+  `channel_ack_outbox` and `channel_fail_outbox` remove it.
+- **The auto-mode short-circuit does not apply**: a turn's reply never
+  carries a file, so sending one to the session's own chat is not a
+  double post.
+
+For a file a chat cannot carry there is `share_file` (see
+[operations.md](operations.md#shared-files--share)).
 
 ## Ingestion-only channels
 

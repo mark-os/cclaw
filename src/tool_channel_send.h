@@ -13,6 +13,7 @@ typedef struct {
     const char *db_path;      /* for channel_outbox_wake */
     int64_t session_id;       /* threaded per call by dispatch */
     char agent_name[64];      /* threaded per call by dispatch */
+    const char *workspace;    /* the agent's workspace: where `file` resolves */
 } ToolChannelSendCtx;
 
 int tool_channel_send_register(ToolRegistry *reg, ToolChannelSendCtx *ctx);

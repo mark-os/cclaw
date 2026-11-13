@@ -187,6 +187,13 @@ int main(void) {
     expect("outbox_bad_payload_fails",
         "onOutbox({id:4, payload:'not json'}); '' + __failed[0].id",
         "4");
+    /* The bridge takes text only: a file row fails loudly (the sending
+     * session is told) rather than delivering the caption alone. */
+    expect("outbox_file_row_fails",
+        "onOutbox({id:6, payload: JSON.stringify({chat_id:'1555@s.whatsapp.net',"
+        " caption:'look', file:{path:'/spool/x.png',name:'x.png',mime:'image/png'}})});"
+        " __failed[0].id + '|' + __sent.length",
+        "6|0");
     expect("outbox_missing_fields_fails",
         "onOutbox({id:5, payload: JSON.stringify({text:'no chat'})}); '' + __failed[0].id",
         "5");

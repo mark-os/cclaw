@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE   /* realpath, readlink */
 #include "util.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -266,4 +267,39 @@ int util_random(void *buf, size_t len) {
     }
     if (fd >= 0) close(fd);
     return got == len ? 0 : -1;
+}
+
+int util_open_inside(const char *root, const char *path, char *real, size_t cap) {
+    char base[PATH_MAX], src[PATH_MAX + 2], link[64];
+    if (!root || !path || !path[0] || cap < 2 || !realpath(root, base)) {
+        errno = ENOENT;
+        return -1;
+    }
+    int n = path[0] == '/' ? snprintf(src, sizeof(src), "%s", path)
+                           : snprintf(src, sizeof(src), "%s/%s", base, path);
+    if (n <= 0 || (size_t)n >= sizeof(src)) { errno = ENAMETOOLONG; return -1; }
+    /* NONBLOCK: a FIFO planted at the path must not hang the opener */
+    int fd = open(src, O_RDONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+    if (fd < 0) return -1;
+    snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+    ssize_t rl = readlink(link, real, cap - 1);
+    size_t bl = strlen(base);
+    real[rl > 0 ? rl : 0] = '\0';
+    if (rl <= 0 || strncmp(real, base, bl) != 0 || real[bl] != '/') {
+        close(fd);
+        errno = EXDEV;
+        return -1;
+    }
+    return fd;
+}
+
+const char *util_sniff_mime(const unsigned char *d, size_t n) {
+    if (n >= 3 && d[0] == 0xFF && d[1] == 0xD8 && d[2] == 0xFF) return "image/jpeg";
+    if (n >= 8 && memcmp(d, "\x89PNG\r\n\x1a\n", 8) == 0) return "image/png";
+    if (n >= 6 && (memcmp(d, "GIF87a", 6) == 0 || memcmp(d, "GIF89a", 6) == 0))
+        return "image/gif";
+    if (n >= 12 && memcmp(d, "RIFF", 4) == 0 && memcmp(d + 8, "WEBP", 4) == 0)
+        return "image/webp";
+    if (n >= 5 && memcmp(d, "%PDF-", 5) == 0) return "application/pdf";
+    return NULL;
 }

@@ -180,7 +180,8 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
     if (!url)
         return JS_ThrowTypeError(ctx, "http_request: url must be a string");
 
-    const char *method = NULL, *body = NULL;
+    const char *method = NULL, *body = NULL, *save_to = NULL;
+    double max_bytes = 0;
     int markdownify = 0;
     int timeout = JS_HTTP_TIMEOUT_DEFAULT;
     char **hdr_lines = NULL;       /* owned "Name: Value" strings */
@@ -204,6 +205,14 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
                 timeout = secs > JS_HTTP_TIMEOUT_MAX ? JS_HTTP_TIMEOUT_MAX : secs;
         }
         JS_FreeValue(ctx, t);
+        JSValue sv = JS_GetPropertyStr(ctx, argv[1], "save_to");
+        if (!JS_IsUndefined(sv) && !JS_IsNull(sv)) save_to = JS_ToCString(ctx, sv);
+        JS_FreeValue(ctx, sv);
+        JSValue mb = JS_GetPropertyStr(ctx, argv[1], "max_bytes");
+        if (!JS_IsUndefined(mb) && !JS_IsNull(mb) &&
+            (JS_ToFloat64(ctx, &max_bytes, mb) != 0 || !(max_bytes > 0)))
+            max_bytes = 0;
+        JS_FreeValue(ctx, mb);
 
         /* headers: {Name: Value, ...} → NULL-terminated "Name: Value" array */
         JSValue h = JS_GetPropertyStr(ctx, argv[1], "headers");
@@ -259,20 +268,27 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, url);
         if (method) JS_FreeCString(ctx, method);
         if (body) JS_FreeCString(ctx, body);
+        if (save_to) JS_FreeCString(ctx, save_to);
         for (size_t i = 0; i < hdr_n; i++) free(hdr_lines[i]);
         free(hdr_lines);
         free(hdr_ptrs);
         return JS_ThrowTypeError(ctx, "http_request: %s", errbuf);
     }
 
+    size_t cap = max_bytes >= (double)JS_HTTP_SAVE_MAX_CEILING
+        ? JS_HTTP_SAVE_MAX_CEILING : (size_t)max_bytes;
     JsHttpResult r = js_http_fetch_exec(r_url ? r_url : url, method,
-                                        r_body ? r_body : body, hdr_ptrs, timeout);
+                                        r_body ? r_body : body, hdr_ptrs, timeout,
+                                        save_to, cap);
     free(r_url);
     free(r_body);
     free(used);
     JS_FreeCString(ctx, url);
     if (method) JS_FreeCString(ctx, method);
     if (body) JS_FreeCString(ctx, body);
+    JSValue saved_path = (save_to && r.saved) ? JS_NewString(ctx, save_to)
+                                              : JS_UNDEFINED;
+    if (save_to) JS_FreeCString(ctx, save_to);
     for (size_t i = 0; i < hdr_n; i++) free(hdr_lines[i]);
     free(hdr_lines);
     free(hdr_ptrs);
@@ -289,6 +305,29 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         JS_SetPropertyStr(ctx, result, "body", JS_NewString(ctx, ""));
         js_http_result_free(&r);
         return result;
+    }
+
+    if (r.saved) {
+        /* The body is on disk and was never a JS value. */
+        JS_SetPropertyStr(ctx, result, "path", saved_path);
+        JS_SetPropertyStr(ctx, result, "bytes",
+                          JS_NewInt64(ctx, (int64_t)r.saved_bytes));
+        JS_SetPropertyStr(ctx, result, "body", JS_NewString(ctx, ""));
+        js_http_result_free(&r);
+        return result;
+    }
+
+    /* A binary body cannot become a JS string: every byte that is not valid
+     * UTF-8 would turn into U+FFFD, and the script would hold a corrupted
+     * copy that looks like data. Refuse, and name the way that works. */
+    if (js_http_body_is_binary(r.body, r.body_len)) {
+        size_t n = r.body_len;
+        js_http_result_free(&r);
+        JS_FreeValue(ctx, result);
+        return JS_ThrowTypeError(ctx,
+            "http_request: the response is binary (%zu bytes, HTTP %d) and "
+            "cannot be returned as a string — pass {save_to:'<file>'} to "
+            "write it to a file instead", n, r.status);
     }
 
     if (r.body && markdownify) {

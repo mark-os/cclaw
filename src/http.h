@@ -7,6 +7,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 /* HTTP response. data stays NULL when the transfer produced no body. */
 typedef struct {
@@ -16,6 +17,7 @@ typedef struct {
     char content_type[128]; /* Content-Type header value, empty if absent */
     char err_detail[256];   /* curl error description on failure */
     int truncated;          /* 1 if body was cut at max_response_bytes */
+    size_t sink_bytes;      /* bytes written to opts->sink (0 without one) */
     /* Timing metrics (populated on success) */
     double ttfb;            /* CURLINFO_STARTTRANSFER_TIME — first byte received */
     double tls_time;        /* CURLINFO_APPCONNECT_TIME — TLS handshake */
@@ -39,6 +41,11 @@ typedef struct {
     void *read_data;
     const char *user_agent;      /* NULL = no User-Agent header */
     void *curl_handle;           /* If non-NULL, reuse this CURL* (caller owns lifecycle) */
+    /* If non-NULL, a 2xx body streams here instead of into resp->data — it is
+     * never held in memory, and max_response_bytes then caps the file. Any
+     * other status still lands in resp->data, so the caller can show the
+     * server's error text. Caller opens and closes it. */
+    FILE *sink;
 } HttpRequestOpts;
 
 /* General-purpose HTTP request. Returns HTTP status, -1 on curl error, -2 on timeout. */

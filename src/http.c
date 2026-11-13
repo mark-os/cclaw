@@ -26,12 +26,34 @@ typedef struct {
     Buf *buf;
     size_t max_bytes;
     int truncated;          /* set when the cap was hit and the transfer aborted */
+    FILE *sink;             /* 2xx bodies go here instead of buf (may be NULL) */
+    size_t sunk;
+    CURL *curl;
+    int sink_decided, to_sink;
 } WriteCbCtx;
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t bytes = size * nmemb;
     WriteCbCtx *ctx = userdata;
     Buf *b = ctx->buf;
+
+    if (ctx->sink && !ctx->sink_decided) {
+        /* Redirect bodies never reach this callback, so the status at the
+         * first body byte is the final one. */
+        long code = 0;
+        curl_easy_getinfo(ctx->curl, CURLINFO_RESPONSE_CODE, &code);
+        ctx->to_sink = (code >= 200 && code < 300);
+        ctx->sink_decided = 1;
+    }
+    if (ctx->to_sink) {
+        if (ctx->max_bytes > 0 && ctx->sunk + bytes > ctx->max_bytes) {
+            ctx->truncated = 1;
+            return 0;
+        }
+        if (fwrite(ptr, 1, bytes, ctx->sink) != bytes) return 0;
+        ctx->sunk += bytes;
+        return bytes;
+    }
 
     if (ctx->max_bytes > 0 && b->len + bytes > ctx->max_bytes) {
         /* Keep what fits, flag truncation, and abort by returning 0. curl reads
@@ -115,7 +137,8 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     if (!opts || !opts->url) return -1;
 
     Buf body = {0};
-    WriteCbCtx wctx = { .buf = &body, .max_bytes = opts->max_response_bytes };
+    WriteCbCtx wctx = { .buf = &body, .max_bytes = opts->max_response_bytes,
+                        .sink = opts->sink };
 
     int own_curl = 0;
     CURL *curl = opts->curl_handle;
@@ -127,6 +150,7 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     }
     if (!curl) return -1;
 
+    wctx.curl = curl;
     char errbuf[CURL_ERROR_SIZE] = "";
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
     curl_easy_setopt(curl, CURLOPT_URL, opts->url);
@@ -204,6 +228,7 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
         rc = CURLE_OK;
         resp->truncated = 1;
     }
+    resp->sink_bytes = wctx.sunk;
 
     long status = -1;
     if (rc == CURLE_OK) {

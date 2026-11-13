@@ -56,6 +56,13 @@ typedef struct SendReq {
     JSContext *js_ctx;
     JSValue p_resolve, p_reject;
     char *save_to;
+    /* Upload: with file_path set the request body is multipart/form-data —
+       the form name/value pairs first, then the file as part file_field. The
+       file is read from disk by curl as it sends; it never enters the JS
+       heap. file_path must be inside this channel's media spool. */
+    char *file_path, *file_field, *file_name, *file_mime;
+    char **form;         /* n_form name/value pairs, flattened */
+    int n_form;
     struct SendReq *next;
 } SendReq;
 

@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v54 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v55 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -436,6 +436,8 @@ channel-wide default lives on `channels.default_agent`.
 | `channel_name` | TEXT | originating channel |
 | `chat_id` | TEXT | originating chat id |
 | `chat_title` | TEXT | display name of the bound chat as observed by the channel runner (`#general @ My Server`, `DM with alice`); injected into the system prompt so the bot knows where it is chatting. Display only — sends always address by `chat_id`. NULL until a runner reports a name |
+| `chat_type` | TEXT | `dm` or `group`, as the channel runner reported it with the last message (v55). NULL until a message arrives. Decides who gets the error of a failed turn ([error-handling.md](error-handling.md#a-turn-that-ends-in-an-error)) |
+| `chat_error_notice_at` | INTEGER | Unix time this session last sent its chat the generic "can't respond" line (v55). The once-per-`group_error_notice_hours` limit reads the newest value over all sessions of the chat |
 | `parent_session_id` | INTEGER DEFAULT -1 | sub-agent parent (-1 = top-level) |
 | `parent_tool_call_id` | TEXT | the tool_call that spawned this sub-session |
 | `depth` | INTEGER NOT NULL DEFAULT 0 | sub-agent nesting depth |

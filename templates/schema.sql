@@ -237,6 +237,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   chat_title TEXT,                          -- observed human-readable name of the bound chat
                                             -- ("#general @ My Server", "DM with alice"). Display
                                             -- only: sends always address by chat_id.
+  chat_type TEXT,                           -- 'dm' or 'group', as the channel runner reported it
+                                            -- on the last message; NULL until one arrives. A
+                                            -- failed turn in a group tells the group only a
+                                            -- generic line (specs/error-handling.md).
+  chat_error_notice_at INTEGER,             -- when this chat last got that generic line; the
+                                            -- limit is per chat (MAX over its sessions).
   parent_session_id INTEGER DEFAULT -1,
   parent_tool_call_id TEXT,
   depth INTEGER NOT NULL DEFAULT 0,

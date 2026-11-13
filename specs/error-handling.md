@@ -69,17 +69,42 @@ operator. Approval prompts use the same destination. If the channel has no
 `admin_ids`, the notice goes to the session's chat. A session with no channel
 gets no notice.
 
-Two messages are not system notices and still go to the session's chat: the
-error text that ends a failed turn (it is the turn's response), and the
-"message deferred" reply to a rate-limited or over-budget request.
+The "message deferred" reply to a rate-limited or over-budget request is not a
+system notice. It answers a message, and it goes to the session's chat.
+
+### A turn that ends in an error
+
+The error text is for the operator. A group chat never gets it.
+`error_notify()` (advance.c) applies this rule to every failed turn: an LLM
+failure, a failed cron script, and a failed turn on an `explicit` chat.
+
+| The chat is | The channel has `admin_ids` | The error text goes to | The chat gets |
+|-------------|-----------------------------|------------------------|---------------|
+| a group | yes | the admins, as a direct message | the generic line |
+| a group | no | nobody (it is in the log and in `entries`) | the generic line |
+| a DM | yes | the admins, as a direct message | nothing |
+| a DM | no | the chat (it is taken to be the operator's own) | the error text |
+
+The generic line is `group_error_text` (default "Sorry, I can't provide a
+response right now."). A chat gets it at most once per
+`group_error_notice_hours` (default 24; 0 = never). The limit is per chat, not
+per session: `sessions.chat_error_notice_at` holds the time, and the check
+takes the newest value over all sessions of the chat. The chat type comes from
+`sessions.chat_type`, which the channel runner reports with each message; a
+chat with no type yet is treated as a DM.
+
+Repeats are suppressed. If the newest outbox row of the session is the same
+error (compared up to the `[resp #N]` citation) and no human message arrived
+after it, nothing is sent. This stops a cron job from repeating the notice on
+every fire during an outage.
+
+Before v55 an LLM failure sent nothing to any chat, and the other errors went
+to the session's chat as text.
 
 There is no per-degrade notice.
 After each success, the model that served is compared to the agent's previous
 success (from `llm_responses`); on any change one notice names the new server
-and the cause (knob: `notify_model_change`, default on). All-models-down error
-deliveries to a channel are deduped per session — the first speaks, identical
-repeats are suppressed until a human message arrives or routing recovers
-(`channel_push`, advance.c).
+and the cause (knob: `notify_model_change`, default on).
 
 Two failures never reach this table because they happen *before* a request
 exists, and both are recorded anyway:

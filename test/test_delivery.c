@@ -496,6 +496,136 @@ static void test_channel_edge_semantics(void) {
     printf("  PASS test_channel_edge_semantics\n");
 }
 
+/* One failed turn: drain, land an error answer, advance to the boundary. */
+static void run_failed_turn(sqlite3 *db, int64_t sid, const char *err) {
+    AdvanceOutput out = advance_session(db, sid, 25);
+    assert(out.action == ADVANCE_DISPATCH_LLM);
+    Message m = { .role = ROLE_ASSISTANT, .content = (char *)err,
+                  .stop_reason = STOP_REASON_ERROR };
+    entry_append_with_iteration(db, sid, &m, db_next_iteration_id(db, sid));
+    advance_session(db, sid, 25);
+}
+
+/* A failed turn: the error text goes to the operator (the channel's admins),
+ * a group gets one generic line at most once per group_error_notice_hours
+ * and never the error text. */
+static void test_error_goes_to_operator(void) {
+    sqlite3 *db = open_seeded();
+    assert(sqlite3_exec(db,
+        "INSERT OR REPLACE INTO channels(name, extension_name, type, binary_path, status)"
+        " VALUES('discord','discord','test','/x','active');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    set_cfg(db, "discord.admin_ids", "777");
+
+    const char *to_chat =       /* rows addressed to the session's own chat */
+        "SELECT COUNT(*) FROM channel_outbox o JOIN sessions s ON s.id=o.session_id"
+        " WHERE o.session_id=?1 AND json_extract(o.payload,'$.chat_id')=s.chat_id"
+        " AND json_extract(o.payload,'$.to_user') IS NULL;";
+    const char *to_admin =
+        "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1"
+        " AND json_extract(payload,'$.chat_id')='777'"
+        " AND json_extract(payload,'$.to_user')=1"
+        " AND json_extract(payload,'$.text') LIKE 'error: all models failed%';";
+    const char *leaks =         /* error text in the session's own chat */
+        "SELECT COUNT(*) FROM channel_outbox o JOIN sessions s ON s.id=o.session_id"
+        " WHERE o.session_id=?1 AND json_extract(o.payload,'$.chat_id')=s.chat_id"
+        " AND json_extract(o.payload,'$.to_user') IS NULL"
+        " AND json_extract(o.payload,'$.text') LIKE 'error:%';";
+
+    int64_t g = session_create(db, "grp", "default", -1, 0);
+    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
+                            " chat_id='g1', chat_type='group' WHERE name='grp';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    inbox_insert(db, g, "discord", NULL, "alice: hi");
+    run_failed_turn(db, g, "error: all models failed [resp #1]");
+    assert(scalar(db, to_admin, g) == 1);        /* operator: the real error */
+    assert(scalar(db, to_chat, g) == 1);         /* group: the generic line */
+    assert(scalar(db, leaks, g) == 0);           /* never the error text */
+    char *line = db_scalar_text(db,
+        "SELECT json_extract(payload,'$.text') FROM channel_outbox"
+        " WHERE session_id=?1 AND json_extract(payload,'$.chat_id')='g1';", g);
+    assert(line && strcmp(line, "Sorry, I can't provide a response right now.") == 0);
+    free(line);
+
+    /* The same failure again with no human message in between (a cron fire
+     * during an outage): nobody is told twice, though the citation differs. */
+    /* (the repeat check works in whole seconds: age the human message) */
+    sqlite3_exec(db, "UPDATE inbox SET created_at = created_at - 10;",
+                 NULL, NULL, NULL);
+    inbox_insert(db, g, "cron", NULL, "tick");
+    run_failed_turn(db, g, "error: all models failed [resp #2]");
+    assert(scalar(db, to_admin, g) == 1);
+
+    /* After a human message: the operator hears again, the group does not —
+     * it is still inside its day. */
+    inbox_insert(db, g, "discord", NULL, "bob: hello?");
+    run_failed_turn(db, g, "error: all models failed [resp #3]");
+    assert(scalar(db, to_admin, g) == 2);
+    assert(scalar(db, to_chat, g) == 1);
+
+    /* The limit is per chat: a new session in the same group is inside it
+     * too. A day later the group hears once more. */
+    int64_t g2 = session_create(db, "grp2", "default", -1, 0);
+    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
+                            " chat_id='g1', chat_type='group' WHERE name='grp2';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    inbox_insert(db, g2, "discord", NULL, "carol: anyone?");
+    run_failed_turn(db, g2, "error: all models failed [resp #4]");
+    assert(scalar(db, to_admin, g2) == 1);
+    assert(scalar(db, to_chat, g2) == 0);
+    assert(sqlite3_exec(db, "UPDATE sessions SET chat_error_notice_at ="
+                            " unixepoch() - 25*3600 WHERE chat_id='g1';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    inbox_insert(db, g2, "discord", NULL, "carol: still down?");
+    run_failed_turn(db, g2, "error: all models failed [resp #5]");
+    assert(scalar(db, to_chat, g2) == 1);
+    assert(scalar(db, leaks, g2) == 0);
+
+    /* An explicit group never auto-ships an answer, but a failure still
+     * reaches the operator and the group still gets its line. */
+    int64_t x = session_create(db, "xgrp", "default", -1, 0);
+    char rsql[320];
+    snprintf(rsql, sizeof(rsql),
+        "UPDATE sessions SET channel_name='discord', chat_id='g2',"
+        " chat_type='group' WHERE id=%lld;"
+        "INSERT INTO channel_routes(channel_name, chat_id, session_id,"
+        " delivery_mode) VALUES('discord','g2',%lld,'explicit');",
+        (long long)x, (long long)x);
+    assert(sqlite3_exec(db, rsql, NULL, NULL, NULL) == SQLITE_OK);
+    inbox_insert(db, x, "discord", NULL, "dave: hi");
+    run_failed_turn(db, x, "error: all models failed [resp #6]");
+    assert(scalar(db, to_admin, x) == 1);
+    assert(scalar(db, to_chat, x) == 1);
+    assert(scalar(db, leaks, x) == 0);
+
+    /* A DM on a channel with admins: the admins get it, the chat nothing. */
+    int64_t d = session_create(db, "dm", "default", -1, 0);
+    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
+                            " chat_id='d1', chat_type='dm' WHERE name='dm';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    inbox_insert(db, d, "discord", NULL, "hi");
+    run_failed_turn(db, d, "error: all models failed [resp #7]");
+    assert(scalar(db, to_admin, d) == 1);
+    assert(scalar(db, to_chat, d) == 0);
+
+    /* No admins configured. A DM is taken to be the operator's own chat and
+     * gets the error text; a group gets its line and no error text. */
+    set_cfg(db, "discord.admin_ids", "");
+    sqlite3_exec(db, "DELETE FROM channel_outbox;"
+                     "UPDATE sessions SET chat_error_notice_at=NULL;",
+                 NULL, NULL, NULL);
+    inbox_insert(db, d, "discord", NULL, "hi again");
+    run_failed_turn(db, d, "error: all models failed [resp #8]");
+    assert(scalar(db, leaks, d) == 1);
+    inbox_insert(db, g, "discord", NULL, "alice: again");
+    run_failed_turn(db, g, "error: all models failed [resp #9]");
+    assert(scalar(db, to_chat, g) == 1);
+    assert(scalar(db, leaks, g) == 0);
+
+    db_close(db);
+    printf("  PASS test_error_goes_to_operator\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_delivery:\n");
@@ -510,6 +640,7 @@ int main(void) {
     test_sweep_delivers_silent_settle();
     test_streak_pause_fail_notify();
     test_channel_edge_semantics();
+    test_error_goes_to_operator();
     printf("All delivery tests passed.\n");
     return 0;
 }

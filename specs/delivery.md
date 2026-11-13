@@ -95,9 +95,13 @@ failed:`. `source='agent_result'`, `source_ref=<child sid>` as before.
 
 ## Edge cases that are rules
 
-- **LLM-error turns never ship to chat**: the error boundary
-  evaluates with channel edges suppressed, cursor still advanced. Cron script
-  errors *do* ship to chat — that boundary includes the channel.
+- **A failed turn never ships its error text to a group**: the error text goes
+  to the operator, and a group gets a rate-limited generic line. The rule and
+  its table are in
+  [error-handling.md](error-handling.md#a-turn-that-ends-in-an-error). An
+  LLM-error boundary evaluates with channel edges suppressed (no answer
+  ships, cursor still advanced) and reports the error on the way; an
+  `explicit` edge does the same for any failed turn.
 - **Pause fail-notify**: the autonomy streak guard's trip resolves the paused
   session's one-shot reply edge with an error ("paused by autonomy guard") —
   a paused session never settles, and recovery never fires for a

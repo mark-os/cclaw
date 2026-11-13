@@ -1013,9 +1013,13 @@ void channel_consume_events(sqlite3 *db) {
             {
                 sqlite3_stmt *ts;
                 if (sqlite3_prepare_v2(db,
-                        "UPDATE sessions SET chat_title=json_extract(?2,'$.chat_title')"
-                        " WHERE id=?1 AND json_extract(?2,'$.chat_title') IS NOT NULL"
-                        "   AND chat_title IS NOT json_extract(?2,'$.chat_title')",
+                        /* chat_type rides the same envelope ('dm' | 'group'). */
+                        "UPDATE sessions SET"
+                        "  chat_title=COALESCE(json_extract(?2,'$.chat_title'), chat_title),"
+                        "  chat_type=COALESCE(json_extract(?2,'$.chat_type'), chat_type)"
+                        " WHERE id=?1"
+                        "   AND (chat_title IS NOT COALESCE(json_extract(?2,'$.chat_title'), chat_title)"
+                        "     OR chat_type IS NOT COALESCE(json_extract(?2,'$.chat_type'), chat_type))",
                         -1, &ts, NULL) == SQLITE_OK) {
                     sqlite3_bind_int64(ts, 1, sid);
                     sqlite3_bind_text(ts, 2, payload, -1, SQLITE_STATIC);

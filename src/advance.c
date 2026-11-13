@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "advance.h"
+#include "channel.h"
 #include "channel_api.h"
 #include "config.h"
 #include "config_registry.h"
@@ -227,41 +228,9 @@ static void parent_push(sqlite3 *db, int64_t parent_sid, int64_t child_sid,
     free(scrubbed);
 }
 
-/* One outbox row toward the session's bound chat (deliver_response's shape).
- * Error dedup (model-routing.md R4): an unattended source (cron, chatter)
- * during a provider outage produces the same "error: ..." answer every turn;
- * deliver the first, suppress identical repeats until a human message
- * intervenes (they deserve a fresh answer, even the same bad news). Success
- * text is never deduped, so recovery speaks by itself. */
-static void channel_push(sqlite3 *db, const char *channel, int64_t session_id,
-                         const char *chat_id, const char *text) {
-    if (text && strncmp(text, "error: ", 7) == 0) {
-        sqlite3_stmt *chk;
-        if (sqlite3_prepare_v2(db,
-                "SELECT 1 FROM channel_outbox o"
-                " WHERE o.channel_name=?1 AND o.session_id=?2"
-                " AND json_extract(o.payload,'$.text')=?3"
-                " AND o.id=(SELECT MAX(id) FROM channel_outbox"
-                "            WHERE channel_name=?1 AND session_id=?2)"
-                /* human sources are named by channel ('discord', 'cli'...);
-                 * the machinery's own sources are the fixed set below */
-                " AND NOT EXISTS (SELECT 1 FROM inbox i"
-                "   WHERE i.session_id=?2 AND i.created_at >= o.created_at"
-                "   AND i.source NOT IN ('cron','cron_error','system',"
-                "                        'approval','agent_result'))",
-                -1, &chk, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(chk, 1, channel, -1, SQLITE_STATIC);
-            sqlite3_bind_int64(chk, 2, session_id);
-            sqlite3_bind_text(chk, 3, text, -1, SQLITE_STATIC);
-            int dup = sqlite3_step(chk) == SQLITE_ROW;
-            sqlite3_finalize(chk);
-            if (dup) {
-                LOG_INFO_("advance deliver suppressed duplicate error"
-                          " session=%lld", (long long)session_id);
-                return;
-            }
-        }
-    }
+/* One outbox row to a chat. */
+static void outbox_to_chat(sqlite3 *db, const char *channel, int64_t session_id,
+                           const char *chat_id, const char *text) {
     sqlite3_stmt *ins;
     if (sqlite3_prepare_v2(db,
             "INSERT INTO channel_outbox(channel_name, session_id, payload)"
@@ -275,6 +244,127 @@ static void channel_push(sqlite3 *db, const char *channel, int64_t session_id,
     sqlite3_bind_text(ins, 4, text, -1, SQLITE_STATIC);
     sqlite3_step(ins);
     sqlite3_finalize(ins);
+}
+
+static int is_error_text(const char *text) {
+    return text && strncmp(text, "error: ", 7) == 0;
+}
+
+/* Error dedup (model-routing.md R4): an unattended source (cron, chatter)
+ * during a provider outage produces the same "error: ..." answer every turn;
+ * tell it once, suppress repeats until a human message intervenes (they
+ * deserve a fresh answer, even the same bad news). The comparison stops at
+ * the " [resp #N]" citation, which differs on every failure, and is a prefix
+ * match because the operator's copy carries an "(agent …)" suffix. */
+static int error_is_repeat(sqlite3 *db, const char *channel, int64_t session_id,
+                           const char *text) {
+    const char *cite = strstr(text, " [resp #");
+    int len = cite ? (int)(cite - text) : (int)strlen(text);
+    sqlite3_stmt *chk;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM channel_outbox o"
+            " WHERE o.channel_name=?1 AND o.session_id=?2"
+            " AND substr(json_extract(o.payload,'$.text'), 1, length(?3))=?3"
+            " AND o.id=(SELECT MAX(id) FROM channel_outbox"
+            "            WHERE channel_name=?1 AND session_id=?2)"
+            /* human sources are named by channel ('discord', 'cli'...);
+             * the machinery's own sources are the fixed set below */
+            " AND NOT EXISTS (SELECT 1 FROM inbox i"
+            "   WHERE i.session_id=?2 AND i.created_at >= o.created_at"
+            "   AND i.source NOT IN ('cron','cron_error','system',"
+            "                        'approval','agent_result'))",
+            -1, &chk, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_text(chk, 1, channel, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(chk, 2, session_id);
+    sqlite3_bind_text(chk, 3, text, len, SQLITE_STATIC);
+    int dup = sqlite3_step(chk) == SQLITE_ROW;
+    sqlite3_finalize(chk);
+    if (dup)
+        LOG_INFO_("advance deliver suppressed duplicate error session=%lld",
+                  (long long)session_id);
+    return dup;
+}
+
+/* The generic line a group gets when a turn fails: at most once per
+ * group_error_notice_hours for the chat — counted per chat, across its
+ * sessions, and kept on the session row because outbox rows are pruned. */
+static void group_error_line(sqlite3 *db, const char *channel, int64_t session_id,
+                             const char *chat_id) {
+    int hours = config_get_int(db, "group_error_notice_hours");
+    if (hours <= 0) return;
+    sqlite3_stmt *st;
+    int due = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COALESCE(MAX(chat_error_notice_at), 0) <= unixepoch() - ?3 * 3600"
+            " FROM sessions WHERE channel_name=?1 AND chat_id=?2;",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, channel, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
+        sqlite3_bind_int(st, 3, hours);
+        due = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+    }
+    if (!due) return;
+    char *line = config_get(db, "group_error_text");
+    if (line && line[0]) {
+        outbox_to_chat(db, channel, session_id, chat_id, line);
+        if (sqlite3_prepare_v2(db,
+                "UPDATE sessions SET chat_error_notice_at=unixepoch() WHERE id=?1;",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(st, 1, session_id);
+            sqlite3_step(st);
+            sqlite3_finalize(st);
+        }
+    }
+    free(line);
+}
+
+/* A turn ended in an error. Who hears what:
+ *   - The error text is for the operator. It goes to the channel's admins
+ *     (channel_notify_operator). With no admins configured, a DM is taken to
+ *     be the operator's own chat and gets it; a group does not.
+ *   - A group never sees error text. It gets the generic line, rate-limited.
+ * A chat whose type is not known yet (no message since the column existed)
+ * is treated as a DM. */
+static void error_notify(sqlite3 *db, const char *channel, int64_t session_id,
+                         const char *chat_id, const char *text) {
+    if (error_is_repeat(db, channel, session_id, text)) return;
+
+    char *type = db_scalar_text(db, "SELECT chat_type FROM sessions WHERE id=?1;",
+                                session_id);
+    int group = type && strcmp(type, "group") == 0;
+    free(type);
+    char *admins = channel_config_get(db, channel, "admin_ids");
+    int has_admins = admins && admins[strspn(admins, " ,")] != '\0';
+    free(admins);
+
+    if (group) group_error_line(db, channel, session_id, chat_id);
+    /* The operator's copy is queued last, so it is the session's newest
+     * outbox row — the one error_is_repeat reads. */
+    if (has_admins) channel_notify_operator(db, NULL, session_id, text);
+    else if (!group) outbox_to_chat(db, channel, session_id, chat_id, text);
+}
+
+/* One outbox row toward the session's bound chat (deliver_response's shape).
+ * Success text is never deduped, so recovery speaks by itself; error text
+ * takes the error path. */
+static void channel_push(sqlite3 *db, const char *channel, int64_t session_id,
+                         const char *chat_id, const char *text) {
+    if (is_error_text(text))
+        error_notify(db, channel, session_id, chat_id, text);
+    else
+        outbox_to_chat(db, channel, session_id, chat_id, text);
+}
+
+/* The boundaries where nothing ships to the chat — an LLM-error turn, and
+ * any failed turn on an 'explicit' chat — still report the error. */
+static void quiet_boundary_error(sqlite3 *db, const char *channel, int64_t session_id,
+                                 const char *chat_id) {
+    char *text = get_response_text(db, session_id);
+    if (is_error_text(text))
+        error_notify(db, channel, session_id, chat_id, text);
+    free(text);
 }
 
 /* Resolve a blocking reply edge: write the ToolResult for the parent's
@@ -530,7 +620,11 @@ int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
     int64_t wake_parent = 0;
     for (int i = 0; i < n; i++) {
         DeliveryEdge *e = &edges[i];
-        if (strcmp(e->policy, "explicit") == 0) continue;
+        if (strcmp(e->policy, "explicit") == 0) {
+            if (is_error && strcmp(e->kind, "channel") == 0)
+                quiet_boundary_error(db, e->ref, session_id, sr.chat_id);
+            continue;
+        }
 
         if (e->one_shot && strcmp(e->kind, "tool_call") == 0) {
             /* Errors bypass the quiescence hold: a parked parent must get an
@@ -575,9 +669,10 @@ int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
         if (is_parent && sr.parent_sid <= 0) continue;
 
         if (is_channel && !include_channel) {
-            /* Suppressed boundary (LLM-error turn): nothing will ever ship
-             * for it, so record it as evaluated or the sweep re-picks the
-             * edge every tick forever. */
+            /* Suppressed boundary (LLM-error turn): the answer never ships
+             * to the chat, but the operator is told. Record it as evaluated
+             * or the sweep re-picks the edge every tick forever. */
+            quiet_boundary_error(db, e->ref, session_id, sr.chat_id);
             edge_cursor_set(db, e->id, sr.leaf_id);
             continue;
         }
@@ -1198,8 +1293,9 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             LOG_INFO_("advance state=llm_running next=idle reason=error");
             /* Abnormal stop: parent edges still deliver (errors bypass the
              * quiescence hold) so a blocking launch_agent gets an error
-             * result instead of hanging. Channel edges stay quiet on an LLM
-             * error, as ever — their cursor just records the boundary. */
+             * result instead of hanging. A channel edge ships no answer on
+             * an LLM error; the boundary reports the error to the operator
+             * (error_notify) and records the cursor. */
             advance_deliver_boundary(db, session_id, 1, 0);
             AdvanceOutput out = make_output(ADVANCE_ERROR, session_id, agent, iter);
             free(agent);

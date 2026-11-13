@@ -309,7 +309,7 @@ static void test_tool_allowed_explicit_filter(void) {
     assert(sid > 0);
     assert(session_tool_allowed(db, sid, "file_read") == 1);
     assert(session_tool_allowed(db, sid, "shell_exec") == 1);
-    assert(session_tool_allowed(db, sid, "memory_create") == 0);
+    assert(session_tool_allowed(db, sid, "memory_block_create") == 0);
     teardown(db);
     printf("  PASS test_tool_allowed_explicit_filter\n");
 }

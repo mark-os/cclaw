@@ -11,7 +11,7 @@
 static const char *TOOL_CALL_RESP =
     "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,"
     "\"tool_calls\":[{\"id\":\"tc1\",\"type\":\"function\","
-    "\"function\":{\"name\":\"memory_create\","
+    "\"function\":{\"name\":\"memory_block_create\","
     "\"arguments\":\"{\\\"label\\\":\\\"test\\\",\\\"description\\\":\\\"a test block\\\"}\"}}]},"
     "\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
 

@@ -433,69 +433,110 @@ int db_tool_call_any_running(sqlite3 *db, int64_t session_id);
 /* Free PendingToolCall array. */
 void db_tool_call_free_pending(PendingToolCall *list, int count);
 
-/* memory_blocks table — a block is a pure container; its content is the
- * numbered memory_entries rows that name it (v39 dropped the scalar value). */
+/* Memory: a BLOCK is a named container; a NOTE is one item of text in it.
+ * Notes are addressed by row id (never reused, never renumbered). Which
+ * agents see a block is the agent_memory_blocks attachment table — a block
+ * attached to more than one agent is shared. */
 typedef struct {
     int64_t id;
-    char *agent_name;
+    char *agent_name; /* owner (creator); "" for an operator-made block */
     char *label;
     char *description;
     int char_limit;
-    int read_only;
+    int read_only;    /* effective for the agent that asked: block OR attachment */
     char *placement;  /* 'system' (system prompt) or 'context' (per-turn session context) */
     int64_t created_at;
     int64_t updated_at;
 } MemoryBlock;
 
-/* Create a memory block. Returns row id (>0) or -1 on error.
- * Fails if UNIQUE(agent_name, label) violated. placement: NULL/"" defaults
- * to 'context' — new memory rides in the per-turn session context block;
- * pass "system" only for stable identity content worth baking into the
- * (cached, once-per-session) system prompt. */
+/* Create a block owned by agent_name and attach it to that agent read-write
+ * (agent_name NULL: an unowned, unattached block — the operator's path).
+ * Returns row id (>0) or -1: invalid label, or the agent already has a block
+ * with that label. placement: NULL/"" defaults to 'context' — new memory
+ * rides in the per-turn session context block; pass "system" only for stable
+ * identity content worth baking into the (cached, once-per-session) system
+ * prompt. */
 int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
                             const char *description, int char_limit,
                             const char *placement);
 
-/* Get a memory block by agent_name + label. Returns NULL if not found. Caller frees. */
+/* The block this agent has attached under that label, or NULL. Caller frees.
+ * read_only is the effective flag for this agent. */
 MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *label);
 
-/* Free a single MemoryBlock. */
 void memory_block_free(MemoryBlock *mb);
 
-/* Seed memory blocks from agent JSON config (json_each over $.memory_blocks). */
+/* Change description and/or placement (NULL = leave as is). 0 ok, -1 on a
+ * bad placement or unknown block. */
+int memory_block_update(sqlite3 *db, int64_t block_id, const char *description,
+                        const char *placement);
+
+/* Operator-only knobs (the dashboard): the size budget and the block-wide
+ * read-only flag. No agent tool reaches these. */
+int memory_block_set_limits(sqlite3 *db, int64_t block_id, int char_limit, int read_only);
+
+/* Attach a block to an agent (or change an existing attachment's read_only).
+ * -1 if the block does not exist or the agent already holds a different
+ * block with the same label. */
+int memory_block_attach(sqlite3 *db, const char *agent_name, int64_t block_id,
+                        int read_only);
+int memory_block_detach(sqlite3 *db, const char *agent_name, int64_t block_id);
+
+/* Delete a block with its notes and attachments. */
+int memory_block_delete(sqlite3 *db, int64_t block_id);
+
+/* Seed memory blocks from agent JSON config (json_each over $.memory_blocks):
+ * {label, description, value, …} creates one, {attach: <block id>} shares an
+ * existing one. */
 void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str);
 
-/* A numbered entry inside a memory block. */
 typedef struct {
-    int pos;       /* 1-based display number, contiguous within the block */
+    int64_t id;
     char *text;
-} MemoryEntry;
+    int64_t updated_at;   /* last time the text changed */
+} MemoryNote;
 
-/* List entries of a block ordered by pos. Caller frees with memory_entries_free.
- * Sets *count. Returns NULL when the block has no entries (count 0). */
-MemoryEntry *memory_entries_list(sqlite3 *db, const char *agent_name,
-                                 const char *block_label, int *count);
-void memory_entries_free(MemoryEntry *list, int count);
+/* Notes of a block, oldest first. Caller frees with memory_notes_free.
+ * Sets *count. Returns NULL when the block has no notes (count 0). */
+MemoryNote *memory_notes_list(sqlite3 *db, int64_t block_id, int *count);
+void memory_notes_free(MemoryNote *list, int count);
 
-/* Append an entry. Returns its new pos (>=1) or -1 on error. */
-int memory_entry_add(sqlite3 *db, const char *agent_name,
-                     const char *block_label, const char *text);
+/* Append a note. Returns its id (>0) or -1. */
+int64_t memory_note_add(sqlite3 *db, int64_t block_id, const char *text);
 
-/* Append a memory entry only if (sum of existing entry lengths + new text)
- * fits char_limit and the block is writable. Returns 1 if inserted, 0 if the
- * guard rejected it (over limit / read-only / missing), -1 on error. */
-int memory_entry_add_guarded(sqlite3 *db, const char *agent_name,
-                             const char *block_label, const char *text);
+/* Append only if the block's notes plus this one fit char_limit. Returns the
+ * new id, 0 if it would not fit, -1 on error. */
+int64_t memory_note_add_guarded(sqlite3 *db, int64_t block_id, const char *text);
 
-/* Replace the text of the entry at the given number/pos.
- * Returns 0 on success, -1 if no entry has that number. */
-int memory_entry_set(sqlite3 *db, const char *agent_name,
-                     const char *block_label, int number, const char *text);
+/* Replace / delete one note. The block id is part of the key: an id that
+ * belongs to another block changes nothing. 0 ok, -1 no such note here. */
+int memory_note_set(sqlite3 *db, int64_t block_id, int64_t note_id, const char *text);
+/* As memory_note_set, but refuses an edit that would take the block over
+ * char_limit (an edit that does not lengthen the note always fits). 0 ok,
+ * -1 no such note here, -2 would not fit. The agent's path. */
+int memory_note_set_guarded(sqlite3 *db, int64_t block_id, int64_t note_id, const char *text);
+int memory_note_delete(sqlite3 *db, int64_t block_id, int64_t note_id);
 
-/* Delete entries whose pos is in numbers[0..n_numbers). After deletion,
- * renumber the remaining entries contiguously (1..N). Returns count deleted. */
-int memory_entries_delete(sqlite3 *db, const char *agent_name,
-                          const char *block_label, const int *numbers, int n_numbers);
+/* SQL expression rendering one block for the prompt, shared by the two
+ * places that show memory (system prompt, per-turn context) so they cannot
+ * drift. Expects `b` = memory_blocks row and `a` = the asking agent's
+ * agent_memory_blocks row. A note shows as "[id date] text": the date (UTC)
+ * is when its text last changed — a date, not an age, so the rendered prompt
+ * stays byte-stable from one day to the next. */
+#define MEMORY_BLOCK_RENDER_SQL \
+    "char(10) || '### ' || COALESCE(b.label,'') || char(10) ||" \
+    "'description: ' || COALESCE(b.description,'') || char(10) ||" \
+    "'usage: ' ||" \
+    "  (SELECT COALESCE(SUM(length(text)),0) FROM memory_notes n WHERE n.block_id=b.id) ||" \
+    "  '/' || b.char_limit || ' chars | ' ||" \
+    "  CASE WHEN b.read_only OR a.read_only THEN 'read-only' ELSE 'read-write' END ||" \
+    "  ' | placement: ' || b.placement ||" \
+    "  CASE WHEN b.agent_name IS NOT a.agent_name THEN ' | shared' ELSE '' END || char(10) ||" \
+    "COALESCE(" \
+    "  (SELECT group_concat('[' || n.id || ' ' || date(n.updated_at,'unixepoch') || '] ' ||" \
+    "            n.text, char(10) ORDER BY n.id) || char(10)" \
+    "     FROM memory_notes n WHERE n.block_id=b.id)," \
+    "  '(no notes yet)' || char(10))"
 
 /* Channel→agent binding. Returns heap-allocated agent_name or NULL. */
 char *db_channel_binding_get(sqlite3 *db, const char *channel_name, const char *chat_id);

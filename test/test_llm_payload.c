@@ -332,8 +332,9 @@ static void test_session_context_live_state(void) {
 
     /* Memory block created with NULL placement — defaults to 'context',
      * so it surfaces here rather than in the system prompt */
-    assert(memory_block_create(db, "default", "scratch", "working notes", 5000, NULL) > 0);
-    assert(memory_entry_add(db, "default", "scratch", "remember the milk") >= 1);
+    int64_t scratch = memory_block_create(db, "default", "scratch", "working notes", 5000, NULL);
+    assert(scratch > 0);
+    assert(memory_note_add(db, scratch, "remember the milk") > 0);
 
     Config cfg = {0};
     cfg.provider.model = "test-model";

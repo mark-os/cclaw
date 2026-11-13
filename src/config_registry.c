@@ -125,8 +125,9 @@ static const ConfigDef s_defs[] = {
        * available the sanctioned way. */
       "[\"file_read\",\"file_write\",\"file_list\",\"file_find\",\"file_grep\","
       "\"file_edit\",\"js_eval\",\"request_config\","
-      "\"search_config\",\"memory_create\",\"memory_add\",\"memory_edit\","
-      "\"memory_delete\",\"cron_set\",\"cron_list\",\"cron_remove\","
+      "\"search_config\",\"memory_block_create\",\"memory_block_update\","
+      "\"memory_note_add\",\"memory_note_edit\",\"memory_note_delete\","
+      "\"cron_set\",\"cron_list\",\"cron_remove\","
       "\"update_agent\",\"extension_promote\","
       "\"extension_attach\",\"extension_list\",\"extension_fork\",\"launch_agent\","
       "\"check_session\",\"cancel\",\"channel_send\"]",

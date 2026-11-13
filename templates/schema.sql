@@ -540,36 +540,58 @@ CREATE TABLE IF NOT EXISTS hook_directives (
 CREATE INDEX IF NOT EXISTS idx_hook_directives_session ON hook_directives(session_id);
 
 -- ═══ Memory ═══
+-- Two words, used everywhere: a BLOCK is a named container (description,
+-- char_limit, placement); a NOTE is one item of text inside a block,
+-- addressed by its row id — ids are never reused and never renumbered.
+--
 -- placement: 'system' blocks render into the system prompt once per session
 -- (agent_config.c); 'context' blocks render into the <RELEVANT_CONTEXT>
 -- block, materialized at each turn start (llm_payload.c session_context_text).
 -- New blocks default to 'context' — the API default in memory_block_create,
 -- which every insert path goes through; the column DEFAULT below is inert.
--- Only the Assistant's seeded AGENT/USER identity blocks ask for 'system'.
+--
+-- agent_name is the block's OWNER (the agent that created it; NULL for a
+-- block the operator made). Who actually SEES a block is agent_memory_blocks:
+-- a block attached to several agents is a shared block. There is no global
+-- block — "every agent" is a list of attachments, visible and editable.
 CREATE TABLE IF NOT EXISTS memory_blocks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
   label TEXT NOT NULL,
   description TEXT,
   char_limit INTEGER NOT NULL DEFAULT 5000,
-  read_only INTEGER NOT NULL DEFAULT 0,
+  read_only INTEGER NOT NULL DEFAULT 0,   -- 1 = no agent may change it
   placement TEXT NOT NULL DEFAULT 'system',
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   UNIQUE(agent_name, label)
 );
 
--- Numbered entries within a memory block (block = container of entries)
-CREATE TABLE IF NOT EXISTS memory_entries (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,
-  block_label TEXT NOT NULL,
-  pos INTEGER NOT NULL,
-  text TEXT NOT NULL,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+-- Which agents have which blocks. read_only here is per attachment: the
+-- owner is attached read-write, anyone else read-only unless the operator
+-- says otherwise (a writable shared block lets one agent write into
+-- another's prompt). An agent addresses a block by label, so no agent may
+-- hold two attachments with the same label — memory_block_attach enforces it.
+CREATE TABLE IF NOT EXISTS agent_memory_blocks (
+  agent_name TEXT NOT NULL REFERENCES agents(name)
+             ON UPDATE CASCADE ON DELETE CASCADE,
+  block_id   INTEGER NOT NULL REFERENCES memory_blocks(id) ON DELETE CASCADE,
+  read_only  INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (agent_name, block_id)
 );
-CREATE INDEX IF NOT EXISTS idx_memory_entries_block
-  ON memory_entries(agent_name, block_label, pos);
+
+-- Notes inside a block, shown oldest first (ORDER BY id). updated_at is shown
+-- to the agent as a date beside the id: without it every note looks equally
+-- current, and a stale one is indistinguishable from one written yesterday.
+CREATE TABLE IF NOT EXISTS memory_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  block_id INTEGER NOT NULL REFERENCES memory_blocks(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())  -- last time the text changed
+);
+CREATE INDEX IF NOT EXISTS idx_memory_notes_block
+  ON memory_notes(block_id, id);
 
 -- ═══ Cron ═══
 -- A job's schedule is exactly one of: cron_expr (recurring 5-field),

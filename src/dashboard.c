@@ -20,7 +20,9 @@
  * zero client JS. Auth is a single generated token — cookie for the session,
  * ?token= for the first visit (LAN threat model; TLS/tunnelling later). */
 
-#define FORM_MAX 8192
+/* A memory note can be 5000+ characters, and form encoding triples the
+ * bytes of anything non-alphanumeric. */
+#define FORM_MAX 32768
 
 static sqlite3 *s_db;
 
@@ -97,7 +99,8 @@ static int resp_plain(struct mg_connection *conn, int status, const char *st_tex
 /* 303 back to the page; set_cookie non-NULL on the ?token= first visit. */
 static int resp_303(struct mg_connection *conn, const char *location,
                     const char *set_cookie_token) {
-    mg_printf(conn, "HTTP/1.1 303 See Other\r\nLocation: %s\r\n", location);
+    mg_printf(conn, "HTTP/1.1 303 See Other\r\nLocation: %s\r\n"
+                    "Cache-Control: no-store\r\n", location);
     if (set_cookie_token)
         mg_printf(conn, "Set-Cookie: cclaw_admin=%s; Path=/; HttpOnly; SameSite=Strict\r\n",
                   set_cookie_token);
@@ -512,6 +515,204 @@ static void render_approvals(Buf *b) {
     admin_approvals_free(list, n);
 }
 
+/* ── memory ──────────────────────────────────────────────────── */
+
+static void mem_form_open(Buf *b, const char *action, long long block_id) {
+    buf_appendf(b, "<form class=i method=post action=/admin/act>"
+                   "<input type=hidden name=action value=%s>"
+                   "<input type=hidden name=block_id value=%lld>", action, block_id);
+}
+
+/* <option> per agent; `skip_block` > 0 leaves out agents already attached. */
+static void mem_agent_options(Buf *b, long long skip_block) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db,
+            "SELECT name FROM agents WHERE ?1=0 OR name NOT IN"
+            " (SELECT agent_name FROM agent_memory_blocks WHERE block_id=?1)"
+            " ORDER BY name", -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(st, 1, skip_block);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        buf_appendf(b, "<option>");
+        buf_html(b, (const char *)sqlite3_column_text(st, 0));
+        buf_appendf(b, "</option>");
+    }
+    sqlite3_finalize(st);
+}
+
+static void render_memory_block(Buf *b, long long id, const char *label,
+                                const char *owner, const char *desc,
+                                int limit, int read_only, const char *placement,
+                                int used) {
+    buf_appendf(b, "<h3>#%lld ", id);
+    buf_html(b, label);
+    buf_appendf(b, " <small>owner: ");
+    buf_html(b, owner && owner[0] ? owner : "operator");
+    buf_appendf(b, " · %d/%d chars</small></h3>", used, limit);
+
+    mem_form_open(b, "mem_block_update", id);
+    buf_appendf(b, "<input name=description size=60 value=\"");
+    buf_html(b, desc);
+    buf_appendf(b, "\"> <select name=placement>"
+                   "<option%s>system</option><option%s>context</option></select>"
+                   " limit <input name=char_limit size=6 value=%d>"
+                   " <label><input type=checkbox name=read_only value=1%s> read-only"
+                   " for every agent</label> <button>save block</button></form> ",
+                strcmp(placement, "system") == 0 ? " selected" : "",
+                strcmp(placement, "context") == 0 ? " selected" : "",
+                limit, read_only ? " checked" : "");
+    mem_form_open(b, "mem_block_delete", id);
+    buf_appendf(b, "<button>delete block</button></form>");
+
+    /* Who has it. */
+    buf_appendf(b, "<p>Attached to: ");
+    sqlite3_stmt *st;
+    int n = 0;
+    if (sqlite3_prepare_v2(s_db,
+            "SELECT agent_name, read_only FROM agent_memory_blocks"
+            " WHERE block_id=?1 ORDER BY agent_name", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, id);
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            const char *ag = (const char *)sqlite3_column_text(st, 0);
+            int ro = sqlite3_column_int(st, 1);
+            n++;
+            buf_html(b, ag);
+            buf_appendf(b, " (%s) ", ro ? "read-only" : "read-write");
+            mem_form_open(b, "mem_attach", id);
+            buf_appendf(b, "<input type=hidden name=agent_name value=\"");
+            buf_html(b, ag);
+            buf_appendf(b, "\">%s<button>make %s</button></form> ",
+                        ro ? "" : "<input type=hidden name=read_only value=1>",
+                        ro ? "read-write" : "read-only");
+            mem_form_open(b, "mem_detach", id);
+            buf_appendf(b, "<input type=hidden name=agent_name value=\"");
+            buf_html(b, ag);
+            buf_appendf(b, "\"><button>detach</button></form> · ");
+        }
+        sqlite3_finalize(st);
+    }
+    if (n == 0) buf_appendf(b, "nobody · ");
+    mem_form_open(b, "mem_attach", id);
+    buf_appendf(b, "<select name=agent_name>");
+    mem_agent_options(b, id);
+    buf_appendf(b, "</select> <label><input type=checkbox name=read_only value=1 checked>"
+                   " read-only</label> <button>attach</button></form></p>");
+
+    /* Notes. */
+    buf_appendf(b, "<table><tr><th>id</th><th>changed</th><th>note</th><th></th></tr>");
+    if (sqlite3_prepare_v2(s_db, "SELECT id, text, date(updated_at,'unixepoch') FROM memory_notes"
+                                 " WHERE block_id=?1 ORDER BY id", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, id);
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            long long nid = sqlite3_column_int64(st, 0);
+            buf_appendf(b, "<tr><td>%lld</td><td>%s</td><td>", nid,
+                        (const char *)sqlite3_column_text(st, 2));
+            mem_form_open(b, "mem_note_set", id);
+            buf_appendf(b, "<input type=hidden name=note_id value=%lld>"
+                           "<textarea name=text rows=3 cols=90>", nid);
+            buf_html(b, (const char *)sqlite3_column_text(st, 1));
+            buf_appendf(b, "</textarea> <button>save</button></form></td><td>");
+            mem_form_open(b, "mem_note_delete", id);
+            buf_appendf(b, "<input type=hidden name=note_id value=%lld>"
+                           "<button>delete</button></form></td></tr>", nid);
+        }
+        sqlite3_finalize(st);
+    }
+    buf_appendf(b, "<tr><td>new</td><td></td><td>");
+    mem_form_open(b, "mem_note_add", id);
+    buf_appendf(b, "<textarea name=text rows=2 cols=90></textarea>"
+                   " <button>add note</button></form></td><td></td></tr></table>");
+}
+
+/* Every block with its notes and attachments. The operator's edits here are
+ * not bound by read_only or char_limit — those constrain agents. A change to
+ * a 'system' block reaches an agent at its next session; 'context' blocks at
+ * its next turn. */
+static void render_memory(Buf *b) {
+    buf_appendf(b, "<h2>Memory</h2><p>A block is a named container; a note is one"
+                   " item in it. Changes to a <i>context</i> block show at the"
+                   " agent's next turn, to a <i>system</i> block at its next"
+                   " session.</p>");
+    /* Collect block ids first: the per-block renderer runs its own queries. */
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db,
+            "SELECT b.id, b.label, COALESCE(b.agent_name,''), COALESCE(b.description,''),"
+            " b.char_limit, b.read_only, b.placement,"
+            " (SELECT COALESCE(SUM(length(text)),0) FROM memory_notes n WHERE n.block_id=b.id)"
+            " FROM memory_blocks b ORDER BY COALESCE(b.agent_name,''), b.id",
+            -1, &st, NULL) == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW)
+            render_memory_block(b, sqlite3_column_int64(st, 0),
+                                (const char *)sqlite3_column_text(st, 1),
+                                (const char *)sqlite3_column_text(st, 2),
+                                (const char *)sqlite3_column_text(st, 3),
+                                sqlite3_column_int(st, 4), sqlite3_column_int(st, 5),
+                                (const char *)sqlite3_column_text(st, 6),
+                                sqlite3_column_int(st, 7));
+        sqlite3_finalize(st);
+    }
+    buf_appendf(b, "<h3>New block</h3><form method=post action=/admin/act>"
+                   "<input type=hidden name=action value=mem_block_create>"
+                   "label <input name=label size=16> description"
+                   " <input name=description size=50> <select name=placement>"
+                   "<option>context</option><option>system</option></select>"
+                   " owner <select name=agent_name><option value=\"\">(operator,"
+                   " attach later)</option>");
+    mem_agent_options(b, 0);
+    buf_appendf(b, "</select> <button>create</button></form>");
+}
+
+/* POST actions for the section above. Returns 0 on success. */
+static int memory_act(const char *action, const char *body, size_t blen) {
+    char idbuf[32] = "", agent[128] = "", small[512] = "", placement[16] = "";
+    mg_get_var(body, blen, "block_id", idbuf, sizeof(idbuf));
+    mg_get_var(body, blen, "agent_name", agent, sizeof(agent));
+    long long block = atoll(idbuf);
+    int ro = mg_get_var(body, blen, "read_only", small, sizeof(small)) > 0;
+
+    if (strcmp(action, "mem_block_create") == 0) {
+        char label[80] = "", desc[512] = "";
+        mg_get_var(body, blen, "label", label, sizeof(label));
+        mg_get_var(body, blen, "description", desc, sizeof(desc));
+        mg_get_var(body, blen, "placement", placement, sizeof(placement));
+        return memory_block_create(s_db, agent[0] ? agent : NULL, label, desc,
+                                   5000, placement) > 0 ? 0 : -1;
+    }
+    if (block <= 0) return -1;
+    if (strcmp(action, "mem_block_update") == 0) {
+        char desc[512] = "", lim[16] = "";
+        mg_get_var(body, blen, "description", desc, sizeof(desc));
+        mg_get_var(body, blen, "placement", placement, sizeof(placement));
+        mg_get_var(body, blen, "char_limit", lim, sizeof(lim));
+        if (memory_block_update(s_db, block, desc, placement[0] ? placement : NULL) != 0)
+            return -1;
+        return memory_block_set_limits(s_db, block, atoi(lim), ro);
+    }
+    if (strcmp(action, "mem_block_delete") == 0) return memory_block_delete(s_db, block);
+    if (strcmp(action, "mem_attach") == 0)
+        return agent[0] ? memory_block_attach(s_db, agent, block, ro) : -1;
+    if (strcmp(action, "mem_detach") == 0)
+        return agent[0] ? memory_block_detach(s_db, agent, block) : -1;
+
+    char nid[32] = "";
+    mg_get_var(body, blen, "note_id", nid, sizeof(nid));
+    if (strcmp(action, "mem_note_delete") == 0)
+        return memory_note_delete(s_db, block, atoll(nid));
+
+    /* The two actions that carry note text: decode into a buffer as large as
+     * the form itself, since a note has no fixed small bound. */
+    char *text = malloc(blen + 1);
+    if (!text) return -1;
+    int rc = -1;
+    if (mg_get_var(body, blen, "text", text, blen + 1) > 0) {
+        if (strcmp(action, "mem_note_add") == 0)
+            rc = memory_note_add(s_db, block, text) > 0 ? 0 : -1;
+        else if (strcmp(action, "mem_note_set") == 0)
+            rc = memory_note_set(s_db, block, atoll(nid), text);
+    }
+    free(text);
+    return rc;
+}
+
 static int render_page(struct mg_connection *conn) {
     const struct mg_request_info *ri = mg_get_request_info(conn);
     char agent[128] = "";
@@ -537,6 +738,7 @@ static int render_page(struct mg_connection *conn) {
     render_agents(&b);
     render_sessions(&b);
     render_channels(&b);
+    render_memory(&b);
     render_grants(&b, agent);
     render_approvals(&b);
     buf_appendf(&b, "</body></html>");
@@ -545,6 +747,7 @@ static int render_page(struct mg_connection *conn) {
     if (!out) return resp_plain(conn, 500, "Internal Server Error", "oom\n");
     mg_printf(conn,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+        "Cache-Control: no-store\r\n"
         "Content-Length: %zu\r\n\r\n", strlen(out));
     mg_write(conn, out, strlen(out));
     free(out);
@@ -559,9 +762,17 @@ static int handle_act(struct mg_connection *conn) {
     if (dashboard_auth_check(conn, 0) != 1)
         return resp_plain(conn, 403, "Forbidden", "forbidden\n");
 
-    char body[FORM_MAX];
-    int len = mg_read(conn, body, sizeof(body) - 1);
-    if (len < 0) len = 0;
+    /* One mg_read returns what has arrived, not the whole body — a long
+     * note spans several TCP segments. Read until the body ends or the
+     * buffer is full. */
+    /* Heap, not stack: this runs on a web-server worker thread whose stack
+     * is small, and the handler below adds its own buffers on top. */
+    char *body = malloc(FORM_MAX);
+    if (!body) return resp_plain(conn, 500, "Internal Server Error", "oom\n");
+    int len = 0, got;
+    while (len < FORM_MAX - 1 &&
+           (got = mg_read(conn, body + len, (size_t)(FORM_MAX - 1 - len))) > 0)
+        len += got;
     body[len] = '\0';
     size_t blen = (size_t)len;
 
@@ -655,11 +866,14 @@ static int handle_act(struct mg_connection *conn) {
             rc = approval_decision_queue(s_db, atoll(v1), d, "dashboard");
             if (rc == 0) wake_session(0);
         }
+    } else if (strncmp(action, "mem_", 4) == 0) {
+        rc = memory_act(action, body, blen);
     } else if (strcmp(action, "grant_history") == 0) {
         if (mg_get_var(body, blen, "approval_id", v1, sizeof(v1)) > 0)
             rc = admin_grant_from_history(s_db, atoll(v1));
     }
 
+    free(body);
     if (rc != 0)
         return resp_plain(conn, 400, "Bad Request", "action failed\n");
 

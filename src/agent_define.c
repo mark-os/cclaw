@@ -334,18 +334,37 @@ static int validate_inner(sqlite3 *db, const char *json, const char *creator,
     if (rc == 0)
         rc = models_check(db, json, creator, err);
 
-    /* Memory block labels, at request time (Livermore audit): the seed used
-     * to skip an invalid label silently, leaving a system prompt referencing
-     * a block that never existed. Reject the whole create with a naming
-     * message instead — same posture as the grants gate above. */
+    /* Memory blocks, at request time (Livermore audit): the seed used to
+     * skip an invalid label silently, leaving a system prompt referencing a
+     * block that never existed. Reject the whole create with a naming message
+     * instead — same posture as the grants gate above.
+     *
+     * {"attach": <block id>} shares an existing block. A creator may only
+     * share what it can itself see: otherwise defining a child would be a
+     * way to read any agent's memory by guessing ids. (creator NULL is the
+     * operator, who may attach anything.) */
     if (rc == 0) {
         sqlite3_stmt *ml;
         if (sqlite3_prepare_v2(db,
-                "SELECT COALESCE(json_extract(value,'$.label'),'')"
-                " FROM json_each(?1,'$.memory_blocks')", -1, &ml, NULL) == SQLITE_OK) {
+                "SELECT COALESCE(json_extract(j.value,'$.label'),''),"
+                "       json_type(j.value,'$.attach'), json_extract(j.value,'$.attach'),"
+                "       (SELECT 1 FROM memory_blocks b WHERE b.id=json_extract(j.value,'$.attach')"
+                "          AND (?2 IS NULL OR EXISTS (SELECT 1 FROM agent_memory_blocks a"
+                "               WHERE a.block_id=b.id AND a.agent_name=?2)))"
+                " FROM json_each(?1,'$.memory_blocks') j", -1, &ml, NULL) == SQLITE_OK) {
             sqlite3_bind_text(ml, 1, json, -1, SQLITE_STATIC);
+            if (creator) sqlite3_bind_text(ml, 2, creator, -1, SQLITE_STATIC);
             while (rc == 0 && sqlite3_step(ml) == SQLITE_ROW) {
                 const char *lbl = (const char *)sqlite3_column_text(ml, 0);
+                if (sqlite3_column_type(ml, 1) != SQLITE_NULL) {
+                    if (sqlite3_column_type(ml, 2) != SQLITE_INTEGER ||
+                        sqlite3_column_type(ml, 3) == SQLITE_NULL)
+                        rc = failf(err, "memory block attach '%.31s' is not a block "
+                                   "you have — attach takes the id of one of your "
+                                   "own blocks%s",
+                                   (const char *)sqlite3_column_text(ml, 2), "");
+                    continue;
+                }
                 if (!lbl || !is_valid_name(lbl))
                     rc = failf(err, "memory block label '%.63s' is invalid — "
                                "labels are letters, digits, _ and - only (max "

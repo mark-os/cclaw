@@ -765,6 +765,18 @@ static const char *SQL_CREATE_AGENT_LINES =
     "          THEN substr(json_extract(value,'$.value'),1,200)||'...'"
     "          ELSE COALESCE(json_extract(value,'$.value'),'(empty)') END)"
     "   FROM json_each(?1,'$.memory_blocks')"
+    "   WHERE json_type(value,'$.attach') IS NULL"
+    /* A shared block: name it and say whether the new agent may write to it —
+     * a writable share lets it write into every other holder's prompt. */
+    " UNION ALL SELECT format('%-7sshares block #%s %s (%s)','memory',"
+    "     json_extract(j.value,'$.attach'),"
+    "     COALESCE((SELECT b.label || ' of ' || COALESCE(b.agent_name,'operator')"
+    "                 FROM memory_blocks b WHERE b.id=json_extract(j.value,'$.attach')),"
+    "              '(no such block)'),"
+    "     CASE WHEN COALESCE(json_extract(j.value,'$.read_only'),1) THEN 'read-only'"
+    "          ELSE 'READ-WRITE' END)"
+    "   FROM json_each(?1,'$.memory_blocks') j"
+    "   WHERE json_type(j.value,'$.attach') IS NOT NULL"
     " UNION ALL SELECT format('%s = %s', key,"
     "     CASE WHEN length(atom) > 200 THEN substr(atom,1,200)||'...' ELSE atom END)"
     "   FROM json_each(?1)"

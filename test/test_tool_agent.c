@@ -394,7 +394,7 @@ static void test_worker_tools_default_is_the_documented_list(void) {
     assert(strstr(def, "\"check_session\"") != NULL);
     /* Deliberate omissions — see specs/security.md. */
     assert(strstr(def, "\"file_grep\"") == NULL);
-    assert(strstr(def, "\"memory_add\"") == NULL);
+    assert(strstr(def, "\"memory_note_add\"") == NULL);
     assert(strstr(def, "\"request_config\"") == NULL);
     assert(strstr(def, "\"channel_send\"") == NULL);
 
@@ -425,7 +425,7 @@ static void test_default_worker_may_nest(void) {
     assert(worker_sid > 0);
     assert(session_tool_allowed(db, worker_sid, "launch_agent") == 1);
     assert(session_tool_allowed(db, worker_sid, "check_session") == 1);
-    assert(session_tool_allowed(db, worker_sid, "memory_add") == 0);
+    assert(session_tool_allowed(db, worker_sid, "memory_note_add") == 0);
 
     /* And the nested spawn actually succeeds (depth 1 < agent_max_depth 2). */
     AgentLaunchCtx wctx = {.db = db, .session_id = worker_sid};

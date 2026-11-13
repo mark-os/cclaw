@@ -68,12 +68,12 @@ static void test_operator_apply(void) {
      * block itself stores no text. */
     MemoryBlock *mb = memory_block_get(g_db, "Scout", "notes");
     assert(mb != NULL);
-    memory_block_free(mb);
     int n_entries = 0;
-    MemoryEntry *entries = memory_entries_list(g_db, "Scout", "notes", &n_entries);
+    MemoryNote *entries = memory_notes_list(g_db, mb->id, &n_entries);
+    memory_block_free(mb);
     assert(n_entries == 1);
     assert(strcmp(entries[0].text, "v") == 0);
-    memory_entries_free(entries, n_entries);
+    memory_notes_free(entries, n_entries);
 
     /* Duplicate name refused. */
     char *err2 = NULL;
@@ -383,6 +383,53 @@ static void test_bad_input(void) {
     printf("  PASS test_bad_input\n");
 }
 
+/* Sharing a block through a definition: a creator may share only a block it
+ * holds itself (otherwise defining a child would read any agent's memory by
+ * guessing ids); the share is read-only unless the definition says so. */
+static void test_memory_attach(void) {
+    seed_creator("Sharer", "standard");
+    seed_creator("Stranger", "standard");
+    int64_t mine = memory_block_create(g_db, "Sharer", "team", "shared facts", 5000, NULL);
+    int64_t theirs = memory_block_create(g_db, "Stranger", "secrets", "private", 5000, NULL);
+    assert(mine > 0 && theirs > 0);
+    assert(memory_note_add(g_db, mine, "standup at 9") > 0);
+
+    char def[256], *err = NULL;
+    snprintf(def, sizeof(def),
+             "{\"name\":\"Thief\",\"memory_blocks\":[{\"attach\":%lld}]}", (long long)theirs);
+    assert(agent_definition_validate(g_db, def, "Sharer", &err) != 0);
+    assert(err && strstr(err, "not a block you have"));
+    free(err); err = NULL;
+    assert(agent_definition_validate(g_db,
+        "{\"name\":\"Thief\",\"memory_blocks\":[{\"attach\":\"team\"}]}", "Sharer", &err) != 0);
+    free(err); err = NULL;
+    assert(agent_definition_validate(g_db,
+        "{\"name\":\"Thief\",\"memory_blocks\":[{\"attach\":987654}]}", NULL, &err) != 0);
+    free(err); err = NULL;
+
+    snprintf(def, sizeof(def),
+             "{\"name\":\"Mate\",\"memory_blocks\":[{\"attach\":%lld},"
+             "{\"label\":\"own\",\"description\":\"d\",\"value\":\"v\"}]}", (long long)mine);
+    assert(agent_definition_apply(g_db, def, "Sharer", NULL, &err) == 0);
+    MemoryBlock *mb = memory_block_get(g_db, "Mate", "team");
+    assert(mb && mb->id == mine && mb->read_only == 1);
+    memory_block_free(mb);
+    mb = memory_block_get(g_db, "Mate", "own");
+    assert(mb && mb->read_only == 0);
+    memory_block_free(mb);
+    /* The operator (no creator) may attach any block. */
+    snprintf(def, sizeof(def),
+             "{\"name\":\"Auditor\",\"models\":[\"p/m\"],"
+             "\"memory_blocks\":[{\"attach\":%lld}]}", (long long)theirs);
+    int arc = agent_definition_apply(g_db, def, NULL, NULL, &err);
+    if (arc != 0) printf("  operator attach refused: %s\n", err ? err : "?");
+    assert(arc == 0);
+    mb = memory_block_get(g_db, "Auditor", "secrets");
+    assert(mb && mb->read_only == 1);
+    memory_block_free(mb);
+    printf("  PASS test_memory_attach\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_agent_define:\n");
@@ -396,6 +443,7 @@ int main(void) {
     test_update_agent();
     test_tools_exhaustive_vs_baseline();
     test_memory_label_rejected();
+    test_memory_attach();
     test_bad_input();
     db_close(g_db);
     printf("\nAll agent_define tests passed.\n");

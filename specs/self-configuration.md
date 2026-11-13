@@ -174,7 +174,8 @@ One JSON object describes an agent, everywhere an agent is declared:
   "extensions": ["nws"],
   "memory_blocks": [
     { "label": "persona", "description": "…", "value": "…",
-      "char_limit": 5000, "read_only": false, "placement": "system" }
+      "char_limit": 5000, "read_only": false, "placement": "system" },
+    { "attach": 12, "read_only": true }
   ],
   "max_iterations": 25,
   "shell_timeout": 30,

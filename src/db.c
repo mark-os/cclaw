@@ -720,6 +720,77 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
       "  expires_at INTEGER NOT NULL);",
       NULL },
+    /* v57: memory gets two fixed words and stable handles.
+     *  - memory_entries -> memory_notes, keyed by block_id and addressed by
+     *    row id. The old 1..N position is gone: deleting a note renumbered
+     *    the rest, so a second call in the same batch hit the wrong one.
+     *    Notes are re-inserted in (block, pos) order so id order is display
+     *    order; nothing referenced the old ids.
+     *  - agent_memory_blocks: who sees a block. Every existing block is
+     *    attached read-write to the agent that owned it, so nothing changes
+     *    for anyone until the operator shares one. (The spec's "NULL agent =
+     *    global block" never worked — every query matched agent_name=?.)
+     *  - The tools are renamed to say which thing they act on; grants and the
+     *    stored default toolset follow, and holders of the old create grant
+     *    get the new memory_block_update. Stale tools rows are dropped — the
+     *    registry re-seeds the new names at startup. */
+    { 57,
+      /* No-op on a real v56 database. It exists for the patch tests that
+       * rewind a fresh-schema database (which has no memory_entries) and
+       * replay the patches over it: the statements below then find an empty
+       * table instead of failing. */
+      "CREATE TABLE IF NOT EXISTS memory_entries ("
+      "  id INTEGER PRIMARY KEY AUTOINCREMENT, agent_name TEXT NOT NULL,"
+      "  block_label TEXT NOT NULL, pos INTEGER NOT NULL, text TEXT NOT NULL,"
+      "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+      "CREATE TABLE IF NOT EXISTS agent_memory_blocks ("
+      "  agent_name TEXT NOT NULL REFERENCES agents(name)"
+      "             ON UPDATE CASCADE ON DELETE CASCADE,"
+      "  block_id   INTEGER NOT NULL REFERENCES memory_blocks(id) ON DELETE CASCADE,"
+      "  read_only  INTEGER NOT NULL DEFAULT 0,"
+      "  PRIMARY KEY (agent_name, block_id));"
+      "INSERT OR IGNORE INTO agent_memory_blocks(agent_name, block_id, read_only)"
+      "  SELECT agent_name, id, 0 FROM memory_blocks WHERE agent_name IS NOT NULL;"
+      "CREATE TABLE IF NOT EXISTS memory_notes ("
+      "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "  block_id INTEGER NOT NULL REFERENCES memory_blocks(id) ON DELETE CASCADE,"
+      "  text TEXT NOT NULL,"
+      "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+      "  updated_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+      /* The old table kept no edit time; creation time is the best there is. */
+      "INSERT INTO memory_notes(block_id, text, created_at, updated_at)"
+      "  SELECT b.id, e.text, e.created_at, e.created_at FROM memory_entries e"
+      "  JOIN memory_blocks b ON b.agent_name=e.agent_name AND b.label=e.block_label"
+      "  ORDER BY b.id, e.pos, e.id;"
+      "DROP INDEX IF EXISTS idx_memory_entries_block;"
+      "DROP TABLE memory_entries;"
+      "CREATE INDEX IF NOT EXISTS idx_memory_notes_block ON memory_notes(block_id, id);"
+      "INSERT OR IGNORE INTO grants(agent_name, kind, value, approval_mode, expires_at, created_at)"
+      "  SELECT agent_name, kind, 'memory_block_update', approval_mode, expires_at, created_at"
+      "  FROM grants WHERE kind='tool' AND value='memory_create';"
+      "UPDATE OR REPLACE grants SET value = CASE value"
+      "    WHEN 'memory_create' THEN 'memory_block_create'"
+      "    WHEN 'memory_add'    THEN 'memory_note_add'"
+      "    WHEN 'memory_edit'   THEN 'memory_note_edit'"
+      "    ELSE 'memory_note_delete' END"
+      "  WHERE kind='tool' AND value IN"
+      "    ('memory_create','memory_add','memory_edit','memory_delete');"
+      "UPDATE config SET value = replace(replace(replace(replace(value,"
+      "    '\"memory_create\"','\"memory_block_create\",\"memory_block_update\"'),"
+      "    '\"memory_add\"','\"memory_note_add\"'),"
+      "    '\"memory_edit\"','\"memory_note_edit\"'),"
+      "    '\"memory_delete\"','\"memory_note_delete\"')"
+      "  WHERE key='agent_default_tools';"
+      "DELETE FROM tools WHERE extension_name IS NULL AND name IN"
+      "  ('memory_create','memory_add','memory_edit','memory_delete');"
+      /* Stored prompts and notes that tell the agent which tool to use: an
+       * agent's system_prompt is its own copy of the default text, so the
+       * old names would otherwise outlive the tools they named. */
+      "UPDATE agents SET system_prompt = replace(replace(replace(replace(system_prompt,'memory_create','memory_block_create'),'memory_add','memory_note_add'),'memory_edit','memory_note_edit'),'memory_delete','memory_note_delete')"
+      "  WHERE system_prompt LIKE '%memory\\_%' ESCAPE '\\';"
+      "UPDATE memory_notes SET text = replace(replace(replace(replace(text,'memory_create','memory_block_create'),'memory_add','memory_note_add'),'memory_edit','memory_note_edit'),'memory_delete','memory_note_delete')"
+      "  WHERE text LIKE '%memory\\_%' ESCAPE '\\';",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
@@ -2411,12 +2482,15 @@ int db_agent_upsert(sqlite3 *db, const char *name, const char *description,
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
+static int exec_i64(sqlite3 *db, const char *sql, int64_t id);
+
 void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str) {
     if (!agent_json_str || !agent_name) return;
     const char *sql =
         "SELECT json_extract(value,'$.label'), json_extract(value,'$.description'),"
         " json_extract(value,'$.value'), json_extract(value,'$.char_limit'),"
-        " json_extract(value,'$.read_only'), json_extract(value,'$.placement')"
+        " json_extract(value,'$.read_only'), json_extract(value,'$.placement'),"
+        " json_extract(value,'$.attach')"
         " FROM json_each(?1, '$.memory_blocks')";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
@@ -2426,6 +2500,19 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
      * If the query ever touches a real table, restructure to collect-then-
      * write (see channel_consume_events). */
     while (sqlite3_step(stmt) == SQLITE_ROW) {
+        /* {"attach": <block id>} shares an existing block instead of making
+         * one — read-only unless the definition says read_only:false. Which
+         * blocks a creator may share is checked at request time
+         * (agent_define's validate), before the approval parks. */
+        if (sqlite3_column_type(stmt, 6) == SQLITE_INTEGER) {
+            int ro = sqlite3_column_type(stmt, 4) == SQLITE_NULL
+                         ? 1 : sqlite3_column_int(stmt, 4);
+            if (memory_block_attach(db, agent_name, sqlite3_column_int64(stmt, 6), ro) != 0)
+                LOG_WARN_("memory seed: block #%lld was NOT attached to %s "
+                          "(missing, or its label is already in use there)",
+                          (long long)sqlite3_column_int64(stmt, 6), agent_name);
+            continue;
+        }
         const char *lbl = (const char *)sqlite3_column_text(stmt, 0);
         if (!lbl) continue;
         MemoryBlock *existing = memory_block_get(db, agent_name, lbl);
@@ -2443,19 +2530,12 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
         if (id <= 0)
             LOG_WARN_("memory seed: block '%.63s' for %s was NOT created "
                       "(invalid label or db error)", lbl, agent_name);
-        /* A manifest's $.value seeds entry 1 of the new block. Blocks are pure
-         * containers — entries are the only thing the render paths read — so
-         * bootstrap content has to arrive as an entry to be visible at all. */
-        if (id > 0 && val && val[0]) memory_entry_add(db, agent_name, lbl, val);
-        if (id > 0 && ro) {
-            const char *ro_sql = "UPDATE memory_blocks SET read_only=1 WHERE id=?;";
-            sqlite3_stmt *rstmt;
-            if (sqlite3_prepare_v2(db, ro_sql, -1, &rstmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(rstmt, 1, id);
-                sqlite3_step(rstmt);
-                sqlite3_finalize(rstmt);
-            }
-        }
+        /* A manifest's $.value seeds the block's first note. Blocks are pure
+         * containers — notes are the only thing the render paths read — so
+         * bootstrap content has to arrive as a note to be visible at all. */
+        if (id > 0 && val && val[0]) memory_note_add(db, id, val);
+        if (id > 0 && ro)
+            exec_i64(db, "UPDATE memory_blocks SET read_only=1 WHERE id=?1", id);
     }
     sqlite3_finalize(stmt);
 }
@@ -2840,10 +2920,36 @@ void memory_block_free(MemoryBlock *mb) {
     free(mb);
 }
 
+/* Does this agent already hold an attachment whose block has this label?
+ * An agent addresses blocks by label, so the answer must stay "at most one". */
+static int agent_has_label(sqlite3 *db, const char *agent_name, const char *label) {
+    sqlite3_stmt *st;
+    int has = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM agent_memory_blocks a JOIN memory_blocks b ON b.id=a.block_id"
+            " WHERE a.agent_name=?1 AND b.label=?2", -1, &st, NULL) != SQLITE_OK)
+        return 1;   /* fail closed: refuse the create/attach */
+    sqlite3_bind_text(st, 1, agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, label, -1, SQLITE_STATIC);
+    has = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    return has;
+}
+
+static int exec_i64(sqlite3 *db, const char *sql, int64_t id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(st, 1, id);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
 int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
                             const char *description, int char_limit,
                             const char *placement) {
     if (!label || !is_valid_name(label)) return -1;
+    if (agent_name && agent_has_label(db, agent_name, label)) return -1;
     const char *sql = "INSERT INTO memory_blocks(agent_name, label, description, char_limit, placement)"
                       " VALUES(?,?,?,?,?);";
     sqlite3_stmt *stmt;
@@ -2855,12 +2961,22 @@ int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *lab
     sqlite3_bind_text(stmt, 5, placement && placement[0] ? placement : "context", -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
-    return rc == SQLITE_DONE ? sqlite3_last_insert_rowid(db) : -1;
+    if (rc != SQLITE_DONE) return -1;
+    int64_t id = sqlite3_last_insert_rowid(db);
+    /* The owner sees its own block, read-write. Not wrapped in a transaction
+     * (callers may already hold one): a failed attach takes the block back. */
+    if (agent_name && memory_block_attach(db, agent_name, id, 0) != 0) {
+        exec_i64(db, "DELETE FROM memory_blocks WHERE id=?1", id);
+        return -1;
+    }
+    return id;
 }
 
 MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *label) {
-    const char *sql = "SELECT id, agent_name, label, description, char_limit, read_only,"
-                      " placement, created_at, updated_at FROM memory_blocks WHERE agent_name=? AND label=?;";
+    const char *sql = "SELECT b.id, b.agent_name, b.label, b.description, b.char_limit,"
+                      " (b.read_only OR a.read_only), b.placement, b.created_at, b.updated_at"
+                      " FROM agent_memory_blocks a JOIN memory_blocks b ON b.id=a.block_id"
+                      " WHERE a.agent_name=? AND b.label=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
@@ -2881,30 +2997,101 @@ MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *l
     return mb;
 }
 
-/* memory_entries CRUD */
+int memory_block_update(sqlite3 *db, int64_t block_id, const char *description,
+                        const char *placement) {
+    if (placement && strcmp(placement, "system") != 0 && strcmp(placement, "context") != 0)
+        return -1;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE memory_blocks SET description=COALESCE(?2, description),"
+            " placement=COALESCE(?3, placement), updated_at=unixepoch() WHERE id=?1",
+            -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(st, 1, block_id);
+    sqlite3_bind_text(st, 2, description, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, placement, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
+}
 
-MemoryEntry *memory_entries_list(sqlite3 *db, const char *agent_name,
-                                 const char *block_label, int *count) {
+int memory_block_set_limits(sqlite3 *db, int64_t block_id, int char_limit, int read_only) {
+    sqlite3_stmt *st;
+    if (char_limit <= 0) return -1;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE memory_blocks SET char_limit=?2, read_only=?3, updated_at=unixepoch()"
+            " WHERE id=?1", -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(st, 1, block_id);
+    sqlite3_bind_int(st, 2, char_limit);
+    sqlite3_bind_int(st, 3, read_only ? 1 : 0);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
+}
+
+int memory_block_attach(sqlite3 *db, const char *agent_name, int64_t block_id,
+                        int read_only) {
+    if (!agent_name) return -1;
+    /* Label of the block being attached; refuse a second attachment under a
+     * label this agent already uses (re-attaching the same block is an
+     * update of its read_only flag, not a clash). */
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO agent_memory_blocks(agent_name, block_id, read_only)"
+            " SELECT ?1, b.id, ?3 FROM memory_blocks b WHERE b.id=?2"
+            "  AND NOT EXISTS (SELECT 1 FROM agent_memory_blocks a2"
+            "    JOIN memory_blocks b2 ON b2.id=a2.block_id"
+            "    WHERE a2.agent_name=?1 AND b2.label=b.label AND b2.id<>b.id)"
+            " ON CONFLICT(agent_name, block_id) DO UPDATE SET read_only=excluded.read_only",
+            -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, block_id);
+    sqlite3_bind_int(st, 3, read_only ? 1 : 0);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
+}
+
+int memory_block_detach(sqlite3 *db, const char *agent_name, int64_t block_id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "DELETE FROM agent_memory_blocks WHERE agent_name=?1 AND block_id=?2",
+            -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, block_id);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
+}
+
+int memory_block_delete(sqlite3 *db, int64_t block_id) {
+    /* Notes and attachments go with it (ON DELETE CASCADE). */
+    if (exec_i64(db, "DELETE FROM memory_blocks WHERE id=?1", block_id) != 0) return -1;
+    return sqlite3_changes(db) == 1 ? 0 : -1;
+}
+
+/* memory_notes CRUD */
+
+MemoryNote *memory_notes_list(sqlite3 *db, int64_t block_id, int *count) {
     *count = 0;
-    const char *sql = "SELECT pos, text FROM memory_entries"
-                      " WHERE agent_name=? AND block_label=? ORDER BY pos;";
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, block_label, -1, SQLITE_STATIC);
+    if (sqlite3_prepare_v2(db, "SELECT id, text, updated_at FROM memory_notes"
+                               " WHERE block_id=? ORDER BY id;", -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(stmt, 1, block_id);
     int cap = 8;
-    MemoryEntry *list = calloc((size_t)cap, sizeof(MemoryEntry));
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    MemoryNote *list = calloc((size_t)cap, sizeof(MemoryNote));
+    while (list && sqlite3_step(stmt) == SQLITE_ROW) {
         if (*count >= cap) {
             cap *= 2;
-            MemoryEntry *tmp = realloc(list, (size_t)cap * sizeof(MemoryEntry));
-            if (!tmp) { memory_entries_free(list, *count); sqlite3_finalize(stmt); *count = 0; return NULL; }
+            MemoryNote *tmp = realloc(list, (size_t)cap * sizeof(MemoryNote));
+            if (!tmp) { memory_notes_free(list, *count); sqlite3_finalize(stmt); *count = 0; return NULL; }
             list = tmp;
         }
-        MemoryEntry *e = &list[*count];
-        e->pos = sqlite3_column_int(stmt, 0);
+        MemoryNote *e = &list[*count];
+        e->id = sqlite3_column_int64(stmt, 0);
         const char *s = (const char *)sqlite3_column_text(stmt, 1);
         e->text = s ? strdup(s) : strdup("");
+        e->updated_at = sqlite3_column_int64(stmt, 2);
         (*count)++;
     }
     sqlite3_finalize(stmt);
@@ -2912,114 +3099,90 @@ MemoryEntry *memory_entries_list(sqlite3 *db, const char *agent_name,
     return list;
 }
 
-void memory_entries_free(MemoryEntry *list, int count) {
+void memory_notes_free(MemoryNote *list, int count) {
     if (!list) return;
     for (int i = 0; i < count; i++) free(list[i].text);
     free(list);
 }
 
-int memory_entry_add(sqlite3 *db, const char *agent_name,
-                     const char *block_label, const char *text) {
-    const char *sql = "INSERT INTO memory_entries(agent_name, block_label, pos, text)"
-                      " VALUES(?1,?2,(SELECT COALESCE(MAX(pos),0)+1 FROM memory_entries"
-                      " WHERE agent_name=?1 AND block_label=?2),?3);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, block_label, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, text, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) return -1;
-    /* Retrieve the pos of the just-inserted row */
-    int64_t rowid = sqlite3_last_insert_rowid(db);
-    const char *pos_sql = "SELECT pos FROM memory_entries WHERE id=?;";
-    if (sqlite3_prepare_v2(db, pos_sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_int64(stmt, 1, rowid);
-    int pos = -1;
-    if (sqlite3_step(stmt) == SQLITE_ROW) pos = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    return pos;
-}
-
-int memory_entry_add_guarded(sqlite3 *db, const char *agent_name,
-                             const char *block_label, const char *text) {
-    /* Append entry only if sum of existing + new fits char_limit and block is writable. */
+static int64_t note_insert(sqlite3 *db, int64_t block_id, const char *text, int guarded) {
+    /* guarded: only if the block's notes plus this one fit char_limit. */
     const char *sql =
-        "INSERT INTO memory_entries (agent_name, block_label, pos, text)"
-        " SELECT ?1, ?2,"
-        " (SELECT COALESCE(MAX(pos),0)+1 FROM memory_entries WHERE agent_name=?1 AND block_label=?2),"
-        " ?3"
-        " WHERE EXISTS ("
-        "  SELECT 1 FROM memory_blocks b"
-        "  WHERE b.agent_name=?1 AND b.label=?2 AND b.read_only=0"
-        "   AND (SELECT COALESCE(SUM(length(text)),0) FROM memory_entries"
-        "        WHERE agent_name=?1 AND block_label=?2) + length(?3) <= b.char_limit"
-        ");";
+        "INSERT INTO memory_notes(block_id, text)"
+        " SELECT b.id, ?2 FROM memory_blocks b WHERE b.id=?1"
+        "  AND (?3=0 OR (SELECT COALESCE(SUM(length(text)),0) FROM memory_notes"
+        "                WHERE block_id=?1) + length(?2) <= b.char_limit)";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, block_label, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, text, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 1, block_id);
+    sqlite3_bind_text(stmt, 2, text, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, guarded);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
-    return (sqlite3_changes(db) == 1) ? 1 : 0;
+    return sqlite3_changes(db) == 1 ? sqlite3_last_insert_rowid(db) : 0;
 }
 
-int memory_entry_set(sqlite3 *db, const char *agent_name,
-                     const char *block_label, int number, const char *text) {
-    const char *sql = "UPDATE memory_entries SET text=?"
-                      " WHERE agent_name=? AND block_label=? AND pos=?;";
+int64_t memory_note_add(sqlite3 *db, int64_t block_id, const char *text) {
+    int64_t id = note_insert(db, block_id, text, 0);
+    return id > 0 ? id : -1;
+}
+
+int64_t memory_note_add_guarded(sqlite3 *db, int64_t block_id, const char *text) {
+    return note_insert(db, block_id, text, 1);
+}
+
+static int note_update(sqlite3 *db, int64_t block_id, int64_t note_id,
+                       const char *text, int guarded) {
+    /* guarded: refuse an edit that would take the block over char_limit —
+     * unless it makes the note no longer than it was, so an over-full block
+     * can always be edited DOWN. */
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE memory_notes SET text=?1, updated_at=unixepoch()"
+            " WHERE id=?2 AND block_id=?3"
+            "  AND (?4=0 OR length(?1) <= length(text) OR"
+            "       (SELECT COALESCE(SUM(length(n.text)),0) FROM memory_notes n"
+            "         WHERE n.block_id=?3) - length(text) + length(?1)"
+            "       <= (SELECT char_limit FROM memory_blocks WHERE id=?3));",
+            -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, text, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, block_label, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 4, number);
+    sqlite3_bind_int64(stmt, 2, note_id);
+    sqlite3_bind_int64(stmt, 3, block_id);
+    sqlite3_bind_int(stmt, 4, guarded);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (sqlite3_changes(db) > 0) ? 0 : -1;
 }
 
-int memory_entries_delete(sqlite3 *db, const char *agent_name,
-                          const char *block_label, const int *numbers, int n_numbers) {
-    sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
-    int deleted = 0;
-    const char *del_sql = "DELETE FROM memory_entries"
-                          " WHERE agent_name=? AND block_label=? AND pos=?;";
+int memory_note_set(sqlite3 *db, int64_t block_id, int64_t note_id, const char *text) {
+    return note_update(db, block_id, note_id, text, 0);
+}
+
+int memory_note_set_guarded(sqlite3 *db, int64_t block_id, int64_t note_id, const char *text) {
+    if (note_update(db, block_id, note_id, text, 1) == 0) return 0;
+    /* Tell "no such note here" from "would not fit". */
+    sqlite3_stmt *st;
+    int exists = 0;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM memory_notes WHERE id=?1 AND block_id=?2",
+                           -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, note_id);
+        sqlite3_bind_int64(st, 2, block_id);
+        exists = sqlite3_step(st) == SQLITE_ROW;
+        sqlite3_finalize(st);
+    }
+    return exists ? -2 : -1;
+}
+
+int memory_note_delete(sqlite3 *db, int64_t block_id, int64_t note_id) {
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, del_sql, -1, &stmt, NULL) != SQLITE_OK) {
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        return 0;
-    }
-    for (int i = 0; i < n_numbers; i++) {
-        sqlite3_reset(stmt);
-        sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, block_label, -1, SQLITE_STATIC);
-        sqlite3_bind_int(stmt, 3, numbers[i]);
-        sqlite3_step(stmt);
-        deleted += sqlite3_changes(db);
-    }
+    if (sqlite3_prepare_v2(db, "DELETE FROM memory_notes WHERE id=?1 AND block_id=?2;",
+                           -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, note_id);
+    sqlite3_bind_int64(stmt, 2, block_id);
+    sqlite3_step(stmt);
     sqlite3_finalize(stmt);
-    /* Renumber survivors contiguously */
-    const char *renum_sql =
-        "WITH ranked AS ("
-        "  SELECT id, ROW_NUMBER() OVER (ORDER BY pos) AS rn"
-        "  FROM memory_entries WHERE agent_name=?1 AND block_label=?2)"
-        " UPDATE memory_entries"
-        "  SET pos = (SELECT rn FROM ranked WHERE ranked.id = memory_entries.id)"
-        "  WHERE agent_name=?1 AND block_label=?2;";
-    if (sqlite3_prepare_v2(db, renum_sql, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, block_label, -1, SQLITE_STATIC);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
-    } else {
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-    }
-    return deleted;
+    return (sqlite3_changes(db) > 0) ? 0 : -1;
 }
 
 int rate_limit_check(sqlite3 *db, int limit) {

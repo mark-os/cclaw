@@ -22,6 +22,8 @@ static sqlite3 *setup(void) {
     sqlite3_exec(db, "INSERT INTO channels(name,default_agent) VALUES('tg','OldAgent')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO cron_jobs(agent_name,name,cron_expr,session_id,task) VALUES('OldAgent','job1','* * * * *',1,'hi')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO memory_blocks(agent_name,label) VALUES('OldAgent','AGENT')", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO agent_memory_blocks(agent_name,block_id)"
+                     " SELECT agent_name,id FROM memory_blocks WHERE agent_name='OldAgent'", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO config(key,value) VALUES('default_agent','OldAgent')", NULL, NULL, NULL);
     return db;
 }
@@ -48,6 +50,9 @@ static void test_successful_rename(void) {
     assert(count_rows(db, "SELECT COUNT(*) FROM channels WHERE default_agent='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM cron_jobs WHERE agent_name='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM memory_blocks WHERE agent_name='NewAgent'") == 1);
+    /* the attachment follows the rename, so the block is still the agent's */
+    assert(count_rows(db, "SELECT COUNT(*) FROM agent_memory_blocks WHERE agent_name='NewAgent'") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM agent_memory_blocks WHERE agent_name='OldAgent'") == 0);
     assert(count_rows(db, "SELECT COUNT(*) FROM config WHERE key='default_agent' AND value='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE created_by='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE created_by='OldAgent'") == 0);
@@ -183,6 +188,12 @@ static void seed_generic_row(sqlite3 *db, const char *table, const char *agent) 
                 "INSERT OR IGNORE INTO models(id,provider_name,model)"
                 " VALUES('p/m','p','m');", NULL, NULL, NULL);
             snprintf(val, sizeof(val), "'p/m'");
+        } else if (strcmp(name, "block_id") == 0) {
+            /* FK into memory_blocks: seed the referenced row once. */
+            sqlite3_exec(db,
+                "INSERT OR IGNORE INTO memory_blocks(id,label) VALUES(900001,'generic');",
+                NULL, NULL, NULL);
+            snprintf(val, sizeof(val), "900001");
         } else if (has_dflt || !notnull) {
             continue;  /* defaulted / nullable / autoincrement rowid — skip */
         } else if (type && (strstr(type, "INT") || strstr(type, "int"))) {

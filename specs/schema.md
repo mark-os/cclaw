@@ -713,16 +713,16 @@ Index: `idx_hook_directives_session ON hook_directives(session_id)`.
 
 ## memory_blocks
 
-Agent-scoped named memory blocks. A block is a pure **container**: it carries a label, char limit, and optional read-only flag, but no text of its own — its content is the numbered `memory_entries` rows that name it. (v39 dropped the scalar `value` column; nothing rendered it, so text stored there was invisible to the model. The migration rescued any non-empty value as entry 1 of blocks that had no entries yet.)
+Named memory blocks. A block is a pure **container**: it carries a label, char limit, placement and optional read-only flag, but no text of its own — its content is the `memory_notes` rows that name it. Which agents see it is `agent_memory_blocks`. See [memory.md](memory.md).
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; NULL = global |
-| `label` | TEXT NOT NULL | |
+| `agent_name` | TEXT | **Owner** — the agent that created the block. FK → `agents(name)` ON UPDATE CASCADE; NULL = made by the operator. Not who sees it (that is `agent_memory_blocks`) |
+| `label` | TEXT NOT NULL | how an agent addresses the block |
 | `description` | TEXT | tells agent what block is for |
-| `char_limit` | INTEGER NOT NULL DEFAULT 5000 | |
-| `read_only` | INTEGER NOT NULL DEFAULT 0 | |
+| `char_limit` | INTEGER NOT NULL DEFAULT 5000 | budget for the notes' total length |
+| `read_only` | INTEGER NOT NULL DEFAULT 0 | 1 = no agent may change the block |
 | `placement` | TEXT NOT NULL DEFAULT 'system' | `system` = rendered into the system prompt once per session (`agent_config.c`); `context` = rendered into the `<RELEVANT_CONTEXT>` block at each turn start. New blocks default to `context` via `memory_block_create` (the API default every insert path goes through — the column DEFAULT is inert); only the Assistant's seeded AGENT/USER identity blocks ask for `system` |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
@@ -730,20 +730,40 @@ Agent-scoped named memory blocks. A block is a pure **container**: it carries a 
 
 ---
 
-## memory_entries
+## agent_memory_blocks
 
-Numbered entries within a memory block (the block is the container; entries are the content lines).
+Which agents have which blocks (v57). A block with more than one row here is shared. No agent may hold two attachments whose blocks share a label — enforced by `memory_block_attach`, since a label is how the agent names the block.
 
 | Column | Type | Notes |
 |--------|------|-------|
+| `agent_name` | TEXT NOT NULL | FK → `agents(name)` ON UPDATE CASCADE ON DELETE CASCADE |
+| `block_id` | INTEGER NOT NULL | FK → `memory_blocks(id)` ON DELETE CASCADE |
+| `read_only` | INTEGER NOT NULL DEFAULT 0 | per attachment; the owner is attached with 0, anyone else with 1 unless the operator chooses otherwise |
+| PRIMARY KEY | (agent_name, block_id) | |
+
+---
+
+## memory_notes
+
+The notes inside a block (v57; replaces `memory_entries`). A note is addressed by `id`, which is never reused or renumbered. Display order is `ORDER BY id`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | the handle shown to the agent as `[id]` |
+| `block_id` | INTEGER NOT NULL | FK → `memory_blocks(id)` ON DELETE CASCADE |
+| `text` | TEXT NOT NULL | |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `agent_name` | TEXT NOT NULL | FK → `agents(name)` ON UPDATE CASCADE |
 | `block_label` | TEXT NOT NULL | |
 | `pos` | INTEGER NOT NULL | ordering position |
 | `text` | TEXT NOT NULL | |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+| `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | last time the text changed; shown to the agent as a date beside the id |
 
-Index: `idx_memory_entries_block ON memory_entries(agent_name, block_label, pos)`.
+Index: `idx_memory_notes_block ON memory_notes(block_id, id)`.
 
 ---
 

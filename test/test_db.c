@@ -872,6 +872,107 @@ static void test_rate_limit_and_cost(void) {
     printf("  PASS test_rate_limit_and_cost\n");
 }
 
+/* v56 -> v57: memory_entries becomes memory_notes (ids in display order),
+ * every block is attached to its owner, and the renamed tools carry their
+ * grants, the stored default toolset and the tools rows with them. */
+static void test_schema_patch_v57(void) {
+    const char *path = "/tmp/test_cclaw_schema_v57.sqlite";
+    char junk[192];
+    const char *suffixes[] = { "", "-wal", "-shm", ".v56.bak" };
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+
+    /* Reverse-shape to v56. Entries are inserted so that id order and pos
+     * order DISAGREE for agent A: the patch must follow pos. */
+    assert(sqlite3_exec(db,
+        "DROP TABLE memory_notes; DROP TABLE agent_memory_blocks;"
+        "CREATE TABLE memory_entries ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,"
+        "  block_label TEXT NOT NULL, pos INTEGER NOT NULL, text TEXT NOT NULL,"
+        "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+        "CREATE INDEX idx_memory_entries_block"
+        "  ON memory_entries(agent_name, block_label, pos);"
+        "INSERT INTO agents(name, system_prompt) VALUES"
+        " ('A','Save it with memory_edit. Tools: memory_add, memory_delete, memory_create.'),"
+        " ('B','no tools named here');"
+        "DELETE FROM memory_blocks;"
+        "INSERT INTO memory_blocks(agent_name,label,placement) VALUES"
+        " ('A','NOTES','system'),('B','NOTES','context'),('B','EMPTY','context');"
+        "INSERT INTO memory_entries(agent_name,block_label,pos,text) VALUES"
+        " ('A','NOTES',2,'a-second'),('B','NOTES',1,'use memory_edit here'),('A','NOTES',1,'a-first'),"
+        " ('A','GONE',1,'orphan of a block that no longer exists');"
+        "UPDATE memory_entries SET created_at=1700000000;"
+        "DELETE FROM grants; DELETE FROM tools WHERE name LIKE 'memory_%';"
+        "INSERT INTO grants(agent_name,kind,value) VALUES"
+        " ('A','tool','memory_create'),('A','tool','memory_add'),"
+        " ('A','tool','memory_edit'),('A','tool','memory_delete'),"
+        " ('A','tool','file_read'),('B','tool','memory_add');"
+        "INSERT INTO tools(name,description) VALUES('memory_create','x'),"
+        " ('memory_add','x'),('memory_edit','x'),('memory_delete','x');"
+        "INSERT OR REPLACE INTO config(key,value) VALUES('agent_default_tools',"
+        " '[\"file_read\",\"memory_create\",\"memory_add\",\"memory_edit\",\"memory_delete\"]');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 56);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT);
+
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sqlite_master"
+        " WHERE name IN ('memory_entries','idx_memory_entries_block');", 0, -1) == 0);
+    /* Notes land on the right block, in pos order, orphan dropped. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM memory_notes;", 0, -1) == 3);
+    assert(db_scalar_i64(db,
+        "SELECT group_concat(n.text, ',' ORDER BY n.id) = 'a-first,a-second'"
+        " FROM memory_notes n JOIN memory_blocks b ON b.id=n.block_id"
+        " WHERE b.agent_name='A' AND b.label='NOTES';", 0, -1) == 1);
+    assert(db_scalar_i64(db,
+        "SELECT COUNT(*) FROM memory_notes n JOIN memory_blocks b ON b.id=n.block_id"
+        " WHERE b.agent_name='B' AND b.label='NOTES'"
+        "   AND n.text='use memory_note_edit here';", 0, -1) == 1);
+    /* Stored prompts follow the rename too. */
+    assert(db_scalar_i64(db, "SELECT system_prompt = 'Save it with memory_note_edit. Tools: "
+        "memory_note_add, memory_note_delete, memory_block_create.'"
+        " FROM agents WHERE name='A';", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT system_prompt = 'no tools named here'"
+        " FROM agents WHERE name='B';", 0, -1) == 1);
+    /* A migrated note's "last changed" is its creation time. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM memory_notes"
+        " WHERE updated_at=created_at AND created_at=1700000000;", 0, -1) == 3);
+    /* Every block attached read-write to its owner — and to nobody else. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_memory_blocks a"
+        " JOIN memory_blocks b ON b.id=a.block_id"
+        " WHERE a.agent_name=b.agent_name AND a.read_only=0;", 0, -1) == 3);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_memory_blocks;", 0, -1) == 3);
+    /* The API sees the migrated state. */
+    MemoryBlock *mb = memory_block_get(db, "A", "NOTES");
+    assert(mb && mb->read_only == 0 && strcmp(mb->placement, "system") == 0);
+    memory_block_free(mb);
+
+    /* Grants follow the rename; whoever could create blocks can update them. */
+    assert(db_scalar_i64(db, "SELECT group_concat(value, ',' ORDER BY value) ="
+        " 'file_read,memory_block_create,memory_block_update,memory_note_add,"
+        "memory_note_delete,memory_note_edit'"
+        " FROM grants WHERE agent_name='A';", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT group_concat(value) = 'memory_note_add'"
+        " FROM grants WHERE agent_name='B';", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT value = '[\"file_read\",\"memory_block_create\","
+        "\"memory_block_update\",\"memory_note_add\",\"memory_note_edit\","
+        "\"memory_note_delete\"]' FROM config WHERE key='agent_default_tools';", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM tools WHERE name IN"
+        " ('memory_create','memory_add','memory_edit','memory_delete');", 0, -1) == 0);
+
+    db_close(db);
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    printf("  PASS test_schema_patch_v57\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_db:\n");
@@ -890,6 +991,7 @@ int main(void) {
     test_schema_state();
     test_schema_patch_application();
     test_schema_patch_v47();
+    test_schema_patch_v57();
     test_schema_patch_v48();
     test_schema_patch_v50();
     test_schema_patch_v51();

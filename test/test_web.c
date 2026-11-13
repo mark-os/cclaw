@@ -337,7 +337,7 @@ static void test_admin_dashboard(void) {
     char *gid = query_text(db,
         "SELECT rowid FROM grants WHERE agent_name='Assistant' AND value='web_fetch'");
     assert(gid);
-    char form[128];
+    char form[256];
     snprintf(form, sizeof(form), "action=revoke&agent=Assistant&grant_id=%s", gid);
     free(gid);
     assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
@@ -385,6 +385,97 @@ static void test_admin_dashboard(void) {
     /* Taken exactly once. */
     q = approval_decisions_take(db, &nq);
     assert(nq == 0 && q == NULL);
+
+    /* ── Memory: view and edit blocks and notes from the dashboard ── */
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
+                     "action=mem_block_create&label=NOTES&description=running+notes"
+                     "&placement=context&agent_name=Assistant",
+                     page, sizeof(page)) == 303);
+    int64_t blk = 0;
+    {
+        char *v = query_text(db, "SELECT b.id FROM memory_blocks b"
+            " JOIN agent_memory_blocks a ON a.block_id=b.id"
+            " WHERE b.label='NOTES' AND b.agent_name='Assistant'"
+            "   AND a.agent_name='Assistant' AND a.read_only=0");
+        assert(v); blk = atoll(v); free(v);
+    }
+    assert(blk > 0);
+    snprintf(form, sizeof(form),
+             "action=mem_note_add&block_id=%lld&text=first+%%3Cb%%3Enote%%26more",
+             (long long)blk);
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
+                     page, sizeof(page)) == 303);
+    char *nid = query_text(db, "SELECT id FROM memory_notes WHERE text='first <b>note&more'");
+    assert(nid);
+    /* The page shows the block and the note, escaped. */
+    assert(dash_get(curl, "http://127.0.0.1:19878/admin", page, sizeof(page)) == 200);
+    assert(strstr(page, "<h2>Memory</h2>"));
+    assert(strstr(page, "NOTES"));
+    assert(strstr(page, "first &lt;b&gt;note&amp;more"));
+    assert(!strstr(page, "first <b>note"));
+    /* A long note: several kB once form-encoded, more than one TCP segment's
+     * worth for the old single-read 8 kB body buffer. */
+    {
+        static char big[4000 * 6 + 128];   /* 4000 x "%C3%A9" plus the fields */
+        int o = snprintf(big, sizeof(big), "action=mem_note_set&block_id=%lld&note_id=%s&text=",
+                         (long long)blk, nid);
+        for (int i = 0; i < 4000; i++) {
+            assert((size_t)o + 7 <= sizeof(big));
+            o += snprintf(big + o, sizeof(big) - (size_t)o, "%%C3%%A9");
+        }
+        assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", big,
+                         page, sizeof(page)) == 303);
+        char *len = query_text(db, "SELECT length(text) FROM memory_notes WHERE block_id IS NOT NULL");
+        assert(len && atoi(len) == 4000);
+        free(len);
+    }
+    /* A note id addressed through the wrong block changes nothing. */
+    snprintf(form, sizeof(form),
+             "action=mem_note_delete&block_id=%lld&note_id=%s", (long long)blk + 999, nid);
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
+                     page, sizeof(page)) == 400);
+    /* Block settings, sharing and its read-only flag. */
+    snprintf(form, sizeof(form),
+             "action=mem_block_update&block_id=%lld&description=d2&placement=system"
+             "&char_limit=9000&read_only=1", (long long)blk);
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
+                     page, sizeof(page)) == 303);
+    {
+        char *v = query_text(db, "SELECT description||'|'||placement||'|'||char_limit||'|'||read_only"
+                                 " FROM memory_blocks WHERE label='NOTES'");
+        assert(v && strcmp(v, "d2|system|9000|1") == 0);
+        free(v);
+    }
+    snprintf(form, sizeof(form),
+             "action=mem_attach&block_id=%lld&agent_name=ev%%3Cil%%26name&read_only=1",
+             (long long)blk);
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
+                     page, sizeof(page)) == 303);
+    {
+        char *v = query_text(db, "SELECT read_only FROM agent_memory_blocks"
+                                 " WHERE agent_name='ev<il&name'");
+        assert(v && strcmp(v, "1") == 0);
+        free(v);
+    }
+    snprintf(form, sizeof(form),
+             "action=mem_detach&block_id=%lld&agent_name=ev%%3Cil%%26name", (long long)blk);
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
+                     page, sizeof(page)) == 303);
+    snprintf(form, sizeof(form),
+             "action=mem_note_delete&block_id=%lld&note_id=%s", (long long)blk, nid);
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
+                     page, sizeof(page)) == 303);
+    free(nid);
+    snprintf(form, sizeof(form), "action=mem_block_delete&block_id=%lld", (long long)blk);
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
+                     page, sizeof(page)) == 303);
+    {
+        char *v = query_text(db, "SELECT (SELECT COUNT(*) FROM memory_blocks WHERE label='NOTES')"
+                                 " + (SELECT COUNT(*) FROM memory_notes)"
+                                 " + (SELECT COUNT(*) FROM agent_memory_blocks)");
+        assert(v && strcmp(v, "0") == 0);
+        free(v);
+    }
 
     /* POST without the cookie → 403 (query token is GET-only) */
     CURL *bare = curl_easy_init();

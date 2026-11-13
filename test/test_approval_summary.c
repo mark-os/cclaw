@@ -179,6 +179,18 @@ static void test_create_agent_discloses_scalars(void) {
     assert(!strstr(s, "name = helper"));
     assert(!strstr(s, "sandbox_profile = standard"));
     free(s);
+
+    /* A shared block is named with its owner and whether the new agent may
+     * write to it — loudly when it may. */
+    exec_sql(db, "INSERT INTO memory_blocks(id,agent_name,label) VALUES(41,'bot','TEAM')");
+    s = summarize(db, "create_agent", APPROVAL_PARK_REQUIRED,
+        "{\"name\":\"mate\",\"memory_blocks\":[{\"attach\":41},"
+        "{\"attach\":41,\"read_only\":false},{\"attach\":999}]}");
+    assert(strstr(s, "memory shares block #41 TEAM of bot (read-only)"));
+    assert(strstr(s, "memory shares block #41 TEAM of bot (READ-WRITE)"));
+    assert(strstr(s, "memory shares block #999 (no such block)"));
+    assert(!strstr(s, "(unlabeled)"));
+    free(s);
     db_close(db);
     printf("  create_agent scalars: OK\n");
 }

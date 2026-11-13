@@ -191,7 +191,7 @@ static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_er
     const char *bn = strrchr(req_path, '/');
     bn = bn ? bn + 1 : req_path;
     if (strcasecmp(bn, "MEMORY.md") == 0 || strcasecmp(bn, "SOUL.md") == 0)
-        return tool_fail(is_error, "error: memories are not files — use the memory tools (memory_add/memory_edit) instead of writing MEMORY.md");
+        return tool_fail(is_error, "error: memories are not files — use the memory tools (memory_note_add/memory_note_edit) instead of writing MEMORY.md");
 
     const char *content = run_tool_param_str(q, "content");
     if (!content)

@@ -108,12 +108,9 @@ Gemini generateContent (`endpoint_type` in `llm_proc.c`).
 - Episodic memory: key events/decisions tagged and retrievable by topic
 
 ### Shared memory blocks
-- Problem: memory_blocks are scoped by agent_name in cclaw.db — no cross-agent visibility
-- Approach: `shared_memory_blocks` table in cclaw.db (daemon-owned)
-- Read: agents get read-only access via a `shared_memory_read` tool (never a mount of cclaw.db: the DB is masked in every sandboxed profile)
-- Write: mediated by the daemon through a dedicated tool
-- Use cases: shared knowledge base, project context, team conventions, coordination state
-- Scoping: optional namespace/tag per block so agents can subscribe to relevant shared memory only
+Shipped (schema v57) as explicit attachments — see [memory.md](memory.md).
+Still open: per-block namespaces/tags so an agent can subscribe to a topic
+instead of being attached block by block.
 
 ## JS Extension System
 

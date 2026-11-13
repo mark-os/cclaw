@@ -73,8 +73,8 @@ static void test_all_tools_registered(void) {
     if (tools_lookup(&setup.reg, "db_query") == NULL) {
         FAIL("db_query missing"); agent_setup_destroy(&setup); db_close(db); test_db_clean(dbpath); return;
     }
-    if (tools_lookup(&setup.reg, "memory_create") == NULL) {
-        FAIL("memory_create missing"); agent_setup_destroy(&setup); db_close(db); test_db_clean(dbpath); return;
+    if (tools_lookup(&setup.reg, "memory_block_create") == NULL) {
+        FAIL("memory_block_create missing"); agent_setup_destroy(&setup); db_close(db); test_db_clean(dbpath); return;
     }
 
     agent_setup_destroy(&setup);

@@ -313,18 +313,19 @@ static void ensure_default_agent(const char *base_dir) {
          * (who am I / who is the user) belongs in the system prompt, where it
          * changes rarely and stays in the cached prefix — unlike new blocks,
          * which default to the per-turn 'context' placement. */
-        memory_block_create(proc_db(), "Assistant", "AGENT",
-            "Your identity, capabilities, and operational notes. Update as you learn about yourself.",
+        int64_t agent_block = memory_block_create(proc_db(), "Assistant", "AGENT",
+            "Your identity, capabilities, and operational notes: facts that change what you do next time, not a record of what happened. Correct a note when it goes out of date; delete it when it stops mattering.",
             5000, "system");
         memory_block_create(proc_db(), "Assistant", "USER",
-            "Information about the user: preferences, context, working style. Update as you learn.",
+            "Information about the user: preferences, context, working style. Keep what changes how you work with them; correct notes that go out of date.",
             5000, "system");
-        /* AGENT gets one functional starter entry (it drives the self-naming
+        /* AGENT gets one functional starter note (it drives the self-naming
          * flow). USER starts empty — its description already states the block's
-         * purpose, so a placeholder entry would just be noise the model has to
+         * purpose, so a placeholder note would just be noise the model has to
          * carry until it edits it away. */
-        memory_entry_add(proc_db(), "Assistant", "AGENT",
-            "You are CClaw. You do not have a name yet — ask the user what they would like to call you, then save it here with memory_edit.");
+        if (agent_block > 0)
+            memory_note_add(proc_db(), agent_block,
+                "You are CClaw. You do not have a name yet — ask the user what they would like to call you, then save it here with memory_note_edit.");
     }
     if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
 }

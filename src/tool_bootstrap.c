@@ -26,7 +26,7 @@ static const char *CREATE_AGENT_PARAMS =
       "\"write_paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},"
       "\"description\":\"Grants beyond the baseline; each must be a grant you hold\"},"
     "\"extensions\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Extensions to attach (published, or owned by you)\"},"
-    "\"memory_blocks\":{\"type\":\"array\",\"items\":{\"type\":\"object\"},\"description\":\"Memory blocks: {label, description, value, char_limit?, read_only?, placement?}\"},"
+    "\"memory_blocks\":{\"type\":\"array\",\"items\":{\"type\":\"object\"},\"description\":\"Memory blocks. New block: {label, description, value, char_limit?, read_only?, placement?}. Share one of your own blocks with the new agent: {attach: <block id>, read_only?} (read-only unless read_only is false)\"},"
     "\"max_iterations\":{\"type\":\"integer\"},"
     "\"shell_timeout\":{\"type\":\"integer\"},"
     "\"clone_from\":{\"type\":\"string\",\"description\":\"Copy an existing agent's config/grants/extensions first, then overlay\"}"

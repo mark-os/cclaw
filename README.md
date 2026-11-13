@@ -118,7 +118,7 @@ Every new agent is granted a baseline toolset; the rest it asks for with `reques
 | `file_find` | Find files by glob (`*.c`, `src/**/*.spec.ts`) | yes |
 | `file_grep` | Search file contents by POSIX regex, returns `path:line:match` | yes |
 | `js_eval` | Run JavaScript in the sandboxed QuickJS engine | yes |
-| `memory_create` / `memory_add` / `memory_edit` / `memory_delete` | Edit persistent memory blocks | yes |
+| `memory_block_create` / `memory_block_update` / `memory_note_add` / `memory_note_edit` / `memory_note_delete` | Manage persistent memory: named blocks holding notes addressed by id | yes |
 | `search_config` / `request_config` | Read configuration / ask for changes | yes |
 | `cron_set` / `cron_list` / `cron_remove` | Schedule its own prompts and scripts | yes |
 | `launch_agent` / `check_session` | Delegate work and check on it | yes |

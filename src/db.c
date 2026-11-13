@@ -691,6 +691,16 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "      AND c.tool_call_id = entries.tool_call_id LIMIT 1)"
       " WHERE type = 'tool_result' AND tool_name = '';",
       NULL },
+    /* v54: approval_decisions — the queue a non-loop thread (the dashboard)
+     * writes a decision to, so the event loop is the only thing that ever
+     * resolves an approval. */
+    { 54,
+      "CREATE TABLE IF NOT EXISTS approval_decisions ("
+      "  approval_id INTEGER PRIMARY KEY,"
+      "  decision    TEXT NOT NULL CHECK (decision IN ('deny','once','always')),"
+      "  decided_via TEXT NOT NULL,"
+      "  created_at  INTEGER NOT NULL DEFAULT (unixepoch()));",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {

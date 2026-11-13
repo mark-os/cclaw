@@ -1006,3 +1006,63 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
     }
     return s;
 }
+
+/* ── Decisions queued for the event loop ─────────────────────── */
+
+static const char *const DECISION_NAMES[] = { "deny", "once", "always" };
+
+int approval_decision_queue(sqlite3 *db, int64_t approval_id,
+                            ApprovalDecision decision, const char *decided_via) {
+    if (!db || approval_id <= 0 || decision < APPROVAL_DENY || decision > APPROVAL_ALWAYS)
+        return -1;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR IGNORE INTO approval_decisions(approval_id, decision, decided_via)"
+            " VALUES(?1, ?2, ?3)", -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(s, 1, approval_id);
+    sqlite3_bind_text(s, 2, DECISION_NAMES[decision], -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, decided_via ? decided_via : "", -1, SQLITE_STATIC);
+    int rc = sqlite3_step(s);
+    sqlite3_finalize(s);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+ApprovalQueued *approval_decisions_take(sqlite3 *db, int *out_count) {
+    *out_count = 0;
+    /* Cheap empty check first: this runs on every loop wake, and a DELETE
+     * would take the write lock each time for nothing. */
+    if (db_scalar_i64(db, "SELECT COUNT(*) FROM approval_decisions WHERE approval_id > ?1",
+                      0, 0) == 0)
+        return NULL;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "DELETE FROM approval_decisions"
+            " RETURNING approval_id, decision, decided_via, created_at",
+            -1, &s, NULL) != SQLITE_OK)
+        return NULL;
+    ApprovalQueued *list = NULL;
+    int n = 0, cap = 0;
+    /* The statement is stepped to completion before anything acts on a row:
+     * nothing else is written while it is open. */
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 4;
+            ApprovalQueued *nl = realloc(list, (size_t)ncap * sizeof(*list));
+            if (!nl) break;
+            list = nl;
+            cap = ncap;
+        }
+        const char *d = (const char *)sqlite3_column_text(s, 1);
+        const char *via = (const char *)sqlite3_column_text(s, 2);
+        list[n].approval_id = sqlite3_column_int64(s, 0);
+        list[n].decision = d && strcmp(d, "always") == 0 ? APPROVAL_ALWAYS
+                         : d && strcmp(d, "once") == 0   ? APPROVAL_ONCE
+                                                         : APPROVAL_DENY;
+        snprintf(list[n].decided_via, sizeof(list[n].decided_via), "%s", via ? via : "");
+        n++;
+    }
+    sqlite3_finalize(s);
+    *out_count = n;
+    return list;
+}

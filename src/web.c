@@ -6,8 +6,10 @@
 #include "channel_api.h"
 #include "civetweb.h"
 #include "dashboard.h"
+#include "db.h"
 #include "json_escape.h"
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +26,10 @@
 static struct mg_context *s_ctx;
 static time_t s_start_time;
 static sqlite3 *s_db;
+static pthread_mutex_t s_db_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void web_db_lock(void) { pthread_mutex_lock(&s_db_mu); }
+void web_db_unlock(void) { pthread_mutex_unlock(&s_db_mu); }
 static char *s_db_path;
 
 /* ── /hook/<channel> — dumb proxy to the channel runner's UDS ────
@@ -185,6 +191,8 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
 
     buf_appendf(&b, "version: %s\nuptime: %lds\n", CCLAW_VERSION, uptime);
 
+    web_db_lock();
+
     /* Unauthenticated `/` is liveness only — the session table (names,
      * states, inbox depths) is operator data, gated behind the same
      * web_admin_token as /admin (cookie or ?token=). */
@@ -223,6 +231,7 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
             sqlite3_finalize(mstmt);
         }
     }
+    web_db_unlock();
 
     char *out = buf_take(&b);
     if (!out) { mg_printf(conn, "HTTP/1.1 500\r\n\r\n"); return 500; }
@@ -238,9 +247,11 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
     return 200;
 }
 
-int web_start(Config *cfg, sqlite3 *db, const char *db_path) {
-    s_db = db;
-    s_db_path = db_path ? strdup(db_path) : NULL;
+int web_start(Config *cfg, const char *db_path) {
+    if (!db_path) return -1;
+    s_db = db_open(db_path);
+    if (!s_db) return -1;
+    s_db_path = strdup(db_path);
     s_start_time = time(NULL);
 
     mg_init_library(0);
@@ -255,12 +266,11 @@ int web_start(Config *cfg, sqlite3 *db, const char *db_path) {
     };
 
     s_ctx = mg_start(NULL, NULL, options);
-    if (!s_ctx) return -1;
+    if (!s_ctx) { web_stop(); return -1; }
 
     mg_set_request_handler(s_ctx, "/hook/", handle_hook, NULL);
-    if (dashboard_register(s_ctx, db) != 0) {
-        mg_stop(s_ctx);
-        s_ctx = NULL;
+    if (dashboard_register(s_ctx, s_db) != 0) {
+        web_stop();
         return -1;
     }
     mg_set_request_handler(s_ctx, "/", handle_status, NULL);
@@ -273,6 +283,8 @@ void web_stop(void) {
         s_ctx = NULL;
     }
     mg_exit_library();
+    /* mg_stop joined the worker threads, so nothing holds the handle now. */
+    if (s_db) { sqlite3_close(s_db); s_db = NULL; }
     free(s_db_path);
     s_db_path = NULL;
 }

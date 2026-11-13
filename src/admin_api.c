@@ -345,7 +345,8 @@ int admin_switch_model(sqlite3 *db, const char *model_id, char *prev, size_t pre
     /* Prepend to every agent's list (dupe removed first, relative order kept
      * by a uniform +1 shift), with fresh health — stale degradation must not
      * sideline an explicit switch. */
-    sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
+        return -1;
     int rc = 0;
     if (sqlite3_prepare_v2(db,
             "DELETE FROM agent_models WHERE model_id=?1", -1, &stmt, NULL) == SQLITE_OK) {
@@ -480,7 +481,8 @@ int admin_add_provider(sqlite3 *db, const char *name, const char *base_url,
 
 int admin_remove_provider(sqlite3 *db, const char *name) {
     if (!db || !name) return -1;
-    sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
+        return -1;
     sqlite3_stmt *stmt;
     int rc = -1;
     if (sqlite3_prepare_v2(db, "DELETE FROM models WHERE provider_name=?1",
@@ -617,7 +619,8 @@ int admin_set_agent_model(sqlite3 *db, const char *agent_name,
     /* Whole-list write of the dashboard's two slots. An empty primary would
      * leave the agent unroutable — refuse rather than clear. */
     if (!primary_model || !primary_model[0]) return -1;
-    sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
+        return -1;
     int rc = 0;
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, "DELETE FROM agent_models WHERE agent_name=?1",

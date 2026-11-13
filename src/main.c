@@ -372,7 +372,7 @@ static int run_daemon(char *db_path) {
               proc_cfg()->db_path ? proc_cfg()->db_path : "(unset)",
               proc_cfg()->provider.api_key_source ? proc_cfg()->provider.api_key_source
                                              : "(none)");
-    web_start(proc_cfg(), proc_db(), db_path);
+    web_start(proc_cfg(), db_path);
     /* No heartbeat thread: the pulse is a seeded bare-wake cron row fired by
      * cron_run_due off the db_periodic tick — one scheduler. */
 
@@ -451,9 +451,13 @@ static int run_daemon(char *db_path) {
         if (pfds[1].revents & POLLIN) {
             WakeMsg msg;
             while (read(wake_fd(), &msg, sizeof(msg)) == (ssize_t)sizeof(msg)) {
+                /* Session 0 is "look at the queues", not a session to advance
+                 * (the dashboard, after recording an approval decision). */
+                if (msg.session_id == 0) continue;
                 if (child_has_session(msg.session_id)) continue;
                 run_advance(msg.session_id);
             }
+            approval_apply_queued();
         }
         if (fifo_idx >= 0 && (pfds[fifo_idx].revents & POLLIN)) {
             char drain[64];

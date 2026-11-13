@@ -29,4 +29,7 @@ void db_periodic(void);
  * tick. */
 void approval_sweep_expired(void);
 
+/* Resolve every decision in approval_decisions. Event loop only. */
+void approval_apply_queued(void);
+
 #endif

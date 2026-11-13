@@ -7,7 +7,9 @@
 #include "civetweb.h"
 #include "config_registry.h"
 #include "db.h"
-#include "resolve.h"
+#include "approval.h"
+#include "wake.h"
+#include "web.h"
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
@@ -650,8 +652,10 @@ static int handle_act(struct mg_connection *conn) {
             ApprovalDecision d = strcmp(v2, "always") == 0 ? APPROVAL_ALWAYS
                                : strcmp(v2, "once") == 0   ? APPROVAL_ONCE
                                                            : APPROVAL_DENY;
-            resolve_approval(atoll(v1), d, "dashboard", 0);
-            rc = 0;
+            /* Recorded here, carried out by the event loop: resolving runs
+             * tools and advances a session, which this thread must not do. */
+            rc = approval_decision_queue(s_db, atoll(v1), d, "dashboard");
+            if (rc == 0) wake_session(0);
         }
     } else if (strcmp(action, "grant_history") == 0) {
         if (mg_get_var(body, blen, "approval_id", v1, sizeof(v1)) > 0)
@@ -681,8 +685,17 @@ static int handle_act(struct mg_connection *conn) {
 
 /* ── entry ───────────────────────────────────────────────────── */
 
+static int handle_admin_locked(struct mg_connection *conn);
+
 static int handle_admin(struct mg_connection *conn, void *cbdata) {
     (void)cbdata;
+    web_db_lock();
+    int rc = handle_admin_locked(conn);
+    web_db_unlock();
+    return rc;
+}
+
+static int handle_admin_locked(struct mg_connection *conn) {
     const struct mg_request_info *ri = mg_get_request_info(conn);
     const char *uri = ri->local_uri ? ri->local_uri : "";
     const char *method = ri->request_method ? ri->request_method : "";

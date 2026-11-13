@@ -26,6 +26,9 @@
 
 sqlite3 *proc_db(void);
 void     proc_set_db(sqlite3 *db);
+/* Calls to proc_db() from a thread other than the one that set it. Always 0
+ * in a correct build; each one is a bug (see proc.c). */
+int      proc_db_foreign_uses(void);
 
 Config  *proc_cfg(void);
 void     proc_set_cfg(Config *cfg);

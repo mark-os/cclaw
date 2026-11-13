@@ -12,22 +12,11 @@
 #include "web.h"
 #include "config_registry.h"
 #include "db.h"
-#include "resolve.h"
+#include <pthread.h>
+#include "approval.h"
+#include "proc.h"
 #include "test_util.h"
 
-/* dashboard.o (pulled in via web.o) references resolve_approval — the spy
- * pre-satisfies it so resolve.o stays out of the link, and captures the
- * call. Same pattern as test_channel_events.c. */
-static int64_t g_ra_id = -1;
-static ApprovalDecision g_ra_decision;
-static char g_ra_via[32];
-void resolve_approval(int64_t approval_id, ApprovalDecision decision,
-                      const char *decided_via, int64_t grant_expires_at) {
-    (void)grant_expires_at;
-    g_ra_id = approval_id;
-    g_ra_decision = decision;
-    snprintf(g_ra_via, sizeof(g_ra_via), "%s", decided_via ? decided_via : "");
-}
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
@@ -53,7 +42,7 @@ static void test_status_page(void) {
     assert(session_set_state(db, sid, "llm_running") == 0);
     assert(inbox_insert(db, sid, "test", NULL, "hello") > 0);
 
-    assert(web_start(&cfg, db, cfg.db_path) == 0);
+    assert(web_start(&cfg, cfg.db_path) == 0);
     usleep(50000);
 
     /* Unauthenticated `/` is liveness only — no session table (r2 F3). */
@@ -158,7 +147,7 @@ static void test_hook_proxy(void) {
 
     sqlite3 *db = test_db_open(cfg.db_path);
     assert(db);
-    assert(web_start(&cfg, db, cfg.db_path) == 0);
+    assert(web_start(&cfg, cfg.db_path) == 0);
     usleep(50000);
 
     /* channel_uds_path("test_web_hook.db","tchan") = test_web_hook.tchan.sock */
@@ -295,7 +284,7 @@ static void test_admin_dashboard(void) {
         "  VALUES(1, 'shell_exec', 'approval_required', '{\"cmd\":\"ls\"}', 'pending');",
         NULL, NULL, NULL) == SQLITE_OK);
 
-    assert(web_start(&cfg, db, cfg.db_path) == 0);
+    assert(web_start(&cfg, cfg.db_path) == 0);
     usleep(50000);
 
     /* web_start minted a token */
@@ -355,13 +344,45 @@ static void test_admin_dashboard(void) {
         "SELECT rowid FROM grants WHERE agent_name='Assistant' AND value='web_fetch'");
     assert(gone == NULL);
 
-    /* approve routes through resolve_approval with decided_via="dashboard" */
+    /* The web server has its own handle. With this handle inside a
+     * transaction, a dashboard write still commits on its own and leaves
+     * this transaction open. (On a shared handle the dashboard's COMMIT
+     * ended it.) */
+    assert(sqlite3_exec(db, "BEGIN; SELECT count(*) FROM agents;",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_get_autocommit(db) == 0);
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
+                     "action=set_agent_model&agent=Assistant&primary_model=m2",
+                     page, sizeof(page)) == 303);
+    assert(sqlite3_get_autocommit(db) == 0);
+    assert(sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL) == SQLITE_OK);
+    char *kept = query_text(db,
+        "SELECT model_id FROM agent_models WHERE agent_name='Assistant' AND pos=0");
+    assert(kept && strcmp(kept, "m2") == 0);
+    free(kept);
+
+    /* approve does NOT resolve on the web thread: it records the decision
+     * for the event loop and leaves the approval pending. */
     assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
                      "action=approve&approval_id=1&decision=always",
                      page, sizeof(page)) == 303);
-    assert(g_ra_id == 1);
-    assert(g_ra_decision == APPROVAL_ALWAYS);
-    assert(strcmp(g_ra_via, "dashboard") == 0);
+    char *st = query_text(db, "SELECT state FROM approvals WHERE id=1");
+    assert(st && strcmp(st, "pending") == 0);
+    free(st);
+    /* A second click does not replace the first decision. */
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
+                     "action=approve&approval_id=1&decision=deny",
+                     page, sizeof(page)) == 303);
+    int nq = 0;
+    ApprovalQueued *q = approval_decisions_take(db, &nq);
+    assert(nq == 1 && q);
+    assert(q[0].approval_id == 1);
+    assert(q[0].decision == APPROVAL_ALWAYS);
+    assert(strcmp(q[0].decided_via, "dashboard") == 0);
+    free(q);
+    /* Taken exactly once. */
+    q = approval_decisions_take(db, &nq);
+    assert(nq == 0 && q == NULL);
 
     /* POST without the cookie → 403 (query token is GET-only) */
     CURL *bare = curl_easy_init();
@@ -378,8 +399,32 @@ static void test_admin_dashboard(void) {
     printf("PASS: test_admin_dashboard\n");
 }
 
+/* proc_db() notices a caller that is not the thread that installed it. */
+static void *foreign_use(void *arg) {
+    (void)arg;
+    (void)proc_db();
+    return NULL;
+}
+
+static void test_db_handle_owner(void) {
+    sqlite3 *db = test_db_open("test_web_owner.db");
+    assert(db);
+    proc_set_db(db);
+    assert(proc_db() == db);
+    assert(proc_db_foreign_uses() == 0);     /* the owner is not counted */
+    pthread_t t;
+    assert(pthread_create(&t, NULL, foreign_use, NULL) == 0);
+    pthread_join(t, NULL);
+    assert(proc_db_foreign_uses() == 1);     /* another thread is */
+    proc_set_db(NULL);
+    db_close(db);
+    test_db_clean("test_web_owner.db");
+    printf("PASS: test_db_handle_owner\n");
+}
+
 int main(void) {
     TEST_INIT();
+    test_db_handle_owner();
     test_status_page();
     test_hook_proxy();
     test_admin_dashboard();

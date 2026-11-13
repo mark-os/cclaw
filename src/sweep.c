@@ -28,6 +28,15 @@ void approval_sweep_expired(void) {
     free(ids);
 }
 
+/* Carry out decisions queued by a thread that is not the event loop. */
+void approval_apply_queued(void) {
+    int n = 0;
+    ApprovalQueued *q = approval_decisions_take(proc_db(), &n);
+    for (int i = 0; i < n; i++)
+        resolve_approval(q[i].approval_id, q[i].decision, q[i].decided_via, 0);
+    free(q);
+}
+
 /* Unpark one approval past the short block window: answer the frozen tool_call
  * with a non-terminal "still pending" result and resume the turn, leaving the
  * approval pending so a later decision is delivered async (post-window). Under
@@ -162,6 +171,7 @@ void db_periodic(void) {
     process_heartbeat(proc_db(), proc_instance_id());
     process_gc_dead(proc_db(), PROCESS_TTL_SEC);
     db_recover_stale_sessions(proc_db());   /* owner-scoped, safe to repeat */
+    approval_apply_queued();   /* fallback: the dashboard's wake is the fast path */
     approval_sweep_block_window();
     approval_sweep_expired();
     db_prune_inbox(proc_db());

@@ -622,6 +622,18 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 CREATE INDEX IF NOT EXISTS approvals_pending ON approvals(session_id, state) WHERE state='pending';
 
+-- A decision made off the event loop (the web dashboard), waiting for the
+-- loop to carry it out. Deciding an approval re-runs tools and advances a
+-- session, which only the loop may do — so another thread or process records
+-- its decision here and wakes the loop. The first decision for an approval
+-- wins; a row lives for milliseconds.
+CREATE TABLE IF NOT EXISTS approval_decisions (
+  approval_id INTEGER PRIMARY KEY,
+  decision    TEXT NOT NULL CHECK (decision IN ('deny','once','always')),
+  decided_via TEXT NOT NULL,
+  created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
 -- ═══ Sensitivity axis (specs/trust.md) ═══
 -- Operator-owned labels on TARGETS, global (not per-agent). The one place a
 -- label subtracts from authority: a sensitive host always escalates, and no

@@ -1,4 +1,7 @@
+#include <pthread.h>
 #include <stdio.h>
+
+#include "log.h"
 
 #include "proc.h"
 
@@ -14,8 +17,30 @@ static AgentSetup *g_tool_setup;
 static char        g_log_level_env[32] = "CCLAW_LOG_LEVEL=info";
 static char        g_js_heap_env[32] = "CCLAW_JS_HEAP_MB=8";
 
-sqlite3 *proc_db(void) { return g_db; }
-void proc_set_db(sqlite3 *db) { g_db = db; }
+/* The handle belongs to the thread that installed it (the event loop). A
+ * transaction is a property of the handle, so a second thread using it can
+ * end or join one the loop has open. Any other thread opens its own handle
+ * with db_open(); this counts the ones that do not, and says so once. */
+static pthread_t   g_db_owner;
+static int         g_db_owned;
+static int         g_db_foreign_uses;
+
+sqlite3 *proc_db(void) {
+    if (g_db_owned && !pthread_equal(pthread_self(), g_db_owner)) {
+        if (__atomic_fetch_add(&g_db_foreign_uses, 1, __ATOMIC_RELAXED) == 0)
+            LOG_ERROR_("BUG: proc_db() used off the event-loop thread —"
+                       " open a separate handle with db_open()");
+    }
+    return g_db;
+}
+void proc_set_db(sqlite3 *db) {
+    g_db = db;
+    g_db_owner = pthread_self();
+    g_db_owned = (db != NULL);
+}
+int proc_db_foreign_uses(void) {
+    return __atomic_load_n(&g_db_foreign_uses, __ATOMIC_RELAXED);
+}
 
 Config *proc_cfg(void) { return g_cfg; }
 void proc_set_cfg(Config *cfg) { g_cfg = cfg; }

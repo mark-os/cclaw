@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v53 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v54 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -293,6 +293,22 @@ Audit log for tool-call approvals. When a tool call is parked (`sessions.state` 
 | `expires_at` | INTEGER | park deadline; fail-closed deny if reached |
 
 Index: `approvals_pending ON approvals(session_id, state) WHERE state='pending'`.
+
+## approval_decisions
+
+A queue of decisions made off the event loop (v54). Only the event loop
+resolves an approval, because resolving re-runs a tool and advances a session.
+The web dashboard runs on other threads. It inserts a row here and wakes the
+loop; the loop removes the row and calls `resolve_approval()`. The first
+decision for an approval wins. A row normally lives for milliseconds; the
+periodic tick drains any row whose wake was lost.
+
+| Column | Type | Meaning |
+|--------|------|---------|
+| `approval_id` | INTEGER PRIMARY KEY | The approval the decision is for. |
+| `decision` | TEXT | `deny`, `once` or `always`. |
+| `decided_via` | TEXT | Copied to `approvals.decided_via` (for example `dashboard`). |
+| `created_at` | INTEGER | Unix time of the decision. |
 
 `park_reason` has exactly two values (v47 rekey, config-doc M3). `sensitive_target` is the sensitivity-axis overlay — per-call authority, ALWAYS coerced to ONCE at resolve, never transferable as a ticket; everything else parks as `approval_required`. What a row is *about* is `tool_name` alone (card dispatch, dedup, and apply all key on it), so the old dual-purpose `action` column — sometimes a tool name, sometimes a document verb, sometimes `sensitive` — is gone. The former `secret_bind` action was deleted with the bind park (D17) — an unbound secret denies inline and the agent requests the binding via `request_config` `secret_bindings`.
 

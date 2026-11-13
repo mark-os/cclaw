@@ -113,6 +113,26 @@ Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *de
  * Caller frees. Sets *out_count. */
 int64_t *approval_list_expired(sqlite3 *db, const char *me, int *out_count);
 
+/* A decision waiting for the event loop (table approval_decisions). */
+typedef struct {
+    int64_t approval_id;
+    ApprovalDecision decision;
+    char decided_via[128];
+} ApprovalQueued;
+
+/* Record a decision for the event loop to carry out. For callers that are
+ * NOT the event loop: deciding re-runs tools and advances a session, so it
+ * must not happen on their thread. The first decision for an approval wins.
+ * Returns 0 when queued (or already queued), -1 on error. The caller wakes
+ * the loop. */
+int approval_decision_queue(sqlite3 *db, int64_t approval_id,
+                            ApprovalDecision decision, const char *decided_via);
+
+/* Remove and return every queued decision, oldest first (one statement, so
+ * a decision is taken exactly once). Caller frees; *out_count is 0 and the
+ * result NULL when the queue is empty. */
+ApprovalQueued *approval_decisions_take(sqlite3 *db, int *out_count);
+
 /* Return malloc'd array of pending approval ids past the short block window
  * (requested_at + block_sec < now) whose session is still awaiting_approval,
  * owner-scoped to `me` exactly like approval_list_expired. Caller frees. */

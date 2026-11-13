@@ -11,6 +11,8 @@
       "description": "Bridge API token (required when the bridge is not loopback)" },
     { "key": "admin_ids", "default": "",
       "description": "Comma-separated WhatsApp JIDs with admin commands (e.g. 15551234567@s.whatsapp.net)" },
+    { "key": "admin_chats", "default": "",
+      "description": "Comma-separated WhatsApp chat JIDs that are admin chats: system notices and error details are posted there instead of being sent to each admin directly. Being in one grants no admin commands" },
     { "key": "allow_unknown", "default": "0",
       "description": "Accept unrouted senders via default_agent (1 = on; default drops them with an admin notice)" }
   ]

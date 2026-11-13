@@ -321,33 +321,42 @@ static void chat_error_line(sqlite3 *db, const char *channel, int64_t session_id
 }
 
 /* A turn ended in an error. The one distinction is who reads the chat:
- *   - The error text is for the operator. It goes to the channel's admins as
- *     a direct message (channel_notify_operator) and to nobody else. For an
- *     admin's own chat that is the same place the question came from.
- *   - Any other chat — a group, a DM with a non-admin — gets the generic
- *     line, rate-limited, and never the error text.
- * An admin chat is sessions.chat_is_admin, recorded from the last message.
- * Before a message has recorded it, a chat whose id is itself an admin id
- * (a Telegram DM) counts; anything else does not. */
+ *   - The error text is for the operator. It goes where the operator reads
+ *     (channel_operator_queue: the admin_chats, else a DM to each admin) and
+ *     to nobody else.
+ *   - Any chat that is not an admin chat — a group, a DM with a non-admin —
+ *     gets the generic line, rate-limited, and never the error text.
+ * An admin chat is one listed in admin_chats, or an admin's own DM
+ * (sessions.chat_is_admin, recorded from the last message). Before a message
+ * has recorded that, a chat whose id is itself an admin id (a Telegram DM)
+ * counts; anything else does not. */
 static void error_notify(sqlite3 *db, const char *channel, int64_t session_id,
                          const char *chat_id, const char *text) {
     if (error_is_repeat(db, channel, session_id, text)) return;
 
     int64_t flag = db_scalar_i64(db,
         "SELECT COALESCE(chat_is_admin, -1) FROM sessions WHERE id=?1;", session_id, -1);
-    int admin_chat = flag >= 0 ? flag == 1
-                               : channel_id_is_admin(db, channel, chat_id);
+    int admin_chat = channel_chat_is_admin_chat(db, channel, chat_id) ||
+                     (flag >= 0 ? flag == 1
+                                : channel_id_is_admin(db, channel, chat_id));
 
     if (!admin_chat) chat_error_line(db, channel, session_id, chat_id);
     /* The operator's copy is queued last, so it is the session's newest
      * outbox row — the one error_is_repeat reads. */
-    char *admins = channel_config_get(db, channel, "admin_ids");
-    if (admins && admins[strspn(admins, " ,")] != '\0')
-        channel_notify_operator(db, NULL, session_id, text);
-    else
-        LOG_WARN_("advance error not delivered: channel %s has no admin_ids"
-                  " session=%lld", channel, (long long)session_id);
-    free(admins);
+    size_t cap = strlen(text) + 96;
+    char *full = malloc(cap);
+    char *agent = db_scalar_text(db,
+        "SELECT agent_name FROM sessions WHERE id=?1;", session_id);
+    if (full) {
+        snprintf(full, cap, "%s (agent %s, session #%lld)", text,
+                 agent ? agent : "?", (long long)session_id);
+        if (channel_operator_queue(db, channel, session_id, full) == 0)
+            LOG_WARN_("advance error not delivered: channel %s has no"
+                      " admin_chats or admin_ids session=%lld", channel,
+                      (long long)session_id);
+    }
+    free(agent);
+    free(full);
 }
 
 /* One outbox row toward the session's bound chat (deliver_response's shape).

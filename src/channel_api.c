@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include "channel_api.h"
 #include "channel.h"
-#include "util.h"
 #include "wake.h"
 #include "db.h"
 
@@ -398,38 +397,21 @@ int channel_notify_operator(sqlite3 *db, const char *db_path, int64_t session_id
 
     /* A system notice is for the operator, not for whoever shares the chat:
      * a session can be bound to a group where the people reading are not the
-     * ones running the box. It goes to the channel's admins (admin_ids are
-     * user ids, so to_user=1 — see channel_notify_admins), the same
-     * destination approval prompts use, and names the agent and session it
-     * is about since it no longer arrives in their chat. Only a channel with
-     * no admins configured falls back to the session's own chat, so a plain
-     * 1:1 setup needs no extra config. */
-    char *admins = channel_config_get(db, ch, "admin_ids");
-    char *ids[CHANNEL_ADMIN_IDS_MAX];
-    int n = admins ? split_and_trim(admins, ids, CHANNEL_ADMIN_IDS_MAX) : 0;
-
+     * ones running the box. It goes where the channel's operator reads
+     * (channel_operator_queue: admin_chats, else a DM to each admin — the
+     * destination approval prompts use) and names the agent and session it
+     * is about, since it no longer arrives in their chat. Only a channel
+     * with neither configured falls back to the session's own chat, so a
+     * plain 1:1 setup needs no extra config. */
     int rc = 0, queued = 0;
-    if (n > 0) {
-        char *full = NULL;
-        size_t cap = strlen(text) + sizeof(agent) + 48;
-        if ((full = malloc(cap)) != NULL)
-            snprintf(full, cap, "%s (agent %s, session #%lld)", text, agent,
-                     (long long)session_id);
-        for (int i = 0; i < n && full; i++) {
-            if (sqlite3_prepare_v2(db,
-                    "INSERT INTO channel_outbox(channel_name, session_id, payload)"
-                    " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4, 'to_user', 1));",
-                    -1, &s, NULL) != SQLITE_OK) { rc = -1; break; }
-            sqlite3_bind_text(s, 1, ch, -1, SQLITE_STATIC);
-            sqlite3_bind_int64(s, 2, session_id);
-            sqlite3_bind_text(s, 3, ids[i], -1, SQLITE_STATIC);
-            sqlite3_bind_text(s, 4, full, -1, SQLITE_STATIC);
-            if (sqlite3_step(s) == SQLITE_DONE) queued++; else rc = -1;
-            sqlite3_finalize(s);
-        }
-        if (!full) rc = -1;
-        free(full);
-    } else {
+    size_t cap = strlen(text) + sizeof(agent) + 48;
+    char *full = malloc(cap);
+    if (!full) return -1;
+    snprintf(full, cap, "%s (agent %s, session #%lld)", text, agent,
+             (long long)session_id);
+    queued = channel_operator_queue(db, ch, session_id, full);
+    free(full);
+    if (queued == 0) {
         if (sqlite3_prepare_v2(db,
                 "INSERT INTO channel_outbox(channel_name, session_id, payload)"
                 " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4));",
@@ -442,7 +424,6 @@ int channel_notify_operator(sqlite3 *db, const char *db_path, int64_t session_id
             sqlite3_finalize(s);
         } else rc = -1;
     }
-    free(admins);
 
     if (queued && db_path) channel_outbox_wake(db_path, ch);
     return rc;

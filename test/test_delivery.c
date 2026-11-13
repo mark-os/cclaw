@@ -637,6 +637,34 @@ static void test_error_goes_to_operator(void) {
     assert(scalar(db, to_admin, t2) == 1);
     assert(scalar(db, to_chat, t2) == 1);
 
+    /* A designated admin chat (admin_chats): operator messages are posted
+     * there, not sent to each admin. A failure in another chat lands in it;
+     * a failure in the admin chat itself is shown there, with no generic line. */
+    set_cfg(db, "discord.admin_chats", "ops");
+    sqlite3_exec(db, "DELETE FROM channel_outbox;"
+                     "UPDATE sessions SET chat_error_notice_at=NULL;",
+                 NULL, NULL, NULL);
+    const char *in_ops =
+        "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1"
+        " AND json_extract(payload,'$.chat_id')='ops'"
+        " AND json_extract(payload,'$.to_user') IS NULL"
+        " AND json_extract(payload,'$.text') LIKE 'error: all models failed%';";
+    inbox_insert(db, g, "discord", NULL, "alice: once more");
+    run_failed_turn(db, g, "error: all models failed [resp #11]");
+    assert(scalar(db, in_ops, g) == 1);          /* the error: the admin chat */
+    assert(scalar(db, to_admin, g) == 0);        /* not the admin's DM */
+    assert(scalar(db, to_chat, g) == 1);         /* the group: its line */
+    int64_t ops = session_create(db, "ops", "default", -1, 0);
+    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
+                            " chat_id='ops', chat_is_admin=0 WHERE name='ops';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    inbox_insert(db, ops, "discord", NULL, "mark: status?");
+    run_failed_turn(db, ops, "error: all models failed [resp #12]");
+    assert(scalar(db, in_ops, ops) == 1);
+    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1;",
+                  ops) == 1);                    /* and no generic line */
+    set_cfg(db, "discord.admin_chats", "");
+
     /* No admins configured: there is nobody to send the error to. The chat
      * still gets its line and never the error text. */
     set_cfg(db, "discord.admin_ids", "");
@@ -644,7 +672,7 @@ static void test_error_goes_to_operator(void) {
                      "UPDATE sessions SET chat_error_notice_at=NULL;",
                  NULL, NULL, NULL);
     inbox_insert(db, g, "discord", NULL, "alice: again");
-    run_failed_turn(db, g, "error: all models failed [resp #11]");
+    run_failed_turn(db, g, "error: all models failed [resp #13]");
     assert(scalar(db, to_chat, g) == 1);
     assert(scalar(db, leaks, g) == 0);
 

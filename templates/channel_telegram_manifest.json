@@ -9,6 +9,8 @@
       "description": "Telegram bot API token" },
     { "key": "admin_ids", "default": "",
       "description": "Comma-separated Telegram user ids with admin commands" },
+    { "key": "admin_chats", "default": "",
+      "description": "Comma-separated Telegram chat ids that are admin chats: system notices and error details are posted there instead of being sent to each admin directly. Being in one grants no admin commands" },
     { "key": "base_url", "default": "https://api.telegram.org",
       "description": "Bot API base URL (egress pin source of truth)" },
     { "key": "webhook_secret", "secret": true, "default": "",

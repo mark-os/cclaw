@@ -104,6 +104,9 @@ For each message event, in order (`channel_consume_events`, src/channel.c):
    re-notify after daemon restart is acceptable.
 
 Chat membership is never authority. `admin_ids` is the only admin source.
+`admin_chats` names the chats where operator messages are posted
+([error-handling.md](error-handling.md#operator-notices)); being in one grants
+nothing.
 
 Admin chats can issue `/new` (re-point the pin at a fresh session for the
 same agent) and `/sessions [id]` (list this chat's sessions / attach to

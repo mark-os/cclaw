@@ -73,6 +73,17 @@ char *channel_prev_extension(sqlite3 *db, const char *name);
  * <ext>.admin_ids, comma/space separated). */
 void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *text);
 
+/* Queue `text` to the channel's operator: the admin_chats chats when any are
+ * configured, otherwise a direct message to each admin_ids user. Returns the
+ * rows queued (0 = no operator destination configured). */
+int channel_operator_queue(sqlite3 *db, const char *channel_name, int64_t session_id,
+                           const char *text);
+
+/* Is chat_id listed in the channel's admin_chats? Not authority — see
+ * channel_id_is_admin for that. */
+int channel_chat_is_admin_chat(sqlite3 *db, const char *channel_name,
+                               const char *chat_id);
+
 /* Is `id` in the channel's <ext>.admin_ids? admin_ids are user ids — pass the
  * envelope's sender_id, not the chat id (they differ on Discord). */
 int channel_id_is_admin(sqlite3 *db, const char *channel_name, const char *id);

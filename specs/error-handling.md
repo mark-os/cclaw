@@ -62,12 +62,24 @@ a session's compaction keeps failing, a cron job was auto-paused, and a
 session hit its autonomous-turn limit. `channel_notify_operator()` sends
 each one.
 
-A system notice goes to the admins of the session's channel (`admin_ids`), as
-a direct message, and names the agent and session. It does not go to the
-session's chat: that chat can be a group, and its members are not the
-operator. Approval prompts use the same destination. If the channel has no
-`admin_ids`, the notice goes to the session's chat. A session with no channel
-gets no notice.
+A system notice goes to the channel's **operator destination** and names the
+agent and session. It does not go to the session's chat: that chat can be a
+group, and its members are not the operator.
+
+The operator destination of a channel is (`channel_operator_queue()`):
+
+1. the chats listed in `<channel>.admin_chats`, when the list is not empty;
+2. otherwise a direct message to each user in `<channel>.admin_ids`;
+3. otherwise, for a system notice, the session's own chat (a plain 1:1 setup
+   needs no config). An error is not sent to the session's chat this way; see
+   below.
+
+`admin_chats` designates a chat, usually a private group, as the place the
+operator reads. It replaces the direct messages; it does not add to them. It
+gives no authority: admin commands and approval decisions still need a sender
+in `admin_ids`, and approval prompts still go to each admin directly. The
+"unknown sender" and "channel reverted" notices use the same destination. A
+session with no channel gets no notice.
 
 The "message deferred" reply to a rate-limited or over-budget request is not a
 system notice. It answers a message, and it goes to the session's chat.
@@ -77,22 +89,23 @@ system notice. It answers a message, and it goes to the session's chat.
 The error text is for the operator. No other reader gets it. The one
 distinction is who reads the chat, not what kind of chat it is.
 
-An **admin chat** is a chat whose only reader is an operator: a direct message
-whose other party is one of the channel's `admin_ids`. Every other chat is a
-**non-admin chat**: a group (even with an admin in it), and a direct message
-with anyone else.
+An **admin chat** is a chat the operator reads and nobody else should need
+to: a chat listed in `admin_chats`, or a direct message whose other party is
+one of the channel's `admin_ids`. Every other chat is a **non-admin chat**: a
+group that is not listed (even with an admin in it), and a direct message with
+anyone else.
 
 `error_notify()` (advance.c) applies the rule to every failed turn: an LLM
 failure, a failed cron script, and a failed turn on an `explicit` chat.
 
 | The chat is | The error text goes to | The chat gets |
 |-------------|------------------------|---------------|
-| an admin chat | the admins, as a direct message (for this admin, the same chat) | nothing more |
-| a non-admin chat | the admins, as a direct message | the generic line |
+| an admin chat | the operator destination (often this same chat) | nothing more |
+| a non-admin chat | the operator destination | the generic line |
 
-If the channel has no `admin_ids`, there is no operator to send the error to.
-The error stays in the log and in `entries`, a WARN line says so, and the chat
-still gets the generic line.
+If the channel has neither `admin_chats` nor `admin_ids`, there is no operator
+to send the error to. The error stays in the log and in `entries`, a WARN line
+says so, and the chat still gets the generic line.
 
 The generic line is `chat_error_text` (default "Sorry, I can't provide a
 response right now."). A chat gets it at most once per
@@ -100,8 +113,9 @@ response right now."). A chat gets it at most once per
 per session: `sessions.chat_error_notice_at` holds the time, and the check
 takes the newest value over all sessions of the chat.
 
-`sessions.chat_is_admin` records which kind the chat is. The daemon sets it
-from each incoming message (`chat_type` is `dm` and `sender_id` is an admin).
+`sessions.chat_is_admin` records whether the chat is an admin's own DM. The
+daemon sets it from each incoming message (`chat_type` is `dm` and `sender_id`
+is an admin). Membership of `admin_chats` is read from config each time.
 Until a message has set it, a chat whose id is itself an admin id counts as an
 admin chat (a Telegram DM); any other chat does not.
 

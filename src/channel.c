@@ -110,35 +110,79 @@ char *channel_prev_extension(sqlite3 *db, const char *name) {
     return prev;
 }
 
-/* The destination of an admin notice is a *user* id, not a chat: the outbox
+/* Is `id` in the comma/space separated list stored under a channel key? */
+static int channel_list_has(sqlite3 *db, const char *channel_name, const char *key,
+                            const char *id) {
+    if (!id || !id[0]) return 0;
+    char *list = channel_config_get(db, channel_name, key);
+    if (!list) return 0;
+    char *ids[CHANNEL_ADMIN_IDS_MAX];
+    int n = split_and_trim(list, ids, CHANNEL_ADMIN_IDS_MAX);
+    int hit = 0;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(ids[i], id) == 0) { hit = 1; break; }
+    }
+    free(list);
+    return hit;
+}
+
+/* Where a channel's operator reads: the chats named in admin_chats when any
+ * are, otherwise a direct message to each admin_ids user.
+ *
+ * The two differ on the wire. An admin_chats entry is a chat id and is
+ * addressed as one. An admin_ids entry is a *user* id, not a chat: the
  * payload says so with to_user=1 and the handler resolves it however its
  * platform requires (Telegram: identical, a DM's chat id is the user id;
- * Discord: open a DM channel first). C learns no platform specifics. */
-/* Queue a notice to every admin chat of a channel (channel_state admin_ids,
- * comma/space separated). Rows sit in channel_outbox until a process for the
- * channel delivers them — after an auto-revert that's the respawned, reverted
- * process, so the notice arrives through the channel it is about. */
-void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *text) {
-    char *admins = channel_config_get(db, channel_name, "admin_ids");
-    if (!admins) return;
+ * Discord: open a DM channel first). C learns no platform specifics.
+ *
+ * Rows sit in channel_outbox until a process for the channel delivers them —
+ * after an auto-revert that's the respawned, reverted process, so the notice
+ * arrives through the channel it is about. Returns the rows queued; 0 means
+ * the channel has no operator destination configured. */
+int channel_operator_queue(sqlite3 *db, const char *channel_name, int64_t session_id,
+                           const char *text) {
+    int to_user = 0;
+    char *dest = channel_config_get(db, channel_name, "admin_chats");
+    if (!dest || dest[strspn(dest, " ,")] == '\0') {
+        free(dest);
+        dest = channel_config_get(db, channel_name, "admin_ids");
+        to_user = 1;
+    }
+    if (!dest) return 0;
 
     char *ids[CHANNEL_ADMIN_IDS_MAX];
-    int n = split_and_trim(admins, ids, CHANNEL_ADMIN_IDS_MAX);
-
-    const char *isql =
-        "INSERT INTO channel_outbox(channel_name, session_id, payload)"
-        " VALUES(?1, 0, json_object('chat_id', ?2, 'text', ?3, 'to_user', 1));";
+    int n = split_and_trim(dest, ids, CHANNEL_ADMIN_IDS_MAX);
+    int queued = 0;
+    const char *isql = to_user
+        ? "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+          " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4, 'to_user', 1));"
+        : "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+          " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4));";
     for (int i = 0; i < n; i++) {
         sqlite3_stmt *ins;
         if (sqlite3_prepare_v2(db, isql, -1, &ins, NULL) == SQLITE_OK) {
             sqlite3_bind_text(ins, 1, channel_name, -1, SQLITE_STATIC);
-            sqlite3_bind_text(ins, 2, ids[i], -1, SQLITE_STATIC);
-            sqlite3_bind_text(ins, 3, text, -1, SQLITE_STATIC);
-            sqlite3_step(ins);
+            sqlite3_bind_int64(ins, 2, session_id);
+            sqlite3_bind_text(ins, 3, ids[i], -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 4, text, -1, SQLITE_STATIC);
+            if (sqlite3_step(ins) == SQLITE_DONE) queued++;
             sqlite3_finalize(ins);
         }
     }
-    free(admins);
+    free(dest);
+    return queued;
+}
+
+void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *text) {
+    channel_operator_queue(db, channel_name, 0, text);
+}
+
+/* Is this chat one the operator designated as an admin chat (admin_chats)?
+ * It marks where operator messages are read. It is NOT authority: admin
+ * commands and approvals still require an admin_ids sender. */
+int channel_chat_is_admin_chat(sqlite3 *db, const char *channel_name,
+                               const char *chat_id) {
+    return channel_list_has(db, channel_name, "admin_chats", chat_id);
 }
 
 /* Is this id one of the channel's admin_ids? admin_ids are *user* ids: on
@@ -146,17 +190,7 @@ void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *te
  * channel snowflake is not the user's — so every caller must pass the
  * envelope's sender_id (see admin_id_of()). */
 int channel_id_is_admin(sqlite3 *db, const char *channel_name, const char *id) {
-    if (!id || !id[0]) return 0;
-    char *admins = channel_config_get(db, channel_name, "admin_ids");
-    if (!admins) return 0;
-    char *ids[CHANNEL_ADMIN_IDS_MAX];
-    int n = split_and_trim(admins, ids, CHANNEL_ADMIN_IDS_MAX);
-    int hit = 0;
-    for (int i = 0; i < n; i++) {
-        if (strcmp(ids[i], id) == 0) { hit = 1; break; }
-    }
-    free(admins);
-    return hit;
+    return channel_list_has(db, channel_name, "admin_ids", id);
 }
 
 /* Channel open-door policy: channels.default_agent (NULL = fail-closed).

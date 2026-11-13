@@ -1101,6 +1101,23 @@ static void test_notify_operator(void) {
         " AND json_extract(payload,'$.text') LIKE"
         "     'model degraded (agent testagent, session #%)';") == 2);
 
+    /* An admin chat designated: the notice is posted there, as a chat, and
+     * the admins are not messaged directly. */
+    sqlite3_exec(db, "DELETE FROM channel_outbox;"
+        "INSERT INTO config(key, value, default_value, description)"
+        " VALUES('mychannel.admin_chats','ops-1','','admin chats')"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value;", NULL, NULL, NULL);
+    assert(channel_notify_operator(db, NULL, bound, "model degraded") == 0);
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_outbox;") == 1);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM channel_outbox"
+        " WHERE json_extract(payload,'$.chat_id')='ops-1'"
+        " AND json_extract(payload,'$.to_user') IS NULL"
+        " AND json_extract(payload,'$.text') LIKE 'model degraded (agent %';") == 1);
+    /* Being an admin chat is not authority. */
+    assert(channel_chat_is_admin_chat(db, "mychannel", "ops-1") == 1);
+    assert(channel_id_is_admin(db, "mychannel", "ops-1") == 0);
+
     db_close(db);
     cleanup();
     printf("PASS\n");

@@ -9,6 +9,8 @@
       "description": "Discord bot token (sent as 'Bot <token>')" },
     { "key": "admin_ids", "default": "",
       "description": "Comma-separated Discord user ids with admin commands" },
+    { "key": "admin_chats", "default": "",
+      "description": "Comma-separated Discord channel ids that are admin chats: system notices and error details are posted there instead of being sent to each admin directly. Being in one grants no admin commands" },
     { "key": "base_url", "default": "https://discord.com",
       "description": "REST API base URL (egress pin source of truth)" },
     { "key": "gateway_url", "default": "wss://gateway.discord.gg/?v=10&encoding=json",

@@ -211,7 +211,6 @@ static void test_no_attribution_on_clean_exit(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
     TEST_INIT();
     printf("test_tool_status:\n");
 

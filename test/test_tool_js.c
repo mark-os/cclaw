@@ -31,14 +31,6 @@ static void test_string_result(void) {
     PASS();
 }
 
-static void test_json_stringify(void) {
-    TEST("json_stringify");
-    char *r = test_js_eval_run_json("{\"code\":\"JSON.stringify({a:1})\"}");
-    if (!r || strcmp(r, "{\"a\":1}") != 0) { FAIL(r ? r : "NULL"); free(r); return; }
-    free(r);
-    PASS();
-}
-
 static void test_syntax_error(void) {
     TEST("syntax_error");
     char *r = test_js_eval_run_json("{\"code\":\"function(\"}");
@@ -59,14 +51,6 @@ static void test_missing_code(void) {
     TEST("missing_code");
     char *r = test_js_eval_run_json("{\"notcode\":\"x\"}");
     if (!r || strncmp(r, "error:", 6) != 0) { FAIL(r ? r : "NULL"); free(r); return; }
-    free(r);
-    PASS();
-}
-
-static void test_invalid_json(void) {
-    TEST("invalid_json");
-    char *r = test_js_eval_run_json("not json");
-    if (!r || strcmp(r, "error: invalid tool arguments") != 0) { FAIL(r ? r : "NULL"); free(r); return; }
     free(r);
     PASS();
 }
@@ -114,11 +98,9 @@ int main(void) {
     test_basic_eval();
     test_http_request_error_returns_object();
     test_string_result();
-    test_json_stringify();
     test_syntax_error();
     test_runtime_error();
     test_missing_code();
-    test_invalid_json();
     test_undefined_result();
     test_register();
     printf("%d/%d passed\n", tests_passed, tests_run);

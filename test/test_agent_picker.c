@@ -63,40 +63,12 @@ static void test_agent_list_multiple_sorted(void) {
     printf("  PASS test_agent_list_multiple_sorted\n");
 }
 
-static void test_default_agent_kv(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
-
-    /* First run: no agents, set default_agent */
-    int count = 0;
-    char **agents = db_agent_list(db, &count);
-    assert(!agents && count == 0);
-
-    db_agent_upsert(db, "default", NULL, NULL);
-    config_set(db, "default_agent", "default");
-
-    char *def = config_get(db, "default_agent");
-    assert(def);
-    assert(strcmp(def, "default") == 0);
-    free(def);
-
-    /* Verify agent now listed */
-    agents = db_agent_list(db, &count);
-    assert(agents && count == 1);
-    free(agents[0]);
-    free(agents);
-
-    db_close(db);
-    printf("  PASS test_default_agent_kv\n");
-}
-
 int main(void) {
     TEST_INIT();
     printf("test_agent_picker:\n");
     test_agent_list_empty();
     test_agent_list_one();
     test_agent_list_multiple_sorted();
-    test_default_agent_kv();
     printf("\nAll agent picker tests passed.\n");
     return 0;
 }

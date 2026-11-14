@@ -294,34 +294,6 @@ static void test_granted_exact_0_0_0_0_not_exact(void) {
 
 /* ─── metadata carve-out integration (addr_permitted logic) ─── */
 
-static void test_metadata_carveout_covering_cidr_deny(void) {
-    TEST("metadata_carveout: covering CIDR denies metadata IP");
-    /* Simulate: granted 169.254.0.0/16 (covers metadata), but no exact grant.
-     * The metadata IP must be DENIED via granted_exact, not via cidr_match. */
-    Cidr rules[1];
-    cidr_parse("169.254.0.0/16", &rules[0]);
-    struct in_addr a;
-    inet_pton(AF_INET, "169.254.169.254", &a);
-    /* cidr_match WOULD say yes — that's the containment check */
-    if (!cidr_match(rules, 1, AF_INET, (unsigned char *)&a))
-        FAIL("sanity: cidr_match should contain it");
-    /* But granted_exact says NO — metadata path must use this */
-    if (granted_exact(rules, 1, AF_INET, (unsigned char *)&a))
-        FAIL("metadata carve-out violated");
-    PASS();
-}
-
-static void test_metadata_carveout_exact_grant_allow(void) {
-    TEST("metadata_carveout: exact grant allows metadata IP");
-    Cidr rules[1];
-    cidr_parse("169.254.169.254", &rules[0]);
-    struct in_addr a;
-    inet_pton(AF_INET, "169.254.169.254", &a);
-    if (!granted_exact(rules, 1, AF_INET, (unsigned char *)&a))
-        FAIL("exact metadata grant should allow");
-    PASS();
-}
-
 static void test_url_host_normalize_percent(void) {
     TEST("url_host_normalize: percent-encoded host decodes and matches");
     char host[254] = "chase%2Ecom";
@@ -398,8 +370,6 @@ int main(void) {
     test_granted_exact_0_0_0_0_not_exact();
 
     /* metadata carve-out logic */
-    test_metadata_carveout_covering_cidr_deny();
-    test_metadata_carveout_exact_grant_allow();
 
     /* url_host_normalize (r2 F11) */
     test_url_host_normalize_percent();

@@ -8,13 +8,6 @@
 static int failures = 0;
 #define ASSERT(cond, msg) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); failures++; } } while(0)
 
-static void test_runtime_create_destroy(void) {
-    QjsRuntime *qrt = qjs_runtime_create(1024 * 1024);
-    ASSERT(qrt != NULL, "runtime create");
-    ASSERT(qrt->rt != NULL, "runtime has JSRuntime");
-    qjs_runtime_destroy(qrt);
-}
-
 static void test_context_profiles(void) {
     QjsRuntime *qrt = qjs_runtime_create(2 * 1024 * 1024);
 
@@ -211,7 +204,6 @@ static void test_no_atomics(void) {
 
 int main(void) {
     TEST_INIT();
-    test_runtime_create_destroy();
     test_context_profiles();
     test_eval_to_string();
     test_global_json();

@@ -15,15 +15,6 @@
 #include <limits.h>
 #include <unistd.h>
 
-void agent_config_free(AgentConfig *ac) {
-    if (!ac) return;
-    free(ac->name);
-    free(ac->model);
-    for (size_t i = 0; i < ac->tool_count; i++) free(ac->tools[i]);
-    free(ac->tools);
-    free(ac);
-}
-
 /* helper — render template vars in a string. {date} stays date-only on
  * purpose: anything finer would bust the provider prompt cache every render
  * (review-1 F22); time-of-day belongs in session_context_text(). */
@@ -196,63 +187,6 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     return out;
 }
 
-
-/* Load agent config from agents table + grants table */
-AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
-    if (!db || !name) return NULL;
-
-    /* Head of the agent's routing list stands in for the old scalar model. */
-    const char *sql =
-        "SELECT (SELECT model_id FROM agent_models am"
-        "         WHERE am.agent_name=agents.name ORDER BY pos LIMIT 1),"
-        "       max_iterations FROM agents WHERE name=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-
-    AgentConfig *ac = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        ac = calloc(1, sizeof(AgentConfig));
-        if (!ac) { sqlite3_finalize(stmt); return NULL; }
-        ac->name = strdup(name);
-
-        const char *v = (const char *)sqlite3_column_text(stmt, 0);
-        if (v) ac->model = strdup(v);
-
-        int mi = sqlite3_column_int(stmt, 1);
-        if (mi > 0) ac->max_iterations = mi;
-    }
-    sqlite3_finalize(stmt);
-    if (!ac) return NULL;
-
-    /* Load tools from grants */
-    char *tools_json = grants_json(db, name, "tool");
-    if (tools_json && strcmp(tools_json, "[]") != 0) {
-        sqlite3_stmt *js;
-        if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?)",
-                               -1, &js, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(js, 1, tools_json, -1, SQLITE_STATIC);
-            size_t cap = 8;
-            ac->tools = malloc(cap * sizeof(char *));
-            while (ac->tools && sqlite3_step(js) == SQLITE_ROW) {
-                const char *item = (const char *)sqlite3_column_text(js, 0);
-                if (!item) continue;
-                if (ac->tool_count >= cap) {
-                    cap *= 2;
-                    char **tmp = realloc(ac->tools, cap * sizeof(char *));
-                    if (!tmp) break;
-                    ac->tools = tmp;
-                }
-                ac->tools[ac->tool_count++] = strdup(item);
-            }
-            sqlite3_finalize(js);
-        }
-    }
-    free(tools_json);
-
-
-    return ac;
-}
 
 /* ── Grants API ─────────────────────────────────────────────────── */
 

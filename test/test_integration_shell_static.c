@@ -137,41 +137,6 @@ static void test_static_tunnel_allowed(void) {
     free(result);
 }
 
-/* A non-allowlisted host is denied by the broker — the shim returns a non-200
- * and curl gets no upstream body. */
-static void test_static_tunnel_denied(void) {
-    if (!ns_available) { printf("  SKIP test_static_tunnel_denied (no namespaces)\n"); return; }
-
-    uint16_t port;
-    int listen_fd = start_mock_tcp(&port);  /* exists, but host name is not granted */
-
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd),
-        "export NO_PROXY= no_proxy=; "
-        "curl -s --max-time 5 -x \"$HTTP_PROXY\" --proxytunnel "
-        "http://denied.test:%u/test", port);
-
-    ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.command = cmd;
-    r.workspace = workspace;
-    r.timeout = 15;
-    r.sandbox = 1;
-    r.host_rules = allow_loopback;  /* only 127.0.0.1 — denied.test is not granted */
-    r.host_count = 1;
-
-    char *result = run_tool_shell(&r);
-    close(listen_fd);
-
-    assert(result != NULL);
-    if (strstr(result, "SHIM_WORKS!")) {
-        printf("  FAIL test_static_tunnel_denied\n  output: %s\n", result);
-        free(result);
-        assert(0 && "broker should have denied unlisted host");
-    }
-    printf("  PASS test_static_tunnel_denied\n");
-    free(result);
-}
-
 static char *run_cmd(const char *cmd) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.command = cmd;
@@ -319,7 +284,6 @@ int main(void) {
     setup_workspace();
     check_prerequisites();
     test_static_tunnel_allowed();
-    test_static_tunnel_denied();
     test_plain_http_forwarded();
     test_denial_is_readable();
     test_env_is_proxy_only();

@@ -569,7 +569,7 @@ static void test_non_tls_failopen_on_strict_port(void) {
 
 int main(void) {
     TEST_INIT();
-    alarm(30);
+    alarm(15);   /* below make test's 20 s wrapper, so it can fire first */
     setup_tmpdir();
 
     printf("test_proxy_sni:\n");

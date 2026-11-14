@@ -149,14 +149,12 @@ typedef struct {
      * it coming from default_workspace(). Suppresses per-agent derivation so a
      * CLI/test-pinned workspace keeps serving every agent. */
     int workspace_explicit;
-    char *telegram_token;
     char *system_prompt;    /* per-agent system prompt, supports {session_id} {date} */
     int web_port;
     int context_window;     /* global default context window (overridden per-model in models table) */
     int max_iterations;     /* agent loop iteration cap */
     int max_history_tokens; /* token budget for context (0 = 60% of context_window) */
     int shell_timeout;      /* default shell_exec timeout in seconds (0 = 30) */
-    int stale_lock_timeout; /* janitor stale lock threshold in seconds (0 = 300) */
     float context_threshold;  /* trigger compaction/truncation when tokens > this × context_window (default 0.6) */
     float compaction_target;  /* compact down to this × context_window (default 0.3) */
     int compaction;           /* 1=summarize via LLM (default), 0=truncate only */

@@ -104,48 +104,6 @@ static void test_deny(void) {
     printf("  PASS: test_deny\n");
 }
 
-static void test_approve_and_deny_states(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
-
-    int64_t id1 = approval_create(db, sid, "c1", "request_config",
-                                  APPROVAL_PARK_REQUIRED,
-                                  "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"tmp.com\"]}}}",
-                                  "apply");
-    int64_t id2 = approval_create(db, sid, "c2", "request_config",
-                                  APPROVAL_PARK_REQUIRED,
-                                  "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"perm.com\"]}}}",
-                                  "apply");
-    assert(id1 > 0 && id2 > 0);
-
-    /* Approve first, deny second */
-    Approval *a = approval_resolve(db, id1, 1, "cli");
-    assert(a && strcmp(a->state, "approved") == 0);
-    approval_free(a);
-    a = approval_resolve(db, id2, 0, "cli");
-    assert(a && strcmp(a->state, "denied") == 0);
-    approval_free(a);
-
-    /* Verify states */
-    sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, "SELECT state FROM approvals WHERE id=?", -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, id1);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "approved") == 0);
-    sqlite3_finalize(stmt);
-
-    sqlite3_prepare_v2(db, "SELECT state FROM approvals WHERE id=?", -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, id2);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "denied") == 0);
-    sqlite3_finalize(stmt);
-
-    db_close(db);
-    clean_db();
-    printf("  PASS: test_approve_and_deny_states\n");
-}
-
 static void test_session_set_state_awaiting_approval(void) {
     sqlite3 *db = fresh_db();
     db_agent_upsert(db, "bot", NULL, NULL);
@@ -712,7 +670,6 @@ int main(void) {
     test_create_and_pending();
     test_approve();
     test_deny();
-    test_approve_and_deny_states();
     test_session_set_state_awaiting_approval();
     test_fail_closed_denied();
     test_grant_caps_load();

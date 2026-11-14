@@ -103,28 +103,6 @@ static void test_non_kv_table_unaffected(void) {
     PASS();
 }
 
-/* Verify COUNT(*) on secrets excludes secret rows */
-static void test_count_excludes_secrets(void) {
-    TEST(count_excludes_secrets);
-
-    sqlite3 *db = test_db_open(db_path);
-    if (!db) FAIL("db_open");
-
-    /* COUNT(*) is computed by SQLite before filtering, so it includes all rows.
-     * But the row itself doesn't contain enc: text (it's just a number).
-     * The filter only skips rows with enc: in a TEXT column value.
-     * A COUNT result is an integer, so it passes through. */
-    char *result = tool_db_query_handler(
-        "{\"sql\":\"SELECT COUNT(*) AS cnt FROM secrets\"}", db, &(int){0});
-    if (!result) { db_close(db); FAIL("handler returned NULL"); }
-
-    if (!strstr(result, "cnt")) { free(result); db_close(db); FAIL("missing cnt"); }
-
-    free(result);
-    db_close(db);
-    PASS();
-}
-
 int main(void) {
     TEST_INIT();
     printf("test_integration_db_query_secrets:\n");
@@ -132,7 +110,6 @@ int main(void) {
     test_select_star_filters_secrets();
     test_where_clause_secret_key();
     test_non_kv_table_unaffected();
-    test_count_excludes_secrets();
     teardown();
     printf("  %d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

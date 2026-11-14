@@ -22,5 +22,5 @@ make EXTRA_CFLAGS="-ffunction-sections -fdata-sections" \
      build/cclaw 2>&1 >/dev/null |
   sed -n "s|.*removing unused section '\.text\.\([^']*\)' in file 'build/\([^.]*\)\.o'.*|\2: \1|p" |
   grep -vE '^(sqlite3|civetweb|quickjs|qjs_cutils|qjs_dtoa|qjs_libunicode|qjs_libregexp|monocypher|templates):' |
-  grep -v ': _curl_' |
+  grep -vE ': (_curl_|Wcurl_)' |
   sort

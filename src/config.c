@@ -330,7 +330,6 @@ Config *config_load(sqlite3 *db) {
     cfg->max_iterations = config_get_int(db, "max_iterations");
     cfg->max_history_tokens = config_get_int(db, "max_history_tokens");
     cfg->shell_timeout = config_get_int(db, "shell_timeout");
-    cfg->stale_lock_timeout = config_get_int(db, "stale_lock_timeout");
     cfg->token_rate_limit = config_get_int(db, "token_rate_limit");
     cfg->save_reasoning = config_get_int(db, "save_reasoning");
     /* config_get_double reads the env layer too, so no separate override */
@@ -355,7 +354,6 @@ Config *config_load(sqlite3 *db) {
     env_override_int(&cfg->max_iterations, "CCLAW_MAX_ITERATIONS");
     env_override_int(&cfg->max_history_tokens, "CCLAW_MAX_HISTORY_TOKENS");
     env_override_int(&cfg->shell_timeout, "CCLAW_SHELL_TIMEOUT");
-    env_override_int(&cfg->stale_lock_timeout, "CCLAW_STALE_LOCK_TIMEOUT");
     env_override_int(&cfg->token_rate_limit, "CCLAW_TOKEN_RATE_LIMIT");
 
     /* endpoint_type env override */

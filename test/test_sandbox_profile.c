@@ -102,22 +102,6 @@ static void test_profile_resolve_matches_policy(void) {
     PASS();
 }
 
-/* RLIMIT_AS caps address space, not usage: large-VA reservers (go, node,
- * rustc) fail to start under any cap tight enough to bound memory. No profile
- * may reintroduce it — use a cgroup memory limit if a real ceiling is wanted. */
-static void test_no_profile_caps_address_space(void) {
-    static const char *profiles[] = {"host", "standard", "restricted"};
-    TEST(no_profile_sets_rlimit_as);
-    for (size_t i = 0; i < sizeof(profiles)/sizeof(profiles[0]); i++) {
-        SandboxConfig c = cfg_for(profiles[i]);
-        if (c.rlimits.as_mb != 0) {
-            printf("FAIL: %s sets as_mb=%d\n", profiles[i], c.rlimits.as_mb);
-            return;
-        }
-    }
-    PASS();
-}
-
 /* The workspace is unconditionally writable now — HOME points at it, so
  * npm/cargo/go need it, and `workspace_ro` was deleted rather than left as a
  * field no profile sets. Nothing to assert: it is structural, not policy.
@@ -130,7 +114,6 @@ int main(void) {
     test_standard();
     test_restricted();
     test_fallthrough();
-    test_no_profile_caps_address_space();
     test_profile_resolve_matches_policy();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

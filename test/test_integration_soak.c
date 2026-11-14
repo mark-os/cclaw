@@ -95,8 +95,6 @@ int main(void) {
     setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
     setenv("OPENROUTER_API_KEY", "test-key", 1);
     setenv("CCLAW_MODEL", "test-model", 1);
-    setenv("CCLAW_AGENT_NAME", "Soak", 1);
-    setenv("CCLAW_STREAM", "0", 1);
     db_agent_upsert(db, "Soak", NULL, NULL);
 
     /* Warm up: first turns allocate lazily-initialized singletons (curl

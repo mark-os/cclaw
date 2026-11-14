@@ -41,15 +41,6 @@ static void test_null_url(void) {
     PASS();
 }
 
-/* Runtime create/destroy lifecycle (hosts feed the proxy, not the runtime) */
-static void test_runtime_set_hosts(void) {
-    TEST("runtime_set_hosts");
-    JsSessionRuntime *rt = js_runtime_create();
-    if (!rt) { FAIL("create failed"); return; }
-    js_runtime_destroy(rt);
-    PASS();
-}
-
 /* In-process js_eval compute: arithmetic returns the last expression value. No
  * fork, no re-exec, no network. */
 static void test_js_eval_compute(void) {
@@ -61,39 +52,12 @@ static void test_js_eval_compute(void) {
     PASS();
 }
 
-/* In-process js_eval: console.log output is captured. */
-static void test_js_eval_console(void) {
-    TEST("js_eval_console");
-    char *r = test_js_eval_run_json("{\"code\":\"console.log('hi'); undefined\"}");
-    if (!r) { FAIL("NULL result"); return; }
-    if (!strstr(r, "hi")) { FAIL(r); free(r); return; }
-    free(r);
-    PASS();
-}
-
 /* js_eval requires code or filename. */
 static void test_js_eval_requires_arg(void) {
     TEST("js_eval_requires_arg");
     char *r = test_js_eval_run_json("{}");
     if (!r) { FAIL("NULL result"); return; }
     if (!strstr(r, "error")) { FAIL(r); free(r); return; }
-    free(r);
-    PASS();
-}
-
-/* The timeout option is clamped, not trusted: 0/negative and anything past the
- * ceiling fall back to a sane value, because a JS fetch blocks its tool child
- * for its whole duration. Exercised through js_eval so the option is checked
- * where a handler actually sets it. */
-static void test_timeout_option_is_clamped(void) {
-    TEST("timeout_option_is_clamped");
-    /* An absurd timeout on an unroutable address must still return promptly
-     * with an error rather than being honoured literally. */
-    char *r = test_js_eval_run_json(
-        "{\"code\":\"var r = http_request('http://127.0.0.1:9/x', {timeout: 999999});"
-        " r.status + ':' + (r.error ? 'err' : 'ok')\"}");
-    if (!r) { FAIL("NULL result"); return; }
-    if (!strstr(r, "-1")) { FAIL(r); free(r); return; }
     free(r);
     PASS();
 }
@@ -215,11 +179,8 @@ int main(void) {
     printf("test_js_http_fetch:\n");
     test_invalid_scheme();
     test_null_url();
-    test_runtime_set_hosts();
     test_js_eval_compute();
-    test_js_eval_console();
     test_js_eval_requires_arg();
-    test_timeout_option_is_clamped();
     test_binary_download();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

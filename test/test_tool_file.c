@@ -76,14 +76,6 @@ static void test_missing_file(void) {
     printf("  PASS test_missing_file\n");
 }
 
-static void test_invalid_json(void) {
-    char *r = test_file_tool_run("file_read", "not json", &file_ctx);
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL);
-    free(r);
-    printf("  PASS test_invalid_json\n");
-}
-
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
@@ -425,7 +417,6 @@ int main(void) {
     test_basic_read();
     test_nested_read();
     test_missing_file();
-    test_invalid_json();
     test_register();
     test_write_new_file();
     test_write_overwrite();

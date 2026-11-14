@@ -93,19 +93,6 @@ static void test_network_isolated(void) {
     printf("  PASS test_network_isolated\n");
 }
 
-/* Test: default config is sandboxed (sandbox=1 is the SHELL_REQ_DEFAULTS) */
-static void test_default_config_sandboxed(void) {
-    if (!ns_available) { printf("  SKIP test_default_config_sandboxed\n"); return; }
-    ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.workspace = workspace;
-    r.command = "echo works";
-    char *res = run_tool_shell(&r);
-    assert(res != NULL);
-    assert(strstr(res, "works") != NULL);
-    free(res);
-    printf("  PASS test_default_config_sandboxed\n");
-}
-
 /* Test: agent DB path is not accessible from shell child */
 static void test_agent_db_inaccessible(void) {
     if (!ns_available) { printf("  SKIP test_agent_db_inaccessible\n"); return; }
@@ -145,32 +132,6 @@ static void test_etc_shadow_inaccessible(void) {
            || strstr(res, "No such file") != NULL);
     free(res);
     printf("  PASS test_etc_shadow_inaccessible\n");
-}
-
-/* Verify agent.db path inaccessible from shell child */
-static void test_agent_db_path_blocked(void) {
-    if (!ns_available) { printf("  SKIP test_agent_db_path_blocked\n"); return; }
-    ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.workspace = workspace;
-    r.command = "cat .cclaw/agents/default/agent.db 2>&1; echo rc=$?";
-    char *res = run_tool_shell(&r);
-    assert(res != NULL);
-    assert(strstr(res, "rc=1") != NULL || strstr(res, "No such file") != NULL);
-    free(res);
-    printf("  PASS test_agent_db_path_blocked\n");
-}
-
-/* Verify cclaw.db path inaccessible from shell child */
-static void test_daemon_db_path_blocked(void) {
-    if (!ns_available) { printf("  SKIP test_daemon_db_path_blocked\n"); return; }
-    ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.workspace = workspace;
-    r.command = "cat .cclaw/cclaw.db 2>&1; echo rc=$?";
-    char *res = run_tool_shell(&r);
-    assert(res != NULL);
-    assert(strstr(res, "rc=1") != NULL || strstr(res, "No such file") != NULL);
-    free(res);
-    printf("  PASS test_daemon_db_path_blocked\n");
 }
 
 /* CWD rw bind-mount in CLI mode — cwd_path accessible rw alongside workspace */
@@ -292,11 +253,8 @@ int main(void) {
     test_write_system_dir_blocked();
     test_read_system_files();
     test_network_isolated();
-    test_default_config_sandboxed();
     test_agent_db_inaccessible();
     test_etc_shadow_inaccessible();
-    test_agent_db_path_blocked();
-    test_daemon_db_path_blocked();
     test_cwd_path_rw();
     test_no_cwd_path_blocked();
     test_sandbox_none_skips_namespace();

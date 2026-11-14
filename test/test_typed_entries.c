@@ -135,52 +135,6 @@ static void test_legacy_entry_gets_type(void) {
     printf("  legacy_entry_gets_type... PASS\n");
 }
 
-static void test_tool_calls_result_entry_id(void) {
-    sqlite3 *db = setup();
-    int64_t sid = 1;
-
-    /* Insert a tool_call entry and corresponding tool_calls row */
-    int64_t tc_entry = entry_append_typed(db, sid, 1, "tool_call", 0,
-        "{\"x\":1}", "call_1", "test_tool", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    assert(tc_entry > 0);
-
-    /* Insert into tool_calls table (workflow state only — args in entries.content) */
-    sqlite3_stmt *stmt;
-    const char *ins = "INSERT INTO tool_calls(session_id, entry_id, call_id, name)"
-                      " VALUES(?,?,?,?);";
-    assert(sqlite3_prepare_v2(db, ins, -1, &stmt, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(stmt, 1, sid);
-    sqlite3_bind_int64(stmt, 2, tc_entry);
-    sqlite3_bind_text(stmt, 3, "call_1", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, "test_tool", -1, SQLITE_STATIC);
-    assert(sqlite3_step(stmt) == SQLITE_DONE);
-    sqlite3_finalize(stmt);
-
-    /* Insert tool_result entry */
-    int64_t result_entry = entry_append_typed(db, sid, 1, "tool_result", 1,
-        "result!", "call_1", "test_tool", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    assert(result_entry > 0);
-
-    /* Update tool_calls with result_entry_id */
-    const char *upd = "UPDATE tool_calls SET status='done', result_entry_id=? WHERE call_id=?;";
-    assert(sqlite3_prepare_v2(db, upd, -1, &stmt, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(stmt, 1, result_entry);
-    sqlite3_bind_text(stmt, 2, "call_1", -1, SQLITE_STATIC);
-    assert(sqlite3_step(stmt) == SQLITE_DONE);
-    sqlite3_finalize(stmt);
-
-    /* Verify */
-    const char *sel = "SELECT status, result_entry_id FROM tool_calls WHERE call_id='call_1';";
-    assert(sqlite3_prepare_v2(db, sel, -1, &stmt, NULL) == SQLITE_OK);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "done") == 0);
-    assert(sqlite3_column_int64(stmt, 1) == result_entry);
-    sqlite3_finalize(stmt);
-
-    db_close(db);
-    printf("  tool_calls_result_entry_id... PASS\n");
-}
-
 static void test_ingest_typed(void) {
     sqlite3 *db = setup();
     int64_t sid = 1;
@@ -273,8 +227,7 @@ int main(void) {
     test_insert_typed_entries();
     test_tool_result_typed();
     test_legacy_entry_gets_type();
-    test_tool_calls_result_entry_id();
     test_ingest_typed();
-    printf("\n5/5 tests passed.\n");
+    printf("\n4/4 tests passed.\n");
     return 0;
 }

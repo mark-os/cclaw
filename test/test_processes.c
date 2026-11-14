@@ -34,17 +34,6 @@ static void test_register_writes_id(void) {
     printf("  PASS test_register_writes_id\n");
 }
 
-static void test_is_live_fresh(void) {
-    sqlite3 *db = fresh_db();
-    char id[64];
-    assert(process_register(db, "cli", getpid(), id, sizeof(id)) == 0);
-    assert(process_is_live(db, id, PROCESS_TTL_SEC) == 1);
-    process_unregister(db, id);
-    db_close(db);
-    clean_db();
-    printf("  PASS test_is_live_fresh\n");
-}
-
 static void test_stale_heartbeat_not_live(void) {
     sqlite3 *db = fresh_db();
     char id[64];
@@ -124,7 +113,6 @@ int main(void) {
     TEST_INIT();
     printf("test_processes:\n");
     test_register_writes_id();
-    test_is_live_fresh();
     test_stale_heartbeat_not_live();
     test_dead_pid_gc();
     test_unregister();

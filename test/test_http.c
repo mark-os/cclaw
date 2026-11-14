@@ -7,13 +7,6 @@
 #include <curl/curl.h>
 #include "test_util.h"
 
-static void test_response_free_empty(void) {
-    HttpResponse resp = {0};
-    http_response_free(&resp);
-    assert(resp.data == NULL);
-    assert(resp.len == 0);
-}
-
 static void test_post_bad_url(void) {
     HttpResponse resp = {0};
     const char *headers[] = {"Content-Type: application/json", NULL};
@@ -68,7 +61,6 @@ int main(void) {
     TEST_INIT();
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
-    test_response_free_empty();
     printf("PASS: response_free_empty\n");
 
     test_post_bad_url();

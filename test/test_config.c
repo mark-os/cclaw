@@ -20,7 +20,6 @@ static void test_defaults(void) {
     /* No kv overrides, just env */
     unsetenv("CCLAW_PROVIDER");
     unsetenv("CCLAW_MODEL");
-    unsetenv("CCLAW_TELEGRAM_TOKEN");
     unsetenv("CCLAW_DB_PATH");
     unsetenv("CCLAW_WEB_PORT");
     setenv("OPENROUTER_API_KEY", "sk-test-123", 1);
@@ -182,33 +181,6 @@ static void test_fallback_providers(void) {
     printf("  PASS: test_fallback_providers\n");
 }
 
-static void test_stale_lock_timeout(void) {
-    unsetenv("OPENROUTER_API_KEY");
-    unsetenv("CCLAW_STALE_LOCK_TIMEOUT");
-
-    sqlite3 *db = fresh_db();
-    assert(db);
-    config_set(db, "stale_lock_timeout", "120");
-
-    Config *cfg = config_load(db);
-    assert(cfg != NULL);
-    assert(cfg->stale_lock_timeout == 120);
-    config_free(cfg);
-    db_close(db);
-
-    /* Env override */
-    setenv("CCLAW_STALE_LOCK_TIMEOUT", "60", 1);
-    db = fresh_db();
-    Config *cfg2 = config_load(db);
-    assert(cfg2 != NULL);
-    assert(cfg2->stale_lock_timeout == 60);
-    config_free(cfg2);
-    db_close(db);
-
-    unsetenv("CCLAW_STALE_LOCK_TIMEOUT");
-    printf("  PASS: test_stale_lock_timeout\n");
-}
-
 static void test_system_prompt(void) {
     unsetenv("OPENROUTER_API_KEY");
     unsetenv("CCLAW_SYSTEM_PROMPT");
@@ -332,7 +304,6 @@ int main(void) {
     test_env_overrides_kv();
     test_kv_secret_fallback();
     test_fallback_providers();
-    test_stale_lock_timeout();
     test_system_prompt();
     printf("All config tests passed.\n");
     return 0;

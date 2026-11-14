@@ -27,7 +27,6 @@ int main(void) {
     unsetenv("CCLAW_PROVIDER_BASE_URL");
     unsetenv("CCLAW_PROVIDER");
     unsetenv("CCLAW_MODEL");
-    setenv("CCLAW_STREAM", "0", 1);
     setenv("CCLAW_DB_PATH", DB_PATH, 1);
 
     test_db_clean(DB_PATH);

@@ -6,16 +6,6 @@
 #include <sqlite3.h>
 #include "types.h"
 
-/* Per-agent config loaded from agents table in cclaw.db.
- * Fields override global Config when non-NULL/non-zero. */
-typedef struct {
-    char *name;             /* agent name */
-    char *model;            /* model override (NULL = use global) */
-    char **tools;           /* tool whitelist (NULL = all tools) */
-    size_t tool_count;
-    int max_iterations;     /* 0 = use global */
-} AgentConfig;
-
 /* Grants materialized as flat arrays for tool ctxs / sandboxed children.
  * Not a cache: reloaded from the grants table before every tool dispatch
  * batch (agent_setup_refresh_caps) — the DB is the only durable authority. */
@@ -38,13 +28,6 @@ void agent_caps_refresh(sqlite3 *db, const char *agent, AgentCaps *caps);
 
 /* Free all arrays in caps. */
 void agent_caps_free(AgentCaps *caps);
-
-/* Load agent config from cclaw.db agents table.
- * Returns NULL if agent not found. */
-AgentConfig *agent_config_load_db(sqlite3 *db, const char *name);
-
-/* Free AgentConfig. */
-void agent_config_free(AgentConfig *ac);
 
 /* Would a read_path/write_path grant of `value` expose cclaw.db to a sandboxed
  * child? True when it names the DB file, one of its -wal/-shm siblings, or any

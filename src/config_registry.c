@@ -33,8 +33,6 @@ static const ConfigDef s_defs[] = {
       "Admin dashboard auth token (auto-generated at daemon start; cclaw dashboard prints the URL)" },
     { "max_history_tokens", "0",
       "History token cap per request (0 = derive from context window)" },
-    { "stale_lock_timeout", "300",
-      "Seconds before a dead process's session locks are reclaimed" },
     { "channel_deaf_timeout", "300",
       "Seconds of received-traffic silence before a live channel runner is"
       " restarted (0 = off; per-channel <ext>.deaf_timeout overrides)" },

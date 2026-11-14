@@ -144,16 +144,16 @@ static void test_compaction_fts_indexes_old(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "compact_fts", NULL, -1, 0);
 
-    Message m = {.role = ROLE_USER, .content = "unique_searchable_word"};
+    Message m = {.role = ROLE_USER, .content = "first"};
     int64_t e1 = entry_append_with_iteration(db, sid, &m, 1);
-    m.content = "another message";
-    entry_append_with_iteration(db, sid, &m, 1); /* e2 */
+    m.content = "unique_searchable_word";
+    int64_t e2 = entry_append_with_iteration(db, sid, &m, 1);
     m.content = "final";
     int64_t e3 = entry_append_with_iteration(db, sid, &m, 1);
 
-    /* Compact: reparent e3 past e1 (e1 becomes "old") */
+    /* Compact: e3 is reparented past e2, so e2 is the entry that leaves the
+     * active branch. It must stay in FTS5 — compaction never deletes. */
     entry_compact(db, sid, e1, e3, "Summary");
-    /* But we want to test that e1's content is still in FTS5 — it was never deleted */
 
     sqlite3_stmt *st;
     assert(sqlite3_prepare_v2(db,
@@ -162,7 +162,7 @@ static void test_compaction_fts_indexes_old(void) {
     sqlite3_bind_text(st, 1, "unique_searchable_word", -1, SQLITE_STATIC);
     sqlite3_bind_int64(st, 2, sid);
     assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int64(st, 0) == e1);
+    assert(sqlite3_column_int64(st, 0) == e2);
 
     /* Also verify compaction summary is searchable */
     sqlite3_reset(st);

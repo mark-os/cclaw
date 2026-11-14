@@ -20,15 +20,6 @@ static sqlite3 *setup_db(void) {
     return db;
 }
 
-static void test_invalid_json(void) {
-    AgentLaunchCtx ctx = {.db = NULL, .session_id = 1};
-    char *r = tool_launch_agent_handler("not json", &ctx, &(int){0});
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL);
-    free(r);
-    printf("  PASS test_invalid_json\n");
-}
-
 static void test_missing_task(void) {
     sqlite3 *db = setup_db();
     AgentLaunchCtx ctx = {.db = db, .session_id = 1};
@@ -107,21 +98,6 @@ static void test_system_wide_limit(void) {
     free(r);
     db_close(db);
     printf("  PASS test_system_wide_limit\n");
-}
-
-static void test_spawn_background(void) {
-    sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
-    assert(parent_sid > 0);
-
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    char *r = tool_launch_agent_handler("{\"task\":\"test task\",\"background\":true}", &ctx, &(int){0});
-    assert(r != NULL);
-    assert(strstr(r, "agent delegated") != NULL);
-
-    free(r);
-    db_close(db);
-    printf("  PASS test_spawn_background\n");
 }
 
 static void test_spawn_blocking(void) {
@@ -486,12 +462,10 @@ static void test_self_spawn_inherits_agent_name(void) {
 int main(void) {
     TEST_INIT();
     printf("test_tool_agent:\n");
-    test_invalid_json();
     test_missing_task();
     test_depth_limit();
     test_system_wide_limit();
     test_system_wide_limit_batch_aware();
-    test_spawn_background();
     test_spawn_blocking();
     test_register();
     test_unknown_agent_rejected();

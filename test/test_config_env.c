@@ -55,20 +55,6 @@ static void test_env_defaults(void) {
     printf("  PASS test_env_defaults\n");
 }
 
-static void test_env_openrouter_key(void) {
-    clear_env();
-    setenv("OPENROUTER_API_KEY", "or-key", 1);
-    sqlite3 *db = fresh_db();
-    Config *cfg = config_load(db);
-    assert(cfg != NULL);
-    assert(strcmp(cfg->provider.api_key, "or-key") == 0);
-    config_free(cfg);
-    db_close(db);
-    test_db_clean(TEST_DB);
-    clear_env();
-    printf("  PASS test_env_openrouter_key\n");
-}
-
 static void test_env_all_overrides(void) {
     clear_env();
     setenv("OPENROUTER_API_KEY", "key1", 1);
@@ -145,7 +131,6 @@ int main(void) {
     alarm(10);
     printf("test_config_env:\n");
     test_env_defaults();
-    test_env_openrouter_key();
     test_env_all_overrides();
     test_render_workspace_var();
     test_render_no_template_vars();

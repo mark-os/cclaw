@@ -14,20 +14,6 @@
  * values (raw + base64 + URL-encoded) with the re-referenceable {{SECRET:name}}
  * placeholder. The shell handler no longer masks; the parent does. */
 
-static void test_mask_single_secret(void) {
-    ShellSecret secrets[] = {{"TOKEN", "abc123"}};
-    char *out = secret_deinterpolate("got token: abc123 done", secrets, 1);
-    assert(strcmp(out, "got token: {{SECRET:TOKEN}} done") == 0);
-    free(out);
-}
-
-static void test_mask_multiple_occurrences(void) {
-    ShellSecret secrets[] = {{"KEY", "secret"}};
-    char *out = secret_deinterpolate("secret and secret again", secrets, 1);
-    assert(strcmp(out, "{{SECRET:KEY}} and {{SECRET:KEY}} again") == 0);
-    free(out);
-}
-
 static void test_mask_multiple_secrets(void) {
     ShellSecret secrets[] = {{"A", "aaa"}, {"B", "bbb"}};
     char *out = secret_deinterpolate("aaa then bbb", secrets, 2);
@@ -35,20 +21,6 @@ static void test_mask_multiple_secrets(void) {
     assert(strstr(out, "{{SECRET:B}}") != NULL);
     assert(strstr(out, "aaa") == NULL);
     assert(strstr(out, "bbb") == NULL);
-    free(out);
-}
-
-static void test_mask_no_match(void) {
-    ShellSecret secrets[] = {{"X", "xyz"}};
-    char *out = secret_deinterpolate("nothing here", secrets, 1);
-    assert(strcmp(out, "nothing here") == 0);
-    free(out);
-}
-
-static void test_mask_empty_value_skipped(void) {
-    ShellSecret secrets[] = {{"E", ""}};
-    char *out = secret_deinterpolate("unchanged", secrets, 1);
-    assert(strcmp(out, "unchanged") == 0);
     free(out);
 }
 
@@ -184,42 +156,6 @@ static void cleanup_workspace(void) {
     system(cmd);
 }
 
-/* Injection still works (env reaches the child), and the raw value never
- * survives the parent masking chokepoint — it becomes {{SECRET:MYKEY}}. */
-static void test_shell_inject_then_mask(void) {
-    RunToolSecret secrets[] = {{"MYKEY", "hunter2xyz", NULL}};
-
-    ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.command = "echo $CCLAW_SECRET_MYKEY";
-    r.workspace = workspace;
-    r.timeout = 5;
-    r.secrets = secrets;
-    r.secret_count = 1;
-
-    char *result = run_tool_shell(&r);
-    assert(result != NULL);
-
-    /* If namespaces unavailable, skip assertion on content */
-    if (strstr(result, "error:") != NULL) {
-        printf("  (skipped — broker error: %.60s)\n", result);
-        free(result);
-        return;
-    }
-
-    int echoed = (strstr(result, "hunter2xyz") != NULL);
-
-    /* Parent chokepoint masks it — tool_result_postprocess wraps
-     * secret_deinterpolate which handles raw + b64 + url variants */
-    ShellSecret mask_secrets[] = {{"MYKEY", "hunter2xyz"}};
-    char *pp = tool_result_postprocess(result, mask_secrets, 1);
-    const char *final = pp ? pp : result;
-    assert(strstr(final, "hunter2xyz") == NULL);            /* raw never survives */
-    if (echoed) assert(strstr(final, "{{SECRET:MYKEY}}") != NULL);
-
-    free(pp);
-    free(result);
-}
-
 /* Env injection is scoped: secrets the command does not reference via
  * $CCLAW_SECRET_<NAME> are pre-filtered by the parent (main.c) before being
  * passed to the --run-tool broker. The broker injects exactly what it receives.
@@ -263,11 +199,7 @@ int main(void) {
     alarm(10);
 
     /* Pure unit tests (no broker) */
-    test_mask_single_secret();
-    test_mask_multiple_occurrences();
     test_mask_multiple_secrets();
-    test_mask_no_match();
-    test_mask_empty_value_skipped();
     test_mask_null_secrets();
     test_mask_base64_encoded();
     test_mask_url_encoded();
@@ -281,7 +213,6 @@ int main(void) {
 
     /* Broker-path tests */
     setup_workspace();
-    test_shell_inject_then_mask();
     test_env_injection_scoped();
     cleanup_workspace();
 

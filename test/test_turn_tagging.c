@@ -63,21 +63,6 @@ static void test_next_iteration_id_increments(void) {
     PASS();
 }
 
-static void test_append_tags_iteration(void) {
-    TEST(append_tags_iteration);
-    sqlite3 *db = test_db_open(":memory:");
-    int64_t sid = session_create(db, "test", NULL, -1, 0);
-
-    Message msg = {.role = ROLE_USER, .content = "hi"};
-    int64_t eid = entry_append_with_iteration(db, sid, &msg, 42);
-    if (eid < 0) { FAIL("append failed"); db_close(db); return; }
-
-    if (entry_col(db, eid, "iteration_id") != 42) { FAIL("iteration_id not set"); db_close(db); return; }
-
-    db_close(db);
-    PASS();
-}
-
 static void test_multiple_entries_same_iteration(void) {
     TEST(multiple_entries_same_iteration);
     sqlite3 *db = test_db_open(":memory:");
@@ -235,7 +220,6 @@ int main(void) {
     printf("test_turn_tagging:\n");
     test_next_iteration_id_empty_session();
     test_next_iteration_id_increments();
-    test_append_tags_iteration();
     test_multiple_entries_same_iteration();
     test_turn_id_constant_across_iterations();
     test_turn_id_changes_at_boundary();

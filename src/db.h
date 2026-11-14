@@ -207,13 +207,6 @@ int session_bump_iteration(sqlite3 *db, int64_t session_id);
 int session_set_turn_context(sqlite3 *db, int64_t session_id, const char *text);
 char *session_get_turn_context(sqlite3 *db, int64_t session_id);  /* caller frees */
 
-/* Parent info for sub-agent completion wake */
-typedef struct {
-    int64_t parent_session_id;
-    char *parent_tool_call_id;  /* NULL if background mode */
-} SessionParentInfo;
-SessionParentInfo session_get_parent_info(sqlite3 *db, int64_t session_id);
-
 /* Set parent_tool_call_id on a child session (blocking sub-agent) */
 int session_set_parent_tool_call_id(sqlite3 *db, int64_t session_id, const char *call_id);
 

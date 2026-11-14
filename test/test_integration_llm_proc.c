@@ -44,7 +44,6 @@ static void set_test_env(const char *db_path) {
     setenv("CCLAW_MODEL", "test-model", 1);
     setenv("CCLAW_CONTEXT_WINDOW", "128000", 1);
     setenv("CCLAW_DB_PATH", db_path, 1);
-    setenv("CCLAW_STREAM", "0", 1);
     setenv("CCLAW_MAX_ITERATIONS", "5", 1);
     setenv("CCLAW_AUTO_RECALL", "0", 1);
 }

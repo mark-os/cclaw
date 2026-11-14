@@ -137,18 +137,6 @@ static void test_timeout_kills_process_group(void) {
     printf("  PASS test_timeout_kills_process_group\n");
 }
 
-static void test_configurable_default_timeout(void) {
-    ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.command = "sleep 10";
-    r.timeout = 1;
-    r.workspace = workspace;
-    char *res = run_tool_shell(&r);
-    assert(res != NULL);
-    assert(strstr(res, "[timeout after 1s") != NULL);
-    free(res);
-    printf("  PASS test_configurable_default_timeout\n");
-}
-
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
@@ -256,7 +244,6 @@ int main(void) {
         printf("  SKIP test_nonzero_exit (namespaces unavailable)\n");
         printf("  SKIP test_timeout (namespaces unavailable)\n");
         printf("  SKIP test_timeout_kills_process_group (namespaces unavailable)\n");
-        printf("  SKIP test_configurable_default_timeout (namespaces unavailable)\n");
         printf("  SKIP test_default_shell_is_sh (namespaces unavailable)\n");
         printf("  SKIP test_configurable_shell_path (namespaces unavailable)\n");
     } else {
@@ -265,7 +252,6 @@ int main(void) {
         test_nonzero_exit();
         test_timeout();
         test_timeout_kills_process_group();
-        test_configurable_default_timeout();
         test_default_shell_is_sh();
         test_configurable_shell_path();
     }

@@ -233,44 +233,6 @@ static void test_read_own_workspace(void) {
     printf("  PASS test_read_own_workspace\n");
 }
 
-/* workspace fallback path pattern (./workspace/{agent_id}) */
-static void test_workspace_fallback_path(void) {
-    if (!ns_available) { printf("  SKIP test_workspace_fallback_path\n"); return; }
-
-    char base[128];
-    snprintf(base, sizeof(base), "/tmp/cclaw_ws_fb_XXXXXX");
-    assert(mkdtemp(base) != NULL);
-
-    char agent_ws[256];
-    snprintf(agent_ws, sizeof(agent_ws), "%s/workspace/agent_1", base);
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "mkdir -p %s", agent_ws);
-    system(cmd);
-
-    char path[512];
-    snprintf(path, sizeof(path), "%s/data.txt", agent_ws);
-    FILE *f = fopen(path, "w");
-    assert(f);
-    fprintf(f, "agent1_only");
-    fclose(f);
-
-    char *r = run_tool_request(agent_ws, "file_read", "{\"path\":\"data.txt\"}");
-    assert(r != NULL);
-    assert(strcmp(r, "agent1_only") == 0);
-    free(r);
-
-    /* Agent cannot escape to parent via traversal — <base>/etc/passwd does
-     * not exist in the sandbox (only the workspace leaf is bound) */
-    r = run_tool_request(agent_ws, "file_read", "{\"path\":\"../../etc/passwd\"}");
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
-    free(r);
-
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", base);
-    system(cmd);
-    printf("  PASS test_workspace_fallback_path\n");
-}
-
 int main(void) {
     TEST_INIT();
     printf("test_workspace_isolation:\n");
@@ -282,7 +244,6 @@ int main(void) {
     test_read_traversal_to_other_workspace();
     test_write_traversal_to_other_workspace();
     test_read_own_workspace();
-    test_workspace_fallback_path();
     cleanup();
     printf("All workspace isolation tests passed.\n");
     return 0;

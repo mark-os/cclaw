@@ -1080,25 +1080,6 @@ static void test_apply_rollback(void) {
 
 
 
-/* Direct agent_config_grant still works (low-level API). */
-static void test_add_tool_to_config(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-
-    int rc = agent_config_grant(db, "test", "tool", "shell_exec", 0);
-    assert(rc == 0);
-
-    AgentCaps caps;
-    agent_caps_load(db, "test", &caps);
-    assert(caps.tool_count == 1);
-    agent_caps_free(&caps);
-
-    db_close(db);
-    printf("  PASS test_add_tool_to_config\n");
-}
-
-
 /* A path grant covering cclaw.db is refused at request time, with the reason —
  * it never parks, so no approver is ever shown a grant that would be inert.
  * Needs an on-disk DB: the rule resolves the handle's own filename.
@@ -1438,7 +1419,6 @@ int main(void) {
     test_agent_routes_sections();
     test_agent_models_effort();
     test_apply_rollback();
-    test_add_tool_to_config();
     test_redundant_filtered();
     test_secret_bindings_section();
     test_grants_remove();

@@ -39,30 +39,6 @@ static int get_pragma_text(sqlite3 *db, const char *pragma, char *buf, int bufsz
     return -1;
 }
 
-static int table_exists(sqlite3 *db, const char *name) {
-    const char *sql = "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?;";
-    sqlite3_stmt *stmt;
-    int exists = 0;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-        if (sqlite3_step(stmt) == SQLITE_ROW)
-            exists = sqlite3_column_int(stmt, 0);
-        sqlite3_finalize(stmt);
-    }
-    return exists;
-}
-
-static void test_open_close(void) {
-    const char *path = "/tmp/test_cclaw_db.sqlite";
-    test_db_clean(path);
-
-    sqlite3 *db = test_db_open(path);
-    assert(db != NULL);
-    db_close(db);
-    test_db_clean(path);
-    printf("  PASS test_open_close\n");
-}
-
 static void test_wal_mode(void) {
     const char *path = "/tmp/test_cclaw_wal.sqlite";
     test_db_clean(path);
@@ -77,40 +53,6 @@ static void test_wal_mode(void) {
     db_close(db);
     test_db_clean(path);
     printf("  PASS test_wal_mode\n");
-}
-
-static void test_busy_timeout(void) {
-    const char *path = "/tmp/test_cclaw_timeout.sqlite";
-    test_db_clean(path);
-
-    sqlite3 *db = test_db_open(path);
-    assert(db != NULL);
-
-    /* Custom busy handler replaces PRAGMA busy_timeout — pragma reads 0 but
-     * contention is handled (and logged) by db_busy_handler. Verify WAL mode
-     * is set correctly as a proxy for "db_open configured things properly". */
-    char mode[16] = {0};
-    get_pragma_text(db, "journal_mode", mode, sizeof(mode));
-    assert(strcasecmp(mode, "wal") == 0);
-
-    db_close(db);
-    test_db_clean(path);
-    printf("  PASS test_busy_timeout\n");
-}
-
-static void test_tables_created(void) {
-    const char *path = "/tmp/test_cclaw_tables.sqlite";
-    test_db_clean(path);
-
-    sqlite3 *db = test_db_open(path);
-    assert(db != NULL);
-
-    assert(table_exists(db, "sessions") == 1);
-    assert(table_exists(db, "entries") == 1);
-
-    db_close(db);
-    test_db_clean(path);
-    printf("  PASS test_tables_created\n");
 }
 
 static void test_reopen_idempotent(void) {
@@ -976,10 +918,7 @@ static void test_schema_patch_v57(void) {
 int main(void) {
     TEST_INIT();
     printf("test_db:\n");
-    test_open_close();
     test_wal_mode();
-    test_busy_timeout();
-    test_tables_created();
     test_reopen_idempotent();
     test_fts5_search();
     test_config_registry();

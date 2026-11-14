@@ -16,13 +16,6 @@ static char *dummy_handler(const char *arguments, void *user_data, int *is_error
     return r;
 }
 
-static void test_init(void) {
-    ToolRegistry reg;
-    tools_init(&reg);
-    assert(reg.count == 0);
-    printf("  PASS test_init\n");
-}
-
 static void test_register_and_lookup(void) {
     ToolRegistry reg;
     tools_init(&reg);
@@ -71,23 +64,6 @@ static void test_register_full(void) {
 
     tools_free(&reg);
     printf("  PASS test_register_full\n");
-}
-
-static void test_handler_dispatch(void) {
-    ToolRegistry reg;
-    tools_init(&reg);
-
-    tools_register(&reg, "test_tool", NULL, NULL, dummy_handler, NULL);
-    ToolEntry *e = tools_lookup(&reg, "test_tool");
-    assert(e != NULL);
-
-    char *result = e->handler("{}", e->user_data, &(int){0});
-    assert(result != NULL);
-    assert(strcmp(result, "ok") == 0);
-    free(result);
-
-    tools_free(&reg);
-    printf("  PASS test_handler_dispatch\n");
 }
 
 static int free_fn_called = 0;
@@ -202,11 +178,9 @@ static void test_load_extension_tools_idempotent(void) {
 int main(void) {
     TEST_INIT();
     printf("test_tools:\n");
-    test_init();
     test_register_and_lookup();
     test_lookup_miss();
     test_register_full();
-    test_handler_dispatch();
     test_free_fn_called_on_cleanup();
     test_register_null_name();
     test_register_null_reg();

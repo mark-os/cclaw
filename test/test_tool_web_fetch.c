@@ -82,13 +82,6 @@ static void test_handler_missing_url(void) {
     printf("  PASS: handler_missing_url\n");
 }
 
-static void test_handler_bad_json(void) {
-    char *result = test_web_fetch_run("not json", NULL);
-    assert(strcmp(result, "error: invalid tool arguments") == 0);
-    free(result);
-    printf("  PASS: handler_bad_json\n");
-}
-
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
@@ -264,29 +257,9 @@ static void test_no_retry_when_body_present(void) {
     printf("  PASS: no_retry_when_body_present\n");
 }
 
-static void test_paging_params_removed(void) {
-    /* offset/max_chars are gone: a long page is spilled to a file the agent
-     * reads with its file tools, so blind character paging is dead weight.
-     * Unknown params must not break the call. */
-    char *result = test_web_fetch_run("{\"url\":\"ftp://bad\",\"offset\":100,\"max_chars\":5}", NULL);
-    assert(result != NULL);
-    assert(strstr(result, "error:") != NULL);
-    free(result);
-    ToolRegistry reg;
-    tools_init(&reg);
-    assert(tool_web_fetch_register(&reg, NULL) == 0);
-    ToolEntry *e = tools_lookup(&reg, "web_fetch");
-    assert(e && e->parameters_json);
-    assert(strstr(e->parameters_json, "offset") == NULL);
-    assert(strstr(e->parameters_json, "max_chars") == NULL);
-    tools_free(&reg);
-    printf("  PASS: paging_params_removed\n");
-}
-
 int main(void) {
     TEST_INIT();
     printf("test_tool_web_fetch:\n");
-    test_paging_params_removed();
     test_returns_whole_document();
     test_retry_on_empty_challenge();
     test_no_retry_when_body_present();
@@ -298,7 +271,6 @@ int main(void) {
     test_sanitize_markers_empty();
     test_handler_invalid_url();
     test_handler_missing_url();
-    test_handler_bad_json();
     test_register();
     test_host_hint_allowed_exact();
     test_host_hint_denied();

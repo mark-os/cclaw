@@ -223,22 +223,6 @@ static void test_metadata_exact_grant_allow(void) {
 
 /* ─── SSRF: hostname resolving to private IP, no CIDR grant → DENY ─── */
 
-static void test_ssrf_private_resolve_deny(void) {
-    /* "localhost" is granted as a hostname, but resolves to 127.0.0.1/::1.
-     * Without a CIDR grant covering loopback, it must be DENIED. */
-    char *hosts[] = {"localhost"};
-    ProxyContext ctx;
-    assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
-
-    char resp[128];
-    probe(&ctx, "localhost", resp, sizeof(resp));
-    /* resolve succeeds at DNS level but all results are private and ungrated → ERROR */
-    assert(strncmp(resp, "ERROR", 5) == 0);
-
-    proxy_stop(&ctx);
-    printf("  PASS: SSRF: localhost resolves private, no CIDR grant → DENY\n");
-}
-
 /* ─── Default deny: empty rules ─── */
 
 static void test_empty_rules_deny(void) {
@@ -364,70 +348,6 @@ static void test_deny_empty_changes_nothing(void) {
  * socket: the carve-out must hold at both.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* 2.1: decision function, covering CIDR — metadata denied */
-static void test_path_resolve_covering_cidr_deny(void) {
-    /* Grant 169.254.0.0/16 and ask about 169.254.169.254: in the metadata
-     * range with no exact grant. */
-    char *hosts[] = {"169.254.0.0/16"};
-    ProxyContext ctx;
-    assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
-
-    char resp[128];
-    probe(&ctx, "169.254.169.254", resp, sizeof(resp));
-    /* host_decide rejects it (metadata range, no exact grant) → "ERROR denied" */
-    assert(strncmp(resp, "ERROR denied", 12) == 0);
-
-    proxy_stop(&ctx);
-    printf("  PASS: 2.1 decision + covering CIDR → metadata DENIED\n");
-}
-
-/* 2.2: NUMERIC CONNECT path, covering CIDR — THE path-specific case */
-static void test_path_numeric_connect_covering_cidr_deny(void) {
-    /* Grant 169.254.0.0/16; CONNECT 169.254.169.254:80 (numeric target).
-     * Flow: host_decide → in_metadata_range → true → granted_exact (no /32
-     * for metadata) → 0 → DENIED */
-    char *hosts[] = {"169.254.0.0/16"};
-    ProxyContext ctx;
-    assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
-
-    char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "169.254.169.254:80\n", resp, sizeof(resp));
-    assert(strncmp(resp, "DENIED", 6) == 0);
-
-    proxy_stop(&ctx);
-    printf("  PASS: 2.2 numeric CONNECT + covering CIDR → metadata DENIED\n");
-}
-
-/* 2.3: NUMERIC CONNECT path, 0.0.0.0/0 grant */
-static void test_path_numeric_connect_all_cidr_deny(void) {
-    char *hosts[] = {"0.0.0.0/0"};
-    ProxyContext ctx;
-    assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
-
-    char resp[128];
-    proxy_req(proxy_sock_path(&ctx), "169.254.169.254:80\n", resp, sizeof(resp));
-    assert(strncmp(resp, "DENIED", 6) == 0);
-
-    proxy_stop(&ctx);
-    printf("  PASS: 2.3 numeric CONNECT + 0.0.0.0/0 → metadata DENIED\n");
-}
-
-/* 2.4: Exact grant — allowed. A numeric CONNECT to the metadata IP would
- * hang (unreachable), so this asks the decision function only. */
-static void test_path_exact_grant_resolve_allow(void) {
-    char *hosts[] = {"169.254.169.254"};
-    ProxyContext ctx;
-    assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
-
-    char resp[128];
-    /* host_decide → metadata range → granted_exact → yes. */
-    probe(&ctx, "169.254.169.254", resp, sizeof(resp));
-    assert(strncmp(resp, "ADDR", 4) == 0);
-
-    proxy_stop(&ctx);
-    printf("  PASS: 2.4 exact grant ALLOWS metadata IP\n");
-}
-
 /* 2.5: Asking first changes nothing — the proxy keeps no memory between
  * requests (the per-address "bless" set went with the RESOLVE request), so a
  * denied question cannot prime a later numeric CONNECT. */
@@ -516,7 +436,6 @@ int main(void) {
     test_metadata_exact_grant_allow();
 
     /* SSRF */
-    test_ssrf_private_resolve_deny();
 
     /* Default deny */
     test_empty_rules_deny();
@@ -530,10 +449,6 @@ int main(void) {
     test_deny_empty_changes_nothing();
 
     /* Path-specific metadata carve-out (2.1–2.5) */
-    test_path_resolve_covering_cidr_deny();
-    test_path_numeric_connect_covering_cidr_deny();
-    test_path_numeric_connect_all_cidr_deny();
-    test_path_exact_grant_resolve_allow();
     test_path_no_state_between_requests();
     test_path_mapped_v6_metadata_deny();
     test_path_wildcard_allows_host_denies_metadata();

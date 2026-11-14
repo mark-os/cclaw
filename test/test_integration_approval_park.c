@@ -98,7 +98,6 @@ static int run_cli_p(const char *exe, const char *url, const char *prompt,
         setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
         setenv("OPENROUTER_API_KEY", "test-key", 1);
         setenv("CCLAW_MODEL", "test-model", 1);
-        setenv("CCLAW_STREAM", "0", 1);
         unsetenv("CCLAW_SANDBOX_PROFILE");
         if (sid > 0) {
             char sbuf[32];

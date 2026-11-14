@@ -174,47 +174,6 @@ static void test_check_reports_js_error(void) {
     printf("  PASS test_check_reports_js_error\n");
 }
 
-/* channel_launch_all's gate is `WHERE c.status='active'` — exercised here via
- * the identical query rather than the real function, which forks a live
- * channel process (channel_runner_main) that a unit test shouldn't spawn. */
-static void test_launch_all_gate_query(void) {
-    test_db_clean(TEST_DB);
-    setup_bundle();
-    sqlite3 *db = open_seeded(TEST_DB);
-    char *err = NULL;
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
-    /* Second channel, never checked/activated — stays 'draft'. */
-    assert(sqlite3_exec(db,
-        "INSERT INTO extensions(name, path, version, owner_agent, published, enabled) "
-        "VALUES('other', '/tmp/extensions/other', '0.0.0', 'default', 0, 1);",
-        NULL, NULL, NULL) == SQLITE_OK);
-    assert(sqlite3_exec(db,
-        "INSERT INTO channels(name, extension_name, type, binary_path, status) "
-        "VALUES('other', 'other', 'other', '/tmp/extensions/other/channel.qjs', 'draft');",
-        NULL, NULL, NULL) == SQLITE_OK);
-
-    assert(channel_mark_validated(db, "echo") == 0);
-    assert(channel_activate(db, "echo") == 0);
-
-    const char *sql = "SELECT c.name, e.path FROM channels c"
-                      " JOIN extensions e ON c.extension_name=e.name"
-                      " WHERE c.status='active';";
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK);
-    int count = 0;
-    char matched[64] = {0};
-    while (sqlite3_step(st) == SQLITE_ROW) {
-        count++;
-        snprintf(matched, sizeof(matched), "%s", (const char *)sqlite3_column_text(st, 0));
-    }
-    sqlite3_finalize(st);
-    assert(count == 1);
-    assert(strcmp(matched, "echo") == 0);
-
-    db_close(db);
-    printf("  PASS test_launch_all_gate_query\n");
-}
-
 static char *chan_col(sqlite3 *db, const char *col, const char *name) {
     char sql[128];
     snprintf(sql, sizeof(sql), "SELECT COALESCE(%s,'') FROM channels WHERE name=?;", col);
@@ -315,7 +274,6 @@ int main(void) {
     test_install_lands_in_draft();
     test_check_then_activate();
     test_check_reports_js_error();
-    test_launch_all_gate_query();
     test_swap_and_revert();
     test_notify_admins();
     printf("all channel lifecycle tests passed\n");

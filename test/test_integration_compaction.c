@@ -189,7 +189,6 @@ static void test_llm_compaction_summary(int port) {
     setenv("CCLAW_CONTEXT_THRESHOLD", "0.1", 1);
     setenv("CCLAW_COMPACTION_TARGET", "0.05", 1);
     setenv("CCLAW_COMPACTION", "1", 1);
-    setenv("CCLAW_STREAM", "0", 1);
 
     char buf[64];
     for (int i = 0; i < 20; i++) {
@@ -244,7 +243,6 @@ static void test_llm_compaction_coda(int port) {
     setenv("CCLAW_CONTEXT_THRESHOLD", "0.1", 1);
     setenv("CCLAW_COMPACTION_TARGET", "0.05", 1);
     setenv("CCLAW_COMPACTION", "1", 1);
-    setenv("CCLAW_STREAM", "0", 1);
 
     /* One pending approval, one approved-unconsumed ticket, one running child. */
     sqlite3_stmt *s;
@@ -398,7 +396,6 @@ static void test_llm_compaction_gemini_shape(int port) {
     setenv("CCLAW_CONTEXT_THRESHOLD", "0.1", 1);
     setenv("CCLAW_COMPACTION_TARGET", "0.05", 1);
     setenv("CCLAW_COMPACTION", "1", 1);
-    setenv("CCLAW_STREAM", "0", 1);
 
     char buf[64];
     for (int i = 0; i < 20; i++) {
@@ -441,9 +438,6 @@ static void test_llm_compaction_gemini_shape(int port) {
     unsetenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
     teardown(db);
     printf("  PASS test_llm_compaction_gemini_shape\n");
-}
-
-void run_tests(void) {
 }
 
 int main(void) {

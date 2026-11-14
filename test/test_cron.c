@@ -196,22 +196,6 @@ static void test_cron_crud(void) {
     printf("  PASS: CRUD operations\n");
 }
 
-static void test_cron_table_created(void) {
-    sqlite3 *db = open_seeded(":memory:");
-    assert(db);
-
-    sqlite3_stmt *stmt;
-    int rc = sqlite3_prepare_v2(db,
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='cron_jobs';",
-        -1, &stmt, NULL);
-    assert(rc == SQLITE_OK);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    sqlite3_finalize(stmt);
-
-    db_close(db);
-    printf("  PASS: table exists\n");
-}
-
 static void test_cron_agent_isolation(void) {
     sqlite3 *db = open_seeded(":memory:");
     assert(db);
@@ -1107,7 +1091,6 @@ static void test_fire_script_without_runner(void) {
 int main(void) {
     TEST_INIT();
     printf("test_cron:\n");
-    test_cron_table_created();
     test_cron_next_run_every_minute();
     test_cron_next_run_specific();
     test_cron_next_run_invalid();

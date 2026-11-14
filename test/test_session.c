@@ -17,18 +17,6 @@ static void teardown(sqlite3 *db) {
     test_db_clean(TEST_DB);
 }
 
-static void test_session_create(void) {
-    sqlite3 *db = setup();
-    int64_t id = session_create(db, "test session", NULL, -1, 0);
-    assert(id > 0);
-
-    int64_t id2 = session_create(db, "another", NULL, -1, 0);
-    assert(id2 > id);
-
-    teardown(db);
-    printf("  PASS test_session_create\n");
-}
-
 /* Helper: set session leaf directly (append paths do this via trigger) */
 static void set_leaf(sqlite3 *db, int64_t sid, int64_t leaf_id) {
     sqlite3_stmt *st;
@@ -238,57 +226,6 @@ static void test_original_parent_id(void) {
     printf("  PASS test_original_parent_id\n");
 }
 
-/* session picker query — verify first/last prompt retrieval */
-static void test_session_picker_query(void) {
-    sqlite3 *db = setup();
-    int64_t sid = session_create(db, "picker", NULL, -1, 0);
-
-    /* Insert user messages (role=1) */
-    insert_entry(db, sid, -1, ROLE_USER, "hello world first message");
-    int64_t e2 = insert_entry(db, sid, 1, ROLE_ASSISTANT, "hi there");
-    int64_t e3 = insert_entry(db, sid, e2, ROLE_USER, "goodbye last message");
-    (void)e3;
-
-    /* Run the same query used by cli_select_session */
-    const char *sql =
-        "SELECT s.id, s.created_at,"
-        " (SELECT substr(e.content,1,50) FROM entries e WHERE e.session_id=s.id AND e.role=1 ORDER BY e.id ASC LIMIT 1),"
-        " (SELECT substr(e.content,1,50) FROM entries e WHERE e.session_id=s.id AND e.role=1 ORDER BY e.id DESC LIMIT 1)"
-        " FROM sessions s ORDER BY s.updated_at DESC;";
-    sqlite3_stmt *stmt;
-    assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-
-    int64_t qid = sqlite3_column_int64(stmt, 0);
-    assert(qid == sid);
-    assert(sqlite3_column_int64(stmt, 1) > 0); /* created_at */
-    const char *first = (const char *)sqlite3_column_text(stmt, 2);
-    const char *last = (const char *)sqlite3_column_text(stmt, 3);
-    assert(first != NULL);
-    assert(last != NULL);
-    assert(strcmp(first, "hello world first message") == 0);
-    assert(strcmp(last, "goodbye last message") == 0);
-
-    sqlite3_finalize(stmt);
-
-    /* Verify empty session returns NULLs for prompts */
-    int64_t sid2 = session_create(db, "empty_picker", NULL, -1, 0);
-    (void)sid2;
-    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    /* Skip first row (sid), get second (sid2 — ordered by updated_at DESC so sid2 first) */
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    /* sid2 was just created so has latest updated_at */
-    int64_t qid2 = sqlite3_column_int64(stmt, 0);
-    if (qid2 == sid2) {
-        assert(sqlite3_column_type(stmt, 2) == SQLITE_NULL);
-        assert(sqlite3_column_type(stmt, 3) == SQLITE_NULL);
-    }
-    sqlite3_finalize(stmt);
-
-    teardown(db);
-    printf("  PASS test_session_picker_query\n");
-}
-
 /* session_tool_allowed tests */
 static void test_tool_allowed_null_filter(void) {
     sqlite3 *db = setup();
@@ -343,14 +280,12 @@ static void test_create_filtered_invalid_filter(void) {
 int main(void) {
     TEST_INIT();
     printf("test_session:\n");
-    test_session_create();
     test_session_get_branch();
     test_session_get_branch_empty();
     test_entry_append();
     test_entry_append_invalid_session();
     test_entry_tool_calls_roundtrip();
     test_original_parent_id();
-    test_session_picker_query();
     test_tool_allowed_null_filter();
     test_tool_allowed_explicit_filter();
     test_tool_allowed_unknown_session();

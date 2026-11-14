@@ -26,8 +26,6 @@ static int test_basic_turn(void) {
     setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
     setenv("OPENROUTER_API_KEY", "test-key", 1);
     setenv("CCLAW_MODEL", "test-model", 1);
-    setenv("CCLAW_AGENT_NAME", "default", 1);
-    setenv("CCLAW_STREAM", "0", 1);
 
     /* Create session with user message */
     db_agent_upsert(db, "default", NULL, NULL);

@@ -123,40 +123,6 @@ static void test_cut_point(void) {
     PASS();
 }
 
-static void test_v8_tool_call_group(void) {
-    TEST(v8_tool_call_group_not_split);
-    sqlite3 *db = test_db_open(":memory:");
-    if (!db) FAIL("db_open");
-
-    int64_t sid = session_create(db, "test", NULL, -1, 0);
-    append_msg(db, sid, ROLE_USER, "old message with lots of text padding", STOP_REASON_NONE, NULL, 0);
-    append_msg(db, sid, ROLE_ASSISTANT, "old response", STOP_REASON_STOP, NULL, 0);
-    append_msg(db, sid, ROLE_USER, "do something", STOP_REASON_NONE, NULL, 0);
-    /* Assistant with tool call */
-    ToolCall tc = { .id = "tc1", .name = "file_read", .arguments = "{\"path\":\"x\"}" };
-    append_msg(db, sid, ROLE_ASSISTANT, NULL, STOP_REASON_TOOL_USE, &tc, 1);
-    append_tool_result(db, sid, "tc1", "file contents here");
-    append_msg(db, sid, ROLE_ASSISTANT, "Done!", STOP_REASON_STOP, NULL, 0);
-
-    /* Budget that can fit the last few but not all */
-    Config cfg = {0};
-    cfg.max_history_tokens = 80;
-    ContextPlan plan = {0};
-    int rc = context_plan(db, sid, &cfg, 0, &plan);
-    if (rc != 0) FAIL("context_plan returned error");
-
-    /* If cut lands in the middle, it should NOT split the tool_call group */
-    if (plan.cut > 0) {
-        /* The cut entry should be user or system, never tool_result */
-        if (plan.entries[plan.cut].role == ROLE_TOOL)
-            FAIL("cut landed on tool_result (mid-group split)");
-    }
-
-    context_plan_free(&plan);
-    db_close(db);
-    PASS();
-}
-
 /* A turn legitimately opens with several consecutive user entries — the inbox
  * drain consumes a channel message, a job result and a sub-agent result in one
  * transaction (advance.c idle branch). Those entries are one turn and the cut
@@ -411,7 +377,6 @@ int main(void) {
     test_basic_plan();
     test_v28_filtering();
     test_cut_point();
-    test_v8_tool_call_group();
     test_multi_user_turn_not_split();
     test_compaction_keep_from_is_turn_boundary();
     test_plan_no_content_access();

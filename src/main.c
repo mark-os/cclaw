@@ -558,25 +558,9 @@ static int run_cli(char *db_path, const char *prompt,
     }
     if (!agent_sel) { fprintf(stderr, "no agent selected\n"); free(base_dir); config_free(proc_cfg()); db_close(proc_db()); free(db_path); return 1; }
     proc_set_agent_name(agent_sel);
-    setenv("CCLAW_AGENT_NAME", proc_agent_name(), 1);
     free(agent_sel);
 
-    /* Inject agent config env vars (for forked children). -y skips kernel
-     * isolation only — the agent's tool allowlist still applies. */
-    {
-        AgentConfig *ac = agent_config_load_db(proc_db(), proc_agent_name());
-        if (ac) {
-            if (ac->tool_count > 0) {
-                size_t len = 0; for (size_t i = 0; i < ac->tool_count; i++) len += strlen(ac->tools[i]) + 1;
-                char *csv = malloc(len); if (csv) { csv[0] = '\0';
-                    for (size_t i = 0; i < ac->tool_count; i++) { if (i) strcat(csv, ","); strcat(csv, ac->tools[i]); }
-                    setenv("CCLAW_TOOLS", csv, 1); free(csv); }
-            }
-            agent_config_free(ac);
-        }
-    }
     if (host_mode) setenv("CCLAW_SANDBOX_PROFILE", "host", 1);
-    setenv("CCLAW_MODE", "cli", 1);
     workspace_init(proc_cfg());
     /* Make the workspace the process cwd so relative paths, shell children, and
      * fs.* all operate in the agent's workspace by default. (CLI only — the

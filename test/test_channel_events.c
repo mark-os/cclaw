@@ -729,75 +729,6 @@ static void test_channel_events_approval_decision(void) {
     printf("PASS\n");
 }
 
-/* Verify default binding fallback */
-static void test_channel_events_default_binding(void) {
-    setup();
-
-    sqlite3 *db = open_seeded(DB_PATH);
-    assert(db);
-
-    /* Set up "default" binding for channel type */
-    test_binding_set(db, "webchat", "default", "testagent");
-
-    /* Verify fallback: no specific binding for "user99", but "default" exists */
-    char *agent = db_channel_binding_get(db, "webchat", "user99");
-    /* Direct lookup fails */
-    assert(agent == NULL);
-
-    /* Fallback to "default" */
-    agent = db_channel_binding_get(db, "webchat", "default");
-    assert(agent);
-    assert(strcmp(agent, "testagent") == 0);
-    free(agent);
-
-    db_close(db);
-    printf("PASS\n");
-}
-
-/* Verify channels table schema works */
-static void test_channels_table(void) {
-    setup();
-
-    sqlite3 *db = open_seeded(DB_PATH);
-    assert(db);
-
-    /* Insert a channel row */
-    const char *sql = "INSERT INTO channels(name, type, binary_path)"
-                      " VALUES('telegram','telegram','/usr/local/bin/channel_telegram');";
-    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
-
-    /* Read it back */
-    sqlite3_stmt *stmt;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT name, type, binary_path, status FROM channels WHERE name='telegram';",
-        -1, &stmt, NULL) == SQLITE_OK);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "telegram") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 1), "telegram") == 0);
-    /* Lifecycle default is 'draft' — only --check/--activate reach 'active'. */
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 3), "draft") == 0);
-    sqlite3_finalize(stmt);
-
-    /* Update pid (simulating channel_update_pid) */
-    const char *usql = "UPDATE channels SET pid=1234 WHERE name='telegram';";
-    assert(sqlite3_exec(db, usql, NULL, NULL, NULL) == SQLITE_OK);
-
-    /* Update status (simulating channel_set_status) */
-    const char *ssql = "UPDATE channels SET status='failed' WHERE name='telegram';";
-    assert(sqlite3_exec(db, ssql, NULL, NULL, NULL) == SQLITE_OK);
-
-    assert(sqlite3_prepare_v2(db,
-        "SELECT status, pid FROM channels WHERE name='telegram';",
-        -1, &stmt, NULL) == SQLITE_OK);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "failed") == 0);
-    assert(sqlite3_column_int(stmt, 1) == 1234);
-    sqlite3_finalize(stmt);
-
-    db_close(db);
-    printf("PASS\n");
-}
-
 /* /new and /sessions chat commands: admin-only, consumed in C before
  * dispatch; /new re-points the pin at a fresh session; /sessions lists;
  * /sessions <id> attaches. A non-admin's /new is an ordinary message. */
@@ -1176,30 +1107,6 @@ static char *test_session_tool_filter(sqlite3 *db, int64_t sid) {
     return out;
 }
 
-/* 1. Route with tool_filter → the pinned session carries that filter. */
-static void test_tool_filter_exact_route(void) {
-    setup();
-    sqlite3 *db = open_seeded(DB_PATH);
-    assert(db);
-    chdir_work();
-
-    assert(test_binding_set_filtered(db, "fch", "u1", "testagent",
-                                     "[\"file_read\",\"web_fetch\"]") == 0);
-    test_event_insert(db, "fch", "message", "{\"chat_id\":\"u1\",\"text\":\"hi\"}");
-    channel_consume_events(db);
-
-    int64_t sid = test_session_find(db, "fch", "u1", "testagent");
-    assert(sid > 0);
-    char *f = test_session_tool_filter(db, sid);
-    assert(f);
-    assert(strcmp(f, "[\"file_read\",\"web_fetch\"]") == 0);
-    free(f);
-
-    chdir_restore();
-    db_close(db);
-    printf("PASS\n");
-}
-
 /* 3. Gate-accepted chats (admin / open door, no pre-made route) → session
  *    tool_filter is NULL. */
 static void test_tool_filter_admin_unrouted(void) {
@@ -1372,12 +1279,6 @@ int main(void) {
     printf("  channel_events_approval_decision... ");
     test_channel_events_approval_decision();
 
-    printf("  channel_events_default_binding... ");
-    test_channel_events_default_binding();
-
-    printf("  channels_table... ");
-    test_channels_table();
-
     printf("  chat_commands... ");
     test_chat_commands();
 
@@ -1389,10 +1290,6 @@ int main(void) {
 
     printf("  notify_operator... ");
     test_notify_operator();
-
-    printf("  tool_filter_exact_route... ");
-    test_tool_filter_exact_route();
-
 
     printf("  tool_filter_admin_unrouted... ");
     test_tool_filter_admin_unrouted();

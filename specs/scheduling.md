@@ -18,8 +18,8 @@ rule: forgetting it must *degrade*, never corrupt.
    with feedback *before* anything is created. A closed set: `launch_agent`
    (error string naming the knob, so the model can report it) and
    session-creating cron fires (`target:"new"` — skip + log, the next
-   schedule retries; a skip is not a failure and never feeds the 3-strike
-   auto-pause). Channel routes that create sessions have no synchronous
+   schedule retries, and a one-shot stays armed until there is room; a skip
+   is not a failure and never feeds the 3-strike auto-pause). Channel routes that create sessions have no synchronous
    caller and are never refused — the session row is cheap; rule 3 governs
    the expensive part.
 2. **The inbox accepts everything, always.** Insertion is a delivery promise;

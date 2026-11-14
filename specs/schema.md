@@ -922,9 +922,13 @@ cross-agent approval parks and the apply path replays, so a requested job has
 exactly one representation.
 
 Rescheduling (`src/cron.c`): a one-shot (`run_at`) **deletes its row** after
-firing; interval and recurring jobs advance `next_run_at` (a recurring job
-whose expression fails to parse at reschedule time is disabled, never retried
-hourly).
+firing, or after a fire that can never happen (which reports `cron_error`); a
+one-shot whose fire only ran into a limit — `session_max_active`, no child
+slot, its previous fire undrained — has no next schedule to retry on, so it
+**stays armed** and is looked at again a minute later, with no deadline: the
+limits clear by themselves. Interval and recurring jobs advance `next_run_at`
+(a recurring job whose expression fails to parse at reschedule time is
+disabled, never retried hourly).
 
 ### The fire path
 
@@ -986,7 +990,10 @@ there is no runner and a script fire reports the refusal.
   real consumption rate.
 - *Skip-if-busy* — recurring `'new'` jobs only, the one mode coalescing cannot
   cover (each fire targets a session that did not exist yet). `session_id`
-  records the last fired session; still non-idle at the next fire → skip.
+  records the last fired session; still in flight at the next fire → skip.
+  In flight is the launch gate's definition (`SESSION_IN_FLIGHT`): non-idle,
+  *or* idle with an unconsumed inbox row — a session that was created and has
+  not started yet counts, so a job never stacks sessions behind a stall.
 - *Failure auto-pause* — three consecutive failed fires set `enabled=0` and
   notify the owner with the last error (re-enable = `cron_set` on the same
   name; `cclaw --doctor` lists paused jobs). The streak is **derived** at fire

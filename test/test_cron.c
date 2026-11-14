@@ -772,6 +772,8 @@ static void test_fire_new_session_no_depth_chain(void) {
     int64_t first = scalar(db, "SELECT id FROM sessions WHERE name='cron'");
     assert(first > 0);
     /* First fire done and idle; owner deliberately stays older than it. */
+    exec_ok(db, "UPDATE inbox SET consumed=1 WHERE session_id=%lld",
+            (long long)first);
     exec_ok(db, "UPDATE sessions SET updated_at=updated_at+10 WHERE id=%lld",
             (long long)first);
     exec_ok(db, "UPDATE cron_jobs SET next_run_at=%lld WHERE id=%lld",
@@ -862,8 +864,16 @@ static void test_fire_skip_if_busy(void) {
     cron_run_due(db);
     assert(scalar(db, "SELECT COUNT(*) FROM sessions WHERE name='cron'") == 0);
 
-    /* Once it goes idle the next fire proceeds. */
+    /* Created but never started — idle with its prompt still queued — is just
+     * as live: firing again would stack sessions behind whatever holds it. */
     exec_ok(db, "UPDATE sessions SET state='idle' WHERE id=%lld", (long long)busy);
+    assert(inbox_insert(db, busy, "cron", "digest", "again") > 0);
+    exec_ok(db, "UPDATE cron_jobs SET next_run_at=%lld", (long long)(now - 1));
+    cron_run_due(db);
+    assert(scalar(db, "SELECT COUNT(*) FROM sessions WHERE name='cron'") == 0);
+
+    /* Once it has drained and gone idle the next fire proceeds. */
+    exec_ok(db, "UPDATE inbox SET consumed=1 WHERE session_id=%lld", (long long)busy);
     exec_ok(db, "UPDATE cron_jobs SET next_run_at=%lld", (long long)(now - 1));
     cron_run_due(db);
     assert(scalar(db, "SELECT COUNT(*) FROM sessions WHERE name='cron'") == 1);
@@ -997,6 +1007,38 @@ static void test_fire_failure_auto_pause(void) {
     printf("  PASS: three failed fires auto-pause, a success resets\n");
 }
 
+/* A one-shot has no next schedule to retry on, so a fire that only ran into a
+ * limit must not delete it: it stays armed and goes when there is room. */
+static void test_oneshot_deferred_stays_armed(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    assert(db && wake_init() == 0);
+    assert(config_set(db, "session_max_active", "1") == 0);
+    int64_t now = (int64_t)time(NULL);
+    int64_t parent = session_create(db, "own", "New", -1, 0);
+    int64_t sub = session_create(db, "worker", "New", parent, 1);
+    exec_ok(db, "UPDATE sessions SET state='llm_running' WHERE id=%lld",
+            (long long)sub);
+
+    JobSpec j = {.agent = "New", .name = "remind", .run_at = now,
+                 .task = "call back", .target = "new", .next_run_at = now};
+    int64_t jid = insert_job(db, &j);
+    cron_run_due(db);
+    assert(job_count(db, jid) == 1);                         /* still armed */
+    assert(job_next(db, jid) > now);                         /* not every tick */
+    assert(scalar(db, "SELECT COUNT(*) FROM sessions WHERE name='cron'") == 0);
+    assert(scalar(db, "SELECT COUNT(*) FROM inbox") == 0);   /* not an error */
+
+    exec_ok(db, "UPDATE sessions SET state='idle' WHERE id=%lld", (long long)sub);
+    exec_ok(db, "UPDATE cron_jobs SET next_run_at=%lld", (long long)now);
+    cron_run_due(db);
+    assert(scalar(db, "SELECT COUNT(*) FROM sessions WHERE name='cron'") == 1);
+    assert(job_count(db, jid) == 0);                         /* fired, gone */
+
+    wake_close();
+    db_close(db);
+    printf("  PASS: a one-shot that hits a limit stays armed until it fires\n");
+}
+
 /* ── Script payload: the cron.c ↔ daemon contract ─────────────────────
  * The dispatcher itself lives in main.c (it needs the child table); what cron.c
  * owns is the decision it hands over. A stub runner is how that hand-off gets
@@ -1068,6 +1110,38 @@ static void test_fire_script_handoff(void) {
     printf("  PASS: script fires hand the daemon job/script/agent/session\n");
 }
 
+/* No child slot for a 'new' script fire: the session made for it must not be
+ * left behind, or every retry would add another empty one. */
+static void test_fire_script_busy_leaves_no_session(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    assert(db && wake_init() == 0);
+    session_create(db, "own", "A", -1, 0);
+    int64_t now = (int64_t)time(NULL);
+    memset(&g_stub, 0, sizeof(g_stub));
+    g_stub.rc = CRON_SCRIPT_BUSY;
+    cron_set_script_runner(stub_runner);
+
+    JobSpec j = {.agent = "A", .name = "scan", .run_at = now, .target = "new",
+                 .script = "jobs/scan.qjs", .next_run_at = now};
+    int64_t jid = insert_job(db, &j);
+    cron_run_due(db);
+    assert(g_stub.calls == 1);
+    assert(job_count(db, jid) == 1);
+    assert(scalar(db, "SELECT COUNT(*) FROM sessions WHERE name='cron'") == 0);
+    assert(scalar(db, "SELECT COUNT(*) FROM delivery_edges") == 0);
+
+    g_stub.rc = CRON_SCRIPT_SPAWNED;
+    exec_ok(db, "UPDATE cron_jobs SET next_run_at=%lld", (long long)now);
+    cron_run_due(db);
+    assert(scalar(db, "SELECT COUNT(*) FROM sessions WHERE name='cron'") == 1);
+    assert(job_count(db, jid) == 0);
+
+    cron_set_script_runner(NULL);
+    wake_close();
+    db_close(db);
+    printf("  PASS: a 'new' script fire with no child slot leaves no session\n");
+}
+
 /* Outside the daemon there is no dispatcher, and a script job must say so
  * rather than fail silently. */
 static void test_fire_script_without_runner(void) {
@@ -1122,6 +1196,8 @@ int main(void) {
     test_fire_coalesces();
     test_fire_skip_if_busy();
     test_fire_new_skips_over_session_max_active();
+    test_oneshot_deferred_stays_armed();
+    test_fire_script_busy_leaves_no_session();
     test_fire_bare_wake();
     test_fire_failure_auto_pause();
     test_fire_script_handoff();

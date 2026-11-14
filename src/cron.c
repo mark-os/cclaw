@@ -653,9 +653,9 @@ static int session_exists(sqlite3 *db, int64_t sid) {
                                     sid, 0) == 1;
 }
 
-static int session_is_idle(sqlite3 *db, int64_t sid) {
+static int session_in_flight(sqlite3 *db, int64_t sid) {
     return db_scalar_i64(db,
-        "SELECT state='idle' FROM sessions WHERE id=?;", sid, 1) == 1;
+        "SELECT " SESSION_IN_FLIGHT " FROM sessions s WHERE s.id=?;", sid, 0) == 1;
 }
 
 /* The session a chat is routed to *right now*, plus the fire-time re-check of
@@ -880,6 +880,10 @@ static int64_t fresh_session(sqlite3 *db, const DueJob *j, const char *agent) {
     return sid;
 }
 
+/* How soon a deferred one-shot is looked at again. Policy, not machine speed:
+ * often enough that a reminder is barely late, rarely enough to log calmly. */
+#define ONESHOT_RETRY_S 60
+
 /* The daemon's script dispatcher, or NULL outside it. */
 static CronScriptRunner g_script_runner;
 
@@ -889,8 +893,10 @@ void cron_set_script_runner(CronScriptRunner fn) { g_script_runner = fn; }
  * Payload axis — prompt (a user entry via the inbox, which starts a turn),
  * script (a sandboxed QJS child whose output is posted back, no LLM call),
  * both (one inbox row carrying prompt and script output together), or neither
- * (a bare wake that just drains whatever is pending — the agent pulse). */
-static void fire_due(sqlite3 *db, const DueJob *j) {
+ * (a bare wake that just drains whatever is pending — the agent pulse).
+ * Returns 1 when the fire only ran into a limit that clears by itself (no
+ * room, nothing to target yet) and 0 when it fired or can never fire. */
+static int fire_due(sqlite3 *db, const DueJob *j) {
     int64_t now = (int64_t)time(NULL);
     int has_prompt = (j->task && j->task[0]);
     int has_script = (j->script && j->script[0]);
@@ -905,14 +911,14 @@ static void fire_due(sqlite3 *db, const DueJob *j) {
     if (is_new && !has_prompt && !has_script) {
         LOG_DEBUG_("cron skip job=%lld name=%s: session:\"new\" with no payload",
                    (long long)j->id, j->name ? j->name : "");
-        return;
+        return 0;
     }
 
     /* Recurring only: a one-shot has no consecutive fires to have failed. */
     char detail[224] = "";
     if (j->run_at == 0 && fire_streak_tripped(db, j, now, detail, sizeof(detail))) {
         pause_job(db, j, detail);
-        return;
+        return 0;
     }
 
     /* Authority, re-checked now: a chat that has been re-routed to another
@@ -924,7 +930,7 @@ static void fire_due(sqlite3 *db, const DueJob *j) {
                               is_new ? tagent : j->agent_name, &routed);
         if (auth < 0 || (is_new && auth == 0)) {
             fire_error(db, j, "that chat no longer routes to this agent");
-            return;
+            return 0;
         }
     }
 
@@ -939,27 +945,27 @@ static void fire_due(sqlite3 *db, const DueJob *j) {
             LOG_INFO_("cron skip job=%lld name=%s: session_max_active (%d)"
                       " reached", (long long)j->id, j->name ? j->name : "",
                       max_active);
-            return;
+            return 1;
         }
         /* Skip-if-busy: 'new' is the mode inbox coalescing cannot cover (each
          * fire targets a session that did not exist yet), so the previous
-         * fire's session is the interlock. Recurring only — a one-shot has no
-         * next fire to collide with. */
-        if (j->run_at == 0 && session_exists(db, j->session_id) &&
-            !session_is_idle(db, j->session_id)) {
+         * fire's session is the interlock — including one that was created
+         * but has not started yet. Recurring only — a one-shot has no next
+         * fire to collide with. */
+        if (j->run_at == 0 && session_in_flight(db, j->session_id)) {
             LOG_INFO_("cron skip job=%lld name=%s: previous fire (session %lld)"
                       " still running", (long long)j->id, j->name ? j->name : "",
                       (long long)j->session_id);
-            return;
+            return 1;
         }
         sid = fresh_session(db, j, tagent);
-        if (sid <= 0) { fire_error(db, j, "could not create a session"); return; }
+        if (sid <= 0) { fire_error(db, j, "could not create a session"); return 0; }
     } else {
         if (is_pin) {
             sid = j->session_id;
             if (!session_exists(db, sid)) {
                 fire_error(db, j, "the pinned session no longer exists");
-                return;
+                return 0;
             }
         } else {
             sid = (auth == 1) ? routed : j->session_id;
@@ -969,17 +975,17 @@ static void fire_due(sqlite3 *db, const DueJob *j) {
                 if (sid == 0) {
                     LOG_WARN_("cron skip job=%lld agent=%s: no session to resolve",
                               (long long)j->id, j->agent_name ? j->agent_name : "");
-                    return;
+                    return 1;
                 }
             } else if (!session_exists(db, sid)) {
                 fire_error(db, j, "the session it was following no longer exists");
-                return;
+                return 0;
             }
         }
         if ((has_prompt || has_script) && fire_pending(db, sid, j->name)) {
             LOG_INFO_("cron skip job=%lld name=%s: previous fire still undrained",
                       (long long)j->id, j->name ? j->name : "");
-            return;
+            return 1;
         }
     }
 
@@ -993,9 +999,15 @@ static void fire_due(sqlite3 *db, const DueJob *j) {
         if (rc == CRON_SCRIPT_BUSY) {
             LOG_WARN_("cron skip job=%lld name=%s: no child slot free",
                       (long long)j->id, j->name ? j->name : "");
-            return;   /* not a failure — the next schedule retries */
+            /* The session made for this fire was never used; left behind,
+             * every retry would add another empty one. */
+            if (is_new) {
+                job_exec(db, "DELETE FROM delivery_edges WHERE session_id=?;", sid);
+                job_exec(db, "DELETE FROM sessions WHERE id=?;", sid);
+            }
+            return 1;   /* not a failure — the next schedule retries */
         }
-        if (rc == CRON_SCRIPT_FAILED) { fire_error(db, j, err); return; }
+        if (rc == CRON_SCRIPT_FAILED) { fire_error(db, j, err); return 0; }
     } else if (has_prompt) {
         inbox_insert_scanned(db, sid, "cron", j->name, j->task);
         wake_session(sid);
@@ -1020,6 +1032,19 @@ static void fire_due(sqlite3 *db, const DueJob *j) {
             sqlite3_finalize(st);
         }
     }
+    return 0;
+}
+
+/* A one-shot whose fire was deferred has no next schedule to fall back on, so
+ * it stays armed and comes round again; whatever held it up ends by itself. */
+static void defer_oneshot(sqlite3 *db, const DueJob *j, int64_t now) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "UPDATE cron_jobs SET next_run_at=? WHERE id=?;",
+                           -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(st, 1, now + ONESHOT_RETRY_S);
+    sqlite3_bind_int64(st, 2, j->id);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
 }
 
 /* Reschedule (or delete) a fired row. One-shot self-cleans; interval refires
@@ -1117,8 +1142,10 @@ static void run_due_jobs(sqlite3 *db) {
     /* Fire and reschedule each due job. Both phases only run after the reader
      * above is finalized. */
     for (int i = 0; i < count; i++) {
-        fire_due(db, &due[i]);
-        reschedule_due(db, &due[i], now);
+        if (fire_due(db, &due[i]) && due[i].run_at > 0)
+            defer_oneshot(db, &due[i], now);
+        else
+            reschedule_due(db, &due[i], now);
     }
     due_free(due, count);
 }

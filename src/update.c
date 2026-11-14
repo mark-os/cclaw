@@ -21,9 +21,10 @@
 #include <time.h>
 #include <unistd.h>
 
-/* How long to wait for the supervisor to bring the replacement daemon up
- * before calling the update failed. Generous: the target may be a 128MB ARMv5
- * box where process start is genuinely slow. */
+/* How long the updater watches for the replacement daemon before it reports
+ * "not back yet" and leaves. Nothing is decided on this clock — a daemon that
+ * is merely slow (a 128MB ARMv5 box inside a schema migration) is not undone
+ * for it — so it only bounds how long the verb sits there. */
 #define RESTART_TIMEOUT_S 90
 #define RESTART_POLL_MS   1000
 
@@ -433,6 +434,7 @@ static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
      * exec inherits the current environment, so a deployment whose daemon
      * reads a changed env file at startup needs a real restart. */
     char *restart_cmd = config_get(db, "update.restart_command");
+    int same_pid = 0;   /* SIGUSR2 re-execs in place: the pid says alive or dead */
     if (restart_cmd && restart_cmd[0]) {
         printf("restarting daemon (pid %d): %s\n", (int)pid, restart_cmd);
         int cmd_rc = system(restart_cmd);
@@ -449,46 +451,51 @@ static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
             printf("the new binary is installed; restart the daemon to apply it\n");
             return 0;
         }
+        same_pid = 1;
     }
     free(restart_cmd);
 
-    if (update_await_restart(dbpath_copy, old_instance, 0, RESTART_TIMEOUT_S) == 0) {
+    int back = update_await_restart(dbpath_copy, old_instance, 0, RESTART_TIMEOUT_S) == 0;
+
+    /* The updater installs and reports; it never undoes. Undoing belongs to
+     * the daemon's own startup guard (update_verify_startup), which counts
+     * real crashed starts — where "no new daemon within N seconds" cannot
+     * tell a dead build from a slow one, and putting .prev back under a
+     * daemon that was only slow leaves an old binary beside a database it can
+     * no longer open.
+     *
+     * The guard consumes .prev when it undoes an update, so a missing .prev
+     * means the previous build is what runs now. Nothing is written then:
+     * after a rollback this handle points at the database that was set aside. */
+    if (access(prevpath, F_OK) != 0) {
+        fprintf(stderr, "error: %s kept dying at startup and the daemon put the "
+                        "previous build back — `cclaw --doctor` has the detail\n", tag);
+        return 1;
+    }
+    config_set(db, "update.installed_tag", tag);
+    if (back) {
         printf("daemon is back up on %s\n", tag);
-        config_set(db, "update.installed_tag", tag);
         update_last_set(db, tag, "ok");
         return 0;
     }
-
-    fprintf(stderr, "error: daemon did not come back within %ds — reverting\n",
-            RESTART_TIMEOUT_S);
-
-    /* rename(), not a copy: this binary is *running*, and a running executable
-     * cannot be written to (ETXTBSY) — but its directory entry can be
-     * replaced. Install got this right and the revert did not, so the restore
-     * failed at exactly the moment it existed for. */
-    if (rename(prevpath, self) != 0)
-        fprintf(stderr, "CRITICAL: could not restore %s from %s: %s — "
-                        "do it by hand\n", self, prevpath, strerror(errno));
+    update_last_set(db, tag, "installed_restart_pending");
+    if (same_pid && kill(pid, 0) != 0 && errno == ESRCH)
+        fprintf(stderr, "error: the daemon (pid %d) exited while restarting into %s "
+                        "and nothing has started it again.\nRecovery from a bad "
+                        "build needs a supervisor that restarts the daemon when it "
+                        "exits non-zero (systemd Restart=on-failure, an init respawn "
+                        "loop). Start the daemon: it will run %s, and put the "
+                        "previous build back by itself if that keeps dying.\n",
+                (int)pid, tag, tag);
     else
-        fprintf(stderr, "restored the previous binary\n");
-    /* The guard was armed for the build we just removed. */
-    config_set(db, "update.verify", "");
-    update_last_set(db, tag, "reverted_no_restart");
-
-    /* The database is deliberately NOT rolled back automatically. Writing over
-     * a database file is an aggressive act with no safe way to know whether
-     * something is attached to it, and the new daemon may have done real work
-     * we would silently discard. The snapshot is right there, the schema
-     * handshake already refused the migration hazard this would address, and a
-     * stale database beats a corrupted one. Failure stays passive.  */
+        fprintf(stderr, "warning: %s is installed but the daemon was not seen back "
+                        "within %ds. It may still be starting; nothing was "
+                        "reverted. If it keeps dying, the daemon puts the previous "
+                        "build back by itself — `cclaw --doctor` shows which "
+                        "happened.\n", tag, RESTART_TIMEOUT_S);
     if (snap[0])
-        fprintf(stderr, "the database was left as it is; a pre-update snapshot "
-                        "is at\n  %s\n", snap);
-    fprintf(stderr, "reverted to the previous build — start the daemon "
-                    "to confirm it is healthy\n");
-    if (snap[0])
-        fprintf(stderr, "to discard what the new build wrote and go back to the "
-                        "snapshot: cclaw rollback\n");
+        fprintf(stderr, "to undo the update by hand, database included: "
+                        "cclaw rollback\n");
     return 1;
 }
 
@@ -620,7 +627,7 @@ static int update_install_file(sqlite3 *db, const char *self, const char *path) 
 
 /* ── post-update crash-loop verification ───────────────────────────
  *
- * The 90s await above only proves the new build *started once*. A build that
+ * The updater's await only proves the new build *started once*. A build that
  * starts, migrates, then keeps dying is invisible to it — the updater has
  * already exited, and the supervisor keeps respawning the broken build
  * forever. Same failure shape channel_swap already solved with flap
@@ -629,11 +636,15 @@ static int update_install_file(sqlite3 *db, const char *self, const char *path) 
  * Mechanism: update_install arms a marker (config `update.verify`); every
  * daemon startup while it is armed counts itself (update_verify_startup);
  * surviving the window clears it (update_verify_tick). Hitting the start
- * limit reverts the binary — after re-checking that the previous build can
- * still open this database, because schema patches are forward-only and a
- * revert that strands the DB is worse than the crash loop — then re-execs
- * into the restored build and tells the default agent what happened. A
- * healthy deployment pays one config read per boot for this.
+ * limit undoes the update: the binary alone when the previous build can still
+ * open this database, the binary and the pre-update snapshot together when
+ * the new build already migrated it (schema patches are forward-only, so
+ * .prev beside a migrated database could not start). Either way it then
+ * re-execs into the restored build and tells the default agent what happened.
+ * This guard is the ONLY thing that undoes an update — the updater reports and
+ * leaves — and it leans on one outside contract: something restarts the
+ * daemon when it exits non-zero. A healthy deployment pays one config read
+ * per boot for this.
  *
  * A start is evidence of a crash only if the daemon it started then died. A
  * daemon that shuts down in order (SIGTERM, SIGUSR2 — an operator restarting
@@ -644,6 +655,16 @@ static int update_install_file(sqlite3 *db, const char *self, const char *path) 
 
 static char *default_agent_name(sqlite3 *db);
 static int64_t recent_session(sqlite3 *db, const char *agent);
+static int rollback_target_ok(const char *snap, const char *prev, int *snap_version,
+                              int64_t *snap_max, char *why, size_t cap);
+static void rollback_failed_path(char *out, size_t cap, const char *db_path,
+                                 const char *label);
+static int rollback_marker_write(const char *db_path, const char *failed,
+                                 const char *bin);
+
+/* The build update_verify_startup just asked to have rolled back — carried to
+ * update_verify_rollback, which runs after the database it came from is gone. */
+static char g_rollback_tag[64];
 
 static void update_verify_notify(sqlite3 *db, const char *text) {
     char *agent = default_agent_name(db);
@@ -733,7 +754,7 @@ int update_verify_startup(sqlite3 *db) {
     char prevpath[4096];
     snprintf(prevpath, sizeof(prevpath), "%.4085s.prev", self);
 
-    char note[512];
+    char note[768];
     char why[256] = "";
     if (access(prevpath, X_OK) != 0) {
         config_set(db, "update.verify", "");
@@ -747,16 +768,40 @@ int update_verify_startup(sqlite3 *db) {
         return 0;
     }
     if (!schema_compatible(prevpath, db, why, sizeof(why))) {
-        /* Forward-only schema: a revert that cannot open the migrated DB
-         * would brick the box harder than the crash loop does. Stay passive. */
+        /* The new build migrated the database and then kept dying. Schema
+         * patches are forward-only, so .prev alone would leave a binary that
+         * cannot open its database — but staying on a crash-looping build
+         * leaves a box nobody can reach to say `cclaw rollback`. The one move
+         * that brings it back is the whole update undone: snapshot and .prev
+         * together, through the same marker the verb writes. The caller
+         * applies it once this handle is closed; what the new build wrote is
+         * kept beside the database, never deleted. */
+        const char *dbfile = sqlite3_db_filename(db, "main");
+        char snap[4096], failed[4096], rwhy[256] = "no database path";
+        if (dbfile && dbfile[0]) {
+            snprintf(snap, sizeof(snap), "%s.preupdate", dbfile);
+            if (rollback_target_ok(snap, prevpath, NULL, NULL, rwhy, sizeof(rwhy))) {
+                rollback_failed_path(failed, sizeof(failed), dbfile,
+                                     tag[0] ? tag : VERSION_COMMIT);
+                if (rollback_marker_write(dbfile, failed, self) == 0) {
+                    snprintf(g_rollback_tag, sizeof(g_rollback_tag), "%s", tag);
+                    LOG_ERROR_("cclaw %s is crash-looping (%d starts in %d min) "
+                               "after migrating the database — rolling the "
+                               "update back", tag, starts, UPDATE_VERIFY_WINDOW / 60);
+                    return 2;
+                }
+                snprintf(rwhy, sizeof(rwhy), "cannot write the rollback marker: %s",
+                         strerror(errno));
+            }
+        }
         config_set(db, "update.verify", "");
         update_last_set(db, tag, "crash_loop_no_revert");
         snprintf(note, sizeof(note),
-                 "cclaw %.63s is crash-looping (%d starts in %d min) but the "
-                 "previous build cannot take this database back (%.200s) — "
-                 "no automatic revert. `cclaw rollback` restores the pre-update "
-                 "snapshot together with the previous build.", tag, starts,
-                 UPDATE_VERIFY_WINDOW / 60, why);
+                 "cclaw %.63s is crash-looping (%d starts in %d min), the "
+                 "previous build cannot take this database back (%.150s) and "
+                 "the update cannot be rolled back automatically (%.150s) — "
+                 "intervene by hand.", tag, starts,
+                 UPDATE_VERIFY_WINDOW / 60, why, rwhy);
         update_verify_notify(db, note);
         return 0;
     }
@@ -784,6 +829,32 @@ int update_verify_startup(sqlite3 *db) {
              UPDATE_VERIFY_WINDOW / 60, badpath);
     update_verify_notify(db, note);
     return 1;   /* caller re-execs into the restored build */
+}
+
+void update_verify_rollback(const char *db_path) {
+    char msg[8192], note[8600];
+    const char *tag = g_rollback_tag;
+    int rc = update_rollback_apply(db_path, msg, sizeof(msg));
+    /* Whichever database is at db_path now — the snapshot when it worked, the
+     * migrated one when nothing moved. Opened plainly, never migrated. */
+    sqlite3 *db = db_open(db_path);
+    if (rc == 1) {
+        snprintf(note, sizeof(note),
+                 "cclaw %.63s crash-looped after migrating the database, so the "
+                 "update was undone automatically. %s. Tell the operator.", tag, msg);
+        if (db) update_last_set(db, tag, "crash_loop_rolled_back");
+    } else {
+        snprintf(note, sizeof(note),
+                 "cclaw %.63s is crash-looping and the automatic rollback did "
+                 "not apply (%s) — intervene by hand.", tag,
+                 rc == 0 ? "the marker was gone" : msg);
+        if (db) {
+            config_set(db, "update.verify", "");
+            update_last_set(db, tag, "crash_loop_no_revert");
+        }
+    }
+    if (db) { update_verify_notify(db, note); db_close(db); }
+    else LOG_ERROR_("%s", note);
 }
 
 void update_verify_clean_exit(sqlite3 *db) {
@@ -1158,10 +1229,11 @@ int update_main(int argc, char *argv[]) {
 
 /* ── rollback ──────────────────────────────────────────────────────
  *
- * The one thing the update rails deliberately never do on their own is put
- * the database back: swapping a file another process may hold open is how
- * databases get corrupted. `cclaw rollback` does it with consent and with the
- * file closed. The verb writes a marker — <db>.rollback, two lines: where the
+ * Putting the database back is never done under a process that has it open:
+ * swapping a file another process may hold is how databases get corrupted.
+ * `cclaw rollback` does it with consent and with the file closed; the
+ * crash-loop guard does it without being asked in the one case where the
+ * alternative is a box that stays down (update_verify_startup). The verb writes a marker — <db>.rollback, two lines: where the
  * current database goes, which binary to restore — and the swap itself
  * happens at one of three moments when nothing has the DB open: in the verb
  * when no daemon is running; in the daemon's shutdown tail; at daemon
@@ -1214,6 +1286,41 @@ static void move_sidecars(const char *from, const char *to) {
         snprintf(b, sizeof(b), "%s%s", to, sfx[i]);
         (void)rename(a, b);
     }
+}
+
+/* Can this pair be gone back to? The snapshot must be there and readable and
+ * the previous build must be able to open its schema — the handshake update
+ * runs forward, run backward. What the snapshot is comes from the file
+ * itself; no config key can drift from that. */
+static int rollback_target_ok(const char *snap, const char *prev, int *snap_version,
+                              int64_t *snap_max, char *why, size_t cap) {
+    if (access(snap, R_OK) != 0) {
+        snprintf(why, cap, "no pre-update snapshot at %s", snap);
+        return 0;
+    }
+    sqlite3 *sdb = db_open_immutable(snap);
+    if (!sdb) { snprintf(why, cap, "cannot open the snapshot %s", snap); return 0; }
+    int version = 0;
+    db_schema_state(sdb, &version);
+    if (snap_max)
+        *snap_max = db_scalar_i64(sdb, "SELECT COALESCE(MAX(id),0) FROM entries", 0, 0);
+    sqlite3_close(sdb);
+    if (snap_version) *snap_version = version;
+
+    char *range = update_run_capture(prev, "--schema-range");
+    char rwhy[200] = "";
+    int ok = update_schema_ok(range, version, rwhy, sizeof(rwhy));
+    free(range);
+    if (!ok) snprintf(why, cap, "the previous build cannot open the snapshot — %s", rwhy);
+    return ok;
+}
+
+/* Where the database being replaced goes. Never over an earlier one. */
+static void rollback_failed_path(char *out, size_t cap, const char *db_path,
+                                 const char *label) {
+    snprintf(out, cap, "%s.failed-%s", db_path, label);
+    if (access(out, F_OK) == 0)
+        snprintf(out, cap, "%s.failed-%s-%lld", db_path, label, (long long)time(NULL));
 }
 
 int update_rollback_apply(const char *db_path, char *msg, size_t cap) {
@@ -1297,39 +1404,16 @@ int rollback_main(int argc, char *argv[]) {
     if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); goto out; }
     snprintf(snap, sizeof(snap), "%s.preupdate", db_path);
     rollback_marker_path(marker, sizeof(marker), db_path);
-    struct stat sst;
-    if (stat(snap, &sst) != 0) {
-        fprintf(stderr, "error: no pre-update snapshot at %s — nothing to roll "
-                        "back to (cclaw update takes one before it installs)\n", snap);
-        goto out;
-    }
-
-    /* What the snapshot is — schema version and last entry — comes from the
-     * file itself; no config key can drift from that. */
     int snap_version = 0;
     int64_t snap_max = 0;
-    {
-        sqlite3 *sdb = db_open_immutable(snap);
-        if (!sdb) {
-            fprintf(stderr, "error: cannot open the snapshot %s\n", snap);
-            goto out;
-        }
-        db_schema_state(sdb, &snap_version);
-        snap_max = db_scalar_i64(sdb, "SELECT COALESCE(MAX(id),0) FROM entries", 0, 0);
-        sqlite3_close(sdb);
-    }
-
-    /* The same handshake update runs forward, run backward: the previous
-     * build must be able to open the snapshot. */
-    {
-        char *range = update_run_capture(prev, "--schema-range");
-        char why[256] = "";
-        int ok = update_schema_ok(range, snap_version, why, sizeof(why));
-        free(range);
-        if (!ok) {
-            fprintf(stderr, "error: the previous build cannot open the snapshot — %s\n", why);
-            goto out;
-        }
+    char twhy[512] = "";
+    struct stat sst;
+    if (!rollback_target_ok(snap, prev, &snap_version, &snap_max, twhy, sizeof(twhy)) ||
+        stat(snap, &sst) != 0) {
+        fprintf(stderr, "error: %s — nothing to roll back to (cclaw update takes "
+                        "a snapshot before it installs)\n",
+                twhy[0] ? twhy : "the snapshot vanished");
+        goto out;
     }
 
     /* The live database is opened plainly and never migrated: this verb has to
@@ -1340,10 +1424,7 @@ int rollback_main(int argc, char *argv[]) {
                                     snap_max, 0);
     tag = config_get(db, "update.installed_tag");
     const char *label = tag && tag[0] ? tag : VERSION_COMMIT;
-    snprintf(failed, sizeof(failed), "%s.failed-%s", db_path, label);
-    if (access(failed, F_OK) == 0)
-        snprintf(failed, sizeof(failed), "%s.failed-%s-%lld", db_path, label,
-                 (long long)time(NULL));
+    rollback_failed_path(failed, sizeof(failed), db_path, label);
     char old_instance[64] = "";
     pid_t pid = running_daemon_pid(db, NULL, old_instance, sizeof(old_instance));
     restart_cmd = config_get(db, "update.restart_command");

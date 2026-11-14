@@ -142,11 +142,14 @@ cclaw --doctor          # [update] section: last outcome, guard, leftovers
 ```
 
 - `update.last` (shown there) is `{tag, at, outcome}`. `ok`/`verified` means
-  the daemon came back and ran 5 min; `reverted_no_restart` means the new
-  build never registered and the old binary is already back;
+  the daemon came back and ran 5 min; `installed_restart_pending` means the
+  new build is on disk but the daemon was not seen back in time (nothing was
+  reverted — check whether it is running);
   `crash_loop_reverted` means the guard put `.prev` back after three starts;
-  `crash_loop_no_revert` means it *could not* (the new build migrated the DB
-  and `.prev` cannot open it) — that is the case for `cclaw rollback`.
+  `crash_loop_rolled_back` means it also restored the pre-update snapshot,
+  because the new build had migrated the DB (what that build wrote is in
+  `<db>.failed-<tag>`); `crash_loop_no_revert` means it *could not* undo
+  anything (no `.prev`, no snapshot) — intervene by hand.
 - **`cclaw rollback`** restores `<db>.preupdate` and `<self>.prev` together.
   It prints the plan (snapshot age, entries that will be discarded, which
   build returns) and asks; the swap happens only while nothing has the DB

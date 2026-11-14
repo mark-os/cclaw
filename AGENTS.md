@@ -320,11 +320,14 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   `checksums.b2`, snapshots the DB to `<db>.preupdate`, keeps the old binary
   as `.prev`, swaps atomically, then restarts the daemon with `SIGUSR2` (shut
   down and `exec` the binary now on disk, same pid — no supervisor sees an
-  exit) or `update.restart_command` when set; a daemon that does not come
-  back in 90 s gets the old binary back, and a crash-loop guard reverts a
-  build that keeps dying after that. **`cclaw rollback`** is the way back from
-  everything else: it restores the snapshot *and* `.prev` together, swapping
-  the DB only at a moment nothing has it open (see
+  exit) or `update.restart_command` when set. The updater only reports
+  whether the daemon came back; the daemon's own crash-loop guard is the one
+  thing that undoes a build that keeps dying — the binary alone, or binary
+  and snapshot together when that build had already migrated the DB — and it
+  needs a supervisor that restarts the daemon on a non-zero exit. **`cclaw
+  rollback`** is the way back from a build that runs but is wrong: it
+  restores the snapshot *and* `.prev` together, swapping the DB only at a
+  moment nothing has it open (see
   [specs/operations.md](specs/operations.md)). Set `update.check_interval_hours`
   and the daemon notices new releases and drops a note in the default agent's
   inbox — it tells you, it never installs on its own. `cclaw update --file

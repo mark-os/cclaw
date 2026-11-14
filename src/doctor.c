@@ -740,8 +740,11 @@ static void check_update(sqlite3 *db, const char *db_path) {
                 char detail[256];
                 snprintf(detail, sizeof(detail), "%s %s (%s)", t && t[0] ? t : "?",
                          o ? o : "?", w ? w : "?");
+                /* Pending is worth a look, not a failure in itself: the daemon
+                 * was not seen back, and it turns 'verified' by itself once the
+                 * new build has run its window. */
                 int bad = o && (strncmp(o, "crash_loop", 10) == 0 ||
-                                strncmp(o, "reverted", 8) == 0);
+                                strcmp(o, "installed_restart_pending") == 0);
                 if (bad) print_fail("last update", detail);
                 else print_ok("last update", detail);
             }

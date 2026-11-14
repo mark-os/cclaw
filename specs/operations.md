@@ -91,24 +91,51 @@ through the same rails:
    re-read an env file. With no daemon running, the binary is simply in place.
 8. **Await.** 90 s for a *new* `processes` row (fresh `instance_id`, polled on
    a fresh read-only connection each second — a connection from before the
-   restart can sit on a WAL snapshot that never sees it). Timeout reverts the
-   binary from `.prev` and leaves the database alone.
-9. **Crash-loop guard.** `update.verify` is armed; the daemon counts its own
-   starts against it *before* running the schema migration (so a crash inside
-   a patch is counted while `.prev` can still open the un-migrated file), and
-   clears it after 5 minutes of uptime. Three starts inside 5 minutes revert
-   the binary to `.prev` — only if `.prev` can open the database as it now is;
-   otherwise the guard stays passive and tells the agent to suggest
-   `cclaw rollback`. The bad build is kept as `<self>.bad`.
+   restart can sit on a WAL snapshot that never sees it). **The updater only
+   reports.** A daemon that is not back yet is recorded as
+   `installed_restart_pending` and nothing is reverted: "no new daemon in N
+   seconds" cannot tell a dead build from a slow one (a small box can spend
+   longer than that inside a migration), and putting `.prev` back under a
+   daemon that was only slow leaves an old binary beside a database it can no
+   longer open. If the daemon's pid is gone and nothing replaced it, the
+   updater says so loudly.
+9. **Crash-loop guard — the only thing that undoes an update.**
+   `update.verify` is armed; the daemon counts its own starts against it
+   *before* running the schema migration (so a crash inside a patch is counted
+   while `.prev` can still open the un-migrated file), and clears it after 5
+   minutes of uptime. Three starts inside 5 minutes undo the update, by
+   whichever of two moves is legal:
+   - `.prev` can open the database as it now is → the binary alone goes back.
+   - the new build already migrated it → the whole update goes back, snapshot
+     and `.prev` together, through the same `<db>.rollback` marker
+     `cclaw rollback` writes, applied in that same start with the database
+     closed. What the new build wrote is kept as `<db>.failed-<tag>`. This is
+     the one case where the database is restored without being asked: the
+     alternative is a box that crash-loops until someone can log in.
+
+   The daemon then re-execs into the restored build. The bad build is kept as
+   `<self>.bad`. The guard stays passive (`crash_loop_no_revert`) only when
+   there is nothing to go back to — no `.prev`, no snapshot, or a `.prev` that
+   cannot open the snapshot either.
    A daemon that shuts down in order (SIGTERM, SIGUSR2) takes its own start
    back off the count, so restarting it by hand inside the window is not
    mistaken for a crash; a start counts only when the daemon it started died
    without shutting down.
 
 Every exit writes `update.last` (`{tag, at, outcome}`), which `--doctor`
-shows: `ok`, `installed_no_daemon`, `installed_restart_pending`,
-`reverted_no_restart`, `verified`, `crash_loop_reverted`,
-`crash_loop_no_revert`, `rollback_requested`.
+shows: `ok`, `installed_no_daemon`, `installed_restart_pending`, `verified`,
+`crash_loop_reverted`, `crash_loop_rolled_back`, `crash_loop_no_revert`,
+`rollback_requested`.
+
+**What recovery depends on.** The guard runs at daemon startup, so it only
+helps if something starts the daemon again after it dies: a supervisor that
+restarts on a non-zero exit (systemd `Restart=on-failure`, an init script's
+respawn loop). cclaw does not supervise itself. Two things in the binary keep
+that contract honest: a daemon whose re-exec fails exits non-zero (a
+supervisor reads 0 as "stopped on purpose" and stays down), and the updater
+checks the pid it signalled and warns when the daemon is gone with nothing in
+its place. A daemon that is alive but hung never trips a crash counter; that
+is the supervisor's watchdog to catch, not this guard's.
 
 ## Pre-release channels — `cclaw publish`
 
@@ -151,9 +178,11 @@ R2 with wrangler — and point boxes at its public URL. Only https is accepted.
 ## Rollback — `cclaw rollback [--yes]`
 
 Undoes the last update *entirely*: `<db>.preupdate` becomes the database
-again, `<self>.prev` the binary. This is the way back from the case the
-automatic rails cannot handle — a build that migrated the database and then
-turned out to be bad, where `.prev` alone would refuse the migrated file.
+again, `<self>.prev` the binary. This is the way back from a build that
+migrated the database and then turned out to be bad, where `.prev` alone would
+refuse the migrated file. The crash-loop guard does the same thing on its own
+when the bad build cannot even stay up; the verb is for the build that runs
+but is wrong.
 
 The verb prints the whole plan before asking — snapshot schema version and
 age, how many `entries` written since the snapshot will be discarded, which

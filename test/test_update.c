@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include "update.h"
 #include "db.h"
+#include "config_registry.h"
 #include "cclaw.h"
 #include "test_util.h"
 
@@ -205,6 +206,72 @@ static void test_verify_marker_escapes_tag(void) {
     else printf("  FAIL verify_marker_escapes_tag: count or tag lost on restart\n");
 }
 
+/* The guard's own rollback (a build that migrated, then crash-looped): the
+ * outcome has to be written to whichever database is at the path afterwards —
+ * the one it was decided in has just been moved aside. */
+static void outcome_of(const char *path, char *out, size_t cap) {
+    out[0] = '\0';
+    sqlite3 *db = test_db_open(path);
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COALESCE((SELECT value FROM config WHERE key='which'),'') || ':' ||"
+            " COALESCE((SELECT json_extract(value,'$.outcome') FROM config"
+            "           WHERE key='update.last'),'') || ':' ||"
+            " COALESCE((SELECT value FROM config WHERE key='update.verify'),'')",
+            -1, &st, NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
+        snprintf(out, cap, "%s", (const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+}
+
+static void stage_db(const char *path, const char *which, int armed) {
+    sqlite3 *db = test_db_open(path);
+    char sql[128];
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO config(key, value) VALUES('which', '%s')", which);
+    sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (armed) update_verify_arm(db, "v9");
+    sqlite3_close(db);
+}
+
+static void test_verify_rollback_records_outcome(void) {
+    char dir[] = "/tmp/cclaw_vrollback_XXXXXX";
+    if (!mkdtemp(dir)) { printf("  verify_rollback: mkdtemp failed\n"); return; }
+    char db[300], snap[320], bin[300], prev[320], failed[320], got[256], cmd[400];
+    snprintf(db, sizeof(db), "%s/cclaw.db", dir);
+    snprintf(snap, sizeof(snap), "%s/cclaw.db.preupdate", dir);
+    snprintf(bin, sizeof(bin), "%s/cclaw", dir);
+    snprintf(prev, sizeof(prev), "%s/cclaw.prev", dir);
+    snprintf(failed, sizeof(failed), "%s/cclaw.db.failed-v9", dir);
+    put(bin, "new-bin"); chmod(bin, 0755);
+    put(prev, "old-bin"); chmod(prev, 0755);
+    stage_db(db, "live", 1);
+
+    /* Nothing to go back to: nothing moves, and the live database says so and
+     * stops counting, rather than retrying the same rollback at every start. */
+    tests_run++; printf("  verify_rollback_failure_is_recorded_in_place... ");
+    write_marker(db, failed, bin);
+    update_verify_rollback(db);
+    outcome_of(db, got, sizeof(got));
+    if (strcmp(got, "live:crash_loop_no_revert:") != 0 || !has(bin, "new-bin"))
+        printf("FAIL: %s\n", got);
+    else { tests_passed++; printf("PASS\n"); }
+
+    /* Snapshot present: it becomes the database and carries the outcome. */
+    tests_run++; printf("  verify_rollback_records_in_restored_db... ");
+    stage_db(snap, "snap", 0);
+    write_marker(db, failed, bin);
+    update_verify_rollback(db);
+    outcome_of(db, got, sizeof(got));
+    if (strcmp(got, "snap:crash_loop_rolled_back:") != 0 ||
+        !has(bin, "old-bin") || access(failed, F_OK) != 0)
+        printf("FAIL: %s\n", got);
+    else { tests_passed++; printf("PASS\n"); }
+
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+    if (system(cmd) != 0) printf("  (could not remove %s)\n", dir);
+}
+
 /* Writing the downloaded binary: a failure that only shows at fclose (the
  * flush hitting a full disk) is still a failure, reported once. */
 static void test_write_file_reports_flush_failure(void) {
@@ -268,6 +335,7 @@ int main(void) {
     test_rollback_apply();
     test_checksum();
     test_verify_marker_escapes_tag();
+    test_verify_rollback_records_outcome();
     test_write_file_reports_flush_failure();
 
     printf("%d/%d passed\n", tests_passed, tests_run);

@@ -143,8 +143,9 @@ static char g_exe_path[PATH_MAX];
 static char **g_exe_argv;
 
 /* Re-exec into the binary now at g_exe_path, keeping our pid. Only returns on
- * failure, in which case the caller exits normally and whatever supervises us
- * decides what happens next. */
+ * failure, and the caller must then exit NON-ZERO: a supervisor reads 0 as
+ * "stopped on purpose" and leaves the daemon down (systemd Restart=on-failure
+ * and an init script's respawn loop both do). */
 static void reexec_self(void) {
     if (!g_exe_path[0] || !g_exe_argv) return;
     LOG_INFO_("re-exec: %s", g_exe_path);
@@ -514,7 +515,7 @@ static int run_daemon(char *db_path) {
     /* Last thing, after every subsystem is down and the DB is closed: become
      * the new binary. Descriptors survive exec, so this must come after the
      * teardown above, not instead of it. */
-    if (shutdown_reexec_requested()) reexec_self();
+    if (shutdown_reexec_requested()) { reexec_self(); return 1; }
     return 0;
 }
 
@@ -1023,6 +1024,23 @@ int main(int argc, char *argv[]) {
     proc_set_db(db_open(db_path));
     if (!proc_db()) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }
 
+    /* Post-update crash-loop guard: count this start against an armed
+     * update.verify marker BEFORE db_schema_compat below, which is where the
+     * schema patches actually run. A build that dies inside its own patch —
+     * or whose patch fails, which exits here every time — would otherwise
+     * never be counted, and that is the failure the .prev build alone
+     * recovers from, because the database has not moved yet. A build that
+     * dies after migrating takes the snapshot back with it. Either way:
+     * re-exec into the restored build with nothing running and the DB closed. */
+    int undo = daemon_mode ? update_verify_startup(proc_db()) : 0;
+    if (undo) {
+        db_close(proc_db());
+        if (undo == 2) update_verify_rollback(db_path);
+        free(db_path);
+        reexec_self();   /* returns only if exec itself failed */
+        return 1;
+    }
+
     if (!db_schema_compat(proc_db())) {
         fprintf(stderr,
             "error: %s cannot be upgraded to schema v%d.\n"
@@ -1030,18 +1048,6 @@ int main(int argc, char *argv[]) {
             "  rm %s %s-wal %s-shm\n",
             db_path, CCLAW_SCHEMA_VERSION, db_path, db_path, db_path);
         db_close(proc_db()); free(db_path); return 1;
-    }
-
-    /* Post-update crash-loop guard: count this start against an armed
-     * update.verify marker BEFORE the migration below — a build that dies
-     * inside its own schema patch would otherwise never be counted, and that
-     * is the one crash the .prev build can still recover from, because the
-     * database has not moved yet. A revert re-execs into the restored build
-     * with nothing running and the DB closed. */
-    if (daemon_mode && update_verify_startup(proc_db())) {
-        db_close(proc_db()); free(db_path);
-        reexec_self();   /* returns only if exec itself failed */
-        return 1;
     }
 
     /* Schema + seed in one exclusive transaction. When multiple processes

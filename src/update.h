@@ -95,12 +95,17 @@ void update_verify_arm(sqlite3 *db, const char *tag);
  * byte was written AND flushed; on failure errno says why. */
 int update_write_file(const char *path, const void *data, size_t len);
 
-/* Count this daemon start against an armed marker. Returns 1 when the start
- * limit was hit and the previous binary was restored (schema-checked; the
- * revert stays passive when the old build could not open the migrated DB) —
- * the caller must then re-exec so the restored build actually runs. 0
- * otherwise. Daemon-only. */
+/* Count this daemon start against an armed marker. 0 = carry on. 1 = the
+ * start limit was hit and the previous binary was restored: close the DB and
+ * re-exec. 2 = the limit was hit after the new build migrated the database,
+ * so the whole update has to go: close the DB, call update_verify_rollback,
+ * then re-exec. Daemon-only. */
 int update_verify_startup(sqlite3 *db);
+
+/* Apply the rollback update_verify_startup asked for (return 2) — snapshot and
+ * previous binary together — and record what happened in whichever database is
+ * at db_path afterwards. Call with nothing holding the database open. */
+void update_verify_rollback(const char *db_path);
 
 /* An orderly daemon shutdown takes this daemon's start back off an armed
  * marker: a deliberate restart is not a crash. Called on the graceful

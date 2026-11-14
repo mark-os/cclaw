@@ -72,7 +72,8 @@ no `Atomics`; use the provided host bridges:
   `{status: -1, body: "", error}` instead of throwing (`body` is always a
   string). `markdownify: true` converts an HTML
   body to markdown for readability — it is a rendering aid, not a security
-  boundary (untrusted-content wrapping happens at storage time regardless).
+  boundary (network results are wrapped as untrusted content when sent to the
+  model regardless).
   `timeout` is seconds, default 30, capped at 180 — the fetch blocks the whole
   tool child, so the cap is what stops a slow endpoint becoming a hang. Raise
   it only for calls that are legitimately slow (an LLM-backed search that

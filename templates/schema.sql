@@ -333,6 +333,8 @@ CREATE TABLE IF NOT EXISTS entries (
   tool_call_count INTEGER NOT NULL DEFAULT 0,
   data TEXT,
   network_hosts TEXT,  -- NULL or JSON array of hosts the tool run contacted
+  fence_id TEXT,       -- random id minted with network_hosts; both tags of the
+                       -- untrusted-content wrap carry it (llm_payload.c)
   -- Reasoning replay blob, set on type='reasoning' entries only:
   -- {provider, model, format, blob}. provider/model tag who produced it
   -- (replay strips on model switch); format is the wire shape —

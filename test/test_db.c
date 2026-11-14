@@ -606,6 +606,9 @@ static void test_schema_patch_v47(void) {
         " ('Keep','orphan','* * * * *',0,'x','new','GhostAgent'),"
         " ('Keep','keeper','* * * * *',0,'x','new','Keep');",
         NULL, NULL, NULL) == SQLITE_OK);
+    /* v58 column, absent from every earlier shape */
+    assert(sqlite3_exec(db, "ALTER TABLE entries DROP COLUMN fence_id;",
+                        NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 46);
 
     assert(db_schema_compat(db) == 1);
@@ -670,6 +673,9 @@ static void test_schema_patch_v48(void) {
         "ALTER TABLE providers DROP COLUMN request_extra;"
         "ALTER TABLE llm_responses DROP COLUMN upstream_provider;",
         NULL, NULL, NULL) == SQLITE_OK);
+    /* v58 column, absent from every earlier shape */
+    assert(sqlite3_exec(db, "ALTER TABLE entries DROP COLUMN fence_id;",
+                        NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 47);
 
     assert(db_schema_compat(db) == 1);
@@ -708,6 +714,9 @@ static void test_schema_patch_v50(void) {
         "INSERT OR IGNORE INTO providers(name, base_url)"
         " VALUES('openrouter','https://openrouter.ai/api/v1'),('custom','http://x');",
         NULL, NULL, NULL) == SQLITE_OK);
+    /* v58 column, absent from every earlier shape */
+    assert(sqlite3_exec(db, "ALTER TABLE entries DROP COLUMN fence_id;",
+                        NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 49);
 
     assert(db_schema_compat(db) == 1);
@@ -750,6 +759,9 @@ static void test_schema_patch_v51(void) {
         " VALUES('m@p','p','m');"
         "INSERT INTO agent_models(agent_name, model_id, pos)"
         " VALUES('Router','m@p',0);", NULL, NULL, NULL) == SQLITE_OK);
+    /* v58 column, absent from every earlier shape */
+    assert(sqlite3_exec(db, "ALTER TABLE entries DROP COLUMN fence_id;",
+                        NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 50);
 
     assert(db_schema_compat(db) == 1);
@@ -860,6 +872,12 @@ static void test_schema_patch_v57(void) {
         "INSERT OR REPLACE INTO config(key,value) VALUES('agent_default_tools',"
         " '[\"file_read\",\"memory_create\",\"memory_add\",\"memory_edit\",\"memory_delete\"]');",
         NULL, NULL, NULL) == SQLITE_OK);
+    /* v58: a result tagged before the column existed gets its fence id. */
+    assert(sqlite3_exec(db,
+        "ALTER TABLE entries DROP COLUMN fence_id;"
+        "INSERT INTO entries(session_id, role, content, network_hosts) VALUES"
+        " (1, 3, 'fetched', '[\"example.com\"]'), (1, 3, 'local', NULL);",
+        NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 56);
 
     /* A patch whose COMMIT fails did not happen: the upgrade must report
@@ -874,6 +892,10 @@ static void test_schema_patch_v57(void) {
 
     assert(db_schema_compat(db) == 1);
     assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM entries WHERE content='fetched'"
+        " AND length(fence_id)=16;", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM entries WHERE content='local'"
+        " AND fence_id IS NULL;", 0, -1) == 1);
 
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sqlite_master"
         " WHERE name IN ('memory_entries','idx_memory_entries_block');", 0, -1) == 0);

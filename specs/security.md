@@ -30,7 +30,7 @@
 | LLM output | Untrusted input | Adversarial by assumption (prompt injection, jailbreaks) |
 | --run-tool broker children | Untrusted | Re-exec'd for each tool call; contained by the backend (shell/web/js/file tiers), except under `host` |
 | JS runtime (in broker child) | Untrusted | Executes LLM-generated code; heap-capped, instruction-limited |
-| External HTTP responses | Untrusted | Wrapped in boundary markers, homoglyph-sanitized |
+| External HTTP responses | Untrusted | Wrapped at query time in `<UNTRUSTED_EXTERNAL_CONTENT id="…">` tags carrying a per-entry random id the content cannot know |
 
 ## Agent Process: Trusted Binary, Config-Constrained
 

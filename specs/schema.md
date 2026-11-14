@@ -557,6 +557,7 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `tool_call_count` | INTEGER NOT NULL DEFAULT 0 | denormalized for plan pass |
 | `data` | TEXT | JSON side-channel, merged not overwritten (`json_patch`), nullable. `$.pin` — a hook's durable context pin; `$.source` / `$.source_ref` — provenance stamped by the inbox drain (the cron auto-pause streak reads it); `$.job` on a `cron_result` — the job that produced it; plus whatever an `annotate` hook merges in |
 | `network_hosts` | TEXT | JSON array of hosts the tool run contacted (proxy-observed) |
+| `fence_id` | TEXT | Random id minted when `network_hosts` is set; see below |
 | `reasoning_meta` | TEXT | `type='reasoning'` rows only — replay tag+blob, see below |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
@@ -596,6 +597,26 @@ emitted; a reasoning field is never invented.
 ### entries.network_hosts
 
 NULL or a JSON array of hostnames the credential-proxy observed during a shell tool execution. Stored for auditing and grant enforcement replay.
+
+### entries.fence_id
+
+A tool result with `network_hosts` set is sent to the model wrapped as
+untrusted content (`SQL_WRAP_TOOL_CONTENT` in `llm_payload.c`):
+
+```
+<UNTRUSTED_EXTERNAL_CONTENT id="9f2c4e1ab07d53c8">
+Contacted hosts: ["example.com"]
+---
+…the result…
+</UNTRUSTED_EXTERNAL_CONTENT id="9f2c4e1ab07d53c8">
+```
+
+`fence_id` is that id: 16 hex digits from `randomblob(8)`, written by
+`db_entry_set_network_hosts` in the same UPDATE that tags the entry — after the
+content exists, so a fetched page cannot contain it and cannot close the block
+early. Content is not scanned for tag lookalikes; the id is the defence. It is
+stored rather than generated per request so the request prefix stays
+byte-stable for prompt caching.
 
 ### StopReason enum
 

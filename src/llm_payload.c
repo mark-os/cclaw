@@ -42,15 +42,18 @@ static int populate_plan(sqlite3 *db, const ContextPlan *plan) {
 /* ── SQL templates ─────────────────────────────────────────────── */
 
 /* Query-time untrusted-content wrap: a tool_result whose entry carries a
- * network_hosts tag came (at least partly) from the network. Content was
- * sanitized at storage time (invisible Unicode stripped, marker lookalikes
- * neutralized), so static boundary markers here cannot be forged from inside. */
+ * network_hosts tag came (at least partly) from the network. Both tags carry
+ * entries.fence_id, a random id minted when the entry was tagged — after the
+ * content was already written, so nothing inside it can name the id and close
+ * the block early. That is the whole defence: content is not scrubbed for
+ * tag lookalikes. Stored, not generated here, so the request prefix stays
+ * byte-stable for prompt caching. */
 #define SQL_WRAP_TOOL_CONTENT \
     "CASE WHEN e.network_hosts IS NOT NULL THEN" \
-    "  '<<<UNTRUSTED_EXTERNAL_CONTENT>>>' || char(10) ||" \
+    "  '<UNTRUSTED_EXTERNAL_CONTENT id=\"' || COALESCE(e.fence_id,'') || '\">' || char(10) ||" \
     "  'Contacted hosts: ' || e.network_hosts || char(10) || '---' || char(10) ||" \
     "  COALESCE(e.content,'') || char(10) ||" \
-    "  '<<<END_UNTRUSTED_EXTERNAL_CONTENT>>>'" \
+    "  '</UNTRUSTED_EXTERNAL_CONTENT id=\"' || COALESCE(e.fence_id,'') || '\">'" \
     " ELSE COALESCE(e.content,'') END"
 
 /* A cron_result is a scheduled script's output posted into the session with no

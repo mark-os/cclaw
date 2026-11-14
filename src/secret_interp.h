@@ -3,7 +3,7 @@
 
 /* Secret interpolation and result post-processing: expands {{SECRET:name}}
  * before tool execution, deinterpolates values back out of results, and
- * runs the DLP scan + marker sanitizer over every tool result.
+ * runs the DLP scan over every tool result.
  */
 
 #include "types.h"  /* ShellSecret */

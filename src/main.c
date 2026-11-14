@@ -59,7 +59,6 @@
 #include "tool_policy.h"
 #include "secret_interp.h"
 #include "secret_capture.h"
-#include "external_content.h"
 #include "unicode_normalize.h"
 #include "run_tool.h"
 #include "tool_file.h"

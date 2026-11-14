@@ -7,7 +7,6 @@
 #include "qjs_llm.h"
 #include "qjs_xml.h"
 #include "js_http_fetch.h"
-#include "external_content.h"
 #include "host_match.h"
 #include "tool_web_fetch.h"
 #include "tool_js.h"

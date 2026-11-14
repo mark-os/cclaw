@@ -899,8 +899,7 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
 
     /* afterToolCall hooks: chained result replacement, after the secret
      * scanner (security boundary stays first), before the entry write so
-     * the replacement is what the context sees. The replacement comes back
-     * already marker-sanitized (hook_dispatch owns that invariant). */
+     * the replacement is what the context sees. */
     char *hook_annotate = NULL;
     if (proc_tool_setup()) {
         char *rep = hook_dispatch_observe_tool_call(&proc_tool_setup()->ext_ctx,
@@ -1937,9 +1936,6 @@ static char *child_output_finalize(ChildProc *c, int status, char **hosts_out,
         char *st = unicode_strip_invisible(output, slen, &slen);
         if (st) { free(output); output = st; }
     }
-    /* (Forged fence markers are neutralized for ALL results —
-     * network-tagged or not — inside tool_result_postprocess.) */
-
     /* Explicit capture first (raw result), then postprocess:
      * deinterpolate + scan/redact. Fresh per-call snapshot (same
      * rationale as dispatch_tool) — a secret born mid-session must
@@ -2088,11 +2084,7 @@ void reap_children(void) {
             size_t out_len = strlen(output);
 
             /* afterToolCall hooks: chained result replacement, post-scanner,
-             * pre-write (same contract as the inline dispatch path). The
-             * replacement comes back already marker-sanitized (hook_dispatch
-             * owns that invariant) — this reap path carries the
-             * network_hosts-tagged results, so a transform hook must not be
-             * able to smuggle a forged fence past storage-time sanitization. */
+             * pre-write (same contract as the inline dispatch path). */
             char *hook_annotate = NULL;
             if (proc_tool_setup()) {
                 char *rep = hook_dispatch_observe_tool_call(&proc_tool_setup()->ext_ctx,

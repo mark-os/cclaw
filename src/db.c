@@ -791,6 +791,13 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "UPDATE memory_notes SET text = replace(replace(replace(replace(text,'memory_create','memory_block_create'),'memory_add','memory_note_add'),'memory_edit','memory_note_edit'),'memory_delete','memory_note_delete')"
       "  WHERE text LIKE '%memory\\_%' ESCAPE '\\';",
       NULL },
+    /* v58: entries.fence_id — the random id both untrusted-content tags carry
+     * (llm_payload.c). Rows already tagged get one now. */
+    { 58,
+      "ALTER TABLE entries ADD COLUMN fence_id TEXT;"
+      "UPDATE entries SET fence_id = lower(hex(randomblob(8)))"
+      "  WHERE network_hosts IS NOT NULL;",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
@@ -1908,7 +1915,10 @@ int delivery_edge_set_policy(sqlite3 *db, int64_t session_id, const char *kind,
 int db_entry_set_network_hosts(sqlite3 *db, int64_t entry_id, const char *hosts_json) {
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db,
-        "UPDATE entries SET network_hosts=? WHERE id=?",
+        /* The fence id is minted with the tag, once: it is what the payload
+         * wrap puts in both tags, and the content cannot have known it. */
+        "UPDATE entries SET network_hosts=?,"
+        " fence_id=COALESCE(fence_id, lower(hex(randomblob(8)))) WHERE id=?",
         -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, hosts_json, -1, SQLITE_STATIC);
     sqlite3_bind_int64(stmt, 2, entry_id);

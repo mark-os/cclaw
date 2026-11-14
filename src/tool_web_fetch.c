@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_web_fetch.h"
-#include "external_content.h"
 #include "host_match.h"
 #include "http.h"
 #include "run_tool.h"

@@ -492,7 +492,6 @@ static int start_channel(sqlite3 *db, const char *name) {
     ChannelProc *c = &g_channels[g_count++];
     c->pid = pid;
     c->restart_count = 0;
-    c->first_crash = 0;
     c->next_restart_at = 0;
     c->started_at = time(NULL);
     snprintf(c->name, sizeof(c->name), "%s", name);
@@ -692,24 +691,30 @@ void channel_shutdown_all(void) {
         if (g_channels[i].pid > 0) kill(g_channels[i].pid, SIGKILL);
     g_count = 0;
 }
+int channel_backoff_delay(int restart_count) {
+    /* Compare before shifting: restart_count has no ceiling of its own, and
+     * a shift by the width of int or more is undefined. */
+    for (int delay = 1, n = 0; delay < CHANNEL_MAX_BACKOFF; delay <<= 1, n++)
+        if (n >= restart_count) return delay;
+    return CHANNEL_MAX_BACKOFF;
+}
+
 int channel_reap(pid_t pid, sqlite3 *db) {
     ChannelProc *c = find_by_pid(pid);
     if (!c) return 0;
 
     time_t now = time(NULL);
     c->pid = -1;
+    update_pid(db, c->name, 0);   /* a dead pid in the row can be reused */
     c->restart_count++;
 
-    if (c->first_crash == 0) c->first_crash = now;
-
-    /* Flap detection: 3+ crashes in 5 minutes → broken */
-    if (c->restart_count >= CHANNEL_MAX_RESTARTS &&
-        (now - c->first_crash) < CHANNEL_FLAP_WINDOW) {
-        /* Auto-revert first: a swapped-in extension that flaps goes back to
-         * its predecessor instead of taking the channel down — a broken
-         * channel is exactly the one the operator can't be reached through.
-         * prev is cleared by the revert, so a flap of the reverted code
-         * (second pass through here) falls through to 'broken'. */
+    /* Third crash in a row — the count resets only once a runner has stayed
+     * up CHANNEL_HEALTHY_AFTER seconds, so slow crash loops count too. */
+    if (c->restart_count == CHANNEL_MAX_RESTARTS) {
+        /* A swapped-in extension that cannot stay up goes back to its
+         * predecessor: this channel is how the operator reaches the agent.
+         * prev is cleared by the revert, so if the reverted code crashes too
+         * it just keeps retrying on the backoff below. */
         char *prev = channel_prev_extension(db, c->name);
         if (prev) {
             const char *sql =
@@ -720,7 +725,7 @@ int channel_reap(pid_t pid, sqlite3 *db) {
                 sqlite3_bind_text(s, 1, c->name, -1, SQLITE_STATIC);
                 sqlite3_step(s); sqlite3_finalize(s);
             }
-            LOG_ERROR_("channel flapping name=%s crashes=%d — reverted to extension=%s",
+            LOG_ERROR_("channel crash loop name=%s crashes=%d — reverted to extension=%s",
                        c->name, c->restart_count, prev);
             char note[256];
             snprintf(note, sizeof(note),
@@ -730,34 +735,27 @@ int channel_reap(pid_t pid, sqlite3 *db) {
             channel_notify_admins(db, c->name, note);
             free(prev);
             c->restart_count = 0;
-            c->first_crash = 0;
             c->next_restart_at = now + 2;   /* respawn runs the reverted code */
             return 1;
         }
-
-        LOG_ERROR_("channel flapping name=%s crashes=%d window=%lds status=broken",
-                   c->name, c->restart_count, (long)(now - c->first_crash));
-        const char *sql = "UPDATE channels SET status='broken' WHERE name=?;";
-        sqlite3_stmt *s;
-        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, c->name, -1, SQLITE_STATIC);
-            sqlite3_step(s); sqlite3_finalize(s);
-        }
-        remove_channel(c);
-        return 1;
+        LOG_ERROR_("channel crash loop name=%s crashes=%d — still retrying,"
+                   " at most every %ds", c->name, c->restart_count,
+                   CHANNEL_MAX_BACKOFF);
     }
 
-    /* Exponential backoff: min(60, 1 << restart_count) */
-    int delay = 1 << c->restart_count;
-    if (delay > CHANNEL_MAX_BACKOFF) delay = CHANNEL_MAX_BACKOFF;
+    /* Never give up: a channel left down needs the operator, and the channel
+     * is how the operator is reached. The growing delay is what keeps a
+     * permanent failure from hammering the service. */
+    int delay = channel_backoff_delay(c->restart_count);
     c->next_restart_at = now + delay;
     LOG_INFO_("channel died name=%s pid=%d restart_count=%d delay=%ds",
               c->name, (int)pid, c->restart_count, delay);
     return 1;
 }
 
-void channel_tick(sqlite3 *db) {
-    time_t now = time(NULL);
+void channel_tick(sqlite3 *db) { channel_tick_at(db, time(NULL)); }
+
+void channel_tick_at(sqlite3 *db, time_t now) {
 
     /* Reconcile: the channels table is the desired state, g_channels the
      * running set. Launch newly-activated channels and stop deactivated ones,
@@ -824,18 +822,31 @@ void channel_tick(sqlite3 *db) {
             }
         }
 
-        /* Reset restart_count if healthy for 5 minutes */
-        if (c->pid > 0 && c->restart_count > 0 &&
-            c->started_at > 0 && (now - c->started_at) > CHANNEL_FLAP_WINDOW) {
+        /* Healthy: it stayed up. Earlier crashes are history, and a swap is
+         * accepted — the predecessor is a revert target only while the new
+         * code is proving itself, so a crash loop months later cannot roll
+         * the channel back to it. Judged once per launch (started_at = 0).
+         * >= so the default deaf threshold (same length, checked next)
+         * bounces a runner already counted healthy rather than racing this
+         * by a second. */
+        if (c->pid > 0 && c->started_at > 0 &&
+            (now - c->started_at) >= CHANNEL_HEALTHY_AFTER) {
             c->restart_count = 0;
-            c->first_crash = 0;
+            c->started_at = 0;
+            sqlite3_stmt *s;
+            if (sqlite3_prepare_v2(db,
+                    "UPDATE channels SET prev_extension_name=NULL WHERE name=?;",
+                    -1, &s, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(s, 1, c->name, -1, SQLITE_STATIC);
+                sqlite3_step(s); sqlite3_finalize(s);
+            }
         }
 
         /* Deaf watchdog: the process is up but its transport went silent.
          * SIGTERM only — the reap/backoff path above is what restarts it, so a
          * bounce here is indistinguishable from a crash to the rest of
-         * supervision (flap detection included, which is what eventually marks
-         * a channel that can never receive as broken). The mark is reset on
+         * supervision (a threshold shorter than CHANNEL_HEALTHY_AFTER counts
+         * toward the crash backoff like any other death). The mark is reset on
          * the way out so a child that ignores SIGTERM is re-signalled once per
          * threshold rather than once per tick. */
         if (c->pid > 0) {

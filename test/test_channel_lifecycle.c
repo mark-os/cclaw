@@ -268,6 +268,17 @@ static void test_notify_admins(void) {
     printf("  PASS test_notify_admins\n");
 }
 
+/* A channel that never stays healthy is retried forever, so restart_count
+ * climbs without bound; the delay must stay at the ceiling instead of shifting
+ * past the width of int. */
+static void test_backoff_is_capped(void) {
+    assert(channel_backoff_delay(1) == 2);
+    assert(channel_backoff_delay(8) == 256);
+    for (int n = 9; n < 200; n++)
+        assert(channel_backoff_delay(n) == CHANNEL_MAX_BACKOFF);
+    printf("  PASS test_backoff_is_capped\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_channel_lifecycle:\n");
@@ -276,6 +287,7 @@ int main(void) {
     test_check_reports_js_error();
     test_swap_and_revert();
     test_notify_admins();
+    test_backoff_is_capped();
     printf("all channel lifecycle tests passed\n");
     return 0;
 }

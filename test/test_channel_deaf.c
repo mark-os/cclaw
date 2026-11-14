@@ -112,6 +112,17 @@ static int wait_gone(pid_t pid) {
     return 0;
 }
 
+/* Tick until the backoff expires and supervision forks the next runner. */
+static pid_t respawned(sqlite3 *db) {
+    for (int i = 0; i < 60; i++) {
+        channel_tick(db);
+        pid_t p = (pid_t)chan_pid(db);
+        if (p > 0) return p;
+        usleep(100000);
+    }
+    return 0;
+}
+
 /* ── Threshold resolution: <ext>.deaf_timeout > channel_deaf_timeout > built-in ── */
 static void test_threshold_resolution(void) {
     sqlite3 *db = seed(NULL);
@@ -206,19 +217,135 @@ static void test_wedged_runner_restarts(void) {
     assert(channel_reap(pid, db) == 1);
     assert(channel_next_deadline() > 0);
 
-    pid_t next = 0;
-    for (int i = 0; i < 60 && !next; i++) {
-        channel_tick(db);
-        pid_t p = (pid_t)chan_pid(db);
-        if (p > 0 && p != pid) next = p;
-        else usleep(100000);
-    }
-    assert(next > 0);
+    pid_t next = respawned(db);
+    assert(next > 0 && next != pid);
     assert(still_running(next));
 
     channel_shutdown_all();
     db_close(db);
     printf("  PASS test_wedged_runner_restarts\n");
+}
+
+/* ── Crash supervision ──
+ * Driven on a supplied clock (channel_tick_at), so backoffs and the healthy
+ * threshold need no real waiting. */
+static char *chan_text(sqlite3 *db, const char *col) {
+    char sql[128];
+    snprintf(sql, sizeof(sql), "SELECT %s FROM channels WHERE name='" CH "';", col);
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK);
+    char *v = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_text(s, 0))
+        v = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    return v;
+}
+
+static int chan_is(sqlite3 *db, const char *col, const char *want) {
+    char *v = chan_text(db, col);
+    int same = want ? (v && strcmp(v, want) == 0) : v == NULL;
+    free(v);
+    return same;
+}
+
+/* A channel mid-swap: running CH, with 'older' as the revert target. */
+static sqlite3 *seed_swapped(void) {
+    sqlite3 *db = seed(NULL);
+    assert(sqlite3_exec(db,
+        "INSERT INTO extensions(name, path, version, owner_agent, published, enabled)"
+        " VALUES('older', '/tmp/test_channel_deaf_ext', '0.0.0', 'default', 0, 1);"
+        "INSERT INTO config(key, value, default_value, description)"
+        " VALUES('older.enabled', '1', '0', 'launch gate');"
+        "UPDATE channels SET prev_extension_name='older' WHERE name='" CH "';",
+        NULL, NULL, NULL) == SQLITE_OK);
+    return db;
+}
+
+/* Kill the runner and reap it; returns the respawn delay supervision chose. */
+static time_t crash(sqlite3 *db, pid_t pid) {
+    time_t t0 = time(NULL);
+    kill(pid, SIGKILL);
+    assert(wait_gone(pid));
+    assert(channel_reap(pid, db) == 1);
+    assert(chan_pid(db) == 0);            /* no dead pid left in the row */
+    return channel_next_deadline() - t0;
+}
+
+/* Tick at a time past any backoff; returns the respawned runner. */
+static pid_t respawn(sqlite3 *db, time_t *clock) {
+    *clock += 1000;
+    channel_tick_at(db, *clock);
+    pid_t pid = (pid_t)chan_pid(db);
+    assert(pid > 0);
+    return pid;
+}
+
+static void test_crash_loop_reverts_then_keeps_trying(void) {
+    sqlite3 *db = seed_swapped();
+    time_t clock = time(NULL);
+    channel_tick_at(db, clock);
+    pid_t pid = (pid_t)chan_pid(db);
+    assert(pid > 0);
+
+    /* Two crashes: retried on the swapped-in code, each delay longer. */
+    time_t d1 = crash(db, pid);
+    time_t d2 = crash(db, respawn(db, &clock));
+    assert(d2 > d1);
+    assert(chan_is(db, "extension_name", CH));
+
+    /* The third goes back to the predecessor. No window is consulted — these
+     * crashes are 1000 clock-seconds apart, a slow loop by any measure. */
+    crash(db, respawn(db, &clock));
+    assert(chan_is(db, "extension_name", "older"));
+    assert(chan_is(db, "prev_extension_name", NULL));
+
+    /* The reverted code crashing too has nothing left to revert to — and the
+     * channel is still never taken out of service: every death schedules a
+     * respawn, with the delay capped. */
+    time_t d = 0;
+    for (int i = 0; i < 12; i++) d = crash(db, respawn(db, &clock));
+    assert(d >= CHANNEL_MAX_BACKOFF - 1 && d <= CHANNEL_MAX_BACKOFF + 1);
+    assert(chan_is(db, "status", "active"));
+    assert(chan_is(db, "extension_name", "older"));
+    pid = respawn(db, &clock);
+    assert(still_running(pid));
+
+    channel_shutdown_all();
+    db_close(db);
+    printf("  PASS test_crash_loop_reverts_then_keeps_trying\n");
+}
+
+/* The predecessor is a revert target only while the new code proves itself. */
+static void test_healthy_swap_is_accepted(void) {
+    sqlite3 *db = seed_swapped();
+    time_t clock = time(NULL);
+    channel_tick_at(db, clock);
+    pid_t pid = (pid_t)chan_pid(db);
+    assert(pid > 0);
+
+    /* One crash on the way up, then it holds. */
+    crash(db, pid);
+    pid = respawn(db, &clock);
+    channel_tick_at(db, clock + CHANNEL_HEALTHY_AFTER - 1);
+    assert(chan_is(db, "prev_extension_name", "older"));     /* still proving */
+    channel_tick_at(db, clock + CHANNEL_HEALTHY_AFTER);
+    assert(chan_is(db, "prev_extension_name", NULL));        /* accepted */
+
+    /* A crash loop after that is an outage, not a bad swap: no rollback, and
+     * the count started over (first delay again, not the fourth). */
+    clock += CHANNEL_HEALTHY_AFTER;
+    time_t d = 0;
+    for (int i = 0; i < 4; i++) {
+        time_t di = crash(db, pid);
+        if (i == 0) d = di;
+        pid = respawn(db, &clock);
+    }
+    assert(d <= 3);
+    assert(chan_is(db, "extension_name", CH));
+
+    channel_shutdown_all();
+    db_close(db);
+    printf("  PASS test_healthy_swap_is_accepted\n");
 }
 
 /* ── A channel with no watched transport is never judged deaf ── */
@@ -273,6 +400,8 @@ int main(int argc, char **argv) {
     test_threshold_resolution();
     test_enrolment();
     test_wedged_runner_restarts();
+    test_crash_loop_reverts_then_keeps_trying();
+    test_healthy_swap_is_accepted();
     test_unenrolled_never_bounced();
     test_watchdog_disabled();
     clean_all();

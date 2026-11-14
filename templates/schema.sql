@@ -166,11 +166,11 @@ CREATE TABLE IF NOT EXISTS agent_extensions (
 );
 
 -- ═══ Channels ═══
--- status lifecycle: draft → validated → active → broken. extension_install()
+-- status lifecycle: draft → validated → active. extension_install()
 -- inserts 'draft'; only `cclaw --channel <name> --check` (→validated) then
 -- `--activate` (→active) can reach 'active' — channel_launch_all() only execs
--- that state. channel_reap()'s flap detection writes 'broken' on crash-loop;
--- another --check retries validated→active.
+-- that state. A crash-looping channel stays 'active' and is retried on a
+-- backoff; 'broken' exists only in rows an older build left (--check lifts it).
 CREATE TABLE IF NOT EXISTS channels (
   name TEXT PRIMARY KEY,
   extension_name TEXT NOT NULL DEFAULT '',

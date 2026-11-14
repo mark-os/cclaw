@@ -2,7 +2,7 @@
 #define CCLAW_CHANNEL_H
 
 /* Channel supervisor: spawns, monitors, and restarts the per-channel JS
- * runner processes, with flap detection. Owns the channels table and the
+ * runner processes, with crash backoff. Owns the channels table and the
  * daemon side of the channel lifecycle.
  */
 
@@ -12,13 +12,17 @@
 #include <time.h>
 
 #define CHANNEL_MAX 16
-#define CHANNEL_MAX_RESTARTS 3
+#define CHANNEL_MAX_RESTARTS 3     /* crashes in a row that revert a swap */
 
 /* Cap on a parsed admin_ids list — an operator-typed config value, not
  * user-controlled input; sized generously above any real admin roster. */
 #define CHANNEL_ADMIN_IDS_MAX 32
-#define CHANNEL_FLAP_WINDOW 300   /* 3 crashes in 5 min = flapping */
-#define CHANNEL_MAX_BACKOFF 60
+#define CHANNEL_HEALTHY_AFTER 300  /* seconds up before the crash count resets */
+/* Ceiling on the respawn delay. This is the reconnect budget, not a machine
+ * speed: chat services meter session starts per day and punish a client that
+ * hammers them. With the reset above, a channel that cannot stay up restarts
+ * at most once per five minutes, whichever way it is failing. */
+#define CHANNEL_MAX_BACKOFF 300
 
 /* Deaf-channel watchdog (specs/channels.md): a runner that is alive but whose
  * transport has delivered nothing for this many seconds gets bounced.
@@ -30,17 +34,17 @@
 typedef struct {
     pid_t pid;
     char name[64];
-    int restart_count;
-    time_t first_crash;       /* timestamp of first crash in current window */
+    int restart_count;        /* crashes in a row; reset once healthy */
     time_t next_restart_at;   /* 0 = not pending restart */
-    time_t started_at;        /* when process was last launched */
+    time_t started_at;        /* when this runner was launched; 0 once judged healthy */
 } ChannelProc;
 
 /* Lifecycle */
 int channel_launch_all(sqlite3 *db);
 void channel_shutdown_all(void);
 
-/* draft|broken → validated (on a passing --check). Returns 0 on success,
+/* draft|broken → validated (on a passing --check; 'broken' is only found in
+ * rows an older build's flap detection left behind). Returns 0 on success,
  * -1 if the channel doesn't exist or isn't in an allowed source state. */
 int channel_mark_validated(sqlite3 *db, const char *name);
 
@@ -48,13 +52,14 @@ int channel_mark_validated(sqlite3 *db, const char *name);
  * channel doesn't exist or isn't 'validated'. */
 int channel_activate(sqlite3 *db, const char *name);
 
-/* Current lifecycle status ("draft"/"validated"/"active"/"broken"), or NULL
+/* Current lifecycle status ("draft"/"validated"/"active"), or NULL
  * if the channel doesn't exist. Caller frees. */
 char *channel_get_status(sqlite3 *db, const char *name);
 
 /* Swap the extension behind a channel. Records the current extension as the
  * revert target (only on a real change), repoints, and bounces the process —
- * the daemon's supervision respawns it with the new pointer. Returns 0,
+ * the daemon's supervision respawns it with the new pointer. The target lasts
+ * until the new runner has stayed up CHANNEL_HEALTHY_AFTER seconds. Returns 0,
  * -1 unknown channel, -2 unknown extension. */
 int channel_swap(sqlite3 *db, const char *name, const char *extension);
 
@@ -136,12 +141,19 @@ time_t channel_activity_age(sqlite3 *db, const char *name);
 /* Resolved deaf threshold in seconds for a channel; 0 = watchdog off. */
 int channel_deaf_timeout(sqlite3 *db, const char *name);
 
+/* Seconds to wait before respawning a channel that has died restart_count
+ * times: exponential, capped at CHANNEL_MAX_BACKOFF. */
+int channel_backoff_delay(int restart_count);
+
 /* Reap — returns 1 if pid belonged to a channel, 0 otherwise */
 int channel_reap(pid_t pid, sqlite3 *db);
 
 /* Tick — reconcile with the channels table (launch newly-active, stop
  * deactivated), restart crashed channels whose backoff expired. */
 void channel_tick(sqlite3 *db);
+/* The same, with the clock supplied: supervision is all about elapsed time,
+ * and its tests cannot wait five minutes. */
+void channel_tick_at(sqlite3 *db, time_t now);
 
 /* Channel events — process pending channel_events rows */
 void channel_consume_events(sqlite3 *db);

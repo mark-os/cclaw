@@ -29,6 +29,30 @@ The agent decides *when to speak* in listen-and-decide chats.
   name. The launch gate additionally requires `<ext>.enabled` truthy and all
   `required` config keys resolvable (specs/config.md).
 
+### Crash supervision
+
+Two things matter when a runner dies, and they pull in opposite directions:
+the channel is how the operator reaches the agent, so it must come back on its
+own; and chat services meter reconnects, so it must not come back too often.
+
+- **Never give up.** A dead runner is always respawned. There is no terminal
+  state that waits for an operator who can no longer be reached.
+- **Growing delay.** The respawn waits 2 s, 4 s, 8 s … up to five minutes
+  (`CHANNEL_MAX_BACKOFF`), by the number of crashes in a row. The count resets
+  once a runner has stayed up five minutes (`CHANNEL_HEALTHY_AFTER`). Either
+  way a channel that cannot stay up reconnects at most about once per five
+  minutes — under 300 session starts a day.
+- **A bad swap is undone.** On the third crash in a row, a channel with a
+  `prev_extension_name` (set by `channel swap`) is pointed back at it, the
+  admins are told, and the count starts over. An extension that takes two
+  minutes to die is reverted like one that dies at once. (The bounce that
+  loads the new code is itself the first of the three.)
+- **A swap that holds is accepted.** Once the new runner has stayed up five
+  minutes, `prev_extension_name` is cleared. The predecessor is a revert
+  target only while the new code is proving itself — a crash loop months
+  later is an outage, not a bad swap, and must not roll the channel back.
+  After that `channel revert` has nothing to revert to; swap by name instead.
+
 ### Deaf-channel watchdog
 
 Supervision only ever hears about a runner that *exits*, but a runner can be
@@ -44,8 +68,8 @@ within a minute or two, which is exactly the signal.
 `channel_tick` bounces a tracked channel whose mark is older than its
 threshold: `SIGTERM` plus a `channel deaf …` error log, then the ordinary
 reap → backoff → respawn path does the restart (so a bounce is
-indistinguishable from a crash to the rest of supervision, flap detection
-included). The mark is refreshed at every launch, respawn, and bounce, which is
+indistinguishable from a crash to the rest of supervision — see Crash
+supervision below). The mark is refreshed at every launch, respawn, and bounce, which is
 both the grace period — a fresh runner gets a full threshold to connect,
 whatever staleness it inherited — and the debounce for a child that ignores
 `SIGTERM`.

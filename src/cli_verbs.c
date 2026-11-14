@@ -234,7 +234,8 @@ int channel_cli_main(int argc, char *argv[]) {
         if (r == -2) { fprintf(stderr, "error: extension '%s' not registered\n", argv[4]); rc = 1; }
         else if (r != 0) { fprintf(stderr, "error: channel '%s' not found\n", argv[3]); rc = 1; }
         else printf("channel %s now runs extension '%s' (previous kept as revert "
-                    "target; daemon respawns the process within seconds)\n",
+                    "target until this one has run 5 minutes; daemon respawns "
+                    "the process within seconds)\n",
                     argv[3], argv[4]);
     } else if (strcmp(sub, "revert") == 0 && argc >= 4) {
         if (channel_revert(db, argv[3]) != 0) {

@@ -403,11 +403,11 @@ Channel processes managed by the daemon. The extension system writes these rows.
 | `default_tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. Frozen onto every session the gate creates for an *unrouted* chat (open door **and** admin fallback). Set by `route add <ch> '*' <agent> --tools ...` |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
-Status lifecycle: `draft` → `validated` → `active` → `broken`.
+Status lifecycle: `draft` → `validated` → `active`.
 - `extension_install()` inserts as `draft`.
 - `cclaw --channel <name> --check` validates config → `validated`.
 - `--activate` promotes → `active`; `channel_launch_all()` only execs channels in this state.
-- `channel_reap()` crash-loop flap detection writes `broken`; another `--check` retries the cycle.
+- A crash-looping channel stays `active`: `channel_reap()` retries it on a growing backoff (see [channels.md](channels.md#crash-supervision)). `broken` is only found in rows an older build left behind; `--check` lifts it.
 
 ---
 

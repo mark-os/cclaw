@@ -693,7 +693,8 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
              * ordinary one for the same tool. */
             const char *park_why = sens_hit ? APPROVAL_PARK_SENSITIVE
                                             : APPROVAL_PARK_REQUIRED;
-            Approval *ap = approval_get_for_tool_call(proc_db(), session_id, tc->call_id);
+            Approval *ap = approval_for_call(proc_db(), session_id, tc->call_id,
+                                             tc->name, tc->arguments);
             int approved = ap && ap->state && strcmp(ap->state, "approved") == 0;
             int denied   = ap && ap->state && strcmp(ap->state, "denied") == 0;
             int pending  = ap && ap->state && strcmp(ap->state, "pending") == 0;

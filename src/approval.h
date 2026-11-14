@@ -79,6 +79,14 @@ Approval *approval_get_pending_subtree(sqlite3 *db, int64_t root_session_id);
 Approval *approval_get_for_tool_call(sqlite3 *db, int64_t session_id,
                                      const char *tool_call_id);
 
+/* The approval that answers THIS call: found by (session, call id) and parked
+ * for the same tool — and, for a rerun row, the same arguments. Call ids come
+ * from the model and are reused; a row that fails the match is somebody
+ * else's decision and reads as no approval (NULL), so the call parks afresh. */
+Approval *approval_for_call(sqlite3 *db, int64_t session_id,
+                            const char *tool_call_id, const char *tool_name,
+                            const char *args_json);
+
 /* Consume an 'approved' approval (approved → consumed), making a once-approval
  * single-use. Returns 0 if a row transitioned, -1 otherwise (already consumed,
  * not approved, or missing). */

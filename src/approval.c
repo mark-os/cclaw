@@ -278,6 +278,24 @@ static int capability_match(sqlite3 *db, const char *args_a, const char *args_b)
     return match;
 }
 
+Approval *approval_for_call(sqlite3 *db, int64_t session_id,
+                            const char *tool_call_id, const char *tool_name,
+                            const char *args_json) {
+    Approval *a = approval_get_for_tool_call(db, session_id, tool_call_id);
+    if (!a) return NULL;
+    int same = a->tool_name && tool_name && strcmp(a->tool_name, tool_name) == 0;
+    /* An apply row stores the document its tool built, not the raw call. */
+    if (same && a->resolve && strcmp(a->resolve, "rerun") == 0)
+        same = capability_match(db, a->args_json, args_json);
+    if (same) return a;
+    LOG_WARN_("approval id=%lld (%s) does not match call %s (%s) — call id "
+              "reused; treating as unapproved", (long long)a->id,
+              a->tool_name ? a->tool_name : "?", tool_call_id,
+              tool_name ? tool_name : "?");
+    approval_free(a);
+    return NULL;
+}
+
 /* Scan this session's rerun approvals in `state` for a capability match.
  * unexpired_only guards the ticket path: an approved row past its original
  * park deadline is stale authority, not a ticket. Returns row id or 0. */

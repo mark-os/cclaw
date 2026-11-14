@@ -304,6 +304,47 @@ static void test_get_for_tool_call(void) {
     printf("  PASS: test_get_for_tool_call\n");
 }
 
+/* The gate's lookup: a row found by (session, call id) answers this call only
+ * if it parked the same tool with the same arguments. Call ids come from the
+ * model and get reused; a decision made for one call must not cover another. */
+static void test_for_call_matches_name_and_args(void) {
+    sqlite3 *db = fresh_db();
+    db_agent_upsert(db, "bot", NULL, NULL);
+    int64_t sid = session_create(db, "test", "bot", -1, 0);
+    const char *args = "{\"command\":\"ls\",\"timeout\":5}";
+    int64_t id = approval_create(db, sid, "call_r", "shell_exec",
+                                 APPROVAL_PARK_REQUIRED, args, "rerun");
+    assert(id > 0);
+    Approval *r = approval_resolve(db, id, 1, "cli");
+    assert(r); approval_free(r);
+
+    /* The frozen call itself, and the same request with its keys reordered. */
+    Approval *a = approval_for_call(db, sid, "call_r", "shell_exec", args);
+    assert(a && a->id == id); approval_free(a);
+    a = approval_for_call(db, sid, "call_r", "shell_exec",
+                          "{\"timeout\":5, \"command\":\"ls\"}");
+    assert(a && a->id == id); approval_free(a);
+
+    /* Same id, same tool, different command: not this approval. */
+    assert(approval_for_call(db, sid, "call_r", "shell_exec",
+                             "{\"command\":\"rm -rf /\",\"timeout\":5}") == NULL);
+    /* Same id, different tool. */
+    assert(approval_for_call(db, sid, "call_r", "file_write", args) == NULL);
+
+    /* An apply-style row holds the document its tool built, not the call's
+     * raw arguments, so only the tool name can be compared. */
+    int64_t ap = approval_create(db, sid, "call_a", "cron_set",
+                                 APPROVAL_PARK_REQUIRED, "{\"name\":\"x\"}", "apply");
+    assert(ap > 0);
+    a = approval_for_call(db, sid, "call_a", "cron_set", "{\"anything\":1}");
+    assert(a && a->id == ap); approval_free(a);
+    assert(approval_for_call(db, sid, "call_a", "shell_exec", "{}") == NULL);
+
+    db_close(db);
+    clean_db();
+    printf("  PASS: test_for_call_matches_name_and_args\n");
+}
+
 static void test_consume(void) {
     sqlite3 *db = fresh_db();
     db_agent_upsert(db, "bot", NULL, NULL);
@@ -676,6 +717,7 @@ int main(void) {
     test_approval_list_expired();
     test_tool_mode();
     test_get_for_tool_call();
+    test_for_call_matches_name_and_args();
     test_consume();
     test_pending_subtree();
     test_pending_order_matches_subtree();

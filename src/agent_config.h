@@ -30,8 +30,8 @@ void agent_caps_refresh(sqlite3 *db, const char *agent, AgentCaps *caps);
 void agent_caps_free(AgentCaps *caps);
 
 /* Would a read_path/write_path grant of `value` expose cclaw.db to a sandboxed
- * child? True when it names the DB file, one of its -wal/-shm siblings, or any
- * directory containing it.
+ * child? True when it names the DB file, one of its -wal/-shm siblings, the
+ * .cclaw_key beside it, or any directory containing it.
  *
  * The DB is the policy store for the mechanism doing the containment, so it is
  * masked unconditionally inside the sandbox and no grant may unmask it. The

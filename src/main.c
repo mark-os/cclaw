@@ -582,7 +582,11 @@ static int run_cli(char *db_path, const char *prompt,
 
     /* Session selection */
     session_id = cli_select_session(proc_db(), session_id, new_session);
-    if (session_id < 0) { agent_setup_destroy(&setup); free(base_dir); config_free(proc_cfg()); db_close(proc_db()); free(db_path); return 1; }
+    if (session_id < 0) {
+        /* Usually the sessions.agent_name foreign key: the agent has no row. */
+        fprintf(stderr, "error: cannot open a session for agent '%s': %s\n",
+                proc_agent_name(), sqlite3_errmsg(proc_db()));
+        agent_setup_destroy(&setup); free(base_dir); config_free(proc_cfg()); db_close(proc_db()); free(db_path); return 1; }
     proc_set_cli_session(session_id);
     setup.req_cfg_ctx.session_id = session_id;
 

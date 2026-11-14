@@ -523,6 +523,17 @@ int update_checksum_ok(const char *list, const char *asset,
     return 0;
 }
 
+int update_write_file(const char *path, const void *data, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    int ok = fwrite(data, 1, len, f) == len;
+    int werr = errno;
+    /* fclose exactly once: it frees the stream even when its flush fails. */
+    if (fclose(f) != 0) { if (ok) werr = errno; ok = 0; }
+    if (!ok) errno = werr;
+    return ok ? 0 : -1;
+}
+
 static int update_install(sqlite3 *db, const char *self, const char *repo,
                           const char *asset, const char *tag) {
     char url[768], newpath[4096];
@@ -567,10 +578,8 @@ static int update_install(sqlite3 *db, const char *self, const char *repo,
     }
     http_response_free(&c);
 
-    FILE *f = fopen(newpath, "wb");
-    if (!f || fwrite(r.data, 1, r.len, f) != r.len || fclose(f) != 0) {
+    if (update_write_file(newpath, r.data, r.len) != 0) {
         fprintf(stderr, "error: cannot write %s: %s\n", newpath, strerror(errno));
-        if (f) fclose(f);
         http_response_free(&r);
         unlink(newpath);
         return 1;
@@ -645,12 +654,25 @@ static void update_verify_notify(sqlite3 *db, const char *text) {
     free(agent);
 }
 
+/* Store the crash-loop marker. SQLite builds the JSON: the tag is whatever a
+ * release, a channel manifest or a sideloaded binary called itself. */
+static void verify_marker_set(sqlite3 *db, const char *tag, long long first,
+                              int starts) {
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_object('tag', substr(?1,1,63), 'first_start', ?2,"
+            " 'starts', ?3)", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, tag, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 2, first);
+        sqlite3_bind_int(st, 3, starts);
+        if (sqlite3_step(st) == SQLITE_ROW)
+            config_set(db, "update.verify", (const char *)sqlite3_column_text(st, 0));
+    }
+    sqlite3_finalize(st);
+}
+
 void update_verify_arm(sqlite3 *db, const char *tag) {
-    char v[160];
-    /* tag is a release tag we just matched against GitHub — no escaping
-     * hazard worth a JSON builder. */
-    snprintf(v, sizeof(v), "{\"tag\":\"%.63s\",\"first_start\":0,\"starts\":0}", tag);
-    config_set(db, "update.verify", v);
+    verify_marker_set(db, tag, 0, 0);
 }
 
 int update_verify_startup(sqlite3 *db) {
@@ -688,11 +710,7 @@ int update_verify_startup(sqlite3 *db) {
     }
 
     if (starts < UPDATE_VERIFY_MAX_STARTS) {
-        char nv[160];
-        snprintf(nv, sizeof(nv),
-                 "{\"tag\":\"%.63s\",\"first_start\":%lld,\"starts\":%d}",
-                 tag, first, starts);
-        config_set(db, "update.verify", nv);
+        verify_marker_set(db, tag, first, starts);
         LOG_INFO_("update verify: start %d/%d for %s (window %llds)",
                   starts, UPDATE_VERIFY_MAX_STARTS, tag,
                   (long long)(now - first));
@@ -1014,10 +1032,8 @@ static int update_from_channel(sqlite3 *db, const char *self, const char *channe
     printf("signature and checksum verified (%zu bytes)\n", len);
     char newpath[4096];
     snprintf(newpath, sizeof(newpath), "%s.new", self);
-    FILE *f = fopen(newpath, "wb");
-    if (!f || fwrite(data, 1, len, f) != len || fclose(f) != 0) {
+    if (update_write_file(newpath, data, len) != 0) {
         fprintf(stderr, "error: cannot write %s: %s\n", newpath, strerror(errno));
-        if (f) fclose(f);
         unlink(newpath);
         free(data);
         goto out_rel;

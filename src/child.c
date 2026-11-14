@@ -96,14 +96,27 @@ int child_has_session(int64_t session_id) {
     return 0;
 }
 
+/* What a child that could not exec says instead of a tool result: a complete
+ * frame in the format child_drain_pipe() parses (status byte, 4-byte meta
+ * length, body). Static so the post-fork path stays async-signal-safe. */
+const unsigned char child_exec_fail_frame[] =
+    "\001"              /* RUNTOOL_STATUS_ERROR */
+    "\0\0\0\0"          /* no hosts meta */
+    "error: execve failed";
+const size_t child_exec_fail_frame_len = sizeof(child_exec_fail_frame) - 1;
+
 /* ── SIGCHLD self-pipe ──────────────────────────────────────────── */
 
 static int g_chld_pipe[2] = {-1, -1};
 
 static void sigchld_handler(int sig) {
     (void)sig;
+    /* A full self-pipe makes write() fail with EAGAIN; the code this handler
+     * interrupted must not see that in its errno. */
+    int saved = errno;
     char c = 1;
     (void)write(g_chld_pipe[1], &c, 1);
+    errno = saved;
 }
 
 int child_sigchld_init(void) {
@@ -271,9 +284,8 @@ ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
         char *const argv[] = {"cclaw", "--run-tool", NULL};
         char *const envp[] = {proc_log_level_env(), proc_js_heap_env(), NULL};
         execve("/proc/self/exe", argv, envp);
-        /* execve failed — write a framed static error (4-byte zero meta_len
-         * header, then the message) to fd 3 and die */
-        (void)write(FD_REQUEST, "\0\0\0\0error: execve failed", 24);
+        /* execve failed — write a framed static error to fd 3 and die */
+        (void)write(FD_REQUEST, child_exec_fail_frame, child_exec_fail_frame_len);
         _exit(127);
     }
 

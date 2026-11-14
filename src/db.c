@@ -918,22 +918,27 @@ static int db_schema_upgrade(sqlite3 *db) {
         if (schema_patches[i].version <= uv) continue;
         if (schema_patches[i].version > CCLAW_SCHEMA_VERSION) break;
 
+        /* Every step is checked: a patch that ran outside its transaction, or
+         * whose version stamp or COMMIT did not land, is not an upgrade. */
         char *err = NULL;
-        sqlite3_exec(db, "BEGIN EXCLUSIVE", NULL, NULL, NULL);
-        int rc = schema_patches[i].fn
+        char pragma[48];
+        snprintf(pragma, sizeof(pragma), "PRAGMA user_version=%d", schema_patches[i].version);
+        int rc = sqlite3_exec(db, "BEGIN EXCLUSIVE", NULL, NULL, &err);
+        if (rc == SQLITE_OK)
+            rc = schema_patches[i].fn
                      ? (schema_patches[i].fn(db) == 0 ? SQLITE_OK : SQLITE_ERROR)
                      : sqlite3_exec(db, schema_patches[i].sql, NULL, NULL, &err);
+        if (rc == SQLITE_OK) rc = sqlite3_exec(db, pragma, NULL, NULL, &err);
+        if (rc == SQLITE_OK) rc = sqlite3_exec(db, "COMMIT", NULL, NULL, &err);
         if (rc != SQLITE_OK) {
             LOG_ERROR_("schema patch v%d failed: %s", schema_patches[i].version,
                        err ? err : "unknown");
             sqlite3_free(err);
+            /* No-op (and harmless) when BEGIN never opened or a failed COMMIT
+             * already rolled back. */
             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             return 0;
         }
-        char pragma[48];
-        snprintf(pragma, sizeof(pragma), "PRAGMA user_version=%d", schema_patches[i].version);
-        sqlite3_exec(db, pragma, NULL, NULL, NULL);
-        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
         LOG_INFO_("schema upgraded to v%d", schema_patches[i].version);
     }
     db_backup_prune(db, uv);

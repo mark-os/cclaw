@@ -411,6 +411,9 @@ char *truncate_and_spill(sqlite3 *db, const char *src, int64_t session_id,
         if (i + 1 >= TRUNCATE_MAX_BYTES && cut == len) { cut = TRUNCATE_MAX_BYTES; break; }
     }
     if (cut >= len) return strdup(src);
+    /* A byte-budget cut can land inside a multi-byte character; back up to
+     * its first byte so the kept prefix stays valid UTF-8. */
+    while (cut > 0 && ((unsigned char)src[cut] & 0xC0) == 0x80) cut--;
 
     char path[PATH_MAX + 64];
     if (spill_path_build(db, session_id, tool_call_id, path, sizeof(path)) != 0)

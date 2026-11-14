@@ -109,6 +109,10 @@ void child_sigchld_teardown(void);
 
 /* ── Result pipes ───────────────────────────────────────────────────── */
 
+/* The frame a tool child writes when it cannot exec the --run-tool broker. */
+extern const unsigned char child_exec_fail_frame[];
+extern const size_t child_exec_fail_frame_len;
+
 /* Drain a child's result pipe (nonblocking) into its outbuf. */
 void child_drain_pipe(ChildProc *c);
 

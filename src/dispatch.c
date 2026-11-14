@@ -955,8 +955,10 @@ static int job_start(int64_t session_id, PendingToolCall *tc, ChildProc *cp) {
     char rel[128] = "";
     if (job_log_path_build(proc_db(), session_id, tc->call_id,
                            logp, sizeof(logp)) == 0) {
-        /* O_NOFOLLOW: never follow a symlink planted at the log path. */
-        int lfd = open(logp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
+        /* O_NOFOLLOW: never follow a symlink planted at the log path.
+         * O_CLOEXEC: the fd is the daemon's, not every later child's. */
+        int lfd = open(logp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                       0644);
         if (lfd >= 0) cp->log_fd = lfd;
         job_log_rel(session_id, logp, rel, sizeof(rel));
     }

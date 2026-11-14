@@ -817,6 +817,8 @@ static void test_rate_limit_and_cost(void) {
 /* v56 -> v57: memory_entries becomes memory_notes (ids in display order),
  * every block is attached to its owner, and the renamed tools carry their
  * grants, the stored default toolset and the tools rows with them. */
+static int refuse_commit(void *unused) { (void)unused; return 1; }
+
 static void test_schema_patch_v57(void) {
     const char *path = "/tmp/test_cclaw_schema_v57.sqlite";
     char junk[192];
@@ -860,8 +862,17 @@ static void test_schema_patch_v57(void) {
         NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 56);
 
-    assert(db_schema_compat(db) == 1);
+    /* A patch whose COMMIT fails did not happen: the upgrade must report
+     * failure and leave the DB at the version it started from, not log
+     * "upgraded" and hand a v56-shaped database to a v57 build. */
+    sqlite3_commit_hook(db, refuse_commit, NULL);
+    assert(db_schema_compat(db) == 0);
+    sqlite3_commit_hook(db, NULL, NULL);
     int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_UPGRADABLE && uv == 56);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM memory_entries;", 0, -1) == 4);
+
+    assert(db_schema_compat(db) == 1);
     assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT);
 
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sqlite_master"

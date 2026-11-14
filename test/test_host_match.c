@@ -47,6 +47,19 @@ static void test_suffix_no_false_positive(void) {
     PASS();
 }
 
+/* The fully-qualified spelling names the same host, for allow and deny alike. */
+static void test_trailing_dot(void) {
+    TEST("trailing_dot");
+    char *rules[] = {".github.com", "example.org"};
+    if (!host_match(rules, 2, "api.github.com.")) FAIL("suffix rule, trailing dot");
+    if (!host_match(rules, 2, "example.org.")) FAIL("exact rule, trailing dot");
+    if (host_match(rules, 2, "evilgithub.com.")) FAIL("dot boundary still holds");
+    char *deny[] = {"secret.example.com"};
+    if (!host_covered(deny, 1, "secret.example.com.")) FAIL("deny label, trailing dot");
+    if (!host_covered(deny, 1, "a.secret.example.com.")) FAIL("deny subdomain, trailing dot");
+    PASS();
+}
+
 static void test_case_insensitive_ascii(void) {
     TEST("case_insensitive_ascii");
     /* ASCII fold must hold regardless of process locale (review-3 F2) */
@@ -332,6 +345,7 @@ static void test_url_host_normalize_plain_untouched(void) {
 int main(void) {
     TEST_INIT();
     printf("test_host_match\n");
+    test_trailing_dot();
 
     /* host_match */
     test_exact_match();

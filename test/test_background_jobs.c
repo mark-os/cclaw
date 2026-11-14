@@ -89,6 +89,27 @@ static void test_drain_streams_to_log(void) {
     printf("  PASS test_drain_streams_to_log\n");
 }
 
+/* ── the exec-failure frame parses as an error result ─────────────── */
+static void test_exec_fail_frame_is_readable(void) {
+    int p[2];
+    assert(pipe(p) == 0);
+    ChildProc c;
+    memset(&c, 0, sizeof(c));
+    c.result_pipe = p[0];
+    c.log_fd = -1;
+    assert(write(p[1], child_exec_fail_frame, child_exec_fail_frame_len)
+           == (ssize_t)child_exec_fail_frame_len);
+    close(p[1]);
+    child_drain_pipe(&c);
+
+    assert(c.result_pipe == -1);
+    assert(c.frame_status == 1);                 /* the child said: error */
+    assert(c.hosts_json == NULL);
+    assert(c.outbuf && strcmp(c.outbuf, "error: execve failed") == 0);
+    free(c.outbuf);
+    printf("  PASS test_exec_fail_frame_is_readable\n");
+}
+
 /* ── job log path + tail round trip ───────────────────────────────── */
 static void test_log_path_and_tail(void) {
     sqlite3 *db = test_db_open(":memory:");
@@ -286,6 +307,7 @@ int main(void) {
     assert(mkdtemp(g_ws) != NULL);
     printf("test_background_jobs:\n");
     test_drain_streams_to_log();
+    test_exec_fail_frame_is_readable();
     test_log_path_and_tail();
     test_context_block_lists_jobs();
     test_recovery_reconciles_orphans();

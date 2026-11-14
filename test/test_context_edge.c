@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include "context.h"
+#include "run_tool.h"
 #include "test_util.h"
 
 static void test_session_tmp_dir(void) {
@@ -47,12 +48,47 @@ static void test_session_tmp_dir_agent(void) {
     printf("  PASS test_session_tmp_dir_agent\n");
 }
 
+/* A byte-budget cut that lands inside a multi-byte character must back up to
+ * the character's first byte: half a character is invalid UTF-8, and the
+ * provider rejects the whole request body that carries it. */
+static void test_spill_cut_keeps_utf8_whole(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    size_t n = RUNTOOL_RESULT_MAX + 64;
+    char *src = malloc(n + 1);
+    memset(src, 'a', n);
+    src[n] = '\0';
+    /* U+00E9 (C3 A9) straddling the budget: lead byte kept, tail cut. */
+    src[RUNTOOL_RESULT_MAX - 1] = (char)0xC3;
+    src[RUNTOOL_RESULT_MAX]     = (char)0xA9;
+
+    char *out = truncate_and_spill(db, src, 7, "call_utf8");
+    char *note = out ? strstr(out, "\n[truncated") : NULL;
+    assert(note);                                   /* it did truncate */
+    assert(note > out && note[-1] == 'a');          /* no orphaned lead byte */
+    assert((size_t)(note - out) == RUNTOOL_RESULT_MAX - 1);
+
+    /* Control: a cut on a character boundary keeps the full budget. */
+    src[RUNTOOL_RESULT_MAX - 1] = 'a';
+    src[RUNTOOL_RESULT_MAX]     = 'a';
+    char *out2 = truncate_and_spill(db, src, 7, "call_utf8");
+    char *note2 = out2 ? strstr(out2, "\n[truncated") : NULL;
+    assert(note2 && (size_t)(note2 - out2) == RUNTOOL_RESULT_MAX);
+
+    char path[512];
+    assert(spill_path_build(db, 7, "call_utf8", path, sizeof(path)) == 0);
+    unlink(path);
+    free(out); free(out2); free(src);
+    sqlite3_close(db);
+    printf("  PASS test_spill_cut_keeps_utf8_whole\n");
+}
+
 int main(void) {
     TEST_INIT();
     alarm(10);
     printf("test_context_edge:\n");
     test_session_tmp_dir();
     test_session_tmp_dir_agent();
+    test_spill_cut_keeps_utf8_whole();
     printf("All context_edge tests passed.\n");
     return 0;
 }

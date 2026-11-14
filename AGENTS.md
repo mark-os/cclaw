@@ -94,12 +94,13 @@ assumption that was reasonable, never checked, and wrong.
   another process may hold open; do not signal processes on the way out of a
   failure, because whatever is still alive is the part that survived. This is
   the fail-closed rule from the security model applied to lifecycle work.
-- **A hardcoded timeout or size limit is a latent portability bug.** It encodes
-  the speed of the machine it was written on. The same call that takes two
-  seconds from a cloud VM can take fifty on a small ARM box on a domestic
-  connection — and a fixed ceiling makes that feature simply impossible there,
-  with no configuration that helps. Give the caller a way to raise it, and keep
-  a bound so it stays a ceiling rather than a hang.
+- **Think about portability before hardcoding a limit.** A timeout or size
+  that measures how fast or how big *this machine* is will be wrong on
+  another: a call that takes two seconds from a cloud VM can take fifty on a
+  small ARM box on a domestic connection, and a fixed ceiling makes the
+  feature impossible there. Those get a way to raise them. A constant that
+  encodes policy rather than machine speed — a reconnect budget, a retry
+  count — is the same everywhere and is fine as a constant.
 - **Keep the local build at least as strict as the strictest CI target.**
   Distributions differ in what their toolchain enables by default (Debian and
   Ubuntu turn on `-Wformat-security` through hardening; others do not, and it
@@ -341,10 +342,12 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 
 ### Scripted agent testing with `-p` (what to expect)
 
-- **Approvals park and expire between `-p` runs.** Single-turn mode has no
-  interactive approver: a `request_config` call parks, the process exits, and
-  the next run tells the agent "Approval #N expired without a decision" — the
-  agent then tends to loop re-requesting. Plan multi-turn scripts around this.
+- **With piped stdin, `-p` denies an approval in the same run.** Single-turn
+  mode has no interactive approver: a `request_config` call parks and, when
+  stdin is not a tty, is answered DENY on the spot (`decided_via`
+  `auto:no-approver`), so the agent sees the refusal within that turn — and
+  then tends to loop re-requesting. Plan multi-turn scripts around this, or
+  pass `--auto-approve`.
 - **`--auto-approve` approves whatever is parked, not what you meant.** It is
   single-use and blind to which approval it answers — inspect
   `cclaw sqlite3 <db> "select id, tool_call_id, args_json, state from

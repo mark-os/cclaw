@@ -91,6 +91,10 @@ int update_rollback_apply(const char *db_path, char *msg, size_t cap);
  * the binary swap. Exposed for tests. */
 void update_verify_arm(sqlite3 *db, const char *tag);
 
+/* Write len bytes to path (created or truncated). Returns 0 only when every
+ * byte was written AND flushed; on failure errno says why. */
+int update_write_file(const char *path, const void *data, size_t len);
+
 /* Count this daemon start against an armed marker. Returns 1 when the start
  * limit was hit and the previous binary was restored (schema-checked; the
  * revert stays passive when the old build could not open the migrated DB) —

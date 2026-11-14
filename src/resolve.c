@@ -446,6 +446,12 @@ void handle_approval_park(int64_t session_id, const char *tool_call_id) {
              * is left behind. Applies to any session in the CLI tree,
              * including sub-agents. */
             int is_apply = a->resolve && strcmp(a->resolve, "apply") == 0;
+            /* It answers whatever is parked — say what that was. stderr, so
+             * a -p run's stdout stays the response alone. */
+            char *summary = approval_format_summary(proc_db(), a);
+            fprintf(stderr, "auto-approved #%lld: %s\n", (long long)a->id,
+                    summary ? summary : "?");
+            free(summary);
             if (is_apply) {
                 int64_t expires = time(NULL) + approval_timeout_seconds(proc_db());
                 approval_defer_decision(a->id, APPROVAL_ALWAYS, "cli:auto-approve", expires);

@@ -230,6 +230,12 @@ int grant_path_hits_db(sqlite3 *db, const char *kind, const char *value) {
     if (strcmp(g_abs, sib) == 0) return 1;
     snprintf(sib, sizeof(sib), "%s-shm", db_abs);
     if (strcmp(g_abs, sib) == 0) return 1;
+    /* The key that decrypts the secrets table sits beside the DB (secret.c)
+     * and is masked with it; a grant naming it is refused with it. */
+    const char *slash = strrchr(db_abs, '/');
+    snprintf(sib, sizeof(sib), "%.*s/.cclaw_key",
+             (int)(slash ? slash - db_abs : 0), db_abs);
+    if (strcmp(g_abs, sib) == 0) return 1;
     return 0;
 }
 

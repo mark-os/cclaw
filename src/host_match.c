@@ -72,6 +72,16 @@ int cidr_parse(const char *s, Cidr *out) {
 int host_match(char **rules, size_t n, const char *host) {
     if (!rules || !host) return 0;
     size_t hlen = strlen(host);
+    /* "example.com." is example.com: the fully-qualified spelling resolves
+     * the same and must meet the same rules. Done here, in the matcher, so
+     * no caller's allow or deny check can forget it. (Longer than a DNS name
+     * can be: left as written — it resolves nowhere.) */
+    char bare[256];
+    if (hlen > 1 && hlen <= sizeof(bare) && host[hlen - 1] == '.') {
+        memcpy(bare, host, --hlen);
+        bare[hlen] = '\0';
+        host = bare;
+    }
     for (size_t i = 0; i < n; i++) {
         const char *r = rules[i];
         if (!r) continue;

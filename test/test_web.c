@@ -317,6 +317,22 @@ static void test_admin_dashboard(void) {
     /* Cookie now carries auth on its own */
     assert(dash_get(curl, "http://127.0.0.1:19878/admin", page, sizeof(page)) == 200);
 
+    /* The attach form posts the field the handler reads (chat_id), and a
+     * post shaped like the form pins the chat to the session. */
+    assert(strstr(page, "value=attach_channel>"));
+    assert(strstr(page, "<input name=chat_id "));
+    assert(strstr(page, "name=channel_id") == NULL);
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
+                     "action=attach_channel&session_id=1"
+                     "&channel_name=telegram&chat_id=4242",
+                     page, sizeof(page)) == 303);
+    char *pinned = query_text(db,
+        "SELECT session_id FROM channel_routes"
+        " WHERE channel_name='telegram' AND chat_id='4242'");
+    assert(pinned && strcmp(pinned, "1") == 0);
+    free(pinned);
+    assert(dash_get(curl, "http://127.0.0.1:19878/admin", page, sizeof(page)) == 200);
+
     /* Hostile agent name is HTML-escaped everywhere */
     assert(strstr(page, "ev&lt;il&amp;name"));
     assert(strstr(page, "ev<il&name") == NULL);

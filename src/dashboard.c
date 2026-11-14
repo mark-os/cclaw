@@ -331,7 +331,7 @@ static void render_sessions(Buf *b) {
             buf_appendf(b, "</option>");
         }
         buf_appendf(b, "</select>"
-                       "<input name=channel_id size=12 placeholder=\"channel_id\">"
+                       "<input name=chat_id size=12 placeholder=\"chat_id\">"
                        " <button>attach</button></form></td></tr>");
     }
     buf_appendf(b, "</table>");

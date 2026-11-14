@@ -332,7 +332,7 @@ static int numeric_connect(ProxyContext *ctx, int port, char *resp, int cap) {
     return fd;
 }
 
-static void test_sni_sensitive_host_denied(void) {
+static void sni_sensitive_host_denied(char *allow, const char *sni) {
     /* The deny list outranks allow rules for the SNI as it does for the
      * CONNECT target: with ".example.com" granted and secret.example.com
      * marked sensitive, a tunnel opened for an allowed name must not carry a
@@ -344,7 +344,7 @@ static void test_sni_sensitive_host_denied(void) {
     pthread_t th;
     pthread_create(&th, NULL, sink_once, &sarg);
 
-    char *hosts[] = {"localhost", ".example.com", "127.0.0.0/8"};
+    char *hosts[] = {"localhost", allow, "127.0.0.0/8"};
     char *deny[]  = {"secret.example.com"};
     ProxyContext ctx;
     assert(proxy_bind(&ctx, tmpdir, hosts, 3, deny, 1) == 0);
@@ -360,7 +360,7 @@ static void test_sni_sensitive_host_denied(void) {
     assert(strncmp(resp, "OK", 2) == 0);
 
     unsigned char hello[512];
-    size_t hlen = build_client_hello("secret.example.com", hello, sizeof(hello));
+    size_t hlen = build_client_hello(sni, hello, sizeof(hello));
     write(fd, hello, hlen);
 
     char buf[16];
@@ -373,7 +373,14 @@ static void test_sni_sensitive_host_denied(void) {
 
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: SNI naming a sensitive host refused despite an allow rule\n");
+    printf("  PASS: SNI %s refused despite allow rule %s\n", sni, allow);
+}
+
+static void test_sni_sensitive_host_denied(void) {
+    sni_sensitive_host_denied(".example.com", "secret.example.com");
+    /* The fully-qualified spelling names the same host. Under a "*" grant the
+     * deny list is the only thing in the way, and it compared unequal. */
+    sni_sensitive_host_denied("*", "secret.example.com.");
 }
 
 static void test_numeric_needs_its_own_grant(void) {

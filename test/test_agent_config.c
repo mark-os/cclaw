@@ -106,6 +106,18 @@ static void test_db_path_grant_refused(void) {
     assert(agent_config_grant(db, "bot", "read_path",
                               "/tmp/cclaw_grantdb/cclaw.db-shm", 0) != 0);
 
+    /* The key file that decrypts the secrets table lives beside the DB and is
+     * off limits the same way. It has to exist for this to bite: a missing
+     * path is already refused through its ancestor (next case). Control: an
+     * ordinary existing file in the same directory is grantable. */
+    system("touch /tmp/cclaw_grantdb/.cclaw_key /tmp/cclaw_grantdb/notes.txt");
+    assert(agent_config_grant(db, "bot", "read_path",
+                              "/tmp/cclaw_grantdb/.cclaw_key", 0) != 0);
+    assert(agent_config_grant(db, "bot", "write_path",
+                              "/tmp/cclaw_grantdb/.cclaw_key", 0) != 0);
+    assert(agent_config_grant(db, "bot", "read_path",
+                              "/tmp/cclaw_grantdb/notes.txt", 0) == 0);
+
     /* A path that does not exist yet still resolves through its nearest
      * existing ancestor — otherwise "grant me ~/.cclaw/x" walks straight in. */
     assert(agent_config_grant(db, "bot", "read_path",
@@ -114,10 +126,10 @@ static void test_db_path_grant_refused(void) {
     /* Non-path kinds are untouched by the rule. */
     assert(agent_config_grant(db, "bot", "tool", "shell_exec", 0) == 0);
 
-    /* Nothing was written for any refused grant: only the three accepted. */
+    /* Nothing was written for any refused grant: only the four accepted. */
     AgentCaps caps;
     agent_caps_load(db, "bot", &caps);
-    assert(caps.read_count == 1);
+    assert(caps.read_count == 2);
     assert(caps.write_count == 1);
     agent_caps_free(&caps);
 

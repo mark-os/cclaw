@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "update.h"
+#include "db.h"
 #include "cclaw.h"
 #include "test_util.h"
 
@@ -170,6 +171,56 @@ static void expect(const char *label, const char *range, int db_version,
     printf("PASS\n");
 }
 
+/* The crash-loop marker is JSON read back with json_extract; a tag that needs
+ * escaping (a sideloaded or channel build names its own) must not turn it into
+ * a marker the guard cannot read — an unreadable marker restarts the count on
+ * every start, so the guard never trips. */
+static void test_verify_marker_escapes_tag(void) {
+    tests_run++;
+    sqlite3 *db = test_db_open(":memory:");
+    const char *tag = "pre-7 \"quoted\" back\\slash";
+    update_verify_arm(db, tag);
+    if (db_scalar_i64(db,
+            "SELECT json_valid(value) FROM config WHERE key='update.verify'",
+            0, -1) != 1) {
+        printf("  FAIL verify_marker_escapes_tag: armed marker is not JSON\n");
+        sqlite3_close(db);
+        return;
+    }
+    /* Each start rewrites the marker; the count must survive the rewrite. */
+    update_verify_startup(db);
+    update_verify_startup(db);
+    sqlite3_stmt *st = NULL;
+    int ok = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_extract(value,'$.starts')=2 AND json_extract(value,'$.tag')=?1"
+            " FROM config WHERE key='update.verify' AND json_valid(value)",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, tag, -1, SQLITE_STATIC);
+        ok = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1;
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    if (ok) { tests_passed++; printf("  PASS verify_marker_escapes_tag\n"); }
+    else printf("  FAIL verify_marker_escapes_tag: count or tag lost on restart\n");
+}
+
+/* Writing the downloaded binary: a failure that only shows at fclose (the
+ * flush hitting a full disk) is still a failure, reported once. */
+static void test_write_file_reports_flush_failure(void) {
+    tests_run++;
+    int full = update_write_file("/dev/full", "x", 1);
+    char path[] = "/tmp/cclaw_test_update_wf_XXXXXX";
+    int fd = mkstemp(path);
+    if (fd >= 0) close(fd);
+    int good = update_write_file(path, "binary", 6);
+    int roundtrip = has(path, "binary");
+    unlink(path);
+    if (full != 0 && good == 0 && roundtrip) {
+        tests_passed++; printf("  PASS write_file_reports_flush_failure\n");
+    } else printf("  FAIL write_file_reports_flush_failure (full=%d good=%d)\n", full, good);
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_update:\n");
@@ -216,6 +267,8 @@ int main(void) {
 
     test_rollback_apply();
     test_checksum();
+    test_verify_marker_escapes_tag();
+    test_write_file_reports_flush_failure();
 
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

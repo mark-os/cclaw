@@ -371,8 +371,7 @@ int main(void) {
         /* Pre-aged marker: this start is the third. */
         char v[128];
         snprintf(v, sizeof(v),
-                 "{\"tag\":\"vtest2\",\"first_start\":%lld,\"starts\":2}",
-                 (long long)time(NULL));
+                 "{\"tag\":\"vtest2\",\"starts\":2}");
         sqlite3_stmt *st = NULL;
         sqlite3_prepare_v2(adb, "INSERT OR REPLACE INTO config(key,value)"
                                 " VALUES('update.verify',?1)", -1, &st, NULL);

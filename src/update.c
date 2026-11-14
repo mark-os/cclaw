@@ -2,6 +2,7 @@
 #include "update.h"
 
 #include "cclaw.h"
+#include "channel_api.h"
 #include "config_registry.h"
 #include "db.h"
 #include "http.h"
@@ -400,8 +401,10 @@ static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
         return 1;
     }
     printf("installed %s (previous kept at %s)\n", tag, prevpath);
-    /* Arm the crash-loop guard: the daemon counts its own starts against this
-     * until it survives the window (update_verify_startup/_tick). */
+    /* Arm the guard: from here the daemon counts its own starts and reports
+     * its own progress (update_verify_*). Anything it writes to update.last
+     * from now on is about this install. */
+    int64_t armed_at = (int64_t)time(NULL);
     update_verify_arm(db, tag);
 
     if (pid <= 0) {
@@ -473,26 +476,40 @@ static int install_candidate(sqlite3 *db, const char *self, const char *tag) {
         return 1;
     }
     config_set(db, "update.installed_tag", tag);
-    if (back) {
-        printf("daemon is back up on %s\n", tag);
-        update_last_set(db, tag, "ok");
+    /* The daemon may have got there first: a turn can finish (verified) or
+     * the guard can report a build that keeps dying before this poll notices.
+     * Its word is the more specific one, so it stands. */
+    int daemon_said = (int)db_scalar_i64(db,
+        "SELECT CASE WHEN json_extract(value,'$.at') < ?1 THEN 0"
+        "            WHEN json_extract(value,'$.outcome') = 'verified' THEN 1"
+        "            WHEN json_extract(value,'$.outcome') LIKE 'crash_loop%' THEN 2"
+        "            ELSE 0 END FROM config WHERE key='update.last'", armed_at, 0);
+    if (back && daemon_said != 2) {
+        printf("daemon is back up on %s%s\n", tag,
+               daemon_said == 1 ? " and has finished a turn" : "");
+        if (!daemon_said) update_last_set(db, tag, "ok");
         return 0;
     }
-    update_last_set(db, tag, "installed_restart_pending");
-    if (same_pid && kill(pid, 0) != 0 && errno == ESRCH)
-        fprintf(stderr, "error: the daemon (pid %d) exited while restarting into %s "
-                        "and nothing has started it again.\nRecovery from a bad "
-                        "build needs a supervisor that restarts the daemon when it "
-                        "exits non-zero (systemd Restart=on-failure, an init respawn "
-                        "loop). Start the daemon: it will run %s, and put the "
-                        "previous build back by itself if that keeps dying.\n",
-                (int)pid, tag, tag);
-    else
-        fprintf(stderr, "warning: %s is installed but the daemon was not seen back "
-                        "within %ds. It may still be starting; nothing was "
-                        "reverted. If it keeps dying, the daemon puts the previous "
-                        "build back by itself — `cclaw --doctor` shows which "
-                        "happened.\n", tag, RESTART_TIMEOUT_S);
+    if (daemon_said == 2) {
+        fprintf(stderr, "error: %s is installed but keeps dying, and it was not "
+                        "undone automatically — `cclaw --doctor` says why.\n", tag);
+    } else {
+        update_last_set(db, tag, "installed_restart_pending");
+        if (same_pid && kill(pid, 0) != 0 && errno == ESRCH)
+            fprintf(stderr, "error: the daemon (pid %d) exited while restarting "
+                            "into %s and is not running.\nRecovery from a bad "
+                            "build needs a supervisor that restarts the daemon "
+                            "when it exits non-zero (systemd Restart=on-failure, "
+                            "an init respawn loop). Start the daemon: it will run "
+                            "%s, and put the previous build back by itself if "
+                            "that dies before it has served anything.\n",
+                    (int)pid, tag, tag);
+        else
+            fprintf(stderr, "warning: %s is installed but the daemon was not seen "
+                            "back within %ds. It may still be starting; nothing "
+                            "was reverted — `cclaw --doctor` shows where it "
+                            "stands.\n", tag, RESTART_TIMEOUT_S);
+    }
     if (snap[0])
         fprintf(stderr, "to undo the update by hand, database included: "
                         "cclaw rollback\n");
@@ -630,28 +647,37 @@ static int update_install_file(sqlite3 *db, const char *self, const char *path) 
  * The updater's await only proves the new build *started once*. A build that
  * starts, migrates, then keeps dying is invisible to it — the updater has
  * already exited, and the supervisor keeps respawning the broken build
- * forever. Same failure shape channel_swap already solved with flap
- * detection, so the same numbers: 3 starts inside a 5-minute window.
+ * forever.
  *
- * Mechanism: update_install arms a marker (config `update.verify`); every
- * daemon startup while it is armed counts itself (update_verify_startup);
- * surviving the window clears it (update_verify_tick). Hitting the start
- * limit undoes the update: the binary alone when the previous build can still
- * open this database, the binary and the pre-update snapshot together when
- * the new build already migrated it (schema patches are forward-only, so
- * .prev beside a migrated database could not start). Either way it then
- * re-execs into the restored build and tells the default agent what happened.
- * This guard is the ONLY thing that undoes an update — the updater reports and
- * leaves — and it leans on one outside contract: something restarts the
- * daemon when it exits non-zero. A healthy deployment pays one config read
- * per boot for this.
+ * The guard runs on events, not on a clock. update_install arms a marker
+ * (config `update.verify`), and from then on:
  *
- * A start is evidence of a crash only if the daemon it started then died. A
- * daemon that shuts down in order (SIGTERM, SIGUSR2 — an operator restarting
- * it to pick up config) takes its own start back off the count
- * (update_verify_clean_exit), so three deliberate restarts inside the window
- * are not reported as a crash loop. A build that dies during startup, is
- * killed, or exits on a fatal error never reaches that call and stays counted. */
+ *   start    every daemon start counts itself (update_verify_startup), before
+ *            the schema patches run. An orderly shutdown takes its own start
+ *            back off the count (update_verify_clean_exit), so what is counted
+ *            is starts that died — in a row, however far apart.
+ *   served   the daemon is about to take work: channels, cron, turns
+ *            (update_verify_serving). Sticky across restarts. From here the
+ *            database may hold something a human or an agent did.
+ *   verified the first LLM turn that ends without an error
+ *            (update_verify_turn_done). The build demonstrably works; the
+ *            marker is cleared and the guard is over.
+ *
+ * Three dead starts in a row undo the update, by the one rule that matters in
+ * agent software: an automatic undo never discards work.
+ *   - .prev can open the database as it is (no schema change, or the patches
+ *     never ran): the binary goes back. Nothing is lost at any stage.
+ *   - the new build migrated the database and never served: the snapshot and
+ *     .prev go back together. The only thing written since the snapshot is
+ *     the migration itself.
+ *   - the new build migrated AND served: nothing is undone. Restoring the
+ *     snapshot would make the agent forget turns it took, messages it
+ *     answered, jobs it already ran — and then do them again. The operator
+ *     is told, and `cclaw rollback` shows what it would discard before
+ *     asking.
+ * It leans on one outside contract: something restarts the daemon when it
+ * exits non-zero. A healthy deployment pays one config read per boot and one
+ * per finished turn until the first good one. */
 
 static char *default_agent_name(sqlite3 *db);
 static int64_t recent_session(sqlite3 *db, const char *agent);
@@ -675,21 +701,45 @@ static void update_verify_notify(sqlite3 *db, const char *text) {
     free(agent);
 }
 
-/* Store the crash-loop marker. SQLite builds the JSON: the tag is whatever a
- * release, a channel manifest or a sideloaded binary called itself. */
-static void verify_marker_set(sqlite3 *db, const char *tag, long long first,
-                              int starts) {
+/* Store the marker. SQLite builds the JSON: the tag is whatever a release, a
+ * channel manifest or a sideloaded binary called itself. */
+static void verify_marker_set(sqlite3 *db, const char *tag, int starts, int served) {
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db,
-            "SELECT json_object('tag', substr(?1,1,63), 'first_start', ?2,"
-            " 'starts', ?3)", -1, &st, NULL) == SQLITE_OK) {
+            "SELECT json_object('tag', substr(?1,1,63), 'starts', ?2, 'served', ?3)",
+            -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_text(st, 1, tag, -1, SQLITE_STATIC);
-        sqlite3_bind_int64(st, 2, first);
-        sqlite3_bind_int(st, 3, starts);
+        sqlite3_bind_int(st, 2, starts);
+        sqlite3_bind_int(st, 3, served);
         if (sqlite3_step(st) == SQLITE_ROW)
             config_set(db, "update.verify", (const char *)sqlite3_column_text(st, 0));
     }
     sqlite3_finalize(st);
+}
+
+/* Read an armed marker. 0 when there is none (or it is not readable). */
+static int verify_marker_get(sqlite3 *db, char *tag, size_t tcap, int *starts,
+                             int *served) {
+    char *v = config_get(db, "update.verify");
+    int armed = 0;
+    sqlite3_stmt *st = NULL;
+    if (v && v[0] && sqlite3_prepare_v2(db,
+            "SELECT COALESCE(json_extract(?1,'$.tag'),''),"
+            "       COALESCE(json_extract(?1,'$.starts'),0),"
+            "       COALESCE(json_extract(?1,'$.served'),0)"
+            " WHERE json_valid(?1)", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, v, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *t = (const char *)sqlite3_column_text(st, 0);
+            snprintf(tag, tcap, "%s", t ? t : "");
+            *starts = sqlite3_column_int(st, 1);
+            *served = sqlite3_column_int(st, 2);
+            armed = 1;
+        }
+    }
+    sqlite3_finalize(st);
+    free(v);
+    return armed;
 }
 
 void update_verify_arm(sqlite3 *db, const char *tag) {
@@ -697,44 +747,15 @@ void update_verify_arm(sqlite3 *db, const char *tag) {
 }
 
 int update_verify_startup(sqlite3 *db) {
-    char *v = config_get(db, "update.verify");
-    if (!v || !v[0]) { free(v); return 0; }
-
-    long long first = 0;
-    int starts = 0;
     char tag[64] = "";
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT COALESCE(json_extract(?1,'$.first_start'),0),"
-            "       COALESCE(json_extract(?1,'$.starts'),0),"
-            "       COALESCE(json_extract(?1,'$.tag'),'')"
-            " WHERE json_valid(?1)", -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(st, 1, v, -1, SQLITE_STATIC);
-        if (sqlite3_step(st) == SQLITE_ROW) {
-            first = sqlite3_column_int64(st, 0);
-            starts = sqlite3_column_int(st, 1);
-            const char *t = (const char *)sqlite3_column_text(st, 2);
-            if (t) snprintf(tag, sizeof(tag), "%s", t);
-        }
-    }
-    sqlite3_finalize(st);
-    free(v);
+    int starts = 0, served = 0;
+    if (!verify_marker_get(db, tag, sizeof(tag), &starts, &served)) return 0;
 
-    time_t now = time(NULL);
-    if (first == 0 || now - first > UPDATE_VERIFY_WINDOW) {
-        /* First start under this marker, or the previous burst aged out —
-         * open a fresh window. */
-        first = now;
-        starts = 1;
-    } else {
-        starts++;
-    }
-
+    starts++;
     if (starts < UPDATE_VERIFY_MAX_STARTS) {
-        verify_marker_set(db, tag, first, starts);
-        LOG_INFO_("update verify: start %d/%d for %s (window %llds)",
-                  starts, UPDATE_VERIFY_MAX_STARTS, tag,
-                  (long long)(now - first));
+        verify_marker_set(db, tag, starts, served);
+        LOG_INFO_("update verify: start %d/%d for %s%s", starts,
+                  UPDATE_VERIFY_MAX_STARTS, tag, served ? " (has served)" : "");
         return 0;
     }
 
@@ -760,23 +781,43 @@ int update_verify_startup(sqlite3 *db) {
         config_set(db, "update.verify", "");
         update_last_set(db, tag, "crash_loop_no_revert");
         snprintf(note, sizeof(note),
-                 "cclaw %.63s is crash-looping (%d starts in %d min) and no "
+                 "cclaw %.63s is crash-looping (%d dead starts in a row) and no "
                  "previous binary is available at %.255s — no automatic "
-                 "revert; intervene by hand.", tag, starts,
-                 UPDATE_VERIFY_WINDOW / 60, prevpath);
+                 "revert; intervene by hand.", tag, starts, prevpath);
         update_verify_notify(db, note);
         return 0;
     }
     if (!schema_compatible(prevpath, db, why, sizeof(why))) {
-        /* The new build migrated the database and then kept dying. Schema
-         * patches are forward-only, so .prev alone would leave a binary that
-         * cannot open its database — but staying on a crash-looping build
-         * leaves a box nobody can reach to say `cclaw rollback`. The one move
-         * that brings it back is the whole update undone: snapshot and .prev
-         * together, through the same marker the verb writes. The caller
-         * applies it once this handle is closed; what the new build wrote is
-         * kept beside the database, never deleted. */
+        /* The new build migrated the database, so .prev alone cannot open it.
+         * What is legal now depends on one event: did this build ever serve? */
         const char *dbfile = sqlite3_db_filename(db, "main");
+        if (served) {
+            /* It took work. Restoring the snapshot would erase what the agent
+             * did and leave it to do it again, so nothing is undone here: the
+             * operator hears about it directly (no LLM turn needed, and this
+             * build may not manage one) and decides. The marker stays armed
+             * with a fresh count — a later good turn still verifies, and
+             * three more dead starts say so again. */
+            verify_marker_set(db, tag, 0, served);
+            update_last_set(db, tag, "crash_loop_no_revert");
+            snprintf(note, sizeof(note),
+                     "cclaw %.63s keeps dying (%d dead starts in a row). It "
+                     "migrated the database and has already taken work, so it "
+                     "was NOT rolled back automatically — that would discard "
+                     "what the agent did since the update. To go back anyway: "
+                     "`cclaw rollback` shows what would be discarded and asks.",
+                     tag, starts);
+            update_verify_notify(db, note);
+            char *agent = default_agent_name(db);
+            int64_t sid = agent ? recent_session(db, agent) : 0;
+            if (sid > 0) channel_notify_operator(db, dbfile, sid, note);
+            free(agent);
+            return 0;
+        }
+        /* It never served: the only thing written since the snapshot is the
+         * migration, so the whole update can go back with nothing lost —
+         * snapshot and .prev together, through the marker `cclaw rollback`
+         * writes. The caller applies it once this handle is closed. */
         char snap[4096], failed[4096], rwhy[256] = "no database path";
         if (dbfile && dbfile[0]) {
             snprintf(snap, sizeof(snap), "%s.preupdate", dbfile);
@@ -785,9 +826,9 @@ int update_verify_startup(sqlite3 *db) {
                                      tag[0] ? tag : VERSION_COMMIT);
                 if (rollback_marker_write(dbfile, failed, self) == 0) {
                     snprintf(g_rollback_tag, sizeof(g_rollback_tag), "%s", tag);
-                    LOG_ERROR_("cclaw %s is crash-looping (%d starts in %d min) "
-                               "after migrating the database — rolling the "
-                               "update back", tag, starts, UPDATE_VERIFY_WINDOW / 60);
+                    LOG_ERROR_("cclaw %s died %d times in a row after migrating "
+                               "the database and before serving — rolling the "
+                               "update back", tag, starts);
                     return 2;
                 }
                 snprintf(rwhy, sizeof(rwhy), "cannot write the rollback marker: %s",
@@ -797,11 +838,10 @@ int update_verify_startup(sqlite3 *db) {
         config_set(db, "update.verify", "");
         update_last_set(db, tag, "crash_loop_no_revert");
         snprintf(note, sizeof(note),
-                 "cclaw %.63s is crash-looping (%d starts in %d min), the "
+                 "cclaw %.63s is crash-looping (%d dead starts in a row), the "
                  "previous build cannot take this database back (%.150s) and "
                  "the update cannot be rolled back automatically (%.150s) — "
-                 "intervene by hand.", tag, starts,
-                 UPDATE_VERIFY_WINDOW / 60, why, rwhy);
+                 "intervene by hand.", tag, starts, why, rwhy);
         update_verify_notify(db, note);
         return 0;
     }
@@ -823,10 +863,10 @@ int update_verify_startup(sqlite3 *db) {
     config_set(db, "update.verify", "");
     update_last_set(db, tag, "crash_loop_reverted");
     snprintf(note, sizeof(note),
-             "cclaw %.63s crash-looped (%d starts in %d min) and was "
-             "automatically reverted to the previous build; the bad binary "
-             "is kept at %.200s. Tell the operator.", tag, starts,
-             UPDATE_VERIFY_WINDOW / 60, badpath);
+             "cclaw %.63s crash-looped (%d dead starts in a row) and was "
+             "automatically reverted to the previous build; the database was "
+             "not touched. The bad binary is kept at %.200s. Tell the "
+             "operator.", tag, starts, badpath);
     update_verify_notify(db, note);
     return 1;   /* caller re-execs into the restored build */
 }
@@ -840,8 +880,9 @@ void update_verify_rollback(const char *db_path) {
     sqlite3 *db = db_open(db_path);
     if (rc == 1) {
         snprintf(note, sizeof(note),
-                 "cclaw %.63s crash-looped after migrating the database, so the "
-                 "update was undone automatically. %s. Tell the operator.", tag, msg);
+                 "cclaw %.63s kept dying after migrating the database and "
+                 "before it had served anything, so the update was undone "
+                 "automatically. %s. Tell the operator.", tag, msg);
         if (db) update_last_set(db, tag, "crash_loop_rolled_back");
     } else {
         snprintf(note, sizeof(note),
@@ -867,19 +908,48 @@ void update_verify_clean_exit(sqlite3 *db) {
         NULL, NULL, NULL);
 }
 
-void update_verify_tick(sqlite3 *db) {
-    static time_t proc_start;
-    if (proc_start == 0) proc_start = time(NULL);
-    if (time(NULL) - proc_start < UPDATE_VERIFY_WINDOW) return;
-    char *v = config_get(db, "update.verify");
-    int armed = v && v[0];
-    free(v);
-    if (!armed) return;
+void update_verify_serving(sqlite3 *db) {
+    char tag[64] = "";
+    int starts = 0, served = 0;
+    if (!verify_marker_get(db, tag, sizeof(tag), &starts, &served) || served) return;
+    verify_marker_set(db, tag, starts, 1);
+    /* Nothing proves a build like doing its job, and an idle box may not take
+     * a turn for hours. One note makes the first one happen now — and its
+     * answer is the operator hearing, in the chat, that the update landed. */
+    char *agent = default_agent_name(db);
+    int64_t sid = agent ? recent_session(db, agent) : 0;
+    if (sid > 0) {
+        char text[256];
+        snprintf(text, sizeof(text),
+                 "cclaw was updated to %s and has restarted on the new build. "
+                 "Tell the operator so in one short line.", tag);
+        inbox_insert(db, sid, "update", "installed", text);
+    }
+    free(agent);
+    LOG_INFO_("update verify: %s is serving", tag);
+}
+
+void update_verify_turn_done(sqlite3 *db, int64_t session_id) {
+    char tag[64] = "";
+    int starts = 0, served = 0;
+    if (!verify_marker_get(db, tag, sizeof(tag), &starts, &served)) return;
+    /* Only a turn the model actually finished is evidence of health — not one
+     * that ended on the error boundary or was aborted. */
+    sqlite3_stmt *st = NULL;
+    int good = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT stop_reason IN (?2, ?3) FROM entries WHERE session_id=?1"
+            " AND role=2 ORDER BY id DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, session_id);
+        sqlite3_bind_int(st, 2, STOP_REASON_STOP);
+        sqlite3_bind_int(st, 3, STOP_REASON_LENGTH);
+        good = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1;
+    }
+    sqlite3_finalize(st);
+    if (!good) return;
     config_set(db, "update.verify", "");
-    char *tag = config_get(db, "update.installed_tag");
-    update_last_set(db, tag && tag[0] ? tag : "", "verified");
-    free(tag);
-    LOG_INFO_("update verify: healthy for %ds — verified", UPDATE_VERIFY_WINDOW);
+    update_last_set(db, tag, "verified");
+    LOG_INFO_("update verify: %s finished a turn — verified", tag);
 }
 
 /* ── periodic check ────────────────────────────────────────────────

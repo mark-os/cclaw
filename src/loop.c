@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "update.h"
 #include "loop.h"
 
 #include "advance.h"
@@ -135,6 +136,7 @@ void run_advance(int64_t session_id) {
     }
     case ADVANCE_DONE:
         deliver_response(session_id);
+        if (proc_is_daemon()) update_verify_turn_done(proc_db(), session_id);
         /* Attempt compaction if configured */
         if (proc_cfg()->compaction && llm_worker_alive() &&
             session_needs_compaction(proc_db(), session_id, proc_cfg())) {

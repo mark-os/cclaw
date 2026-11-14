@@ -141,15 +141,18 @@ cclaw sqlite3 <db> "SELECT ...;"
 cclaw --doctor          # [update] section: last outcome, guard, leftovers
 ```
 
-- `update.last` (shown there) is `{tag, at, outcome}`. `ok`/`verified` means
-  the daemon came back and ran 5 min; `installed_restart_pending` means the
+- `update.last` (shown there) is `{tag, at, outcome}`. `ok` means the daemon came
+  back; `verified` means it has since finished an LLM turn (an armed guard
+  with no `verified` on a busy box is a build that cannot complete a turn); `installed_restart_pending` means the
   new build is on disk but the daemon was not seen back in time (nothing was
   reverted — check whether it is running);
-  `crash_loop_reverted` means the guard put `.prev` back after three starts;
-  `crash_loop_rolled_back` means it also restored the pre-update snapshot,
-  because the new build had migrated the DB (what that build wrote is in
-  `<db>.failed-<tag>`); `crash_loop_no_revert` means it *could not* undo
-  anything (no `.prev`, no snapshot) — intervene by hand.
+  `crash_loop_reverted` means the guard put `.prev` back after three dead
+  starts in a row; `crash_loop_rolled_back` means it also restored the
+  pre-update snapshot, because the new build had migrated the DB and never
+  got as far as serving (the replaced DB is `<db>.failed-<tag>`);
+  `crash_loop_no_revert` means it undid nothing — either there was nothing to
+  go back to, or the build had already taken work and a rollback would have
+  discarded it. That last case is the one for `cclaw rollback`.
 - **`cclaw rollback`** restores `<db>.preupdate` and `<self>.prev` together.
   It prints the plan (snapshot age, entries that will be discarded, which
   build returns) and asks; the swap happens only while nothing has the DB

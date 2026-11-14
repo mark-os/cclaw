@@ -321,9 +321,12 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   as `.prev`, swaps atomically, then restarts the daemon with `SIGUSR2` (shut
   down and `exec` the binary now on disk, same pid — no supervisor sees an
   exit) or `update.restart_command` when set. The updater only reports
-  whether the daemon came back; the daemon's own crash-loop guard is the one
-  thing that undoes a build that keeps dying — the binary alone, or binary
-  and snapshot together when that build had already migrated the DB — and it
+  whether the daemon came back; the daemon's own guard is the one thing that
+  undoes a build that keeps dying, and it runs on events, not a clock: three
+  dead starts in a row put the binary back, plus the snapshot when the build
+  had migrated the DB but never served. A build that migrated *and* took work
+  is never rolled back automatically — that would discard what the agent did
+  — and the first turn the model finishes clears the guard (`verified`). It
   needs a supervisor that restarts the daemon on a non-zero exit. **`cclaw
   rollback`** is the way back from a build that runs but is wrong: it
   restores the snapshot *and* `.prev` together, swapping the DB only at a

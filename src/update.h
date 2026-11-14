@@ -82,10 +82,9 @@ char *update_run_capture(const char *path, const char *flag);
 int update_rollback_apply(const char *db_path, char *msg, size_t cap);
 
 /* Post-update crash-loop guard — the failure update_await_restart cannot see
- * (a build that starts, then keeps dying after the updater exited). Same
- * numbers as channel flap detection. */
-#define UPDATE_VERIFY_WINDOW     300  /* seconds */
-#define UPDATE_VERIFY_MAX_STARTS 3    /* starts inside the window = crash loop */
+ * (a build that starts, then keeps dying after the updater exited). Driven by
+ * events, not a clock; the rules are at the top of the section in update.c. */
+#define UPDATE_VERIFY_MAX_STARTS 3    /* dead starts in a row = crash loop */
 
 /* Arm the marker (config `update.verify`) — called by update_install after
  * the binary swap. Exposed for tests. */
@@ -95,11 +94,12 @@ void update_verify_arm(sqlite3 *db, const char *tag);
  * byte was written AND flushed; on failure errno says why. */
 int update_write_file(const char *path, const void *data, size_t len);
 
-/* Count this daemon start against an armed marker. 0 = carry on. 1 = the
- * start limit was hit and the previous binary was restored: close the DB and
- * re-exec. 2 = the limit was hit after the new build migrated the database,
- * so the whole update has to go: close the DB, call update_verify_rollback,
- * then re-exec. Daemon-only. */
+/* Count this daemon start against an armed marker. 0 = carry on. 1 = three
+ * dead starts in a row and the previous binary was restored: close the DB and
+ * re-exec. 2 = the same after the new build migrated the database but before
+ * it ever served, so the whole update goes back with nothing lost: close the
+ * DB, call update_verify_rollback, then re-exec. A build that migrated AND
+ * served is never undone here (0, operator notified). Daemon-only. */
 int update_verify_startup(sqlite3 *db);
 
 /* Apply the rollback update_verify_startup asked for (return 2) — snapshot and
@@ -112,8 +112,14 @@ void update_verify_rollback(const char *db_path);
  * shutdown path only, while the DB is still open. */
 void update_verify_clean_exit(sqlite3 *db);
 
-/* Clear the marker after a healthy UPDATE_VERIFY_WINDOW of uptime. Cheap;
- * called from the daemon's periodic tick. */
-void update_verify_tick(sqlite3 *db);
+/* The daemon is about to take work (channels, cron, turns). Records that on an
+ * armed marker — from here the database may hold work, so it is never restored
+ * automatically — and, once, asks the default agent to tell the operator the
+ * update landed. */
+void update_verify_serving(sqlite3 *db);
+
+/* A turn finished in session_id. The first one that did not end in an error
+ * clears the marker: the build works. One config read when not armed. */
+void update_verify_turn_done(sqlite3 *db, int64_t session_id);
 
 #endif

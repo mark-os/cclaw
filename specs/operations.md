@@ -99,28 +99,35 @@ through the same rails:
    daemon that was only slow leaves an old binary beside a database it can no
    longer open. If the daemon's pid is gone and nothing replaced it, the
    updater says so loudly.
-9. **Crash-loop guard — the only thing that undoes an update.**
-   `update.verify` is armed; the daemon counts its own starts against it
-   *before* running the schema migration (so a crash inside a patch is counted
-   while `.prev` can still open the un-migrated file), and clears it after 5
-   minutes of uptime. Three starts inside 5 minutes undo the update, by
-   whichever of two moves is legal:
-   - `.prev` can open the database as it now is → the binary alone goes back.
-   - the new build already migrated it → the whole update goes back, snapshot
-     and `.prev` together, through the same `<db>.rollback` marker
-     `cclaw rollback` writes, applied in that same start with the database
-     closed. What the new build wrote is kept as `<db>.failed-<tag>`. This is
-     the one case where the database is restored without being asked: the
-     alternative is a box that crash-loops until someone can log in.
+9. **The guard — the only thing that undoes an update.** It runs on events,
+   not on a clock. `update.verify` is armed at install, and then:
 
-   The daemon then re-execs into the restored build. The bad build is kept as
-   `<self>.bad`. The guard stays passive (`crash_loop_no_revert`) only when
-   there is nothing to go back to — no `.prev`, no snapshot, or a `.prev` that
-   cannot open the snapshot either.
-   A daemon that shuts down in order (SIGTERM, SIGUSR2) takes its own start
-   back off the count, so restarting it by hand inside the window is not
-   mistaken for a crash; a start counts only when the daemon it started died
-   without shutting down.
+   | Event | What it is | Effect |
+   |---|---|---|
+   | start | a daemon start, counted *before* the schema patches run | an orderly shutdown takes its own start back off, so the count is starts that died, in a row, however far apart |
+   | served | the daemon is about to take work (channels, cron, turns) | sticky; from here the database may hold something a human or an agent did. The default agent is asked, once, to tell the operator the update landed |
+   | verified | the first LLM turn that the model finished (not an error, not an abort) | the marker is cleared; the guard is over |
+
+   Three dead starts in a row undo the update, under one rule: **an automatic
+   undo never discards work.**
+   - `.prev` can open the database as it is (no schema change, or the patches
+     never ran) → the binary alone goes back. Nothing is lost at any stage.
+   - the new build migrated the database and **never served** → snapshot and
+     `.prev` go back together, through the `<db>.rollback` marker, applied in
+     that same start with the database closed (`crash_loop_rolled_back`). The
+     only thing written since the snapshot is the migration; the replaced
+     database is still kept as `<db>.failed-<tag>`.
+   - the new build migrated the database **and served** → nothing is undone
+     (`crash_loop_no_revert`). Restoring the snapshot would make the agent
+     forget turns it took, messages it answered and jobs it ran, and then do
+     them again. The operator is told directly (a channel notice, no LLM turn
+     needed) and `cclaw rollback` shows what it would discard before asking.
+     The marker stays armed with a fresh count.
+
+   After an undo the daemon re-execs into the restored build; the bad build is
+   kept as `<self>.bad`. There is no time window anywhere in this: an idle box
+   reaches `verified` because the "tell the operator" note causes a turn, and a
+   box whose model is unreachable simply stays at `ok` with the guard armed.
 
 Every exit writes `update.last` (`{tag, at, outcome}`), which `--doctor`
 shows: `ok`, `installed_no_daemon`, `installed_restart_pending`, `verified`,
@@ -135,7 +142,8 @@ that contract honest: a daemon whose re-exec fails exits non-zero (a
 supervisor reads 0 as "stopped on purpose" and stays down), and the updater
 checks the pid it signalled and warns when the daemon is gone with nothing in
 its place. A daemon that is alive but hung never trips a crash counter; that
-is the supervisor's watchdog to catch, not this guard's.
+is the supervisor's watchdog to catch, not this guard's — though it also never
+reaches `verified`, which `--doctor` shows.
 
 ## Pre-release channels — `cclaw publish`
 
@@ -180,9 +188,10 @@ R2 with wrangler — and point boxes at its public URL. Only https is accepted.
 Undoes the last update *entirely*: `<db>.preupdate` becomes the database
 again, `<self>.prev` the binary. This is the way back from a build that
 migrated the database and then turned out to be bad, where `.prev` alone would
-refuse the migrated file. The crash-loop guard does the same thing on its own
-when the bad build cannot even stay up; the verb is for the build that runs
-but is wrong.
+refuse the migrated file. The guard does the same thing on its own only while
+doing so discards nothing — a build that never got as far as serving. Once
+the build has taken work, going back means throwing some of it away, and that
+is a decision: this verb, which says what will be discarded and asks.
 
 The verb prints the whole plan before asking — snapshot schema version and
 age, how many `entries` written since the snapshot will be discarded, which

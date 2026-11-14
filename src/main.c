@@ -405,6 +405,10 @@ static int run_daemon(char *db_path) {
     /* SIGCHLD self-pipe */
     if (child_sigchld_init() != 0) return 1;
 
+    /* From here the daemon takes work: an update that fails after this point
+     * is never undone by restoring the database. */
+    update_verify_serving(proc_db());
+
     /* Launch channel processes */
     channel_launch_all(proc_db());
 
@@ -480,7 +484,6 @@ static int run_daemon(char *db_path) {
             /* Daemon-only: notices a newer release and drops a note in the
              * default agent's inbox. Self-gating and off by default. */
             update_check_tick(proc_db());
-            update_verify_tick(proc_db());
             g_next_db_poll = now + POLL_DB_INTERVAL;
         }
     }

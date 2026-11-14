@@ -760,15 +760,17 @@ static void check_update(sqlite3 *db, const char *db_path) {
     if (verify && verify[0]) {
         sqlite3_stmt *st = NULL;
         if (sqlite3_prepare_v2(db,
-                "SELECT json_extract(?1,'$.tag'), COALESCE(json_extract(?1,'$.starts'),0)"
+                "SELECT json_extract(?1,'$.tag'), COALESCE(json_extract(?1,'$.starts'),0),"
+                "       COALESCE(json_extract(?1,'$.served'),0)"
                 " WHERE json_valid(?1)", -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_text(st, 1, verify, -1, SQLITE_STATIC);
             if (sqlite3_step(st) == SQLITE_ROW) {
                 const char *t = (const char *)sqlite3_column_text(st, 0);
-                printf("  WARN post-update guard armed for %s: %d/%d starts — clears "
-                       "after %d min of daemon uptime\n", t ? t : "?",
+                printf("  WARN post-update guard armed for %s: %d of %d starts "
+                       "counted, %s — clears at the first turn that finishes "
+                       "without an error\n", t ? t : "?",
                        sqlite3_column_int(st, 1), UPDATE_VERIFY_MAX_STARTS,
-                       UPDATE_VERIFY_WINDOW / 60);
+                       sqlite3_column_int(st, 2) ? "has served" : "has not served yet");
             }
         }
         sqlite3_finalize(st);

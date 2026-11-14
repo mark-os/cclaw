@@ -206,6 +206,54 @@ static void test_verify_marker_escapes_tag(void) {
     else printf("  FAIL verify_marker_escapes_tag: count or tag lost on restart\n");
 }
 
+/* The guard's two forward events. "Served" is sticky and asks the agent, once,
+ * to say the update landed; "verified" is the first turn that did not end in
+ * an error, and nothing else — not uptime, not a turn that failed. */
+static void test_verify_events(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    char *def = config_get(db, "default_agent");
+    const char *agent = def && def[0] ? def : "bot";
+    db_agent_upsert(db, agent, NULL, NULL);
+    int64_t sid = session_create(db, "chat", agent, -1, 0);
+    free(def);
+    update_verify_arm(db, "v9");
+
+    tests_run++; printf("  verify_serving_is_sticky_and_says_so_once... ");
+    update_verify_serving(db);
+    update_verify_serving(db);
+    update_verify_startup(db);   /* a restart must not lose the flag */
+    int served = (int)db_scalar_i64(db,
+        "SELECT json_extract(value,'$.served') FROM config WHERE key='update.verify'", 0, -1);
+    int notes = (int)db_scalar_i64(db,
+        "SELECT COUNT(*) FROM inbox WHERE source='update' AND payload LIKE '%v9%'", 0, -1);
+    if (served != 1 || notes != 1) printf("FAIL: served=%d notes=%d\n", served, notes);
+    else { tests_passed++; printf("PASS\n"); }
+
+    tests_run++; printf("  verify_failed_turn_is_not_verified... ");
+    Message bad = { .role = ROLE_ASSISTANT, .content = "provider error",
+                    .stop_reason = STOP_REASON_ERROR };
+    entry_append_with_iteration(db, sid, &bad, 0);
+    update_verify_turn_done(db, sid);
+    int armed = (int)db_scalar_i64(db,
+        "SELECT value<>'' FROM config WHERE key='update.verify'", 0, -1);
+    if (armed != 1) printf("FAIL: marker cleared by a failed turn\n");
+    else { tests_passed++; printf("PASS\n"); }
+
+    tests_run++; printf("  verify_first_good_turn_verifies... ");
+    Message good = { .role = ROLE_ASSISTANT, .content = "updated to v9",
+                     .stop_reason = STOP_REASON_STOP };
+    entry_append_with_iteration(db, sid, &good, 0);
+    update_verify_turn_done(db, sid);
+    armed = (int)db_scalar_i64(db,
+        "SELECT value<>'' FROM config WHERE key='update.verify'", 0, -1);
+    int verified = (int)db_scalar_i64(db,
+        "SELECT json_extract(value,'$.outcome')='verified' AND"
+        " json_extract(value,'$.tag')='v9' FROM config WHERE key='update.last'", 0, -1);
+    if (armed != 0 || verified != 1) printf("FAIL: armed=%d verified=%d\n", armed, verified);
+    else { tests_passed++; printf("PASS\n"); }
+    sqlite3_close(db);
+}
+
 /* The guard's own rollback (a build that migrated, then crash-looped): the
  * outcome has to be written to whichever database is at the path afterwards —
  * the one it was decided in has just been moved aside. */
@@ -335,6 +383,7 @@ int main(void) {
     test_rollback_apply();
     test_checksum();
     test_verify_marker_escapes_tag();
+    test_verify_events();
     test_verify_rollback_records_outcome();
     test_write_file_reports_flush_failure();
 

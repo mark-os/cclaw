@@ -21,6 +21,7 @@ typedef struct {
     const char *filter;  /* rows: JSON object {column: value | null | [values]} */
     const char *after;   /* rows: the previous page's "next" (JSON array) */
     const char *search;  /* rows: substring of a text key column (case-insensitive) */
+    int full;            /* rows: long text whole, as on a row page (a page that edits needs it) */
     int limit;           /* rows: 1..EXPLORE_MAX_LIMIT; 0 = default */
 } ExploreQuery;
 

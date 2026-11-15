@@ -216,10 +216,14 @@ function api(what, params) {
     });
   }, function () { throw new ApiError(0, "the server could not be reached"); });
 }
-function rows(table, filter, limit, after) {
+function rows(table, filter, limit, after, full) {
   return api("rows", { table: table, filter: filter ? JSON.stringify(filter) : null,
-                       limit: limit || null, after: after ? JSON.stringify(after) : null });
+                       limit: limit || null, after: after ? JSON.stringify(after) : null,
+                       full: full ? 1 : null });
 }
+/* For a page that shows or edits whole values: the generic list gets long
+   text as a {preview, length} object, which must never reach a form. */
+function rowsFull(table, filter, limit) { return rows(table, filter, limit, null, true); }
 function getRow(table, key) { return api("row", { table: table, key: JSON.stringify(key) }); }
 
 /* ── names and values for people ── */
@@ -761,7 +765,7 @@ var SHAPED = {
     el.appendChild(h("p", { class: "lede" }, res.row.values.description ? res.row.values.description.replace(/\.?$/, ". ") : "",
       res.row.values.created_by ? ["Created by ", link(rowHash("agents", [res.row.values.created_by]), res.row.values.created_by), "."] : ""));
     el.appendChild(h("div", { class: "bar" }, opener("Copy this agent", "Copy " + name, function () { return copyAgentPanel(name, res.row.values); })));
-    sub(el, "Models", seq, rows("agent_models", by, 200), function (r, h2) {
+    sub(el, "Models", seq, rowsFull("agent_models", by, 200), function (r, h2) {
       more(h2, "as a list", listHash("agent_models", by), "Model lists");
       var groups = { chat: [], image: [], audio: [] };
       r.rows.forEach(function (x) { (groups[x.values.purpose] = groups[x.values.purpose] || []).push(x.values); });
@@ -781,7 +785,7 @@ var SHAPED = {
         return modelsEditor(name, r.rows.map(function (x) { return x.values; }));
       })];
     });
-    sub(el, "Grants", seq, rows("grants", by, 200), function (r, h2) {
+    sub(el, "Grants", seq, rowsFull("grants", by, 200), function (r, h2) {
       more(h2, r.rows.length + " as a list", listHash("grants", by), "Grants");
       var addG = opener("Add a grant", "Add a grant to " + name, function () { return addGrantPanel(name); });
       if (!r.rows.length) return [emptyLine("No grants: this agent can use nothing."), addG];
@@ -811,11 +815,11 @@ var SHAPED = {
       });
       return groups.concat([addG]);
     });
-    sub(el, "Sessions", seq, rows("sessions", by, 20).then(function (s) {
+    sub(el, "Sessions", seq, rowsFull("sessions", by, 20).then(function (s) {
       var ids = s.rows.map(function (x) { return x.key[0]; });
       var chats = s.rows.map(function (x) { return x.values.chat_id; }).filter(function (x) { return x; });
-      return Promise.all([s, ids.length ? rows("channel_chats", { session_id: ids }, 200) : { rows: [] },
-                          chats.length ? rows("channel_chats", { chat_id: chats }, 200) : { rows: [] }]);
+      return Promise.all([s, ids.length ? rowsFull("channel_chats", { session_id: ids }, 200) : { rows: [] },
+                          chats.length ? rowsFull("channel_chats", { chat_id: chats }, 200) : { rows: [] }]);
     }), function (r, h2) {
       var s = r[0], pins = {}, titles = {};
       r[1].rows.forEach(function (c) { pins[c.values.session_id] = c; });
@@ -845,9 +849,9 @@ var SHAPED = {
       return [list, h("p", { class: "note small", text: "“Live in its chat”: the chat sends its messages to this session. “Left behind”: the chat has moved on to another session (for example after /new)." }),
               h("div", { class: "actions" }, newS, moveS)];
     });
-    sub(el, "Memory", seq, rows("agent_memory_blocks", by, 200).then(function (a) {
+    sub(el, "Memory", seq, rowsFull("agent_memory_blocks", by, 200).then(function (a) {
       var ids = a.rows.map(function (x) { return x.values.block_id; });
-      return Promise.all([a, ids.length ? rows("memory_blocks", { id: ids }, 200) : { rows: [] }]);
+      return Promise.all([a, ids.length ? rowsFull("memory_blocks", { id: ids }, 200) : { rows: [] }]);
     }), function (r, h2) {
       var att = {};
       r[0].rows.forEach(function (x) { att[x.values.block_id] = x.values; });
@@ -866,7 +870,7 @@ var SHAPED = {
       });
       return [list, memActs];
     });
-    sub(el, "Extensions", seq, Promise.all([rows("agent_extensions", by, 200), rows("extensions", { owner_agent: name }, 200)]), function (r) {
+    sub(el, "Extensions", seq, Promise.all([rowsFull("agent_extensions", by, 200), rowsFull("extensions", { owner_agent: name }, 200)]), function (r) {
       var list = h("div", { class: "rows" }), lines = {}, order = [];
       function line(n) {
         if (!lines[n]) { lines[n] = h("span", { class: "pills" }); order.push(n); }
@@ -884,7 +888,7 @@ var SHAPED = {
       order.forEach(function (n) { list.appendChild(rowLine(link(rowHash("extensions", [n]), n), lines[n])); });
       return list.childNodes.length ? list : emptyLine("No extensions.");
     });
-    sub(el, "Schedules", seq, rows("cron_jobs", by, 200), function (r) {
+    sub(el, "Schedules", seq, rowsFull("cron_jobs", by, 200), function (r) {
       if (!r.rows.length) return emptyLine("No schedules.");
       var list = h("div", { class: "rows" });
       r.rows.forEach(function (x) {
@@ -911,7 +915,7 @@ var SHAPED = {
         : h("span", null, "Not in the secret store. Read from the environment variable ",
             h("span", { class: "mono", text: keyName }), " if it is set."),
       kl && kl.exists ? pill("stored", "ok") : keyName ? pill("environment only", "warn") : null)));
-    sub(el, "Models registered here", seq, rows("models", { provider_name: name }, 200), function (r, h2) {
+    sub(el, "Models registered here", seq, rowsFull("models", { provider_name: name }, 200), function (r, h2) {
       more(h2, "as a list", listHash("models", { provider_name: name }), "Models");
       if (!r.rows.length) return emptyLine("No models registered on this provider: nothing routes to it.");
       var list = h("div", { class: "rows" });
@@ -938,9 +942,9 @@ var SHAPED = {
         return channelDefaultsPanel(res.row.values, r[0].map(function (x) { return x.key[0]; }), r[1]);
       }));
     });
-    sub(el, "Chats", seq, rows("channel_chats", { channel_name: name }, 200).then(function (c) {
+    sub(el, "Chats", seq, rowsFull("channel_chats", { channel_name: name }, 200).then(function (c) {
       var ids = c.rows.map(function (x) { return x.values.session_id; }).filter(function (x) { return x !== null; });
-      return Promise.all([c, ids.length ? rows("sessions", { id: ids }, 200) : { rows: [] }]);
+      return Promise.all([c, ids.length ? rowsFull("sessions", { id: ids }, 200) : { rows: [] }]);
     }), function (r, h2) {
       more(h2, "as a list", listHash("channel_chats", { channel_name: name }), "Chats");
       var sess = {};
@@ -1142,7 +1146,7 @@ function confirmBtn(label, text, okLabel, run, kind, typed) {
   var b = btn(label, function () { confirmBox(b, text, okLabel, run, typed); }, kind || "small");
   return b;
 }
-function allRows(table, filter) { return rows(table, filter || null, 200).then(function (r) { return r.rows; }); }
+function allRows(table, filter) { return rowsFull(table, filter || null, 200).then(function (r) { return r.rows; }); }
 function capsOf(v) { var c = looksJson(v.capabilities); return Array.isArray(c) ? c : []; }
 function modalityCaps(m) {
   /* Only what the provider states, on the input side of "in->out": a token
@@ -1539,7 +1543,7 @@ function offeredSection(el, seq, name, offered) {
   function search() {
     var filter = { provider_name: name };
     var p = q.value.trim() ? api("rows", { table: "models_cache", filter: JSON.stringify(filter), q: q.value.trim(), limit: 25 })
-                           : rows("models_cache", filter, 25);
+                           : rowsFull("models_cache", filter, 25);
     p.then(function (r) {
       if (!page(seq)) return;
       clear(results);
@@ -1560,7 +1564,7 @@ function offeredSection(el, seq, name, offered) {
     h("p", { class: "note", text: offered ? fmtNum(offered) + (offered > 1000 ? "+" : "") + " models on offer." : "" }),
     q, status, results]);
   el.appendChild(sec);
-  rows("models_cache", { provider_name: name }, 1).then(function (r) {
+  rowsFull("models_cache", { provider_name: name }, 1).then(function (r) {
     if (r.rows.length) sec.querySelector("p.note").textContent = fmtNum(offered) + (offered > 1000 ? "+" : "") +
       " models on offer, list fetched " + ago(r.rows[0].values.synced_at) + ".";
   });
@@ -1894,7 +1898,7 @@ var LISTX = {
   approvals: function (el, seq) {
     var box = h("div");
     el.appendChild(box);
-    rows("approvals", { state: "pending" }, 20).then(function (r) {
+    rowsFull("approvals", { state: "pending" }, 20).then(function (r) {
       if (!page(seq) || !r.rows.length) return;
       r.rows.forEach(function (x) {
         var sec = section(["Waiting: ", link(rowHash("approvals", x.key), "#" + x.key[0]), " ", h("span", { class: "muted", text: (x.values.tool_name || "") + ", session " + x.values.session_id })], []);

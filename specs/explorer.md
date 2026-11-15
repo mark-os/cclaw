@@ -131,7 +131,9 @@ One page of a table.
   be used to probe a hidden value.
 - Text longer than 200 characters comes back as `{"preview": "…", "length":
   N}`; JSONB as its JSON text; any other blob as `{"blob": bytes}`; a hidden
-  value as `{"hidden": true}`.
+  value as `{"hidden": true}`. `full=1` lifts the 200-character limit to the
+  row page's; the pages that show or edit whole values (memory notes, chat
+  guidance) ask for it, the generic list does not.
 
 ```json
 {"table": "entries", "key": ["id"], "limit": 2,

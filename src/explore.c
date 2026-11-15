@@ -802,7 +802,7 @@ static void rows_where(Buf *b, const XTable *t, const Filter *f, int nf, int aft
 
 /* page0: the rowids of one page plus one (is there more?), chosen by the key
  * index; page: those rows rendered. Only page0 scans. */
-static char *rows_sql(const XTable *t, const Filter *f, int nf, int after, int search) {
+static char *rows_sql(const XTable *t, const Filter *f, int nf, int after, int search, int full) {
     Buf b = {0};
     buf_append_str(&b, "WITH page0 AS (SELECT t.rowid AS rid FROM ");
     sql_id(&b, t->name);
@@ -815,7 +815,7 @@ static char *rows_sql(const XTable *t, const Filter *f, int nf, int after, int s
         key_ref(&b, t, k, "t");
         buf_appendf(&b, " AS k%d, ", k);
     }
-    row_object(&b, t, LIST_PREVIEW);
+    row_object(&b, t, full ? ROW_PREVIEW : LIST_PREVIEW);
     buf_append_str(&b, " AS r FROM page0 JOIN ");
     sql_id(&b, t->name);
     buf_append_str(&b, " AS t ON t.rowid = page0.rid) SELECT json_object('table', :t,"
@@ -855,7 +855,7 @@ static int rows_run(sqlite3 *db, const XTable *t, const ExploreQuery *q,
         for (k = 0; k < key_count(t); k++) can |= search_col(t, k);
         if (!can) return fail(db, 400, "this table cannot be searched", NULL, out);
     }
-    char *sql = rows_sql(t, f, nf, after, search);
+    char *sql = rows_sql(t, f, nf, after, search, q->full);
     char *kc = keycols_json(t);
     sqlite3_stmt *st;
     int status;
@@ -1217,16 +1217,18 @@ static int api_dispatch(sqlite3 *db, const char *what, const char *qs, char **ou
     char *table = param(qs, "table"), *key = param(qs, "key");
     char *filter = param(qs, "filter"), *after = param(qs, "after");
     char *limit = param(qs, "limit"), *search = param(qs, "q");
+    char *full = param(qs, "full");
     q.table = table;
     q.key = key;
     q.filter = filter;
     q.after = after;
     q.search = search;
+    q.full = full && strcmp(full, "1") == 0;
     q.limit = limit ? atoi(limit) : 0;
     int status = !table ? fail(db, 400, "table is required", NULL, out)
                : is_rows ? explore_rows(db, &q, out)
                          : explore_row(db, &q, out);
-    free(table); free(key); free(filter); free(after); free(limit); free(search);
+    free(table); free(key); free(filter); free(after); free(limit); free(search); free(full);
     return status;
 }
 

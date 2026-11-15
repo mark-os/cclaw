@@ -259,6 +259,14 @@ static void test_rows_paging(void) {
     assert(qi("SELECT ?1 ->> '$.rows[0].values.content.length'", first) == 5000);
     assert(qi("SELECT length(?1 ->> '$.rows[0].values.content.preview')", first) == 200);
     free(first);
+    /* full: the same row with its text whole — what a page that edits a
+     * value asks for, so a preview object never lands in a form. */
+    ExploreQuery fq = { .table = "entries", .filter = "{\"session_id\":1}", .limit = 1, .full = 1 };
+    char *whole = NULL;
+    assert(explore_rows(g_db, &fq, &whole) == 200);
+    assert(qi("SELECT json_type(?1, '$.rows[0].values.content') = 'text'", whole) == 1);
+    assert(qi("SELECT length(?1 ->> '$.rows[0].values.content')", whole) == 5000);
+    free(whole);
     assert(walk_pages("entries", "{\"role\":2}", 7, NULL) == 60);
     assert(walk_pages("entries", "{\"session_id\":\"1\",\"role\":[1,3]}", 200, NULL) == 61);
     assert(walk_pages("entries", "{\"session_id\":2}", 50, NULL) == 0);

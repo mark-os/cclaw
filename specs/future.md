@@ -32,8 +32,9 @@ simplicity — parked.
 - phone_number → session_id mapping
 
 ## Web Dashboard (Full)
-Shipped: server-rendered session/agent/model/channel/grant/approval views
-(`dashboard.c`, token-gated, plain HTML — no JS framework). Still future:
+Shipped: the data explorer at `/admin` (specs/explorer.md) — every table,
+generic reading, named write actions for agents, models, providers, memory,
+chats, approvals and secrets. Still future:
 - Message/conversation viewer
 - Web-based chat interface
 - Sub-agent status + cron job views

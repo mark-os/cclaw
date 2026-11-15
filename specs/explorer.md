@@ -1,13 +1,16 @@
-# Data explorer — `/admin/explore` and `/admin/api/`
+# The dashboard — data explorer at `/admin`, API at `/admin/api/`
 
-A read-only view of everything in `cclaw.db` for the operator: the tables,
-what each column means, and how rows link to each other in both directions.
-It is a JSON API plus one static page that draws it; the API is also the
-first cut of what a mobile app will use. Code: `src/explore.c`,
-`templates/explorer.html`, tests in `test/test_explore.c`.
+Everything in `cclaw.db` for the operator: the tables, what each column means,
+how rows link to each other in both directions — and, where a thing is shown,
+the named actions that change it. It is a JSON API plus one static page that
+draws it; the API is also the first cut of what a mobile app will use. Code:
+`src/explore.c` (reading, HTTP), `src/explore_act.c` (actions),
+`src/dashboard.c` (the token), `templates/explorer.html`; tests in
+`test/test_explore.c`, `test/test_explore_act.c`, `test/test_web.c`.
 
-The old server-rendered page at `/admin` (`src/dashboard.c`) is unchanged and
-still serves; it goes away when the explorer gains its actions (below).
+The server-rendered page that used to live at `/admin` (`dashboard.c`'s HTML
+and its form endpoint `POST /admin/act`) is gone; `/admin/explore`, the
+explorer's address while both existed, redirects to `/admin`.
 
 ## Rules
 
@@ -17,11 +20,12 @@ still serves; it goes away when the explorer gains its actions (below).
   codes, and values that are hidden. Three tables (agents, providers,
   channels) get a few extra sections on their row page, built from the same
   API calls any client could make.
-- **Writing will be specific.** There is no "edit any cell". When editing
-  arrives (step 4b), each edit is a named action that runs the same checks as
-  the CLI, and anything the event loop must carry out goes through a queue
-  row and `wake_session(0)`, as approval decisions do today. Conversation
-  history is never editable.
+- **Writing is specific.** There is no "edit any cell": each edit is a named
+  action (below) that runs the same checks as the CLI verb or agent path it
+  stands beside, and anything the event loop must carry out goes through a
+  queue row and `wake_session(0)` (approval decisions). Conversation history
+  — sessions, entries, tool calls, LLM responses, inbox, outbox, change_log —
+  is never editable, and there is no delete for agents or sessions.
 - **SQL is the serializer.** Every response is the single text column of one
   statement built with JSON1 (`json_object`, `json_group_array`, …); C only
   chooses which schema names appear in that statement.
@@ -33,20 +37,20 @@ still serves; it goes away when the explorer gains its actions (below).
   filter values and cursors are always bound parameters. An unknown table is
   404, an unknown column 400.
 - **Secret values never leave the server** (see below).
-- **Read-only.** Plain SELECTs in autocommit, never `BEGIN`. The web thread's
-  own handle is used under `web_db_lock()`; the lock is held for the
+- **Reads never write.** Plain SELECTs in autocommit, never `BEGIN`. The web
+  thread's own handle is used under `web_db_lock()`; the lock is held for the
   database work only — the response is copied out and written after it is
-  released, so a slow client cannot hold up an approval click on `/admin`.
-  Lists are paged and long values previewed to keep each request short.
-  Only `GET` is accepted (anything else is 405).
+  released, so a slow client cannot hold up an approval click. Lists are paged
+  and long values previewed to keep each request short. Every path but
+  `/admin/api/act` accepts only `GET` (anything else is 405); `act` accepts
+  only `POST`.
 
 ## Access
 
-The same admin token as `/admin` (`web_admin_token`, printed as a link by
-`cclaw dashboard`). The page accepts `?token=` once and answers with a 303 to
-`/admin/explore` that moves the token into the `cclaw_admin` cookie
-(HttpOnly, SameSite=Strict), exactly like `/admin`. The API accepts the
-cookie only. Without it every path is 403: the page explains how to get in,
+The admin token (`web_admin_token`, printed as a link by `cclaw dashboard`).
+The page accepts `?token=` once and answers with a 303 to `/admin` that moves
+the token into the `cclaw_admin` cookie (HttpOnly, SameSite=Strict). The API
+accepts the cookie only. Without it every path is 403: the page explains how to get in,
 the API answers `{"error": "not signed in: …"}`.
 
 The page is served with `Content-Security-Policy: default-src 'none';
@@ -136,6 +140,17 @@ One page of a table.
  "next": [322]}
 ```
 
+`q` — a case-insensitive substring of the table's text key columns (hidden
+ones excluded); 400 for a table with none. This is how the page searches a
+provider's offered models (`models_cache`, hundreds of rows):
+`rows?table=models_cache&filter={"provider_name":"x"}&q=vision`.
+
+### `GET /admin/api/approval?id=N`
+
+`{"id", "state", "resolve", "park_reason", "tool_name", "summary"}` — the
+approval card an approver sees on a channel (`approval_format_summary`), as
+text, never the raw `args_json`.
+
 ### `GET /admin/api/row?table=T&key=K`
 
 One row by key (`K` is a JSON array in `meta`'s key order — text, integer
@@ -194,7 +209,67 @@ include it is left out. Decided not hidden:
 table through `meta`, every page of `rows` and `row` for every row, and fails
 if the marker appears in any response.
 
-## The page — `/admin/explore`
+## Actions — `POST /admin/api/act`
+
+One endpoint; the body is a JSON object naming the action and its fields:
+`{"action": "grant_add", "agent": "Researcher", "kind": "host", "value":
+"api.github.com"}`. A field the action does not take is refused (a typo
+must not silently change nothing). The answer is `{"ok": true, "message":
+"<what changed, in a sentence>", ...}` or `{"error": "<what was wrong and how
+to fix it>"}` with 400 (bad input), 403, 404 (no such thing), 409 (the state
+does not allow it: already there, still in use, needs a confirmation), 502
+(the provider did not answer) or 503 (database busy, secret key not loaded).
+
+**Forgery.** The cookie alone is not enough for another site's page to act.
+SameSite=Strict keeps it off cross-site requests in current browsers, and on
+top of that an action must carry `Content-Type: application/json` and
+`X-Cclaw-Action: 1` — a cross-site HTML form can send neither, and a
+cross-site `fetch()` that sets them is preflighted, which this server never
+approves (it sends no CORS headers). When the browser states `Sec-Fetch-Site`
+it must be `same-origin`; when it states `Origin`, its host must be the
+request's `Host`. Refusals are 403 with the reason. The body is capped at
+1 MB and zeroed after use (it may carry a secret value or a key).
+
+**Writes.** Each action runs under `web_db_lock()` on the web server's handle
+(actor `dashboard`), in one `BEGIN IMMEDIATE` where it writes more than one
+row, with the handle's context set to `act:<action>` — so every change_log
+row an action causes says which action did it. (The change log covers the
+tables `CHANGE_LOG_COLUMNS` lists; memory, channels and secret hosts are not
+among them.) Network actions release the lock around the provider call.
+
+| Action | Fields | Checks (refusals) |
+|---|---|---|
+| `grant_add` | agent, kind (`tool` `host` `read_path` `write_path` `secret`), value, approval_mode?, expires_at? | agent exists; tool exists in `tools`; host is a host rule, not a URL; a path is absolute and not cclaw.db, its -wal/-shm, `.cclaw_key` or a directory holding them (`grant_path_hits_db`); a secret name is valid and not a `system` secret (as `cclaw secret grant`); mode only on tools; expiry in the future; an identical live grant is 409. Source `operator`. A tool's mode, when not given, is `always` for `agent_approval_tools`, else `silent`; re-granting a tool with another mode changes only the mode |
+| `grant_remove` | agent, kind, value | the grant exists |
+| `agent_copy` | from, name, description?, attach_memory? | the operator's `clone_from` through `agent_definition_apply` (creator NULL: no creator caps; everything else as for any new agent — baseline extensions, heartbeat schedule, workspace under `<db dir>/agents/<name>/workspace`, made on the web thread since nothing in it belongs to the event loop). Copies prompt and limits, every model list with effort, every grant (source `agent_create`), extension attachments. Memory is not part of a clone; `attach_memory` shares each of the source's blocks **read-only**. Name PascalCase and new |
+| `models_set` | agent, purpose (`chat` `image` `audio`), models: [{model_id, reasoning_effort?}] in order | one transaction replacing that list; chat may not be empty; no duplicates; models exist; effort only on chat, one of the five levels; image/audio only for models whose capabilities include it (the trigger is the backstop, its refusal turned into a sentence); an unchanged list writes nothing |
+| `session_new_on_chat` | agent, channel, chat_id, confirm_handover? | the chat is a `channel_chats` row; `channel_pin_new_session`. A chat that talks to **another agent's** session is 409 with `{"confirm": {"kind": "handover", "from", "to"}}` until `confirm_handover` equals the receiving agent's name — handing a chat to an agent is an authority change, so it takes a typed name, not one click. The previous session is left behind and keeps naming the chat |
+| `session_move_to_chat` | session_id, channel, chat_id, confirm_handover? | `channel_pin_session`: the session's old chat goes on with a fresh session for the same agent (decision 4); the target chat's previous session is left behind; same handover rule; sub-agent sessions refused |
+| `chat_settings` | channel, chat_id, delivery_mode? (`auto` `explicit`), tool_filter? (list or `"unrestricted"`), guidance? | tools exist; an empty list is refused — "unrestricted" is its own choice; `""` guidance clears |
+| `chat_unroute` | channel, chat_id | `cclaw route rm`: session_id and notified_at cleared, the row stays |
+| `channel_defaults` | channel, default_agent? (name or null), default_tool_filter? | agent exists; tools exist |
+| `provider_add` | name, base_url, endpoint_type (`openai` `gemini` `anthropic`), api_key? | name starts with a letter; http(s) URL; the key's secret name `<NAME>_API_KEY` is not taken. The key is checked **before anything is written** by listing the provider's models (`models_cache_fetch`, authenticated as that wire format authenticates, with the lock released, waiting up to max(30 s, `llm_probe_timeout`)); if that fails nothing is saved. Then one transaction: the key as a `system` secret, the provider row, its catalog |
+| `provider_edit` | name, base_url?, endpoint_type?, request_extra? (JSON object or empty), api_key? | a change to endpoint, format or key is checked the same way first and nothing is saved if it fails; the key is written through `admin_set_key` |
+| `provider_refresh_models` | name | `models_cache_fetch` + `models_cache_ingest`; on failure the previous list stays (502) |
+| `provider_remove` | name | refused while it has models; its cached list goes, its key secret stays (the answer says so) |
+| `model_import` | provider, model, context_window?, max_output_tokens?, capabilities? | id `<provider>/<model>`, not already registered; capabilities lowercase words |
+| `model_edit` | id, context_window?, max_output_tokens?, capabilities?, effort_map?, enabled? | effort map shape (format and levels as in schema.sql); a capability cannot be taken away while the model is on a list for it; disabling the only enabled chat model of an agent is allowed with a warning naming the agents |
+| `model_remove` | id | refused while on any list, naming them |
+| `memory_block_create` | label, description?, placement?, char_limit?, read_only?, agent? | label rule; per-agent label uniqueness; `created_by` NULL; with `agent`, attached read-write |
+| `memory_block_edit` | block_id, description?, placement?, char_limit?, read_only? | |
+| `memory_block_delete` | block_id | the answer names the agents it was detached from |
+| `memory_attach` | block_id, agent, read_only? (default true) | label clash refused with the clashing block named; also switches an existing attachment |
+| `memory_detach` | block_id, agent | |
+| `memory_note_add` / `memory_note_edit` / `memory_note_delete` | block_id, note_id, text | the note belongs to that block; empty text refused; over the limit is allowed (the operator is not bound) with a warning |
+| `approval_decide` | approval_id, decision (`once` `always` `deny`) | pending; not already decided; `once` refused for an applied request (`resolve = apply`), `always` for a sensitive target — as the event loop would. Queued with `approval_decision_queue(…, "dashboard")` + `wake_session(0)`; the loop applies it |
+| `approval_grant_from_history` | approval_id | a denied `request_config`; `admin_grant_from_history(…, "dashboard")` records a new approved row the grants point at |
+| `secret_add` | name, value, scope?, replace? | name rule; an existing name needs `replace`, and keeps its scope; the value is written encrypted and never returned |
+| `secret_hosts_set` | name, hosts | replaces the set; host rules; not for system secrets |
+| `secret_remove` | name | refused while a provider uses it as its key; `db_secret_rm` (value, hosts, grants) |
+
+Letting an agent use a secret is `grant_add` with kind `secret`.
+
+## The page — `/admin`
 
 `templates/explorer.html`, embedded at build time. Hash routes:
 
@@ -204,14 +279,33 @@ if the marker appears in any response.
 | `#/tables` | Every table, with its count and the first sentence of its comment |
 | `#/t/<table>[?f=<filter JSON>]` | List: key and a few identifying columns, long text previewed, filter chips, "Load more" |
 | `#/r/<table>/<key parts…>` | Row: fields grouped "What you configured" / "What cclaw observed" where the column class is known (else one group), each with its explanation; links from this row; rows that point here, with counts, opening the filtered list |
+| `#/add-provider` | New provider: name, endpoint, wire format, key |
 
-Agents, providers and channels add sections above the fields: an agent's
+Agents, providers, channels, models, memory blocks, chats, approvals and
+secrets add sections (and their actions) above the fields: an agent's
 model lists by purpose in order, grants by kind with their source, sessions
 with their chat and whether that chat still sends to them, memory, extensions
 and schedules; a provider's key (stored secret or environment), registered
 models and how many models the provider offers; a channel's routed and
-unrouted chats with their reply mode. Anything else uses the generic pages —
-the rule is to improve those rather than add a fourth shaped view.
+unrouted chats with their reply mode and its defaults; a model's edit and
+remove; a block's attachments and notes; a chat's route and settings; an
+approval's card and decision; a secret's allowed hosts and the agents that may
+use it. The providers, memory blocks and secrets lists offer adding one; the
+approvals list shows the pending ones as cards. Anything else uses the generic
+pages.
+
+Actions on the page: an editor opens below its button and closes with Escape
+or Cancel; Enter submits. Anything destructive or authority-widening (remove,
+delete, unroute, add a grant, hand a chat to another agent, make a shared block
+writable, open a channel's door, always-allow) asks in an inline confirm that
+says what will happen; handing a chat to another agent also needs that agent's
+name typed. After an action the page is drawn again from the API with the
+server's sentence on top; a refusal is shown next to the control that sent it.
+Key and secret fields are password inputs, cleared on submit, never put in a
+URL or kept in page state. Image/audio model pickers offer only capable models;
+an imported model's capabilities are prefilled from the provider's modality —
+only the input side of `in->out`, and only the exact tokens `image`/`audio`
+(no modality, no media).
 
 Values are drawn for people: times as local date and time with the raw value
 beside them, codes as words, 0/1 as yes/no, JSON pretty-printed and

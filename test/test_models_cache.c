@@ -180,7 +180,7 @@ static void test_ttl(sqlite3 *db) {
                         NULL, NULL, NULL) == SQLITE_OK);
     err[0] = '\0';
     assert(models_cache_query(db, "openrouter", NULL, 10, 1, 0, &out, err, sizeof(err)) == -1);
-    assert(strstr(err, "failed") != NULL);
+    assert(strstr(err, "could not reach") != NULL);
     assert(out == NULL);
     /* The failed probe wrote nothing — the stale rows are still there. */
     assert(row_count(db, "openrouter") == 2);

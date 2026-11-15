@@ -6,6 +6,7 @@
 #include "channel_api.h"
 #include "civetweb.h"
 #include "dashboard.h"
+#include "explore_act.h"
 #include "db.h"
 #include "json_escape.h"
 #include "util.h"
@@ -371,9 +372,12 @@ int web_start(Config *cfg, const char *db_path) {
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%d", cfg->web_port);
 
+    /* Four workers: a provider check from the page (explore_act.c) holds one
+     * for as long as llm_probe_timeout allows — without the database lock —
+     * and an approval click or a webhook must still find a free one. */
     const char *options[] = {
         "listening_ports", port_str,
-        "num_threads", "2",
+        "num_threads", "4",
         NULL
     };
 
@@ -382,6 +386,15 @@ int web_start(Config *cfg, const char *db_path) {
 
     mg_set_request_handler(s_ctx, "/hook/", handle_hook, NULL);
     mg_set_request_handler(s_ctx, "/share/", handle_share, NULL);
+    /* New agents' workspaces go where the daemon puts them: beside the
+     * database, under agents/ (main.c). */
+    {
+        char dir[PATH_MAX];
+        const char *sl = strrchr(db_path, '/');
+        if (sl) snprintf(dir, sizeof(dir), "%.*s/agents", (int)(sl - db_path), db_path);
+        else snprintf(dir, sizeof(dir), "./agents");
+        explore_set_agents_dir(dir);
+    }
     if (dashboard_register(s_ctx, s_db) != 0) {
         web_stop();
         return -1;
@@ -396,6 +409,7 @@ void web_stop(void) {
         s_ctx = NULL;
     }
     mg_exit_library();
+    explore_set_agents_dir(NULL);
     /* mg_stop joined the worker threads, so nothing holds the handle now. */
     if (s_db) { sqlite3_close(s_db); s_db = NULL; }
     free(s_db_path);

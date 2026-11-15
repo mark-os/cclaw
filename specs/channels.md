@@ -132,7 +132,7 @@ A new row starts from defaults, **copied once**: `tool_filter` from
 operator or agent names it first); `delivery_mode` from what the envelope
 says the chat is — a `group` starts `explicit`, a `dm` starts `auto`. A chat
 named before it ever spoke (`cclaw route add`, an agent's `routes` request,
-the dashboard attach) has no envelope yet and is judged by its id: one that
+an operator naming it) has no envelope yet and is judged by its id: one that
 begins with `-` (a Telegram group) starts `explicit`, any other `auto`; when
 it then speaks, its first message does not overwrite the mode it was given.
 After that only the row is consulted; changing the channel's default
@@ -243,8 +243,9 @@ this chat (Guidance, below).
 
 ## Where routes come from
 
-Operator verbs (`cclaw route add`, dashboard `set_channel_route` /
-`attach_channel`) — or the agent itself: a `request_config` changes document
+Operator verbs (`cclaw route add`; on `/admin`, a chat's "Route to an agent",
+an agent's "New session on a channel" / "Move a session to a chat", and a
+channel's default agent) — or the agent itself: a `request_config` changes document
 with a `routes` section (`["telegram:12345"]`,
 approval-gated like every self-config write). Agent-requested routes are
 **first-come** (a chat already routed to another agent is refused — an agent

@@ -567,14 +567,18 @@ static void test_http(void) {
     char path[256];
     snprintf(path, sizeof(path), "/admin/api/meta?token=%s", tok);
     assert(http(c, path, NULL, &b, &h) == 403);   /* API: cookie only */
-    assert(http(c, "/admin/explore", NULL, &b, &h) == 403);
+    assert(http(c, "/admin", NULL, &b, &h) == 403);
     assert(strstr(b.d, "cclaw dashboard") && strstr(h.d, "text/html"));
-    assert(http(c, "/admin/explore?token=00000000000000000000000000000000", NULL, &b, &h) == 403);
-    /* Signing in moves the token into the cookie and out of the URL. */
+    assert(http(c, "/admin?token=00000000000000000000000000000000", NULL, &b, &h) == 403);
+    /* The page's old address keeps working: it redirects, query and all. */
     snprintf(path, sizeof(path), "/admin/explore?token=%s", tok);
     assert(http(c, path, NULL, &b, &h) == 303);
-    assert(strstr(h.d, "Location: /admin/explore\r\n") && strstr(h.d, "Set-Cookie: cclaw_admin="));
-    assert(http(c, "/admin/explore", NULL, &b, &h) == 200);
+    assert(strstr(h.d, "Location: /admin?token="));
+    /* Signing in moves the token into the cookie and out of the URL. */
+    snprintf(path, sizeof(path), "/admin?token=%s", tok);
+    assert(http(c, path, NULL, &b, &h) == 303);
+    assert(strstr(h.d, "Location: /admin\r\n") && strstr(h.d, "Set-Cookie: cclaw_admin="));
+    assert(http(c, "/admin", NULL, &b, &h) == 200);
     assert(strstr(h.d, "Content-Security-Policy: default-src 'none'"));
     assert(strstr(h.d, "Cache-Control: no-store"));
     assert(strcmp(b.d, TPL_EXPLORER_HTML) == 0);
@@ -598,11 +602,16 @@ static void test_http(void) {
     assert(http(c, "/admin/api/row?table=nosuch&key=%5B1%5D", NULL, &b, &h) == 404);
     assert(http(c, "/admin/api/rows", NULL, &b, &h) == 400);
     assert(http(c, "/admin/api/nope", NULL, &b, &h) == 404);
-    /* Read-only: nothing but GET. */
+    /* Reading is GET only; actions are POST /admin/api/act, and a GET there
+     * changes nothing. */
     assert(http(c, "/admin/api/meta", "x=1", &b, &h) == 405);
-    assert(http(c, "/admin/explore", "x=1", &b, &h) == 405);
-    /* The old page is untouched and still served. */
-    assert(http(c, "/admin", NULL, &b, &h) == 200 && strstr(b.d, "cclaw admin"));
+    assert(http(c, "/admin", "x=1", &b, &h) == 405);
+    assert(http(c, "/admin/api/act", NULL, &b, &h) == 405);
+    /* Search: a substring of a text key column, here a cached model id. */
+    assert(http(c, "/admin/api/rows?table=models_cache&q=A%2F2", NULL, &b, &h) == 200);
+    assert(qi("SELECT json_array_length(?1, '$.rows')", b.d) == 1);
+    assert(qi("SELECT ?1 ->> '$.rows[0].key[1]' = 'a/2'", b.d) == 1);
+    assert(http(c, "/admin/api/rows?table=entries&q=x", NULL, &b, &h) == 400);
     free(b.d); free(h.d); free(tok);
     curl_easy_cleanup(c);
     web_stop();

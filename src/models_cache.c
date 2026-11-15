@@ -1,8 +1,10 @@
 /* models_cache.c — provider availability probe. See models_cache.h. */
+#define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "models_cache.h"
 
 #include "buf.h"
+#include "config_registry.h"
 #include "db.h"
 #include "http.h"
 #include "log.h"
@@ -37,6 +39,37 @@ static char *q_text(sqlite3 *db, const char *sql, const char *p1) {
     return out;
 }
 
+/* BEGIN IMMEDIATE when the handle is idle, a savepoint inside a caller's
+ * transaction (the dashboard's add-provider writes the key, the provider and
+ * its catalog as one unit). */
+static int write_begin(sqlite3 *db, int *own) {
+    *own = sqlite3_get_autocommit(db);
+    return sqlite3_exec(db, *own ? "BEGIN IMMEDIATE" : "SAVEPOINT models_cache",
+                        NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
+}
+
+static void write_end(sqlite3 *db, int own, int ok) {
+    if (ok) sqlite3_exec(db, own ? "COMMIT" : "RELEASE models_cache", NULL, NULL, NULL);
+    else if (own) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    else sqlite3_exec(db, "ROLLBACK TO models_cache; RELEASE models_cache", NULL, NULL, NULL);
+}
+
+/* The two catalog shapes providers send: {"data":[{"id",...}]} (OpenAI,
+ * OpenRouter, Anthropic) and Gemini's {"models":[{"name":"models/x",
+ * "inputTokenLimit":N}]}. Gemini states no modality, so none is recorded. */
+#define CATALOG_ROWS_SQL \
+    " SELECT json_extract(value,'$.id') AS id, json_extract(value,'$.context_length') AS ctx," \
+    "        json_extract(value,'$.pricing.prompt') AS pp," \
+    "        json_extract(value,'$.pricing.completion') AS cp," \
+    "        json_extract(value,'$.architecture.modality') AS modality" \
+    "   FROM json_each(?2,'$.data') WHERE json_type(?2,'$.data')='array'" \
+    " UNION ALL" \
+    " SELECT CASE WHEN json_extract(value,'$.name') LIKE 'models/%'" \
+    "             THEN substr(json_extract(value,'$.name'), 8)" \
+    "             ELSE json_extract(value,'$.name') END," \
+    "        json_extract(value,'$.inputTokenLimit'), NULL, NULL, NULL" \
+    "   FROM json_each(?2,'$.models') WHERE json_type(?2,'$.data') IS NULL"
+
 int models_cache_ingest(sqlite3 *db, const char *provider_name,
                         const char *body, char *err, size_t errlen) {
     if (!db || !provider_name || !body) return -1;
@@ -46,19 +79,22 @@ int models_cache_ingest(sqlite3 *db, const char *provider_name,
     sqlite3_stmt *s;
     int ok = 0;
     if (sqlite3_prepare_v2(db,
-            "SELECT json_valid(?1) AND json_type(?1,'$.data')='array'",
+            "SELECT json_valid(?1) AND (json_type(?1,'$.data')='array'"
+            " OR (json_type(?1,'$.models')='array' AND json_array_length(?1,'$.models') > 0"
+            "     AND json_type(?1,'$.models[0].name')='text'))",
             -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_text(s, 1, body, -1, SQLITE_STATIC);
         if (sqlite3_step(s) == SQLITE_ROW) ok = sqlite3_column_int(s, 0);
         sqlite3_finalize(s);
     }
     if (!ok) {
-        set_err(err, errlen, "provider '%s' did not return a JSON {\"data\":[...]} catalog",
-                provider_name);
+        set_err(err, errlen, "provider '%s' did not return a model catalog"
+                " (a JSON {\"data\":[...]} or {\"models\":[...]} list)", provider_name);
         return -1;
     }
 
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+    int own;
+    if (write_begin(db, &own) != 0) {
         set_err(err, errlen, "cache busy");
         return -1;
     }
@@ -74,14 +110,8 @@ int models_cache_ingest(sqlite3 *db, const char *provider_name,
     if (rc == 0 && sqlite3_prepare_v2(db,
             "INSERT OR REPLACE INTO models_cache(provider_name, id, context_length,"
             "  prompt_price, completion_price, modality, synced_at)"
-            " SELECT ?1, json_extract(value,'$.id'),"
-            "        json_extract(value,'$.context_length'),"
-            "        json_extract(value,'$.pricing.prompt'),"
-            "        json_extract(value,'$.pricing.completion'),"
-            "        json_extract(value,'$.architecture.modality'),"
-            "        unixepoch()"
-            "   FROM json_each(?2,'$.data')"
-            "  WHERE json_extract(value,'$.id') IS NOT NULL",
+            " SELECT ?1, id, ctx, pp, cp, modality, unixepoch() FROM ("
+            CATALOG_ROWS_SQL ") WHERE id IS NOT NULL",
             -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_text(s, 1, provider_name, -1, SQLITE_STATIC);
         sqlite3_bind_text(s, 2, body, -1, SQLITE_STATIC);
@@ -89,19 +119,86 @@ int models_cache_ingest(sqlite3 *db, const char *provider_name,
         if (rc != 0) set_err(err, errlen, "cache write failed: %s", sqlite3_errmsg(db));
         sqlite3_finalize(s);
     } else if (rc == 0) {
+        set_err(err, errlen, "cache write failed: %s", sqlite3_errmsg(db));
         rc = -1;
     }
-    sqlite3_exec(db, rc == 0 ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
+    write_end(db, own, rc == 0);
     return rc;
 }
 
 /* Provider key, resolved the way the request path does: env var wins, then the
  * system secret store. A blank api_key_env is legal (local gateways). */
-static char *provider_key(sqlite3 *db, const char *api_key_env) {
+char *models_cache_key(sqlite3 *db, const char *api_key_env) {
     if (!api_key_env || !api_key_env[0]) return NULL;
     const char *env = getenv(api_key_env);
     if (env && env[0]) return strdup(env);
     return db_secret_get_system(db, api_key_env);
+}
+
+int models_cache_timeout(sqlite3 *db) {
+    int t = (int)config_get_int(db, "llm_probe_timeout");
+    return t > MODELS_CACHE_FETCH_MIN_S ? t : MODELS_CACHE_FETCH_MIN_S;
+}
+
+int models_cache_fetch(const char *base_url, const char *endpoint_type,
+                       const char *key, int timeout_s, char **body_out,
+                       char *err, size_t errlen) {
+    *body_out = NULL;
+    if (!base_url || !base_url[0]) {
+        set_err(err, errlen, "no API endpoint");
+        return -1;
+    }
+    size_t n = strlen(base_url);
+    while (n > 0 && base_url[n - 1] == '/') n--;
+    /* Each wire format lists models at <base>/models, authenticates the way
+     * its requests do (llm_build_auth_header), and pages: ask for one big
+     * page so the catalog arrives whole. */
+    int gemini = endpoint_type && strcmp(endpoint_type, "gemini") == 0;
+    int anthropic = endpoint_type && strcmp(endpoint_type, "anthropic") == 0;
+    char url[1100], auth[600];
+    snprintf(url, sizeof(url), "%.*s/models%s", (int)n, base_url,
+             gemini ? "?pageSize=1000" : anthropic ? "?limit=1000" : "");
+    snprintf(auth, sizeof(auth), gemini ? "x-goog-api-key: %s"
+                               : anthropic ? "x-api-key: %s"
+                               : "Authorization: Bearer %s", key ? key : "");
+    const char *headers[4] = { "Accept: application/json", NULL, NULL, NULL };
+    int h = 1;
+    if (key && key[0]) headers[h++] = auth;
+    if (anthropic) headers[h++] = "anthropic-version: 2023-06-01";
+
+    HttpRequestOpts opts = {
+        .url = url, .method = "GET", .headers = headers,
+        .timeout = timeout_s > 0 ? timeout_s : MODELS_CACHE_FETCH_MIN_S,
+        .follow_redirects = 1,
+        /* Hard cap: an oversized catalog is refused, not half-parsed. */
+        .max_response_bytes = MODELS_CACHE_MAX_BYTES,
+        .user_agent = "cclaw",
+    };
+    HttpResponse resp = {0};
+    int status = http_do(&opts, &resp);
+    explicit_bzero(auth, sizeof(auth));
+
+    int rc = -1;
+    if (status < 200 || status > 299) {
+        if (status == 401 || status == 403)
+            set_err(err, errlen, "the provider refused the key (HTTP %d) at %s", status, url);
+        else if (status <= 0)
+            set_err(err, errlen, "could not reach %s%s%s", url,
+                    resp.err_detail[0] ? ": " : "", resp.err_detail);
+        else
+            set_err(err, errlen, "GET %s failed (HTTP %d)", url, status);
+    } else if (resp.truncated) {
+        set_err(err, errlen, "the catalog exceeds the %u MB cap — not cached",
+                MODELS_CACHE_MAX_BYTES / (1024u * 1024u));
+    } else if (!resp.data) {
+        set_err(err, errlen, "the provider returned an empty body");
+    } else {
+        *body_out = resp.data;
+        resp.data = NULL;
+        rc = 0;
+    }
+    http_response_free(&resp);
+    return rc;
 }
 
 int models_cache_refresh(sqlite3 *db, const char *provider_name,
@@ -114,47 +211,21 @@ int models_cache_refresh(sqlite3 *db, const char *provider_name,
         set_err(err, errlen, "no provider named '%s'", provider_name);
         return -1;
     }
+    char *type = q_text(db, "SELECT endpoint_type FROM providers WHERE name=?1",
+                        provider_name);
     char *key_env = q_text(db, "SELECT api_key_env FROM providers WHERE name=?1",
                            provider_name);
-    char *key = provider_key(db, key_env);
-
-    size_t n = strlen(base_url);
-    while (n > 0 && base_url[n-1] == '/') base_url[--n] = '\0';
-    char url[1024], auth[512];
-    snprintf(url, sizeof(url), "%s/models", base_url);
-    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", key ? key : "");
-
-    const char *headers[3] = { "Accept: application/json", NULL, NULL };
-    if (key) headers[1] = auth;
-
-    HttpRequestOpts opts = {
-        .url = url, .method = "GET", .headers = headers, .timeout = 30,
-        .follow_redirects = 1,
-        /* Hard cap: an oversized catalog is refused, not half-parsed. */
-        .max_response_bytes = MODELS_CACHE_MAX_BYTES,
-        .user_agent = "cclaw",
-    };
-    HttpResponse resp = {0};
-    int status = http_do(&opts, &resp);
-
-    int rc = -1;
-    if (status < 200 || status > 299) {
-        set_err(err, errlen, "GET %s failed (status %d)%s%s", url, status,
-                resp.err_detail[0] ? ": " : "", resp.err_detail);
-    } else if (resp.truncated) {
-        set_err(err, errlen, "catalog from '%s' exceeds the %u MB cap — not cached",
-                provider_name, MODELS_CACHE_MAX_BYTES / (1024u * 1024u));
-    } else if (!resp.data) {
-        set_err(err, errlen, "provider '%s' returned an empty body", provider_name);
-    } else {
-        rc = models_cache_ingest(db, provider_name, resp.data, err, errlen);
+    char *key = models_cache_key(db, key_env);
+    char *body = NULL;
+    int rc = models_cache_fetch(base_url, type, key, models_cache_timeout(db),
+                                &body, err, errlen);
+    if (key) { explicit_bzero(key, strlen(key)); free(key); }
+    if (rc == 0) {
+        rc = models_cache_ingest(db, provider_name, body, err, errlen);
         if (rc == 0)
-            LOG_INFO_("models_cache: refreshed %s (%zu bytes)", provider_name, resp.len);
+            LOG_INFO_("models_cache: refreshed %s (%zu bytes)", provider_name, strlen(body));
     }
-
-    http_response_free(&resp);
-    free(base_url); free(key_env);
-    if (key) { memset(key, 0, strlen(key)); free(key); }
+    free(body); free(base_url); free(type); free(key_env);
     return rc;
 }
 

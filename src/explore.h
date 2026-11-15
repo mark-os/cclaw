@@ -1,7 +1,7 @@
 #ifndef CCLAW_EXPLORE_H
 #define CCLAW_EXPLORE_H
 
-/* The data explorer's read side (specs/explorer.md): a JSON API that
+/* The data explorer (specs/explorer.md), read side: a JSON API that
  * describes and pages through every table, and the one static page that
  * draws it. Reading is generic — nothing here knows a table by name except
  * the short hand lists that say what the schema does not (home order, links
@@ -20,6 +20,7 @@ typedef struct {
     const char *key;     /* row: JSON array of the key values, in key order */
     const char *filter;  /* rows: JSON object {column: value | null | [values]} */
     const char *after;   /* rows: the previous page's "next" (JSON array) */
+    const char *search;  /* rows: substring of a text key column (case-insensitive) */
     int limit;           /* rows: 1..EXPLORE_MAX_LIMIT; 0 = default */
 } ExploreQuery;
 
@@ -37,8 +38,10 @@ int explore_row(sqlite3 *db, const ExploreQuery *q, char **out);
  * hidden in some rows). Shared with the tests' secret walk. */
 int explore_hidden(const char *table, const char *column);
 
-/* GET /admin/explore and /admin/api/{meta,rows,row}. db is the web server's
- * handle; this takes web_db_lock() itself, for the database work only. */
+/* Everything under /admin: the page (GET /admin), the read API (GET
+ * /admin/api/{meta,rows,row,approval}) and the actions (POST /admin/api/act,
+ * explore_act.h). db is the web server's handle; this takes web_db_lock()
+ * itself, for the database work only. */
 int explore_handle(struct mg_connection *conn, sqlite3 *db);
 
 #endif

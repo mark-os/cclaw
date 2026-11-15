@@ -4,10 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>cclaw data</title>
+<title>cclaw</title>
 <style>
-/* The data explorer (specs/explorer.md). One page, no external requests:
-   system fonts, no images, everything drawn with textContent. */
+/* The operator's page (specs/explorer.md): the data explorer and its
+   actions. One page, no external requests: system fonts, no images,
+   everything drawn with textContent. */
 :root {
   --bg: #f6f7f9; --surface: #ffffff; --fg: #171b24; --muted: #5a6272; --line: #d9dde4;
   --link: #0a3fc9; --focus: #0a3fc9;
@@ -108,6 +109,50 @@ table.list td.num { text-align: right; font-variant-numeric: tabular-nums; }
        border-radius: 6px; padding: 12px 14px; margin-bottom: 16px; max-width: 70ch; }
 .msg.bad { border-left-color: var(--bad); }
 .doc { white-space: pre-line; }
+fieldset.fl { border: 0; padding: 0; margin: 0; }
+fieldset.fl legend { padding: 0; margin-bottom: 3px; }
+/* actions */
+button.act, a.act { font: inherit; font-size: .88rem; padding: 5px 12px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--surface); color: var(--fg); cursor: pointer; text-decoration: none;
+  display: inline-block; line-height: 1.4; }
+button.act:hover, a.act:hover { border-color: var(--muted); }
+button.act.primary { background: var(--link); border-color: var(--link); color: var(--bg); }
+button.act.danger { color: var(--bad); border-color: var(--bad); }
+button.act.small { font-size: .78rem; padding: 2px 9px; }
+button.act:disabled { opacity: .55; cursor: default; }
+button.act:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a.act:focus-visible {
+  outline: 2px solid var(--focus); outline-offset: 2px; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 16px; }
+.panel { border: 1px solid var(--line); border-left: 4px solid var(--link); border-radius: 6px; background: var(--bg);
+  padding: 12px 14px; margin: 10px 0 4px; }
+.panel h3 { font-size: .95rem; margin: 0 0 8px; }
+form.f { display: flex; flex-direction: column; gap: 10px; }
+.fl { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.fl > span.lab { font-size: .82rem; font-weight: 600; }
+.fl .why { font-weight: 400; }
+.fl input[type=text], .fl input[type=password], .fl input[type=number], .fl input[type=search],
+.fl input[type=datetime-local], .fl select, .fl textarea, input.wide, select.wide, textarea.wide {
+  font: inherit; font-size: .92rem; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--fg); width: 100%; max-width: 34rem; min-width: 0; }
+.fl textarea, textarea.wide { min-height: 5em; font-family: var(--mono); font-size: .85rem; }
+.checks { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.checks label, label.check { display: inline-flex; gap: 6px; align-items: center; font-size: .9rem; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.err { color: var(--bad); font-size: .88rem; flex-basis: 100%; white-space: pre-line; }
+.err:empty { display: none; }
+.okmsg { color: var(--ok); font-size: .88rem; }
+.confirm { border: 1px solid var(--warn); background: var(--warn-bg); border-radius: 6px; padding: 10px 12px;
+  margin: 8px 0; max-width: 40rem; }
+.confirm p { margin: 0 0 8px; color: var(--fg); }
+.msg.ok { border-left-color: var(--ok); }
+.list-ed { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
+.list-ed .it { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.list-ed .it .nm { flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere; font-family: var(--mono); font-size: .85rem; }
+.list-ed select { font: inherit; font-size: .85rem; padding: 3px 6px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--surface); color: var(--fg); }
+.note-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.row .r .act { margin-left: 4px; }
 @media (max-width: 640px) {
   dl.fields > div { grid-template-columns: minmax(0, 1fr); }
   h1 { font-size: 1.35rem; }
@@ -116,8 +161,8 @@ table.list td.num { text-align: right; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><a class="brand" href="#/" data-nav>cclaw data</a>
-<span class="sub">read-only</span></div></header>
+<header class="top"><div class="top-in"><a class="brand" href="#/" data-nav>cclaw</a>
+<span class="sub">your agents and their data</span></div></header>
 <div class="page">
 <nav class="crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
 <main id="main" tabindex="-1" aria-live="polite"></main>
@@ -320,6 +365,7 @@ function parseRoute(hash) {
   var params = new URLSearchParams(q), filter = null;
   if (params.get("f")) { try { filter = JSON.parse(params.get("f")); } catch (e) { filter = "bad"; } }
   if (segs[0] === "tables") return { kind: "tables" };
+  if (segs[0] === "add-provider") return { kind: "add-provider" };
   if (segs[0] === "t" && segs[1]) return { kind: "list", table: segs[1], filter: filter };
   if (segs[0] === "r" && segs[1] && segs.length > 2) return { kind: "row", table: segs[1], segs: segs.slice(2) };
   return { kind: "home" };
@@ -335,6 +381,10 @@ function filterText(f) {
 function naturalTrail(route) {
   var t = [{ hash: "#/", label: "Home" }];
   if (route.kind === "tables") t.push({ hash: "#/tables", label: "All tables" });
+  if (route.kind === "add-provider") {
+    t.push({ hash: listHash("providers"), label: "Providers" });
+    t.push({ hash: "#/add-provider", label: "New provider" });
+  }
   if (route.kind === "list") t.push({ hash: location.hash, label: listLabel(route.table, route.filter) });
   if (route.kind === "row") {
     t.push({ hash: listHash(route.table), label: title(route.table) });
@@ -397,10 +447,12 @@ window.addEventListener("popstate", function () { render(); });
 
 /* ── page frame and states ── */
 function page(seq) { return seq === renderSeq; }
+var SHOWN_FLASH = null;
 function setPage(nodes, docTitle) {
   clear(MAIN);
+  if (SHOWN_FLASH) MAIN.appendChild(h("div", { class: "msg ok", role: "status", text: SHOWN_FLASH }));
   add(MAIN, nodes);
-  document.title = (docTitle ? docTitle + " · " : "") + "cclaw data";
+  document.title = (docTitle ? docTitle + " · " : "") + "cclaw";
 }
 function loading() { setPage(h("p", { class: "muted", text: "Loading…" })); }
 function failure(err, what) {
@@ -430,7 +482,7 @@ function pill(text, kind) { return h("span", { class: "pill" + (kind ? " " + kin
 /* ── home ── */
 function renderHome() {
   var a = META.attention, out = [h("h1", { text: "Your cclaw" }),
-    h("p", { class: "lede", text: "What this cclaw is made of. Open anything to see what each field means and what it links to. Nothing here can be changed." })];
+    h("p", { class: "lede", text: "What this cclaw is made of. Open anything to see what each field means and what it links to. Things you can change have their buttons where they are shown; history is never editable." })];
   var list = h("div", { class: "rows" });
   META.home.forEach(function (item) {
     var t0 = item.tables[0];
@@ -515,6 +567,11 @@ function renderList(route, seq) {
                  "aria-label": "Remove this filter", title: "Remove this filter", text: "×" })));
     });
     head.push(chips);
+  }
+  if (LISTX[t] && (!Object.keys(filter).length || t === "approvals")) {
+    var lx = h("div");
+    LISTX[t](lx, seq);
+    head.push(lx);
   }
   var tbody = h("tbody"), more = h("div"), status = h("p", { class: "note" });
   var table = h("div", { class: "tw" }, h("table", { class: "list" },
@@ -703,6 +760,7 @@ var SHAPED = {
     var name = res.row.values.name, by = { agent_name: name };
     el.appendChild(h("p", { class: "lede" }, res.row.values.description ? res.row.values.description.replace(/\.?$/, ". ") : "",
       res.row.values.created_by ? ["Created by ", link(rowHash("agents", [res.row.values.created_by]), res.row.values.created_by), "."] : ""));
+    el.appendChild(h("div", { class: "bar" }, opener("Copy this agent", "Copy " + name, function () { return copyAgentPanel(name, res.row.values); })));
     sub(el, "Models", seq, rows("agent_models", by, 200), function (r, h2) {
       more(h2, "as a list", listHash("agent_models", by), "Model lists");
       var groups = { chat: [], image: [], audio: [] };
@@ -719,18 +777,21 @@ var SHAPED = {
             v.reasoning_effort ? ", effort " + v.reasoning_effort : ""]));
         });
       });
-      return list;
+      return [list, opener("Assign models", "Assign models to " + name, function () {
+        return modelsEditor(name, r.rows.map(function (x) { return x.values; }));
+      })];
     });
     sub(el, "Grants", seq, rows("grants", by, 200), function (r, h2) {
       more(h2, r.rows.length + " as a list", listHash("grants", by), "Grants");
-      if (!r.rows.length) return emptyLine("No grants: this agent can use nothing.");
+      var addG = opener("Add a grant", "Add a grant to " + name, function () { return addGrantPanel(name); });
+      if (!r.rows.length) return [emptyLine("No grants: this agent can use nothing."), addG];
       var kinds = {}, order = ["tool", "host", "read_path", "write_path", "secret"];
       r.rows.forEach(function (x) { (kinds[x.values.kind] = kinds[x.values.kind] || []).push(x); });
       Object.keys(kinds).forEach(function (k) { if (order.indexOf(k) < 0) order.push(k); });
       var KIND = { tool: "Tools", host: "Hosts it may reach", read_path: "Paths it may read",
                    write_path: "Paths it may write", secret: "Secrets it may use" };
       var MODE = { silent: ["runs freely", ""], always: ["asks each time", "warn"], tool_decides: ["tool decides", ""] };
-      return order.filter(function (k) { return kinds[k]; }).map(function (k) {
+      var groups = order.filter(function (k) { return kinds[k]; }).map(function (k) {
         var list = h("div", { class: "rows" });
         kinds[k].forEach(function (x) {
           var v = x.values, target = k === "tool" ? "tools" : k === "secret" ? "secrets" : null;
@@ -741,10 +802,14 @@ var SHAPED = {
           if (v.expires_at) pills.appendChild(pill((v.expires_at < Date.now() / 1000 ? "expired " : "expires ") + ago(v.expires_at),
                                                    v.expires_at < Date.now() / 1000 ? "bad" : ""));
           pills.appendChild(link(rowHash("grants", x.key), "details", "Grant"));
+          var agentName = res.row.values.name;   /* `name` is this row's label here */
+          pills.appendChild(confirmBtn("Remove", agentName + " will no longer be able to use " + v.value + ".", "Remove the grant",
+            function () { return act("grant_remove", { agent: agentName, kind: k, value: v.value }); }));
           list.appendChild(rowLine(name, pills));
         });
         return h("div", { class: "grp" }, h("h3", { text: KIND[k] || k + " (" + kinds[k].length + ")" }), list);
       });
+      return groups.concat([addG]);
     });
     sub(el, "Sessions", seq, rows("sessions", by, 20).then(function (s) {
       var ids = s.rows.map(function (x) { return x.key[0]; });
@@ -757,7 +822,9 @@ var SHAPED = {
       r[2].rows.forEach(function (c) { titles[c.key[0] + "\u0000" + c.key[1]] = c; });
       more(h2, countIn(res, "sessions", "agent_name") > s.rows.length ? "all " + countIn(res, "sessions", "agent_name") : "as a list",
            listHash("sessions", by), "Sessions");
-      if (!s.rows.length) return emptyLine("No sessions yet.");
+      var newS = opener("New session on a channel", "New session for " + name + " on a channel", function () { return newSessionPanel(name); });
+      var moveS = opener("Move a session to a chat", "Move a session of " + name + " to a chat", function () { return moveSessionPanel(name, s.rows); });
+      if (!s.rows.length) return [emptyLine("No sessions yet."), newS];
       var list = h("div", { class: "rows" });
       s.rows.forEach(function (x) {
         var v = x.values, where, state;
@@ -775,7 +842,8 @@ var SHAPED = {
         else if (v.channel_name) pills.appendChild(pill("left behind"));
         list.appendChild(rowLine(h("span", null, link(rowHash("sessions", x.key), rowLabelOf("sessions", x)), where), pills));
       });
-      return [list, h("p", { class: "note small", text: "“Live in its chat”: the chat sends its messages to this session. “Left behind”: the chat has moved on to another session (for example after /new)." })];
+      return [list, h("p", { class: "note small", text: "“Live in its chat”: the chat sends its messages to this session. “Left behind”: the chat has moved on to another session (for example after /new)." }),
+              h("div", { class: "actions" }, newS, moveS)];
     });
     sub(el, "Memory", seq, rows("agent_memory_blocks", by, 200).then(function (a) {
       var ids = a.rows.map(function (x) { return x.values.block_id; });
@@ -784,7 +852,10 @@ var SHAPED = {
       var att = {};
       r[0].rows.forEach(function (x) { att[x.values.block_id] = x.values; });
       if (r[1].rows.length) more(h2, "as a list", listHash("memory_blocks", { id: Object.keys(att).map(Number) }), "Memory blocks");
-      if (!r[1].rows.length) return emptyLine("No memory blocks attached.");
+      var memActs = h("div", { class: "actions" },
+        opener("Create a block", "New memory block for " + name, function () { return createBlockPanel(name); }),
+        opener("Attach a block", "Attach a block to " + name, function () { return attachBlockPanel(name, Object.keys(att).map(Number)); }));
+      if (!r[1].rows.length) return [emptyLine("No memory blocks attached."), memActs];
       var list = h("div", { class: "rows" });
       r[1].rows.forEach(function (x) {
         var v = x.values, a = att[x.key[0]];
@@ -793,7 +864,7 @@ var SHAPED = {
         list.appendChild(rowLine(h("span", null, link(rowHash("memory_blocks", x.key), v.label),
           h("span", { class: "why", text: (v.description || "") + (v.created_by === name ? " · made by this agent" : v.created_by ? " · made by " + v.created_by : " · made by the operator") })), pills));
       });
-      return list;
+      return [list, memActs];
     });
     sub(el, "Extensions", seq, Promise.all([rows("agent_extensions", by, 200), rows("extensions", { owner_agent: name }, 200)]), function (r) {
       var list = h("div", { class: "rows" }), lines = {}, order = [];
@@ -829,6 +900,11 @@ var SHAPED = {
   providers: function (res, el, seq) {
     var name = res.row.values.name, keyName = res.row.values.api_key_env;
     var kl = (res.links_out || []).filter(function (l) { return l && l.to === "secrets"; })[0];
+    var nModels = countIn(res, "models", "provider_name");
+    el.appendChild(h("div", { class: "bar" }, opener("Edit", "Edit " + name, function () { return editProviderPanel(res.row.values); }),
+      confirmBtn("Remove", nModels ? name + " still has " + nModels + " model" + (nModels === 1 ? "" : "s") + ": removing it will be refused until they are removed."
+                                   : "Remove " + name + "? Its cached model list goes with it; its key stays on the Secrets page.", "Remove the provider",
+        function () { return act("provider_remove", { name: name }).then(function (r) { FLASH = r.message; navigate(listHash("providers"), "Providers"); return null; }); }, "danger")));
     el.appendChild(section("API key", rowLine(
       !keyName ? h("span", { class: "none", text: "No key configured." })
         : kl && kl.exists ? h("span", null, "Stored as the secret ", link(rowHash("secrets", [keyName]), keyName))
@@ -848,24 +924,20 @@ var SHAPED = {
       });
       return list;
     });
-    var offered = countIn(res, "models_cache", "provider_name");
-    sub(el, "Offered by the provider", seq, rows("models_cache", { provider_name: name }, 5), function (r, h2) {
-      if (!r.rows.length) return emptyLine("No list fetched from this provider yet.");
-      more(h2, "all " + (offered > 1000 ? "1,000+" : fmtNum(offered)), listHash("models_cache", { provider_name: name }), "Models offered");
-      var list = h("div", { class: "rows" });
-      r.rows.forEach(function (x) {
-        var v = x.values;
-        list.appendChild(rowLine(h("span", null, link(rowHash("models_cache", x.key), v.id),
-          h("span", { class: "why", text: [v.context_length ? fmtNum(v.context_length) + " tokens" : null, v.modality].filter(Boolean).join(" · ") })), ""));
-      });
-      return [h("p", { class: "note", text: fmtNum(offered) + (offered > 1000 ? "+" : "") + " models on offer, list fetched " + ago(r.rows[0].values.synced_at) + "." }), list];
-    });
+    offeredSection(el, seq, name, countIn(res, "models_cache", "provider_name"));
   },
 
   channels: function (res, el, seq) {
     var name = res.row.values.name, da = res.row.values.default_agent;
-    el.appendChild(section("Unknown chats", rowLine(da ? h("span", null, "Get a new session with ", link(rowHash("agents", [da]), da), ".")
-      : h("span", null, "Dropped; the operator is told once per chat."), da ? pill("open door", "warn") : pill("closed", "ok"))));
+    var unk = section("Unknown chats", [rowLine(da ? h("span", null, "Get a new session with ", link(rowHash("agents", [da]), da), ".")
+      : h("span", null, "Dropped; the operator is told once per chat."), da ? pill("open door", "warn") : pill("closed", "ok"))]);
+    el.appendChild(unk);
+    Promise.all([allRows("agents"), toolNames()]).then(function (r) {
+      if (!page(seq)) return;
+      unk.appendChild(opener("Change the defaults", "Defaults for " + name, function () {
+        return channelDefaultsPanel(res.row.values, r[0].map(function (x) { return x.key[0]; }), r[1]);
+      }));
+    });
     sub(el, "Chats", seq, rows("channel_chats", { channel_name: name }, 200).then(function (c) {
       var ids = c.rows.map(function (x) { return x.values.session_id; }).filter(function (x) { return x !== null; });
       return Promise.all([c, ids.length ? rows("sessions", { id: ids }, 200) : { rows: [] }]);
@@ -901,13 +973,948 @@ var SHAPED = {
   }
 };
 
+/* ── actions (POST /admin/api/act) ──
+   Each is a named action the server validates; the page only gathers the
+   fields. After one succeeds the page is drawn again from the API (never
+   patched locally), with the server's sentence shown at the top. A refusal is
+   shown next to the control that sent it. */
+var FLASH = null;
+function act(action, fields) {
+  var body = { action: action };
+  for (var k in fields) if (fields[k] !== undefined) body[k] = fields[k];
+  return fetch("/admin/api/act", { method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "Content-Type": "application/json", "X-Cclaw-Action": "1" }, body: JSON.stringify(body) })
+    .then(function (r) {
+      return r.text().then(function (t) {
+        var b = null;
+        try { b = JSON.parse(t); } catch (e) { b = null; }
+        if (!r.ok || !b || !b.ok) {
+          var e = new ApiError(r.status, b && b.error ? b.error : "HTTP " + r.status);
+          e.body = b;
+          throw e;
+        }
+        return b;
+      });
+    }, function () { throw new ApiError(0, "the server could not be reached"); });
+}
+/* Draw the current page again from fresh data, with msg on top. */
+function refresh(msg) {
+  FLASH = msg || null;
+  return api("meta").then(function (m) { setMeta(m); render(); }, function () { render(); });
+}
+function setMeta(m) {
+  META = m;
+  TABLES = {};
+  m.tables.forEach(function (t) { TABLES[t.name] = t; });
+}
+
+/* ── small form kit: every input has a label; Enter submits, Escape cancels ── */
+var uid = 0;
+function fieldIn(label, input, hint) {
+  var id = "f" + (++uid);
+  input.id = id;
+  return h("div", { class: "fl" }, h("label", { for: id }, h("span", { class: "lab", text: label })),
+           input, hint ? h("span", { class: "why", text: hint }) : null);
+}
+function textIn(name, value, attrs) {
+  var a = { type: "text", name: name, autocomplete: "off", spellcheck: "false" };
+  for (var k in attrs || {}) a[k] = attrs[k];
+  var el = h("input", a);
+  if (value !== null && value !== undefined) el.value = String(value);
+  return el;
+}
+function areaIn(name, value, rows) {
+  var el = h("textarea", { name: name, rows: rows || 4, spellcheck: "false" });
+  if (value !== null && value !== undefined) el.value = String(value);
+  return el;
+}
+function selectIn(name, options, value) {
+  var el = h("select", { name: name });
+  options.forEach(function (o) {
+    var op = h("option", { value: o[0], text: o[1] });
+    if (o[2]) op.disabled = true;
+    el.appendChild(op);
+  });
+  if (value !== null && value !== undefined) el.value = String(value);
+  return el;
+}
+function checkIn(name, label, checked) {
+  var id = "f" + (++uid), box = h("input", { type: "checkbox", name: name, id: id });
+  box.checked = !!checked;
+  return h("label", { class: "check", for: id }, box, label);
+}
+function btn(label, onclick, kind) {
+  return h("button", { type: "button", class: "act" + (kind ? " " + kind : ""), text: label, onclick: onclick });
+}
+/* A <form>: fields, then a submit button and the error line beside it.
+   onSubmit(form, ctx) returns a promise of the server's answer; ctx.err
+   shows a sentence, ctx.confirm asks before going on. */
+function formBox(nodes, submitLabel, onSubmit, opts) {
+  opts = opts || {};
+  var err = h("div", { class: "err", role: "alert" });
+  var submit = h("button", { type: "submit", class: "act " + (opts.danger ? "danger" : "primary"), text: submitLabel });
+  var row = h("div", { class: "actions" }, submit, opts.cancel ? btn("Cancel", opts.cancel) : null, err);
+  var f = h("form", { class: "f", novalidate: true }, nodes, row);
+  f.addEventListener("submit", function (e) {
+    e.preventDefault();
+    err.textContent = "";
+    var ctx = { err: err, row: row, form: f, submit: submit };
+    var p = onSubmit(f, ctx);
+    if (p && p.then) {
+      submit.disabled = true;
+      p.then(function () { submit.disabled = false; }, function (x) {
+        submit.disabled = false;
+        if (x && x.message) err.textContent = x.message.replace(/\.?$/, ".");
+      });
+    }
+  });
+  return f;
+}
+function val(f, name) {
+  var el = f.elements[name];
+  if (!el) return undefined;
+  if (el.type === "checkbox") return el.checked;
+  return el.value;
+}
+/* The inline confirm: plain words about what will happen, then Confirm or
+   Cancel (Escape). typed: the text the operator must type first. run()
+   returns a promise; a refusal stays in the box. */
+function confirmBox(anchor, text, okLabel, run, typed) {
+  var box, input = null, err = h("div", { class: "err", role: "alert" });
+  function close() { if (box.parentNode) box.parentNode.removeChild(box); anchor.hidden = false; focusFirst(anchor); }
+  var ok = h("button", { type: "submit", class: "act danger", text: okLabel });
+  var nodes = [h("p", { text: text })];
+  if (typed) {
+    input = textIn("typed", "", { "aria-label": "Type " + typed + " to confirm" });
+    nodes.push(fieldIn("Type " + typed + " to confirm", input));
+  }
+  box = h("form", { class: "confirm", role: "group", "aria-label": "Confirm" }, nodes,
+          h("div", { class: "actions" }, ok, btn("Cancel", function () { close(); }), err));
+  box.addEventListener("keydown", function (e) { if (e.key === "Escape") { e.preventDefault(); close(); } });
+  box.addEventListener("submit", function (e) {
+    e.preventDefault();
+    err.textContent = "";
+    if (typed && input.value.trim() !== typed) { err.textContent = "Type " + typed + " exactly to go ahead."; return; }
+    ok.disabled = true;
+    run(input ? input.value.trim() : null).then(function (r) {
+      if (r === null) return;   /* the action moved to another page itself */
+      return refresh(r && r.message);
+    }, function (x) {
+      ok.disabled = false;
+      err.textContent = (x && x.message ? x.message : String(x)).replace(/\.?$/, ".");
+    });
+  });
+  anchor.hidden = true;
+  anchor.parentNode.insertBefore(box, anchor.nextSibling);
+  (input || ok).focus();
+  return box;
+}
+function focusFirst(el) {
+  var f = el && el.querySelector ? el.querySelector("input, select, textarea, button") : null;
+  if (f) f.focus(); else if (el && el.focus) el.focus();
+}
+/* A button that opens a panel below it; Escape (or Cancel) closes it. */
+function opener(label, title, build, kind) {
+  var wrap = h("div", { class: "opener" }), b, pnl = null;
+  function close() { if (pnl) { wrap.removeChild(pnl); pnl = null; b.setAttribute("aria-expanded", "false"); b.focus(); } }
+  b = btn(label, function () {
+    if (pnl) { close(); return; }
+    pnl = h("div", { class: "panel", role: "region", "aria-label": title }, h("h3", { text: title }));
+    pnl.addEventListener("keydown", function (e) { if (e.key === "Escape") { e.preventDefault(); close(); } });
+    add(pnl, build(close));
+    wrap.appendChild(pnl);
+    b.setAttribute("aria-expanded", "true");
+    focusFirst(pnl);
+  }, kind);
+  b.setAttribute("aria-expanded", "false");
+  wrap.appendChild(b);
+  return wrap;
+}
+/* Run an action from a form and draw the page again on success. */
+function submitAct(action, fields, ctx, after) {
+  return act(action, fields).then(function (r) {
+    if (after) return after(r);
+    return refresh(r.message);
+  });
+}
+/* A button whose action is confirmed inline first. */
+function confirmBtn(label, text, okLabel, run, kind, typed) {
+  var b = btn(label, function () { confirmBox(b, text, okLabel, run, typed); }, kind || "small");
+  return b;
+}
+function allRows(table, filter) { return rows(table, filter || null, 200).then(function (r) { return r.rows; }); }
+function capsOf(v) { var c = looksJson(v.capabilities); return Array.isArray(c) ? c : []; }
+function modalityCaps(m) {
+  /* Only what the provider states, on the input side of "in->out": a token
+     must be exactly image or audio to count. No modality, no media. */
+  var out = ["text"];
+  if (typeof m !== "string" || m.indexOf("->") < 0) return out;
+  m.split("->")[0].split("+").forEach(function (t) {
+    t = t.trim();
+    if ((t === "image" || t === "audio") && out.indexOf(t) < 0) out.push(t);
+  });
+  return out;
+}
+var WIRE = [["openai", "OpenAI-compatible (chat completions)"], ["gemini", "Google Gemini (native)"],
+            ["anthropic", "Anthropic Messages"]];
+var EFFORT = [["", "no effort setting"], ["off", "off"], ["minimal", "minimal"], ["low", "low"],
+              ["medium", "medium"], ["high", "high"]];
+function toolFilterEditor(name, current, tools) {
+  /* "Unrestricted" is a choice of its own, never what an empty list means. */
+  var list = looksJson(current), restricted = Array.isArray(list);
+  var id = "f" + (++uid);
+  var un = h("input", { type: "radio", name: name + "_mode", value: "unrestricted", id: id + "u" });
+  var on = h("input", { type: "radio", name: name + "_mode", value: "list", id: id + "l" });
+  un.checked = !restricted; on.checked = restricted;
+  var checks = h("div", { class: "checks" });
+  tools.forEach(function (t) {
+    var c = checkIn(name + "_tool", t, restricted && list.indexOf(t) >= 0);
+    c.querySelector("input").value = t;
+    checks.appendChild(c);
+  });
+  function sync() { checks.hidden = !on.checked; }
+  un.addEventListener("change", sync); on.addEventListener("change", sync); sync();
+  var el = h("fieldset", { class: "fl" }, h("legend", null, h("span", { class: "lab", text: "Tools" })),
+    h("label", { class: "check", for: id + "u" }, un, "Unrestricted: whatever the agent is granted"),
+    h("label", { class: "check", for: id + "l" }, on, "Only these tools:"), checks);
+  el.value = function () {
+    if (un.checked) return "unrestricted";
+    var out = [];
+    checks.querySelectorAll("input:checked").forEach(function (c) { out.push(c.value); });
+    return out;
+  };
+  return el;
+}
+function toolNames() { return allRows("tools").then(function (r) { return r.map(function (x) { return x.key[0]; }); }); }
+
+/* ── agent page controls ── */
+function copyAgentPanel(name, src) {
+  var box = h("div", null, h("p", { class: "muted", text: "Loading what would be copied…" }));
+  Promise.all([allRows("grants", { agent_name: name }), allRows("agent_models", { agent_name: name }),
+               allRows("agent_extensions", { agent_name: name }), allRows("agent_memory_blocks", { agent_name: name })])
+  .then(function (r) {
+    var by = { chat: 0, image: 0, audio: 0 };
+    r[1].forEach(function (x) { by[x.values.purpose]++; });
+    clear(box);
+    var nameIn = textIn("name", "", { placeholder: "for example " + name + "2", required: true });
+    var descIn = textIn("description", src.description || "");
+    var mem = checkIn("attach_memory", "Also share its " + r[3].length + " memory block" + (r[3].length === 1 ? "" : "s") +
+                      ", read only", false);
+    box.appendChild(h("p", { class: "note" }, "A new agent with the same prompt and limits (iterations, output, shell timeout and interpreter, sandbox profile ",
+      h("span", { class: "mono", text: src.sandbox_profile || "standard" }), "), the same model lists — chat " + by.chat +
+      ", images " + by.image + ", audio " + by.audio + ", effort included — the same " + r[0].length + " grants (recorded as given when it was created) and the same " +
+      r[2].length + " extension" + (r[2].length === 1 ? "" : "s") + ". Not copied: sessions, schedules, history and memory notes; memory blocks only if you tick the box, and then read only."));
+    box.appendChild(formBox([fieldIn("Name of the copy", nameIn, "PascalCase: a capital letter, then letters and digits."),
+      fieldIn("Description", descIn), mem], "Create the copy", function (f) {
+        return act("agent_copy", { from: name, name: val(f, "name").trim(), description: val(f, "description"),
+                                   attach_memory: val(f, "attach_memory") }).then(function (res) {
+          FLASH = res.message;
+          navigate(rowHash("agents", [res.agent]), res.agent);
+        });
+      }));
+    focusFirst(box);
+  }, function (e) { clear(box); box.appendChild(h("div", { class: "err", text: e.message })); });
+  return box;
+}
+
+function modelsEditor(name, current) {
+  var box = h("div", null, h("p", { class: "muted", text: "Loading models…" }));
+  allRows("models").then(function (models) {
+    clear(box);
+    var byId = {};
+    models.forEach(function (m) { byId[m.key[0]] = m.values; });
+    [["chat", "Chat"], ["image", "Images"], ["audio", "Audio"]].forEach(function (p) {
+      var purpose = p[0], list = current.filter(function (x) { return x.purpose === purpose; })
+        .sort(function (a, b) { return a.pos - b.pos; })
+        .map(function (x) { return { model_id: x.model_id, reasoning_effort: x.reasoning_effort || "" }; });
+      var items = h("div", { class: "list-ed", role: "list" }), err = h("div", { class: "err", role: "alert" });
+      var adder = h("select", { class: "wide", "aria-label": "Model to add to the " + p[1].toLowerCase() + " list" });
+      function draw() {
+        clear(items);
+        if (!list.length) items.appendChild(h("p", { class: "none", text: purpose === "chat"
+          ? "Empty: the agent cannot run without a chat model." : "Empty: the global pick by capability is used." }));
+        list.forEach(function (it, i) {
+          var row = h("div", { class: "it", role: "listitem" }, h("span", { class: "nm", text: (i + 1) + ". " + it.model_id }));
+          if (purpose === "chat") {
+            var eff = selectIn("effort", EFFORT, it.reasoning_effort);
+            eff.setAttribute("aria-label", "Reasoning effort for " + it.model_id);
+            eff.addEventListener("change", function () { it.reasoning_effort = eff.value; });
+            row.appendChild(eff);
+          }
+          var up = btn("Up", function () { list.splice(i - 1, 0, list.splice(i, 1)[0]); draw(); }, "small");
+          up.disabled = i === 0; up.setAttribute("aria-label", "Move " + it.model_id + " up");
+          var dn = btn("Down", function () { list.splice(i + 1, 0, list.splice(i, 1)[0]); draw(); }, "small");
+          dn.disabled = i === list.length - 1; dn.setAttribute("aria-label", "Move " + it.model_id + " down");
+          var rm = btn("Remove", function () { list.splice(i, 1); draw(); }, "small");
+          rm.setAttribute("aria-label", "Remove " + it.model_id + " from the list");
+          add(row, [up, dn, rm]);
+          items.appendChild(row);
+        });
+        clear(adder);
+        var opts = models.filter(function (m) {
+          return !list.some(function (x) { return x.model_id === m.key[0]; }) &&
+                 (purpose === "chat" || capsOf(m.values).indexOf(purpose) >= 0);
+        });
+        adder.appendChild(h("option", { value: "", text: opts.length ? "Add a model…" :
+          purpose === "chat" ? "No other models registered" : "No other model can handle " + purpose }));
+        opts.forEach(function (m) {
+          adder.appendChild(h("option", { value: m.key[0], text: m.key[0] + (m.values.status === "disabled" ? " (disabled)" : "") }));
+        });
+      }
+      draw();
+      var addBtn = btn("Add", function () {
+        if (!adder.value) return;
+        list.push({ model_id: adder.value, reasoning_effort: "" });
+        draw();
+        adder.focus();
+      }, "small");
+      var save = btn("Save the " + p[1].toLowerCase() + " list", function () {
+        err.textContent = "";
+        save.disabled = true;
+        act("models_set", { agent: name, purpose: purpose, models: list.map(function (x) {
+          return purpose === "chat" && x.reasoning_effort ? { model_id: x.model_id, reasoning_effort: x.reasoning_effort }
+                                                          : { model_id: x.model_id };
+        }) }).then(function (r) { refresh(r.message); }, function (x) { save.disabled = false; err.textContent = x.message; });
+      }, "primary");
+      box.appendChild(h("div", { class: "grp" }, h("h3", { text: p[1] + (purpose === "chat" ? ", in order of preference"
+        : ", only models whose capabilities include " + purpose) }), items,
+        h("div", { class: "actions" }, adder, addBtn), h("div", { class: "actions", style: "margin-top:8px" }, save, err)));
+    });
+    focusFirst(box);
+  });
+  return box;
+}
+
+function addGrantPanel(name) {
+  var box = h("div", null, h("p", { class: "muted", text: "Loading…" }));
+  Promise.all([toolNames(), allRows("secrets", { scope: "agent" }), allRows("grants", { agent_name: name })]).then(function (r) {
+    clear(box);
+    var tools = r[0], secrets = r[1].map(function (x) { return x.key[0]; });
+    var kind = selectIn("kind", [["tool", "A tool"], ["host", "A host it may reach"], ["read_path", "A path it may read"],
+                                 ["write_path", "A path it may read and write"], ["secret", "A secret it may use"]], "tool");
+    var slot = h("div");
+    var mode = selectIn("approval_mode", [["", "The tool's default"], ["silent", "Runs freely"],
+                                          ["always", "Asks you each time"], ["tool_decides", "The tool decides when to ask"]], "");
+    var modeField = fieldIn("Approval", mode);
+    var exp = h("input", { type: "datetime-local", name: "expires" });
+    function drawValue() {
+      clear(slot);
+      var k = kind.value, input;
+      if (k === "tool") input = selectIn("value", [["", "Pick a tool…"]].concat(tools.map(function (t) { return [t, t]; })), "");
+      else if (k === "secret") input = secrets.length ? selectIn("value", [["", "Pick a secret…"]].concat(secrets.map(function (t) { return [t, t]; })), "")
+                                                     : textIn("value", "", { placeholder: "NO_SECRETS_YET" });
+      else input = textIn("value", "", { placeholder: k === "host" ? "api.github.com, or .github.com for every subdomain" : "/home/you/reports" });
+      slot.appendChild(fieldIn(k === "tool" ? "Tool" : k === "secret" ? "Secret" : k === "host" ? "Host" : "Path", input,
+        k === "secret" && !secrets.length ? "No agent-scope secrets are stored yet; add one on the Secrets page." :
+        k === "secret" ? "Where it may be sent is set on the secret's own page (allowed hosts)." : null));
+      modeField.hidden = k !== "tool";
+    }
+    kind.addEventListener("change", drawValue);
+    drawValue();
+    var f = formBox([fieldIn("What to grant", kind), slot, modeField,
+      fieldIn("Expires", exp, "Leave empty for a grant that does not expire.")], "Add the grant", function (form, ctx) {
+        var v = (val(form, "value") || "").trim(), k = val(form, "kind");
+        if (!v) { ctx.err.textContent = "Say what to grant."; return; }
+        var e = val(form, "expires"), fields = { agent: name, kind: k, value: v };
+        if (k === "tool" && val(form, "approval_mode")) fields.approval_mode = val(form, "approval_mode");
+        if (e) fields.expires_at = Math.floor(new Date(e).getTime() / 1000);
+        var words = { tool: "use the tool " + v, host: "reach " + v, read_path: "read " + v,
+                      write_path: "read and write " + v, secret: "use the secret " + v };
+        confirmBox(ctx.row, name + " will be able to " + words[k] + (e ? " until " + new Date(e).toLocaleString() : "") +
+                   ". This widens what it can do.", "Grant it", function () { return act("grant_add", fields); });
+      });
+    box.appendChild(f);
+    focusFirst(box);
+  });
+  return box;
+}
+
+function chatOption(c, sess) {
+  var v = c.values, s = v.session_id !== null ? sess[v.session_id] : null;
+  return (v.title || v.chat_id) + (v.kind ? " (" + (v.kind === "dm" ? "direct message" : "group") + ")" : "") + " — " +
+    (v.session_id === null ? "not routed" : "talks to #" + v.session_id + (s ? " " + s.values.agent_name : ""));
+}
+/* Pick a channel, then one of its chats; calls onPick(chat, session) when it changes. */
+function chatPicker(onPick) {
+  var wrap = h("div", { class: "f" }), chSel = selectIn("channel", [["", "Loading…"]], ""), chatSel = selectIn("chat", [["", "Pick a channel first"]], "");
+  var chats = [], sess = {};
+  allRows("channels").then(function (r) {
+    clear(chSel);
+    chSel.appendChild(h("option", { value: "", text: r.length ? "Pick a channel…" : "No channels yet" }));
+    r.forEach(function (c) { chSel.appendChild(h("option", { value: c.key[0], text: c.key[0] })); });
+  });
+  chSel.addEventListener("change", function () {
+    clear(chatSel);
+    chatSel.appendChild(h("option", { value: "", text: "Loading…" }));
+    onPick(null, null);
+    if (!chSel.value) return;
+    allRows("channel_chats", { channel_name: chSel.value }).then(function (c) {
+      chats = c;
+      var ids = c.map(function (x) { return x.values.session_id; }).filter(function (x) { return x !== null; });
+      return ids.length ? allRows("sessions", { id: ids }) : [];
+    }).then(function (s) {
+      sess = {};
+      s.forEach(function (x) { sess[x.key[0]] = x; });
+      clear(chatSel);
+      chatSel.appendChild(h("option", { value: "", text: chats.length ? "Pick a chat…" : "No chats seen on this channel" }));
+      chats.forEach(function (c, i) { chatSel.appendChild(h("option", { value: String(i), text: chatOption(c, sess) })); });
+    });
+  });
+  chatSel.addEventListener("change", function () {
+    var c = chatSel.value === "" ? null : chats[Number(chatSel.value)];
+    onPick(c, c && c.values.session_id !== null ? sess[c.values.session_id] || { key: [c.values.session_id], values: {} } : null);
+  });
+  wrap.appendChild(fieldIn("Channel", chSel));
+  wrap.appendChild(fieldIn("Chat", chatSel, "Every chat the channel has seen, with the session it talks to now."));
+  return wrap;
+}
+
+function newSessionPanel(name) {
+  var picked = null, pinned = null, conseq = h("p", { class: "note", "aria-live": "polite" });
+  var picker = chatPicker(function (c, s) {
+    picked = c; pinned = s;
+    conseq.textContent = !c ? "" : c.values.session_id === null
+      ? "A new session for " + name + " will answer this chat. Nobody answers it now."
+      : s && s.values.agent_name && s.values.agent_name !== name
+        ? "This chat talks to " + s.values.agent_name + " now (session #" + c.values.session_id + "). A new session here hands the chat to " +
+          name + ": its people reach " + name + ", with " + name + "'s grants. Session #" + c.values.session_id + " is left behind with its history."
+        : "Session #" + c.values.session_id + " is left behind with its history; the chat talks to the new session from now on.";
+  });
+  return formBox([picker, conseq], "Start the session", function (f, ctx) {
+    if (!picked) { ctx.err.textContent = "Pick a channel and a chat."; return; }
+    var other = pinned && pinned.values.agent_name && pinned.values.agent_name !== name ? pinned.values.agent_name : null;
+    confirmBox(ctx.row, conseq.textContent, other ? "Hand the chat to " + name : "Start it", function (typed) {
+      return act("session_new_on_chat", { agent: name, channel: picked.key[0], chat_id: picked.key[1],
+                                          confirm_handover: other ? typed : undefined });
+    }, other ? name : null);
+  });
+}
+
+function moveSessionPanel(name, sessions) {
+  var top = sessions.filter(function (x) { return !(x.values.parent_session_id > 0); });
+  var sSel = selectIn("session", [["", top.length ? "Pick a session…" : "No sessions"]].concat(top.map(function (x) {
+    return [String(x.key[0]), rowLabelOf("sessions", x) + (x.values.channel_name ? " (now " + x.values.channel_name + ", " + x.values.chat_id + ")" : " (no chat)")];
+  })), "");
+  var picked = null, pinned = null, conseq = h("p", { class: "note", "aria-live": "polite" });
+  function say() {
+    var s = top.filter(function (x) { return String(x.key[0]) === sSel.value; })[0];
+    if (!s || !picked) { conseq.textContent = ""; return; }
+    var parts = ["Session #" + s.key[0] + " will talk to " + (picked.values.title || picked.values.chat_id) + "."];
+    if (picked.values.session_id !== null && picked.values.session_id !== s.key[0]) {
+      parts.push("Session #" + picked.values.session_id + (pinned && pinned.values.agent_name ? " (" + pinned.values.agent_name + ")" : "") + " is left behind with its history.");
+      if (pinned && pinned.values.agent_name && pinned.values.agent_name !== name)
+        parts.push("The chat changes hands from " + pinned.values.agent_name + " to " + name + ": its people reach " + name + ", with " + name + "'s grants.");
+    }
+    if (s.values.channel_name && s.values.chat_id && !(s.values.channel_name === picked.key[0] && s.values.chat_id === picked.key[1]))
+      parts.push("If the session's old chat (" + s.values.chat_id + ") still talks to it, that chat goes on with a fresh session for " + name + ".");
+    conseq.textContent = parts.join(" ");
+  }
+  sSel.addEventListener("change", say);
+  var picker = chatPicker(function (c, s) { picked = c; pinned = s; say(); });
+  return formBox([fieldIn("Session", sSel), picker, conseq], "Move the session", function (f, ctx) {
+    if (!sSel.value || !picked) { ctx.err.textContent = "Pick a session and a chat."; return; }
+    var other = pinned && pinned.values.agent_name && pinned.values.agent_name !== name ? pinned.values.agent_name : null;
+    confirmBox(ctx.row, conseq.textContent, "Move it", function (typed) {
+      return act("session_move_to_chat", { session_id: Number(sSel.value), channel: picked.key[0], chat_id: picked.key[1],
+                                           confirm_handover: other ? typed : undefined });
+    }, other ? name : null);
+  });
+}
+
+function createBlockPanel(agent) {
+  var f = formBox([fieldIn("Label", textIn("label", "", { placeholder: "team-notes" }), "How agents address it: letters, digits, - and _."),
+    fieldIn("Description", textIn("description", "")),
+    fieldIn("Placement", selectIn("placement", [["context", "Each turn's context (changes show next turn)"],
+                                              ["system", "The system prompt (changes show next session)"]], "context")),
+    checkIn("read_only", "Read only for every agent", false)],
+    "Create the block", function (form) {
+      return submitAct("memory_block_create", { label: val(form, "label").trim(), description: val(form, "description"),
+        placement: val(form, "placement"), read_only: val(form, "read_only"), agent: agent || undefined });
+    });
+  return h("div", null, agent ? h("p", { class: "note", text: "Attached to " + agent + ", who can read and write it." }) : null, f);
+}
+
+function attachBlockPanel(agent, attachedIds) {
+  var box = h("div", null, h("p", { class: "muted", text: "Loading blocks…" }));
+  allRows("memory_blocks").then(function (r) {
+    clear(box);
+    var free = r.filter(function (x) { return attachedIds.indexOf(x.key[0]) < 0; });
+    var sel = selectIn("block", [["", free.length ? "Pick a block…" : "Every block is attached already"]].concat(free.map(function (x) {
+      return [String(x.key[0]), x.values.label + " (#" + x.key[0] + ")"];
+    })), "");
+    var f = formBox([fieldIn("Block", sel), checkIn("read_only", "Read only (the default for a shared block)", true)],
+      "Attach", function (form, ctx) {
+        if (!sel.value) { ctx.err.textContent = "Pick a block."; return; }
+        var fields = { block_id: Number(sel.value), agent: agent, read_only: val(form, "read_only") };
+        if (!fields.read_only) {
+          confirmBox(ctx.row, agent + " will be able to write this block. If other agents have it, what " + agent +
+            " writes reaches their prompts.", "Attach writable", function () { return act("memory_attach", fields); });
+          return;
+        }
+        return submitAct("memory_attach", fields);
+      });
+    box.appendChild(f);
+    focusFirst(box);
+  });
+  return box;
+}
+
+/* ── providers and models ── */
+function addProviderPage() {
+  nameCurrent("New provider");
+  var out = [h("h1", { text: "New provider" }),
+    h("p", { class: "lede", text: "Four things to fill in. Saving checks them by fetching the provider's model list; nothing is saved unless that works. Then you land on the provider's page, ready to import models." })];
+  var key = h("input", { type: "password", name: "api_key", autocomplete: "new-password" });
+  var f = formBox([fieldIn("Name", textIn("name", "", { placeholder: "cerebras" }), "Starts with a letter; letters, digits, - and _."),
+    fieldIn("API endpoint", textIn("base_url", "", { placeholder: "the base URL, starting with https, such as api.cerebras.ai/v1" })),
+    fieldIn("Wire format", selectIn("endpoint_type", WIRE, "openai"), "How requests are written. Most providers speak the OpenAI-compatible format."),
+    fieldIn("API key", key, "Stored encrypted as a system secret, used only by the daemon, never shown again. Leave empty for a gateway that needs none.")],
+    "Save and list its models", function (form) {
+      var fields = { name: val(form, "name").trim(), base_url: val(form, "base_url").trim(),
+                     endpoint_type: val(form, "endpoint_type"), api_key: key.value || undefined };
+      return act("provider_add", fields).then(function (r) {
+        key.value = "";
+        FLASH = r.message;
+        navigate(rowHash("providers", [r.provider]), r.provider);
+      }, function (e) { key.value = ""; throw e; });
+    });
+  out.push(section("Provider", f));
+  setPage(out, "New provider");
+  focusFirst(f);
+}
+
+function editProviderPanel(v) {
+  var key = h("input", { type: "password", name: "api_key", autocomplete: "new-password" });
+  return formBox([fieldIn("API endpoint", textIn("base_url", v.base_url)),
+    fieldIn("Wire format", selectIn("endpoint_type", WIRE, v.endpoint_type)),
+    fieldIn("request_extra", areaIn("request_extra", v.request_extra ? JSON.stringify(looksJson(v.request_extra) || v.request_extra, null, 2) : "", 4),
+          "JSON merged into every request to this provider, last. Empty for none."),
+    fieldIn("Replace the key", key, "Leave empty to keep the current key. A new key is checked before it is stored.")],
+    "Save", function (form) {
+      var fields = { name: v.name };
+      if (val(form, "base_url").trim() !== v.base_url) fields.base_url = val(form, "base_url").trim();
+      if (val(form, "endpoint_type") !== v.endpoint_type) fields.endpoint_type = val(form, "endpoint_type");
+      var ex = val(form, "request_extra").trim(), cur = v.request_extra ? JSON.stringify(looksJson(v.request_extra)) : "";
+      if ((ex ? JSON.stringify(looksJson(ex) || ex) : "") !== cur) fields.request_extra = ex;
+      if (key.value) fields.api_key = key.value;
+      key.value = "";
+      return submitAct("provider_edit", fields);
+    });
+}
+
+function importPanel(provider, cached) {
+  var v = cached.values, caps = modalityCaps(v.modality);
+  var checks = h("div", { class: "checks" });
+  ["text", "image", "audio"].forEach(function (c) {
+    var x = checkIn("cap_" + c, c, caps.indexOf(c) >= 0);
+    checks.appendChild(x);
+  });
+  return formBox([fieldIn("Model", textIn("model", v.id), "As the provider spells it."),
+    fieldIn("Context window (tokens)", textIn("context_window", v.context_length || "", { inputmode: "numeric" })),
+    fieldIn("Most output tokens per reply", textIn("max_output_tokens", "", { inputmode: "numeric", placeholder: "provider default" })),
+    h("fieldset", { class: "fl" }, h("legend", null, h("span", { class: "lab", text: "Capabilities" })), checks,
+      h("span", { class: "why", text: v.modality ? "From the provider's modality, " + v.modality + ". Image and audio only when the provider says it takes them in."
+                                                  : "The provider states no modality, so no image or audio is assumed." }))],
+    "Register the model", function (form) {
+      var cs = ["text", "image", "audio"].filter(function (c) { return val(form, "cap_" + c); });
+      var fields = { provider: provider, model: val(form, "model").trim(), capabilities: cs };
+      if (val(form, "context_window").trim()) fields.context_window = val(form, "context_window").trim();
+      if (val(form, "max_output_tokens").trim()) fields.max_output_tokens = val(form, "max_output_tokens").trim();
+      return submitAct("model_import", fields);
+    });
+}
+
+function offeredSection(el, seq, name, offered) {
+  var results = h("div", { class: "rows" }), status = h("p", { class: "note", "aria-live": "polite" });
+  var q = h("input", { type: "search", name: "q", class: "wide", placeholder: "Search the offered models", "aria-label": "Search the offered models" });
+  var refreshErr = h("div", { class: "err", role: "alert" });
+  var refreshBtn = btn("Refresh the list", function () {
+    refreshErr.textContent = "";
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = "Asking the provider…";
+    act("provider_refresh_models", { name: name }).then(function (r) { refresh(r.message); }, function (e) {
+      refreshBtn.disabled = false; refreshBtn.textContent = "Refresh the list"; refreshErr.textContent = e.message;
+    });
+  });
+  function search() {
+    var filter = { provider_name: name };
+    var p = q.value.trim() ? api("rows", { table: "models_cache", filter: JSON.stringify(filter), q: q.value.trim(), limit: 25 })
+                           : rows("models_cache", filter, 25);
+    p.then(function (r) {
+      if (!page(seq)) return;
+      clear(results);
+      r.rows.forEach(function (x) {
+        var v = x.values, cell = h("span", { class: "pills" });
+        cell.appendChild(opener("Import", "Import " + v.id, function () { return importPanel(name, x); }));
+        results.appendChild(rowLine(h("span", null, h("span", { class: "mono", text: v.id }),
+          h("span", { class: "why", text: [v.context_length ? fmtNum(v.context_length) + " tokens" : null, v.modality].filter(Boolean).join(" · ") })), cell));
+      });
+      status.textContent = !r.rows.length ? (q.value ? "No offered model matches “" + q.value + "”." : "No list fetched from this provider yet.")
+        : "Showing " + r.rows.length + (r.next ? " — narrow the search to see others." : ".");
+    }, function (e) { status.textContent = "Could not search: " + e.message; });
+  }
+  var t = null;
+  q.addEventListener("input", function () { clearTimeout(t); t = setTimeout(search, 250); });
+  q.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); clearTimeout(t); search(); } });
+  var sec = section("Offered by the provider", [h("div", { class: "actions" }, refreshBtn, refreshErr),
+    h("p", { class: "note", text: offered ? fmtNum(offered) + (offered > 1000 ? "+" : "") + " models on offer." : "" }),
+    q, status, results]);
+  el.appendChild(sec);
+  rows("models_cache", { provider_name: name }, 1).then(function (r) {
+    if (r.rows.length) sec.querySelector("p.note").textContent = fmtNum(offered) + (offered > 1000 ? "+" : "") +
+      " models on offer, list fetched " + ago(r.rows[0].values.synced_at) + ".";
+  });
+  search();
+}
+
+function editModelPanel(v) {
+  var caps = capsOf(v), checks = h("div", { class: "checks" }), known = ["text", "image", "audio", "tools"];
+  caps.forEach(function (c) { if (known.indexOf(c) < 0) known.push(c); });
+  known.forEach(function (c) { checks.appendChild(checkIn("cap_" + c, c, caps.indexOf(c) >= 0)); });
+  return formBox([fieldIn("Context window (tokens)", textIn("context_window", v.context_window, { inputmode: "numeric", placeholder: "unknown" })),
+    fieldIn("Most output tokens per reply", textIn("max_output_tokens", v.max_output_tokens, { inputmode: "numeric", placeholder: "provider default" })),
+    h("fieldset", { class: "fl" }, h("legend", null, h("span", { class: "lab", text: "Capabilities" })), checks,
+      h("span", { class: "why", text: "Image and audio make it eligible for an agent's image and audio lists." })),
+    fieldIn("Effort map", areaIn("effort_map", v.effort_map ? JSON.stringify(looksJson(v.effort_map) || v.effort_map, null, 2) : "", 4),
+          "How this model spells reasoning effort, as JSON {\"format\": …, \"levels\": {…}}. Empty for the endpoint's default."),
+    checkIn("enabled", "Enabled (a disabled model is skipped by every list)", v.status !== "disabled")],
+    "Save", function (form) {
+      var fields = { id: v.id, capabilities: known.filter(function (c) { return val(form, "cap_" + c); }),
+                     enabled: val(form, "enabled") };
+      ["context_window", "max_output_tokens"].forEach(function (k) {
+        var nv = val(form, k).trim(), ov = v[k] === null || v[k] === undefined ? "" : String(v[k]);
+        if (nv !== ov) fields[k] = nv === "" ? null : nv;
+      });
+      var em = val(form, "effort_map").trim(), cur = v.effort_map ? JSON.stringify(looksJson(v.effort_map)) : "";
+      if ((em ? JSON.stringify(looksJson(em) || em) : "") !== cur) fields.effort_map = em;
+      return submitAct("model_edit", fields);
+    });
+}
+
+/* ── memory ── */
+function noteEditor(blockId, n) {
+  var shown = h("div", null, h("div", { class: "note-text", text: n.values.text }));
+  var bar = h("span", { class: "pills" });
+  var line = rowLine(shown, bar);
+  bar.appendChild(h("span", { class: "muted small", text: ago(n.values.updated_at) }));
+  bar.appendChild(btn("Edit", function () {
+    var ta = areaIn("text", n.values.text, 4);
+    var f = formBox([fieldIn("Note #" + n.key[0], ta)], "Save", function (form) {
+      return submitAct("memory_note_edit", { block_id: blockId, note_id: n.key[0], text: val(form, "text") });
+    }, { cancel: function () { clear(shown); shown.appendChild(h("div", { class: "note-text", text: n.values.text })); } });
+    f.addEventListener("keydown", function (e) { if (e.key === "Escape") { e.preventDefault(); clear(shown); shown.appendChild(h("div", { class: "note-text", text: n.values.text })); } });
+    clear(shown);
+    shown.appendChild(f);
+    ta.focus();
+  }, "small"));
+  bar.appendChild(confirmBtn("Delete", "Delete note #" + n.key[0] + "? Agents that have this block stop seeing it.", "Delete the note",
+    function () { return act("memory_note_delete", { block_id: blockId, note_id: n.key[0] }); }));
+  return line;
+}
+
+/* ── chats, channels ── */
+function chatSettingsPanel(v, tools) {
+  var filt = toolFilterEditor("tf", v.tool_filter, tools);
+  return formBox([fieldIn("Replies", selectIn("delivery_mode", [["auto", "Auto: the agent's final message is posted"],
+      ["explicit", "Explicit: nothing is posted unless the agent calls channel_send"]].concat(
+      v.delivery_mode !== "auto" && v.delivery_mode !== "explicit" ? [[v.delivery_mode, v.delivery_mode + " (set elsewhere)"]] : []), v.delivery_mode)),
+    filt, fieldIn("Guidance", areaIn("guidance", v.guidance || "", 4), "Appended to the system prompt of this chat's sessions. Empty for none.")],
+    "Save", function (form) {
+      var fields = { channel: v.channel_name, chat_id: v.chat_id, tool_filter: filt.value(), guidance: val(form, "guidance") };
+      if (val(form, "delivery_mode") === "auto" || val(form, "delivery_mode") === "explicit") fields.delivery_mode = val(form, "delivery_mode");
+      return submitAct("chat_settings", fields);
+    });
+}
+
+function channelDefaultsPanel(v, agents, tools) {
+  var agentSel = selectIn("default_agent", [["", "Nobody: drop them and tell me once per chat"]].concat(agents.map(function (a) { return [a, a]; })), v.default_agent || "");
+  var filt = toolFilterEditor("dtf", v.default_tool_filter, tools);
+  return formBox([fieldIn("Chats nobody routed", agentSel, "With an agent here, anyone who writes in a new chat gets a session with it."),
+    filt, h("p", { class: "note", text: "The tools above are what each new chat starts with; existing chats keep theirs." })],
+    "Save", function (form, ctx) {
+      var fields = { channel: v.name, default_agent: val(form, "default_agent") || null, default_tool_filter: filt.value() };
+      if (fields.default_agent && fields.default_agent !== v.default_agent) {
+        confirmBox(ctx.row, "Anyone who writes to this channel in a chat nobody routed will get a session with " + fields.default_agent +
+          ", with " + (fields.default_tool_filter === "unrestricted" ? "all of its grants" : "these tools only: " + fields.default_tool_filter.join(", ")) + ".",
+          "Open the door", function () { return act("channel_defaults", fields); });
+        return;
+      }
+      return submitAct("channel_defaults", fields);
+    });
+}
+
+/* ── approvals ── */
+function approvalCard(id, state, seq, container) {
+  var body = h("div", null, h("p", { class: "muted", text: "Loading the request…" }));
+  container.appendChild(body);
+  api("approval", { id: id }).then(function (c) {
+    if (!page(seq)) return;
+    clear(body);
+    body.appendChild(h("pre", { class: "json", text: c.summary }));
+    var bar = h("div", { class: "actions" });
+    function decide(d) {
+      act("approval_decide", { approval_id: id, decision: d }).then(function (r) { refresh(r.message); }, function (e) { err.textContent = e.message; });
+    }
+    if (c.state === "pending" && c.resolve === "apply") {
+      /* A request applied as a whole (resolve.c): approve or deny, no "once". */
+      bar.appendChild(confirmBtn("Approve", "Apply this request as shown above. What it grants stays granted.",
+        "Approve it", function () { return act("approval_decide", { approval_id: id, decision: "always" }); }, "primary"));
+    } else if (c.state === "pending") {
+      bar.appendChild(btn("Approve once", function () { decide("once"); }, "primary"));
+      if (c.park_reason !== "sensitive_target")
+        bar.appendChild(confirmBtn("Always allow", "Approve this, and let the agent make this call again without asking (the grant stays).",
+          "Always allow", function () { return act("approval_decide", { approval_id: id, decision: "always" }); }, "act"));
+    }
+    if (c.state === "pending") {
+      bar.appendChild(btn("Deny", function () { decide("deny"); }, "danger"));
+    } else if (c.state === "denied" && c.tool_name === "request_config") {
+      bar.appendChild(confirmBtn("Grant it now", "Apply what this denied request asked for, as if you had approved it. It is recorded as a new approval.",
+        "Grant it", function () { return act("approval_grant_from_history", { approval_id: id }); }, "act"));
+    }
+    var err = h("div", { class: "err", role: "alert" });
+    bar.appendChild(err);
+    body.appendChild(bar);
+  }, function (e) { clear(body); body.appendChild(h("div", { class: "err", text: e.message })); });
+}
+
+/* ── secrets ── */
+function addSecretPanel() {
+  var value = h("input", { type: "password", name: "value", autocomplete: "new-password" });
+  return formBox([fieldIn("Name", textIn("name", "", { placeholder: "GITHUB_TOKEN" }), "Capital letters, digits and _."),
+    fieldIn("Value", value, "Stored encrypted. It is never shown again, and never reaches a model."),
+    fieldIn("Scope", selectIn("scope", [["agent", "Agent: usable by the agents you grant it to"], ["system", "System: a provider key, used by the daemon only"]], "agent"))],
+    "Store it", function (form) {
+      var v = value.value;
+      value.value = "";
+      return submitAct("secret_add", { name: val(form, "name").trim(), value: v, scope: val(form, "scope") });
+    });
+}
+
+function editBlockPanel(v) {
+  return formBox([fieldIn("Description", textIn("description", v.description || "")),
+    fieldIn("Placement", selectIn("placement", [["context", "Each turn's context (changes show next turn)"],
+                                              ["system", "The system prompt (changes show next session)"]], v.placement)),
+    fieldIn("Character limit", textIn("char_limit", v.char_limit, { inputmode: "numeric" }), "For agents; your own edits are not bound by it."),
+    checkIn("read_only", "Read only for every agent", v.read_only)],
+    "Save", function (form) {
+      return submitAct("memory_block_edit", { block_id: v.id, description: val(form, "description"),
+        placement: val(form, "placement"), char_limit: val(form, "char_limit").trim(), read_only: val(form, "read_only") });
+    });
+}
+
+function hostsEditor(name, hosts) {
+  var list = hosts.slice(), items = h("div", { class: "list-ed", role: "list" }), err = h("div", { class: "err", role: "alert" });
+  var input = textIn("host", "", { placeholder: "api.github.com, or .github.com", "aria-label": "Host to allow" });
+  function save(next, widen, anchor) {
+    var run = function () { return act("secret_hosts_set", { name: name, hosts: next }); };
+    if (widen) { confirmBox(anchor, name + " may then be sent to " + widen + ". A tool call can carry it there.", "Allow it", run); return; }
+    err.textContent = "";
+    run().then(function (r) { refresh(r.message); }, function (e) { err.textContent = e.message; });
+  }
+  function draw() {
+    clear(items);
+    if (!list.length) items.appendChild(h("p", { class: "none", text: "No host: a tool call that uses this secret is refused." }));
+    list.forEach(function (hst, i) {
+      var rm = btn("Remove", function () { save(list.filter(function (_, j) { return j !== i; })); }, "small");
+      rm.setAttribute("aria-label", "Stop allowing " + hst);
+      items.appendChild(h("div", { class: "it", role: "listitem" }, h("span", { class: "nm", text: hst }), rm));
+    });
+  }
+  draw();
+  var addRow = h("div", { class: "actions" });
+  var addB = btn("Allow", function () {
+    var v = input.value.trim();
+    if (!v) { err.textContent = "Type a host first."; return; }
+    save(list.concat([v]), v, addRow);
+  }, "small");
+  input.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); addB.click(); } });
+  add(addRow, [input, addB, err]);
+  return [items, addRow];
+}
+
+SHAPED.models = function (res, el, seq) {
+  var v = res.row.values;
+  var rm = confirmBtn("Remove", "Remove " + v.id + "? It is refused while any agent's list names it.", "Remove the model",
+    function () { return act("model_remove", { id: v.id }).then(function (r) { FLASH = r.message; navigate(rowHash("providers", [v.provider_name]), v.provider_name); return null; }); }, "danger");
+  el.appendChild(h("div", { class: "bar" }, opener("Edit", "Edit " + v.id, function () { return editModelPanel(v); }), rm));
+};
+
+SHAPED.memory_blocks = function (res, el, seq) {
+  var v = res.row.values, id = res.row.key[0];
+  var nAtt = countIn(res, "agent_memory_blocks", "block_id"), nNotes = countIn(res, "memory_notes", "block_id");
+  var del = confirmBtn("Delete the block", "Delete " + v.label + " and its " + nNotes + " note" + (nNotes === 1 ? "" : "s") +
+    (nAtt ? "? It is detached from " + nAtt + " agent" + (nAtt === 1 ? "" : "s") + ", and leaves their prompts." : "?"),
+    "Delete it", function () {
+      return act("memory_block_delete", { block_id: id }).then(function (r) { FLASH = r.message; navigate(listHash("memory_blocks"), "Memory blocks"); return null; });
+    }, "danger");
+  el.appendChild(h("div", { class: "bar" }, opener("Edit", "Edit " + v.label, function () { return editBlockPanel(v); }), del));
+  sub(el, "Attached to", seq, Promise.all([allRows("agent_memory_blocks", { block_id: id }), allRows("agents")]), function (r) {
+    var att = r[0], names = r[1].map(function (x) { return x.key[0]; }), list = h("div", { class: "rows" });
+    att.forEach(function (x) {
+      var a = x.values.agent_name, ro = x.values.read_only || v.read_only, bar = h("span", { class: "pills" });
+      bar.appendChild(pill(ro ? "read only" : "reads and writes", ro ? "" : "ok"));
+      if (a === v.created_by) bar.appendChild(pill("made it"));
+      if (x.values.read_only)
+        bar.appendChild(confirmBtn("Make writable", a + " will be able to write this block" + (att.length > 1 ? ". It is shared: what " + a +
+          " writes reaches the prompts of the other " + (att.length - 1) + " agent" + (att.length === 2 ? "" : "s") + "." : "."),
+          "Make it writable", function () { return act("memory_attach", { block_id: id, agent: a, read_only: false }); }));
+      else bar.appendChild(btn("Make read only", function () {
+        act("memory_attach", { block_id: id, agent: a, read_only: true }).then(function (r) { refresh(r.message); });
+      }, "small"));
+      bar.appendChild(confirmBtn("Detach", a + " will no longer see this block. The block and its notes stay.", "Detach",
+        function () { return act("memory_detach", { block_id: id, agent: a }); }));
+      list.appendChild(rowLine(link(rowHash("agents", [a]), a), bar));
+    });
+    var others = names.filter(function (n) { return !att.some(function (x) { return x.values.agent_name === n; }); });
+    var attach = opener("Attach to an agent", "Attach " + v.label, function () {
+      var sel = selectIn("agent", [["", others.length ? "Pick an agent…" : "Every agent has it"]].concat(others.map(function (n) { return [n, n]; })), "");
+      return formBox([fieldIn("Agent", sel), checkIn("read_only", "Read only (the default)", true)], "Attach", function (form, ctx) {
+        if (!sel.value) { ctx.err.textContent = "Pick an agent."; return; }
+        var fields = { block_id: id, agent: sel.value, read_only: val(form, "read_only") };
+        if (!fields.read_only) {
+          confirmBox(ctx.row, sel.value + " will be able to write this block" + (att.length ? "; what it writes reaches the prompts of " +
+            att.map(function (x) { return x.values.agent_name; }).join(", ") : "") + ".", "Attach writable", function () { return act("memory_attach", fields); });
+          return;
+        }
+        return submitAct("memory_attach", fields);
+      });
+    });
+    return [att.length ? list : emptyLine("No agent has this block: nobody sees it."), attach];
+  });
+  sub(el, "Notes", seq, allRows("memory_notes", { block_id: id }), function (notes) {
+    notes.sort(function (a, b) { return a.key[0] - b.key[0]; });
+    var used = notes.reduce(function (n, x) { return n + (x.values.text || "").length; }, 0);
+    var list = h("div", { class: "rows" });
+    notes.forEach(function (n) { list.appendChild(noteEditor(id, n)); });
+    var addF = formBox([fieldIn("New note", areaIn("text", "", 3))], "Add the note", function (form) {
+      return submitAct("memory_note_add", { block_id: id, text: val(form, "text") });
+    });
+    return [h("p", { class: "note", text: fmtNum(used) + " of " + fmtNum(v.char_limit) + " characters used. Agents see the notes oldest first." }),
+            notes.length ? list : emptyLine("No notes yet."), addF];
+  });
+};
+
+SHAPED.channel_chats = function (res, el, seq) {
+  var v = res.row.values, label = v.title || v.chat_id;
+  var who = section("Who it talks to", h("p", { class: "muted", text: "Loading…" }));
+  el.appendChild(who);
+  var load = v.session_id !== null ? getRow("sessions", [v.session_id]) : Promise.resolve(null);
+  Promise.all([load, allRows("agents")]).then(function (r) {
+    if (!page(seq)) return;
+    var body = h("div"), s = r[0] && r[0].row.values, agents = r[1].map(function (x) { return x.key[0]; });
+    if (s) {
+      body.appendChild(rowLine(h("span", null, "Session ", link(rowHash("sessions", [v.session_id]), "#" + v.session_id), " with ",
+        link(rowHash("agents", [s.agent_name]), s.agent_name)), pill("routed", "ok")));
+      body.appendChild(h("div", { class: "actions", style: "margin-top:8px" }, confirmBtn("Unroute",
+        label + " stops talking to " + s.agent_name + ". Session #" + v.session_id + " keeps its history; the chat's next message is dropped " +
+        "(you are told once), unless the channel's default agent takes it.", "Unroute it",
+        function () { return act("chat_unroute", { channel: v.channel_name, chat_id: v.chat_id }); }, "danger")));
+    } else {
+      body.appendChild(rowLine("Nobody: its messages are dropped" + (v.notified_at ? " (you were told " + ago(v.notified_at) + ")" : "") + ".", pill("not routed")));
+      body.appendChild(opener("Route to an agent", "Route " + label, function () {
+        var sel = selectIn("agent", [["", "Pick an agent…"]].concat(agents.map(function (a) { return [a, a]; })), "");
+        return formBox([fieldIn("Agent", sel, "A new session with this agent answers the chat.")], "Route it", function (form, ctx) {
+          if (!sel.value) { ctx.err.textContent = "Pick an agent."; return; }
+          confirmBox(ctx.row, "Everyone in " + label + " will reach " + sel.value + ", with " + sel.value + "'s grants" +
+            (v.tool_filter ? " narrowed to this chat's tools" : "") + ".", "Route it", function () {
+              return act("session_new_on_chat", { agent: sel.value, channel: v.channel_name, chat_id: v.chat_id });
+            });
+        });
+      }));
+    }
+    who.replaceChild(body, who.lastChild);
+  });
+  sub(el, "Settings", seq, toolNames(), function (tools) {
+    var tf = looksJson(v.tool_filter), list = h("div", { class: "rows" });
+    list.appendChild(rowLine("Replies", v.delivery_mode === "explicit" ? "only what the agent sends with channel_send" :
+      v.delivery_mode === "auto" ? "the final message is posted" : v.delivery_mode));
+    list.appendChild(rowLine("Tools", Array.isArray(tf) ? tf.join(", ") : "unrestricted"));
+    list.appendChild(rowLine("Guidance", v.guidance ? h("span", { class: "note-text", text: v.guidance }) : h("span", { class: "none", text: "none" })));
+    return [list, opener("Change settings", "Settings for " + label, function () { return chatSettingsPanel(v, tools); })];
+  });
+};
+
+SHAPED.approvals = function (res, el, seq) {
+  var sec = section("The request", []);
+  el.appendChild(sec);
+  approvalCard(res.row.key[0], res.row.values.state, seq, sec);
+};
+
+SHAPED.secrets = function (res, el, seq) {
+  var name = res.row.key[0], v = res.row.values;
+  var nHosts = 0, nGrants = 0;
+  var value = h("input", { type: "password", name: "value", autocomplete: "new-password" });
+  var replace = opener("Replace the value", "Replace the value of " + name, function () {
+    return formBox([fieldIn("New value", value, "Who may use it, and where it may go, stay as they are.")], "Replace", function () {
+      var nv = value.value;
+      value.value = "";
+      return submitAct("secret_add", { name: name, value: nv, scope: v.scope, replace: true });
+    });
+  });
+  var bar = h("div", { class: "bar" }, replace);
+  el.appendChild(bar);
+  if (v.scope === "system") {
+    el.appendChild(section("Used by", h("p", { class: "note", text: "A system secret: a provider key, used by the daemon only. No agent can be granted it, and allowed hosts do not apply." })));
+    bar.appendChild(confirmBtn("Remove", "Remove " + name + "? Its value is gone for good.", "Remove it",
+      function () { return act("secret_remove", { name: name }).then(function (r) { FLASH = r.message; navigate(listHash("secrets"), "Secrets"); return null; }); }, "danger"));
+    return;
+  }
+  Promise.all([allRows("secret_hosts", { secret_name: name }), allRows("grants", { kind: "secret", value: name }), allRows("agents")]).then(function (r) {
+    if (!page(seq)) return;
+    nHosts = r[0].length; nGrants = r[1].length;
+    bar.appendChild(confirmBtn("Remove", "Remove " + name + ": its value, its " + nHosts + " allowed host" + (nHosts === 1 ? "" : "s") +
+      " and the " + nGrants + " grant" + (nGrants === 1 ? "" : "s") + " that let agents use it all go.", "Remove it",
+      function () { return act("secret_remove", { name: name }).then(function (r) { FLASH = r.message; navigate(listHash("secrets"), "Secrets"); return null; }); }, "danger"));
+    el.appendChild(section("Where it may be sent", hostsEditor(name, r[0].map(function (x) { return x.values.host; }))));
+    var list = h("div", { class: "rows" }), granted = r[1].map(function (x) { return x.values.agent_name; });
+    r[1].forEach(function (x) {
+      var a = x.values.agent_name;
+      list.appendChild(rowLine(link(rowHash("agents", [a]), a), h("span", { class: "pills" }, pill("from " + x.values.source),
+        confirmBtn("Revoke", a + " will no longer be able to use " + name + ".", "Revoke",
+          function () { return act("grant_remove", { agent: a, kind: "secret", value: name }); }))));
+    });
+    var others = r[2].map(function (x) { return x.key[0]; }).filter(function (n) { return granted.indexOf(n) < 0; });
+    var grant = opener("Let an agent use it", "Grant " + name, function () {
+      var sel = selectIn("agent", [["", others.length ? "Pick an agent…" : "Every agent may use it"]].concat(others.map(function (n) { return [n, n]; })), "");
+      return formBox([fieldIn("Agent", sel)], "Grant", function (form, ctx) {
+        if (!sel.value) { ctx.err.textContent = "Pick an agent."; return; }
+        confirmBox(ctx.row, sel.value + " will be able to use " + name + " in its tool calls, sent only to the allowed hosts.", "Grant it",
+          function () { return act("grant_add", { agent: sel.value, kind: "secret", value: name }); });
+      });
+    });
+    el.appendChild(section("Agents that may use it", [granted.length ? list : emptyLine("Nobody: no agent may use it yet."), grant]));
+  });
+};
+
+/* List pages that offer a way to add one. */
+var LISTX = {
+  providers: function (el) { el.appendChild(h("div", { class: "bar" }, h("a", { class: "act", href: "#/add-provider", "data-nav": true, "data-label": "New provider", text: "Add a provider" }))); },
+  memory_blocks: function (el) { el.appendChild(h("div", { class: "bar" }, opener("Create a block", "New memory block", function () { return createBlockPanel(null); }))); },
+  secrets: function (el) { el.appendChild(h("div", { class: "bar" }, opener("Add a secret", "New secret", function () { return addSecretPanel(); }))); },
+  approvals: function (el, seq) {
+    var box = h("div");
+    el.appendChild(box);
+    rows("approvals", { state: "pending" }, 20).then(function (r) {
+      if (!page(seq) || !r.rows.length) return;
+      r.rows.forEach(function (x) {
+        var sec = section(["Waiting: ", link(rowHash("approvals", x.key), "#" + x.key[0]), " ", h("span", { class: "muted", text: (x.values.tool_name || "") + ", session " + x.values.session_id })], []);
+        box.appendChild(sec);
+        approvalCard(x.key[0], "pending", seq, sec);
+      });
+    });
+  }
+};
+
 /* ── dispatch ── */
 function render() {
   var seq = ++renderSeq, route = parseRoute(location.hash);
+  SHOWN_FLASH = FLASH;
+  FLASH = null;
   drawCrumbs(currentTrail());
   if (route.kind === "home") renderHome();
   else if (route.kind === "tables") renderTables();
   else if (route.kind === "list") renderList(route, seq);
+  else if (route.kind === "add-provider") addProviderPage();
   else renderRow(route, seq);
   window.scrollTo(0, 0);
   if (document.activeElement && document.activeElement.closest && document.activeElement.closest("#main, #crumbs"))
@@ -916,9 +1923,7 @@ function render() {
 function start() {
   loading();
   api("meta").then(function (m) {
-    META = m;
-    TABLES = {};
-    m.tables.forEach(function (t) { TABLES[t.name] = t; });
+    setMeta(m);
     if (!history.state) history.replaceState({ trail: naturalTrail(parseRoute(location.hash)) }, "", location.hash || "#/");
     render();
   }, function (err) { failure(err, "the description of the database"); });

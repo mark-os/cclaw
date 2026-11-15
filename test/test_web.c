@@ -251,26 +251,61 @@ static long dash_get(CURL *curl, const char *url, char *page, size_t cap) {
     return code;
 }
 
-/* POST form to /admin/act without following the 303; returns HTTP code. */
-static long dash_post(CURL *curl, const char *url, const char *form,
-                      char *page, size_t cap) {
+/* POST a JSON action the way the page does (Content-Type + X-Cclaw-Action);
+ * returns the HTTP code, the answer in page. extra_hdr adds one header. */
+static long act_post(CURL *curl, const char *json, const char *extra_hdr,
+                     char *page, size_t cap) {
     struct page_buf pb = {page, cap};
     page[0] = '\0';
-    curl_easy_setopt(curl, CURLOPT_URL, url);
+    struct curl_slist *h = curl_slist_append(NULL, "Content-Type: application/json");
+    h = curl_slist_append(h, "X-Cclaw-Action: 1");
+    if (extra_hdr) h = curl_slist_append(h, extra_hdr);
+    curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19878/admin/api/act");
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, form);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, h);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, page_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &pb);
     assert(curl_easy_perform(curl) == CURLE_OK);
     long code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, NULL);
+    curl_slist_free_all(h);
     return code;
 }
 
+/* POST a body exactly as given (a forged form, say), no extra headers. */
+static long raw_post(CURL *curl, const char *url, const char *ctype, const char *body,
+                     const char *extra_hdr, char *page, size_t cap) {
+    struct page_buf pb = {page, cap};
+    page[0] = '\0';
+    struct curl_slist *h = NULL;
+    char ct[128];
+    snprintf(ct, sizeof(ct), "Content-Type: %s", ctype);
+    h = curl_slist_append(h, ct);
+    if (extra_hdr) h = curl_slist_append(h, extra_hdr);
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, h);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, page_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &pb);
+    assert(curl_easy_perform(curl) == CURLE_OK);
+    long code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, NULL);
+    curl_slist_free_all(h);
+    return code;
+}
+
+/* The operator's page at /admin (the data explorer) over HTTP: sign-in, the
+ * actions' guards, and the behaviours the old server-rendered dashboard's
+ * tests protected, ported to the actions that replace its forms. */
 static void test_admin_dashboard(void) {
     Config cfg = {0};
     cfg.web_port = 19878;
     cfg.db_path = "test_web_admin.db";
+    test_db_clean(cfg.db_path);   /* a killed run leaves its database behind */
 
     sqlite3 *db = test_db_open(cfg.db_path);
     assert(db);
@@ -280,9 +315,11 @@ static void test_admin_dashboard(void) {
         "INSERT OR REPLACE INTO models(id, provider_name, model) VALUES"
         "  ('m1','openrouter','vendor/one'), ('m2','openrouter','vendor/two');"
         "INSERT OR IGNORE INTO agents(name) VALUES('Assistant'), ('ev<il&name');"
+        "INSERT OR IGNORE INTO tools(name, description) VALUES('web_fetch','fetch');"
         "INSERT INTO channels(name, status) VALUES('telegram','active');"
         "INSERT INTO sessions(name, agent_name, channel_name)"
         "  VALUES('s','Assistant','telegram');"
+        "INSERT INTO channel_chats(channel_name, chat_id) VALUES('telegram','4242');"
         "INSERT INTO approvals(session_id, tool_name, park_reason, args_json, state)"
         "  VALUES(1, 'shell_exec', 'approval_required', '{\"cmd\":\"ls\"}', 'pending');",
         NULL, NULL, NULL) == SQLITE_OK);
@@ -299,99 +336,83 @@ static void test_admin_dashboard(void) {
     assert(curl);
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");  /* enable cookie engine */
 
-    /* No token → 403 */
+    /* No token → 403; bad token → 403 */
     assert(dash_get(curl, "http://127.0.0.1:19878/admin", page, sizeof(page)) == 403);
-
-    /* Bad token → 403 */
     assert(dash_get(curl, "http://127.0.0.1:19878/admin?token=00000000000000000000000000000000",
                     page, sizeof(page)) == 403);
 
-    /* Good token → 303 sets cookie, follow lands on the page */
+    /* Good token → 303 sets the cookie, following lands on the page */
     char url[160];
     snprintf(url, sizeof(url), "http://127.0.0.1:19878/admin?token=%s", token);
     assert(dash_get(curl, url, page, sizeof(page)) == 200);
-    assert(strstr(page, "cclaw admin"));
-    assert(strstr(page, "m1"));
-    assert(strstr(page, "primary model"));
-    assert(strstr(page, "shell_exec"));         /* pending approval row */
-
-    /* Cookie now carries auth on its own */
+    assert(strstr(page, "<title>cclaw</title>"));
+    /* Cookie now carries auth on its own; the old address redirects here. */
     assert(dash_get(curl, "http://127.0.0.1:19878/admin", page, sizeof(page)) == 200);
+    assert(dash_get(curl, "http://127.0.0.1:19878/admin/explore", page, sizeof(page)) == 200);
+    assert(strstr(page, "<title>cclaw</title>"));
 
-    /* The attach form posts the field the handler reads (chat_id), and a
-     * post shaped like the form pins the chat to the session. */
-    assert(strstr(page, "value=attach_channel>"));
-    assert(strstr(page, "<input name=chat_id "));
-    assert(strstr(page, "name=channel_id") == NULL);
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
-                     "action=attach_channel&session_id=1"
-                     "&channel_name=telegram&chat_id=4242",
-                     page, sizeof(page)) == 303);
+    /* A hostile agent name reaches the page as JSON data, never as markup
+     * (the page draws with textContent only — test_explore checks the source). */
+    assert(dash_get(curl, "http://127.0.0.1:19878/admin/api/rows?table=agents",
+                    page, sizeof(page)) == 200);
+    assert(strstr(page, "\"ev<il&name\""));
+
+    /* Moving a session to a chat pins it (the old attach form's job). */
+    assert(act_post(curl, "{\"action\":\"session_move_to_chat\",\"session_id\":1,"
+                          "\"channel\":\"telegram\",\"chat_id\":\"4242\"}",
+                    NULL, page, sizeof(page)) == 200);
     char *pinned = query_text(db,
         "SELECT session_id FROM channel_chats"
         " WHERE channel_name='telegram' AND chat_id='4242'");
     assert(pinned && strcmp(pinned, "1") == 0);
     free(pinned);
-    assert(dash_get(curl, "http://127.0.0.1:19878/admin", page, sizeof(page)) == 200);
 
-    /* Hostile agent name is HTML-escaped everywhere */
-    assert(strstr(page, "ev&lt;il&amp;name"));
-    assert(strstr(page, "ev<il&name") == NULL);
-
-    /* switch_model makes m2 the head of every agent's routing list */
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
-                     "action=switch_model&model_id=m2", page, sizeof(page)) == 303);
-    char *head = query_text(db,
-        "SELECT model_id FROM agent_models"
-        " WHERE agent_name='Assistant' AND pos=0");
-    assert(head && strcmp(head, "m2") == 0);
-    free(head);
-
-    /* grant → row exists; revoke by rowid → gone */
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
-                     "action=grant&agent=Assistant&kind=tool&value=web_fetch",
-                     page, sizeof(page)) == 303);
-    char *gid = query_text(db,
-        "SELECT rowid FROM grants WHERE agent_name='Assistant' AND value='web_fetch'");
-    assert(gid);
-    char form[256];
-    snprintf(form, sizeof(form), "action=revoke&agent=Assistant&grant_id=%s", gid);
-    free(gid);
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
-                     page, sizeof(page)) == 303);
+    /* grant → row exists with source operator; remove → gone */
+    assert(act_post(curl, "{\"action\":\"grant_add\",\"agent\":\"Assistant\",\"kind\":\"tool\","
+                          "\"value\":\"web_fetch\"}", NULL, page, sizeof(page)) == 200);
+    char *src = query_text(db,
+        "SELECT source FROM grants WHERE agent_name='Assistant' AND value='web_fetch'");
+    assert(src && strcmp(src, "operator") == 0);
+    free(src);
+    assert(act_post(curl, "{\"action\":\"grant_remove\",\"agent\":\"Assistant\",\"kind\":\"tool\","
+                          "\"value\":\"web_fetch\"}", NULL, page, sizeof(page)) == 200);
     char *gone = query_text(db,
         "SELECT rowid FROM grants WHERE agent_name='Assistant' AND value='web_fetch'");
     assert(gone == NULL);
 
     /* The web server has its own handle. With this handle inside a
-     * transaction, a dashboard write still commits on its own and leaves
-     * this transaction open. (On a shared handle the dashboard's COMMIT
-     * ended it.) */
+     * transaction, a page write still commits on its own and leaves this
+     * transaction open. (On a shared handle the page's COMMIT ended it.) */
     assert(sqlite3_exec(db, "BEGIN; SELECT count(*) FROM agents;",
                         NULL, NULL, NULL) == SQLITE_OK);
     assert(sqlite3_get_autocommit(db) == 0);
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
-                     "action=set_agent_model&agent=Assistant&primary_model=m2",
-                     page, sizeof(page)) == 303);
+    assert(act_post(curl, "{\"action\":\"models_set\",\"agent\":\"Assistant\",\"purpose\":\"chat\","
+                          "\"models\":[{\"model_id\":\"m2\"},{\"model_id\":\"m1\","
+                          "\"reasoning_effort\":\"low\"}]}", NULL, page, sizeof(page)) == 200);
     assert(sqlite3_get_autocommit(db) == 0);
     assert(sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL) == SQLITE_OK);
     char *kept = query_text(db,
-        "SELECT model_id FROM agent_models WHERE agent_name='Assistant' AND pos=0");
-    assert(kept && strcmp(kept, "m2") == 0);
+        "SELECT group_concat(model_id || ':' || COALESCE(reasoning_effort, '-'), ',') FROM"
+        " (SELECT * FROM agent_models WHERE agent_name='Assistant' AND purpose='chat' ORDER BY pos)");
+    assert(kept && strcmp(kept, "m2:-,m1:low") == 0);
     free(kept);
+    /* ...written by the dashboard handle, labelled with the action. */
+    char *who = query_text(db, "SELECT actor || '|' || context FROM change_log"
+                               " WHERE table_name='agent_models' ORDER BY id DESC LIMIT 1");
+    assert(who && strcmp(who, "dashboard|act:models_set") == 0);
+    free(who);
 
     /* approve does NOT resolve on the web thread: it records the decision
      * for the event loop and leaves the approval pending. */
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
-                     "action=approve&approval_id=1&decision=always",
-                     page, sizeof(page)) == 303);
+    assert(act_post(curl, "{\"action\":\"approval_decide\",\"approval_id\":1,\"decision\":\"always\"}",
+                    NULL, page, sizeof(page)) == 200);
     char *st = query_text(db, "SELECT state FROM approvals WHERE id=1");
     assert(st && strcmp(st, "pending") == 0);
     free(st);
     /* A second click does not replace the first decision. */
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
-                     "action=approve&approval_id=1&decision=deny",
-                     page, sizeof(page)) == 303);
+    assert(act_post(curl, "{\"action\":\"approval_decide\",\"approval_id\":1,\"decision\":\"deny\"}",
+                    NULL, page, sizeof(page)) == 409);
+    assert(strstr(page, "already on its way"));
     int nq = 0;
     ApprovalQueued *q = approval_decisions_take(db, &nq);
     assert(nq == 1 && q);
@@ -403,60 +424,52 @@ static void test_admin_dashboard(void) {
     q = approval_decisions_take(db, &nq);
     assert(nq == 0 && q == NULL);
 
-    /* ── Memory: view and edit blocks and notes from the dashboard ── */
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
-                     "action=mem_block_create&label=NOTES&description=running+notes"
-                     "&placement=context&agent_name=Assistant",
-                     page, sizeof(page)) == 303);
+    /* ── Memory: blocks and notes ── */
+    assert(act_post(curl, "{\"action\":\"memory_block_create\",\"label\":\"NOTES\","
+                          "\"description\":\"running notes\",\"placement\":\"context\","
+                          "\"agent\":\"Assistant\"}", NULL, page, sizeof(page)) == 200);
     int64_t blk = 0;
     {
         char *v = query_text(db, "SELECT b.id FROM memory_blocks b"
             " JOIN agent_memory_blocks a ON a.block_id=b.id"
-            " WHERE b.label='NOTES' AND b.created_by='Assistant'"
+            " WHERE b.label='NOTES' AND b.created_by IS NULL"
             "   AND a.agent_name='Assistant' AND a.read_only=0");
         assert(v); blk = atoll(v); free(v);
     }
     assert(blk > 0);
+    char form[512];
     snprintf(form, sizeof(form),
-             "action=mem_note_add&block_id=%lld&text=first+%%3Cb%%3Enote%%26more",
+             "{\"action\":\"memory_note_add\",\"block_id\":%lld,\"text\":\"first <b>note&more\"}",
              (long long)blk);
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
-                     page, sizeof(page)) == 303);
+    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
     char *nid = query_text(db, "SELECT id FROM memory_notes WHERE text='first <b>note&more'");
     assert(nid);
-    /* The page shows the block and the note, escaped. */
-    assert(dash_get(curl, "http://127.0.0.1:19878/admin", page, sizeof(page)) == 200);
-    assert(strstr(page, "<h2>Memory</h2>"));
-    assert(strstr(page, "NOTES"));
-    assert(strstr(page, "first &lt;b&gt;note&amp;more"));
-    assert(!strstr(page, "first <b>note"));
-    /* A long note: several kB once form-encoded, more than one TCP segment's
-     * worth for the old single-read 8 kB body buffer. */
+    /* A long note arrives over several TCP segments and is read whole. */
     {
-        static char big[4000 * 6 + 128];   /* 4000 x "%C3%A9" plus the fields */
-        int o = snprintf(big, sizeof(big), "action=mem_note_set&block_id=%lld&note_id=%s&text=",
+        static char big[4000 * 2 + 256];
+        int o = snprintf(big, sizeof(big),
+                         "{\"action\":\"memory_note_edit\",\"block_id\":%lld,\"note_id\":%s,\"text\":\"",
                          (long long)blk, nid);
         for (int i = 0; i < 4000; i++) {
-            assert((size_t)o + 7 <= sizeof(big));
-            o += snprintf(big + o, sizeof(big) - (size_t)o, "%%C3%%A9");
+            assert((size_t)o + 3 <= sizeof(big));
+            big[o++] = '\xc3'; big[o++] = '\xa9';
         }
-        assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", big,
-                         page, sizeof(page)) == 303);
+        snprintf(big + o, sizeof(big) - (size_t)o, "\"}");
+        assert(act_post(curl, big, NULL, page, sizeof(page)) == 200);
         char *len = query_text(db, "SELECT length(text) FROM memory_notes WHERE block_id IS NOT NULL");
         assert(len && atoi(len) == 4000);
         free(len);
     }
     /* A note id addressed through the wrong block changes nothing. */
     snprintf(form, sizeof(form),
-             "action=mem_note_delete&block_id=%lld&note_id=%s", (long long)blk + 999, nid);
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
-                     page, sizeof(page)) == 400);
+             "{\"action\":\"memory_note_delete\",\"block_id\":%lld,\"note_id\":%s}",
+             (long long)blk + 999, nid);
+    assert(act_post(curl, form, NULL, page, sizeof(page)) == 404);
     /* Block settings, sharing and its read-only flag. */
     snprintf(form, sizeof(form),
-             "action=mem_block_update&block_id=%lld&description=d2&placement=system"
-             "&char_limit=9000&read_only=1", (long long)blk);
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
-                     page, sizeof(page)) == 303);
+             "{\"action\":\"memory_block_edit\",\"block_id\":%lld,\"description\":\"d2\","
+             "\"placement\":\"system\",\"char_limit\":9000,\"read_only\":true}", (long long)blk);
+    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
     {
         char *v = query_text(db, "SELECT description||'|'||placement||'|'||char_limit||'|'||read_only"
                                  " FROM memory_blocks WHERE label='NOTES'");
@@ -464,28 +477,23 @@ static void test_admin_dashboard(void) {
         free(v);
     }
     snprintf(form, sizeof(form),
-             "action=mem_attach&block_id=%lld&agent_name=ev%%3Cil%%26name&read_only=1",
-             (long long)blk);
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
-                     page, sizeof(page)) == 303);
+             "{\"action\":\"memory_attach\",\"block_id\":%lld,\"agent\":\"ev<il&name\"}", (long long)blk);
+    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
     {
         char *v = query_text(db, "SELECT read_only FROM agent_memory_blocks"
                                  " WHERE agent_name='ev<il&name'");
-        assert(v && strcmp(v, "1") == 0);
+        assert(v && strcmp(v, "1") == 0);   /* read-only by default */
         free(v);
     }
     snprintf(form, sizeof(form),
-             "action=mem_detach&block_id=%lld&agent_name=ev%%3Cil%%26name", (long long)blk);
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
-                     page, sizeof(page)) == 303);
+             "{\"action\":\"memory_detach\",\"block_id\":%lld,\"agent\":\"ev<il&name\"}", (long long)blk);
+    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
     snprintf(form, sizeof(form),
-             "action=mem_note_delete&block_id=%lld&note_id=%s", (long long)blk, nid);
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
-                     page, sizeof(page)) == 303);
+             "{\"action\":\"memory_note_delete\",\"block_id\":%lld,\"note_id\":%s}", (long long)blk, nid);
+    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
     free(nid);
-    snprintf(form, sizeof(form), "action=mem_block_delete&block_id=%lld", (long long)blk);
-    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
-                     page, sizeof(page)) == 303);
+    snprintf(form, sizeof(form), "{\"action\":\"memory_block_delete\",\"block_id\":%lld}", (long long)blk);
+    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
     {
         char *v = query_text(db, "SELECT (SELECT COUNT(*) FROM memory_blocks WHERE label='NOTES')"
                                  " + (SELECT COUNT(*) FROM memory_notes)"
@@ -494,11 +502,47 @@ static void test_admin_dashboard(void) {
         free(v);
     }
 
-    /* POST without the cookie → 403 (query token is GET-only) */
+    /* ── Forgery: the cookie alone does not make an action ── */
+    char *before = query_text(db, "SELECT count(*) FROM change_log");
+    static const char GRANT[] = "{\"action\":\"grant_add\",\"agent\":\"Assistant\","
+                                "\"kind\":\"host\",\"value\":\"evil.example\"}";
+    /* Another site's HTML form: urlencoded or text/plain, no custom header. */
+    assert(raw_post(curl, "http://127.0.0.1:19878/admin/api/act",
+                    "application/x-www-form-urlencoded",
+                    "action=grant_add&agent=Assistant&kind=host&value=evil.example",
+                    NULL, page, sizeof(page)) == 403);
+    assert(raw_post(curl, "http://127.0.0.1:19878/admin/api/act", "text/plain", GRANT,
+                    NULL, page, sizeof(page)) == 403);
+    /* JSON without the page's header (what a no-preflight fetch could send). */
+    assert(raw_post(curl, "http://127.0.0.1:19878/admin/api/act", "application/json", GRANT,
+                    NULL, page, sizeof(page)) == 403);
+    /* The browser says it came from elsewhere. */
+    assert(act_post(curl, GRANT, "Origin: http://evil.example", page, sizeof(page)) == 403);
+    assert(act_post(curl, GRANT, "Sec-Fetch-Site: cross-site", page, sizeof(page)) == 403);
+    /* The old form endpoint is gone. */
+    assert(raw_post(curl, "http://127.0.0.1:19878/admin/act", "application/x-www-form-urlencoded",
+                    "action=grant&agent=Assistant&kind=host&value=evil.example",
+                    NULL, page, sizeof(page)) == 405);
+    /* GET cannot act. */
+    assert(dash_get(curl, "http://127.0.0.1:19878/admin/api/act?action=grant_add&agent=Assistant"
+                          "&kind=host&value=evil.example", page, sizeof(page)) == 405);
+    /* Same origin, as the page sends it: allowed. */
+    assert(act_post(curl, "{\"action\":\"grant_add\",\"agent\":\"Assistant\",\"kind\":\"host\","
+                          "\"value\":\"ok.example\"}", "Origin: http://127.0.0.1:19878",
+                    page, sizeof(page)) == 200);
+    char *evil = query_text(db, "SELECT count(*) FROM grants WHERE value='evil.example'");
+    assert(evil && strcmp(evil, "0") == 0);
+    free(evil);
+    char *after = query_text(db, "SELECT count(*) FROM change_log WHERE NOT (table_name='grants'"
+                           " AND COALESCE(new_values, '') LIKE '%ok.example%')");
+    assert(before && after && strcmp(before, after) == 0);
+    free(before); free(after);
+
+    /* POST without the cookie → 403 (the query token is GET-only) */
     CURL *bare = curl_easy_init();
     assert(bare);
-    assert(dash_post(bare, "http://127.0.0.1:19878/admin/act",
-                     "action=switch_model&model_id=m1", page, sizeof(page)) == 403);
+    assert(act_post(bare, GRANT, NULL, page, sizeof(page)) == 403);
+    assert(strstr(page, "not signed in"));
     curl_easy_cleanup(bare);
 
     free(token);

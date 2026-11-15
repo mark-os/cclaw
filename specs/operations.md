@@ -225,13 +225,19 @@ answer to "can I delete this?".
 
 [error-handling.md]: error-handling.md
 
-## Dashboard and data explorer — `/admin`, `/admin/explore`
+## The dashboard — `/admin`
 
-`cclaw dashboard` prints `<base>/admin?token=…`. Opening it once puts the
-token in a cookie; after that `/admin` (the server-rendered admin page) and
-`/admin/explore` (a read-only view of every table, what each column means and
-how rows link) work in that browser. The explorer and its JSON API
-(`/admin/api/`) are described in [explorer.md](explorer.md).
+`cclaw dashboard` prints `<base>/admin?token=…` (the Telegram and Discord
+`/admin` commands send the same link). Opening it once puts the token in a
+cookie; after that `/admin` works in that browser. It is the data explorer:
+every table, what each column means and how rows link, and the operator's
+actions where the thing is shown — grants, copying an agent, model lists,
+sessions on chats, providers and models, memory, chat and channel settings,
+approvals, secrets. Each action is a named request the server checks as the
+CLI would; each write is in the change log with actor `dashboard` and context
+`act:<action>`. The page and its JSON API (`/admin/api/`) are described in
+[explorer.md](explorer.md). `/admin/explore`, the page's address while the old
+server-rendered dashboard still held `/admin`, redirects to `/admin`.
 
 ## Shared files — `/share`
 

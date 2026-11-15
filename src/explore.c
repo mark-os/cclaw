@@ -10,6 +10,7 @@
  * pragma_table_list and a column name in that table's pragma_table_info; the
  * spelling that goes into the query is the one the schema returned, quoted as
  * an identifier. Values (keys, filters, cursors) are always bound. */
+#define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "explore.h"
 #include "buf.h"
@@ -17,6 +18,7 @@
 #include "civetweb.h"
 #include "config_registry.h"
 #include "dashboard.h"
+#include "explore_act.h"
 #include "web.h"
 #include "templates.h"
 #include <stdio.h>
@@ -759,8 +761,26 @@ static void order_by(Buf *b, const XTable *t, const char *a) {
     }
 }
 
-static void rows_where(Buf *b, const XTable *t, const Filter *f, int nf, int after) {
+/* Key columns a search (?q=) looks in: the text ones not hidden. */
+static int search_col(const XTable *t, int k) {
+    if (t->rowid) return 0;
+    const XCol *c = &t->c[t->key[k]];
+    return !c->hidden && strcasecmp(c->type, "TEXT") == 0;
+}
+
+static void rows_where(Buf *b, const XTable *t, const Filter *f, int nf, int after, int search) {
     buf_append_str(b, " WHERE 1");
+    if (search) {
+        int any = 0;
+        buf_append_str(b, " AND (");
+        for (int k = 0; k < key_count(t); k++) {
+            if (!search_col(t, k)) continue;
+            buf_append_str(b, any++ ? " OR instr(lower(t." : "instr(lower(t.");
+            sql_id(b, t->c[t->key[k]].name);
+            buf_append_str(b, "), lower(:q)) > 0");
+        }
+        buf_append_str(b, any ? ")" : "0)");
+    }
     for (int i = 0; i < nf; i++) {
         buf_append_str(b, " AND t.");
         sql_id(b, t->c[f[i].col].name);
@@ -782,12 +802,12 @@ static void rows_where(Buf *b, const XTable *t, const Filter *f, int nf, int aft
 
 /* page0: the rowids of one page plus one (is there more?), chosen by the key
  * index; page: those rows rendered. Only page0 scans. */
-static char *rows_sql(const XTable *t, const Filter *f, int nf, int after) {
+static char *rows_sql(const XTable *t, const Filter *f, int nf, int after, int search) {
     Buf b = {0};
     buf_append_str(&b, "WITH page0 AS (SELECT t.rowid AS rid FROM ");
     sql_id(&b, t->name);
     buf_append_str(&b, " AS t");
-    rows_where(&b, t, f, nf, after);
+    rows_where(&b, t, f, nf, after, search);
     buf_append_str(&b, " ORDER BY ");
     order_by(&b, t, "t");
     buf_append_str(&b, " LIMIT :lim + 1), page AS MATERIALIZED (SELECT ");
@@ -829,7 +849,13 @@ static int rows_run(sqlite3 *db, const XTable *t, const ExploreQuery *q,
     int after = q->after && q->after[0];
     if (after && !json_is(db, q->after, "array", key_count(t)))
         return fail(db, 400, "after must be the \"next\" of the previous page", NULL, out);
-    char *sql = rows_sql(t, f, nf, after);
+    int search = q->search && q->search[0];
+    if (search) {
+        int k, can = 0;
+        for (k = 0; k < key_count(t); k++) can |= search_col(t, k);
+        if (!can) return fail(db, 400, "this table cannot be searched", NULL, out);
+    }
+    char *sql = rows_sql(t, f, nf, after, search);
     char *kc = keycols_json(t);
     sqlite3_stmt *st;
     int status;
@@ -844,6 +870,7 @@ static int rows_run(sqlite3 *db, const XTable *t, const ExploreQuery *q,
         bind_text(st, ":keycols", kc);
         bind_int(st, ":lim", lim);
         if (after) bind_text(st, ":after", q->after);
+        if (search) bind_text(st, ":q", q->search);
         for (int i = 0; i < nf; i++) {
             if (f[i].kind == 1) continue;
             char nm[16];
@@ -1095,6 +1122,10 @@ static const char *status_text(int s) {
     case 403: return "Forbidden";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
+    case 409: return "Conflict";
+    case 413: return "Payload Too Large";
+    case 502: return "Bad Gateway";
+    case 503: return "Service Unavailable";
     default:  return "Internal Server Error";
     }
 }
@@ -1119,14 +1150,14 @@ static int send_body(struct mg_connection *conn, int status, const char *type,
 static const char NOT_SIGNED_IN_HTML[] =
     "<!doctype html><meta charset=utf-8>"
     "<meta name=viewport content=\"width=device-width, initial-scale=1\">"
-    "<title>cclaw data</title>"
+    "<title>cclaw</title>"
     "<style>body{font:16px/1.6 system-ui,sans-serif;max-width:36em;margin:3em auto;"
     "padding:0 16px}code{font-size:.9em}"
     "@media (prefers-color-scheme:dark){body{background:#12151b;color:#e6e9ef}}</style>"
     "<h1>Not signed in</h1>"
     "<p>This page needs the dashboard's admin token. On the machine running cclaw, run"
     " <code>cclaw dashboard</code>: it prints a link with the token. Open it once in this"
-    " browser, then come back to <code>/admin/explore</code> &mdash; or add"
+    " browser, then come back to <code>/admin</code> &mdash; or add"
     " <code>?token=&hellip;</code> to this address yourself.</p>"
     "<p>A link that worked before stops working when the token changes.</p>";
 
@@ -1138,8 +1169,9 @@ static int serve_page(struct mg_connection *conn, sqlite3 *db) {
     if (auth == 0)
         return send_body(conn, 403, "text/html; charset=utf-8", NOT_SIGNED_IN_HTML);
     if (auth == 2) {
-        /* Like /admin: the token moves into the cookie and leaves the URL. */
-        mg_printf(conn, "HTTP/1.1 303 See Other\r\nLocation: /admin/explore\r\n"
+        /* The token moves into the cookie and leaves the URL (address bar,
+         * history, referrers). */
+        mg_printf(conn, "HTTP/1.1 303 See Other\r\nLocation: /admin\r\n"
                         "Cache-Control: no-store\r\n"
                         "Set-Cookie: cclaw_admin=%s; Path=/; HttpOnly; SameSite=Strict\r\n"
                         "Content-Length: 0\r\n\r\n", tok ? tok : "");
@@ -1147,6 +1179,17 @@ static int serve_page(struct mg_connection *conn, sqlite3 *db) {
         return 303;
     }
     return send_body(conn, 200, "text/html; charset=utf-8", TPL_EXPLORER_HTML);
+}
+
+/* /admin/explore was the page's address while the old dashboard still held
+ * /admin; a bookmark (with or without ?token=) lands on the page. */
+static int redirect_old(struct mg_connection *conn) {
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    const char *qs = ri->query_string;
+    mg_printf(conn, "HTTP/1.1 303 See Other\r\nLocation: /admin%s%.1024s\r\n"
+                    "Cache-Control: no-store\r\nContent-Length: 0\r\n\r\n",
+              qs && qs[0] ? "?" : "", qs && qs[0] ? qs : "");
+    return 303;
 }
 
 /* A query parameter, URL-decoded, heap; NULL when absent. */
@@ -1161,22 +1204,117 @@ static char *param(const char *qs, const char *name) {
 
 static int api_dispatch(sqlite3 *db, const char *what, const char *qs, char **out) {
     if (strcmp(what, "meta") == 0) return explore_meta(db, out);
+    if (strcmp(what, "approval") == 0) {
+        char *id = param(qs, "id");
+        int s = explore_approval_card(db, id, out);
+        free(id);
+        return s;
+    }
     int is_rows = strcmp(what, "rows") == 0;
     if (!is_rows && strcmp(what, "row") != 0)
         return fail(db, 404, "no such endpoint", NULL, out);
     ExploreQuery q = {0};
     char *table = param(qs, "table"), *key = param(qs, "key");
     char *filter = param(qs, "filter"), *after = param(qs, "after");
-    char *limit = param(qs, "limit");
+    char *limit = param(qs, "limit"), *search = param(qs, "q");
     q.table = table;
     q.key = key;
     q.filter = filter;
     q.after = after;
+    q.search = search;
     q.limit = limit ? atoi(limit) : 0;
     int status = !table ? fail(db, 400, "table is required", NULL, out)
                : is_rows ? explore_rows(db, &q, out)
                          : explore_row(db, &q, out);
-    free(table); free(key); free(filter); free(after); free(limit);
+    free(table); free(key); free(filter); free(after); free(limit); free(search);
+    return status;
+}
+
+/* ── POST /admin/api/act: the actions (explore_act.c) ──────────────────────
+ * The admin cookie alone must not be enough for another site's page to
+ * trigger an action: SameSite=Strict already keeps the cookie off a
+ * cross-site request in current browsers, and on top of that a request must
+ *  - say Content-Type: application/json and carry X-Cclaw-Action: 1 — a
+ *    cross-site HTML form can send neither, and a cross-site fetch() that
+ *    sets them is preflighted, which this server never approves (no CORS
+ *    headers are ever sent);
+ *  - when the browser says where it comes from (Origin, Sec-Fetch-Site),
+ *    come from this page's own origin. */
+
+#define ACT_BODY_MAX (1024 * 1024)
+
+static int header_is(struct mg_connection *conn, const char *name, const char *want, size_t n) {
+    const char *v = mg_get_header(conn, name);
+    return v && (n ? strncasecmp(v, want, n) == 0 : strcasecmp(v, want) == 0);
+}
+
+/* NULL when the request may act; otherwise why not. */
+static const char *act_refusal(struct mg_connection *conn) {
+    if (!header_is(conn, "Content-Type", "application/json", 16))
+        return "an action is a JSON request (Content-Type: application/json)";
+    if (!header_is(conn, "X-Cclaw-Action", "1", 0))
+        return "an action must come from the cclaw page (X-Cclaw-Action header missing)";
+    const char *site = mg_get_header(conn, "Sec-Fetch-Site");
+    if (site && strcasecmp(site, "same-origin") != 0)
+        return "cross-site requests are not accepted";
+    const char *origin = mg_get_header(conn, "Origin");
+    const char *host = mg_get_header(conn, "Host");
+    if (origin) {
+        const char *o = strstr(origin, "://");
+        if (!host || !o || strcasecmp(o + 3, host) != 0)
+            return "cross-site requests are not accepted";
+    }
+    return NULL;
+}
+
+/* The body, read whole: one mg_read returns what has arrived, not all of it. */
+static char *read_body(struct mg_connection *conn, int *too_big) {
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    *too_big = ri->content_length > ACT_BODY_MAX;
+    if (*too_big) return NULL;
+    char *b = malloc(ACT_BODY_MAX + 1);
+    if (!b) return NULL;
+    size_t len = 0;
+    int got;
+    while (len < ACT_BODY_MAX && (got = mg_read(conn, b + len, ACT_BODY_MAX - len)) > 0)
+        len += (size_t)got;
+    if (len >= ACT_BODY_MAX && mg_read(conn, b, 1) > 0) { *too_big = 1; free(b); return NULL; }
+    b[len] = '\0';
+    return b;
+}
+
+static int handle_act(struct mg_connection *conn, sqlite3 *db) {
+    char *out = NULL;
+    int status;
+    web_db_lock();
+    int auth = dashboard_auth_check(conn, 0);
+    const char *why = auth == 1 ? act_refusal(conn) : NULL;
+    if (auth != 1)
+        status = fail(db, 403, "not signed in",
+                      "open the link `cclaw dashboard` prints, then reload", &out);
+    else if (why)
+        status = fail(db, 403, "refused", why, &out);
+    else
+        status = 0;
+    web_db_unlock();
+    if (status == 0) {
+        int too_big = 0;
+        char *body = read_body(conn, &too_big);
+        if (!body) {
+            web_db_lock();
+            status = fail(db, too_big ? 413 : 500, too_big ? "the request is too large" : "out of memory",
+                          NULL, &out);
+            web_db_unlock();
+        } else {
+            status = explore_act(db, body, &out);
+            /* The body may hold a secret value or an API key. */
+            explicit_bzero(body, strlen(body));
+            free(body);
+        }
+    }
+    status = send_body(conn, status, "application/json; charset=utf-8",
+                       out ? out : "{\"error\":\"out of memory\"}");
+    free(out);
     return status;
 }
 
@@ -1184,10 +1322,21 @@ int explore_handle(struct mg_connection *conn, sqlite3 *db) {
     const struct mg_request_info *ri = mg_get_request_info(conn);
     const char *uri = ri->local_uri ? ri->local_uri : "";
     const char *method = ri->request_method ? ri->request_method : "";
+    int is_api = strncmp(uri, "/admin/api/", 11) == 0;
+    if (strcmp(uri, "/admin/api/act") == 0) {
+        if (strcmp(method, "POST") == 0) return handle_act(conn, db);
+        return send_body(conn, 405, "application/json",
+                         "{\"error\":\"actions are POST requests\"}");
+    }
     if (strcmp(method, "GET") != 0)
-        return send_body(conn, 405, "application/json", "{\"error\":\"read only\"}");
-    if (strcmp(uri, "/admin/explore") == 0 || strcmp(uri, "/admin/explore/") == 0)
+        return send_body(conn, 405, "application/json",
+                         "{\"error\":\"only GET here; actions are POST /admin/api/act\"}");
+    if (strcmp(uri, "/admin") == 0 || strcmp(uri, "/admin/") == 0)
         return serve_page(conn, db);
+    if (strcmp(uri, "/admin/explore") == 0 || strcmp(uri, "/admin/explore/") == 0)
+        return redirect_old(conn);
+    if (!is_api)
+        return send_body(conn, 404, "application/json", "{\"error\":\"not found\"}");
 
     /* The lock covers the database work only; the copy is written after it
      * is released, so a slow client cannot hold up an approval click. */

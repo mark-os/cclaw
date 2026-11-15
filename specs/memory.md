@@ -111,13 +111,19 @@ attach or detach it — those are the operator's, on the dashboard.
 
 ### Dashboard
 
-`/admin` has a **Memory** section: every block with its creator, usage,
-description, placement, limit and read-only flag; the agents it is attached to
-(attach, detach, switch read-only/read-write); and its notes, each editable
-and deletable, with a form to add one. The operator's edits are not bound by
-`read_only` or `char_limit` — those constrain agents. A change to a `context`
-block reaches the agent at its next turn; to a `system` block at its next
-session.
+On `/admin` ([explorer.md](explorer.md)) every block has one page, reached from
+Home › Memory blocks or from an agent's Memory section: its fields (edit
+description, placement, limit and the block-wide read-only flag; delete it,
+after a confirm that says which agents it is detached from); the agents it is
+attached to (attach — read-only by default — detach, switch an attachment
+between read-only and writable; making a shared block writable asks first);
+and its notes, oldest first, each editable and deletable, with a form to add
+one. The memory blocks list and an agent's page can create a block (made by
+the operator: `created_by` NULL; from an agent's page it is attached to that
+agent read-write). The same label rule holds: an agent cannot hold two blocks
+with the same label. The operator's edits are not bound by `read_only` or
+`char_limit` — those constrain agents. A change to a `context` block reaches
+the agent at its next turn; to a `system` block at its next session.
 
 ### Other properties
 

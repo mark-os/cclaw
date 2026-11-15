@@ -43,7 +43,7 @@ static void test_operator_apply(void) {
         "\"grants\":{\"tools\":[\"web_fetch\"],\"hosts\":[\".example.com\"]},"
         "\"max_iterations\":7,"
         "\"memory_blocks\":[{\"label\":\"notes\",\"description\":\"d\",\"value\":\"v\"}]}",
-        NULL, NULL, &err);
+        NULL, NULL, GRANT_ORIGIN("seed", 0), &err);
     if (rc != 0) fprintf(stderr, "err: %s\n", err ? err : "?");
     assert(rc == 0);
 
@@ -77,7 +77,7 @@ static void test_operator_apply(void) {
 
     /* Duplicate name refused. */
     char *err2 = NULL;
-    assert(agent_definition_apply(g_db, "{\"name\":\"Scout\"}", NULL, NULL, &err2) != 0);
+    assert(agent_definition_apply(g_db, "{\"name\":\"Scout\"}", NULL, NULL, GRANT_ORIGIN("seed", 0), &err2) != 0);
     assert(err2 && strstr(err2, "already exists"));
     free(err2);
     printf("  PASS test_operator_apply\n");
@@ -108,8 +108,8 @@ static void test_profile_escalation_refused(void) {
 
 static void test_grants_superset_refused(void) {
     seed_creator("Parent", "standard");
-    agent_config_grant(g_db, "Parent", "tool", "web_fetch", 0);
-    agent_config_grant(g_db, "Parent", "host", "ok.example.com", 0);
+    agent_config_grant(g_db, "Parent", "tool", "web_fetch", 0, GRANT_ORIGIN("operator", 0));
+    agent_config_grant(g_db, "Parent", "host", "ok.example.com", 0, GRANT_ORIGIN("operator", 0));
 
     char *err = NULL;
     int rc = agent_definition_validate(g_db,
@@ -128,7 +128,7 @@ static void test_grants_superset_refused(void) {
     err = NULL;
     rc = agent_definition_apply(g_db,
         "{\"name\":\"Child\",\"grants\":{\"tools\":[\"web_fetch\"],"
-        "\"hosts\":[\"ok.example.com\"]}}", "Parent", NULL, &err);
+        "\"hosts\":[\"ok.example.com\"]}}", "Parent", NULL, GRANT_ORIGIN("agent_create", 0), &err);
     if (rc != 0) fprintf(stderr, "err: %s\n", err ? err : "?");
     assert(rc == 0);
     assert(grants_contains(g_db, "Child", "host", "ok.example.com"));
@@ -155,7 +155,7 @@ static void test_extension_gate(void) {
 
     err = NULL;
     int rc = agent_definition_apply(g_db,
-        "{\"name\":\"ExtKid\",\"extensions\":[\"pubext\"]}", "Extender", NULL, &err);
+        "{\"name\":\"ExtKid\",\"extensions\":[\"pubext\"]}", "Extender", NULL, GRANT_ORIGIN("agent_create", 0), &err);
     if (rc != 0) fprintf(stderr, "err: %s\n", err ? err : "?");
     assert(rc == 0);
     sqlite3_stmt *s;
@@ -169,7 +169,7 @@ static void test_extension_gate(void) {
 
 static void test_clone_from(void) {
     seed_creator("Template", "restricted");
-    agent_config_grant(g_db, "Template", "tool", "web_fetch", 0);
+    agent_config_grant(g_db, "Template", "tool", "web_fetch", 0, GRANT_ORIGIN("operator", 0));
     sqlite3_exec(g_db,
         "UPDATE agents SET description='tmpl', system_prompt='sp',"
         " max_iterations=11 WHERE name='Template'", NULL, NULL, NULL);
@@ -183,7 +183,7 @@ static void test_clone_from(void) {
     char *err = NULL;
     int rc = agent_definition_apply(g_db,
         "{\"name\":\"Copy\",\"clone_from\":\"Template\",\"description\":\"copied\"}",
-        NULL, NULL, &err);
+        NULL, NULL, GRANT_ORIGIN("seed", 0), &err);
     if (rc != 0) fprintf(stderr, "err: %s\n", err ? err : "?");
     assert(rc == 0);
 
@@ -222,13 +222,13 @@ static void test_clone_from(void) {
 static void test_update_agent(void) {
     /* Provenance: created_by stamped for agent creators, NULL for operator. */
     seed_creator("Mentor", "standard");
-    agent_config_grant(g_db, "Mentor", "tool", "web_fetch", 0);
-    agent_config_grant(g_db, "Mentor", "host", "api.weather.gov", 0);
+    agent_config_grant(g_db, "Mentor", "tool", "web_fetch", 0, GRANT_ORIGIN("operator", 0));
+    agent_config_grant(g_db, "Mentor", "host", "api.weather.gov", 0, GRANT_ORIGIN("operator", 0));
     char *err = NULL;
     assert(agent_definition_apply(g_db,
         "{\"name\":\"Pupil\",\"description\":\"orig\",\"system_prompt\":\"v1\","
         "\"sandbox_profile\":\"restricted\",\"max_iterations\":9}",
-        "Mentor", NULL, &err) == 0);
+        "Mentor", NULL, GRANT_ORIGIN("agent_create", 0), &err) == 0);
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(g_db,
         "SELECT created_by FROM agents WHERE name='Pupil'", -1, &s, NULL) == SQLITE_OK);
@@ -313,7 +313,7 @@ static void test_update_agent(void) {
         "{\"name\":\"Pupil\",\"system_prompt\":\"v2 much better\","
         "\"max_iterations\":40,"
         "\"grants\":{\"hosts\":[\"api.weather.gov\"]},"
-        "\"reason\":\"first prompt was too vague\"}", "Mentor", &err);
+        "\"reason\":\"first prompt was too vague\"}", "Mentor", 0, &err);
     if (rc != 0) fprintf(stderr, "err: %s\n", err ? err : "?");
     assert(rc == 0);
     assert(sqlite3_prepare_v2(g_db,
@@ -340,7 +340,7 @@ static void test_tools_exhaustive_vs_baseline(void) {
     char *err = NULL;
     /* Silent on tools → baseline applies... */
     int rc = agent_definition_apply(g_db,
-        "{\"name\":\"Quiet\",\"models\":[\"p/m\"]}", NULL, NULL, &err);
+        "{\"name\":\"Quiet\",\"models\":[\"p/m\"]}", NULL, NULL, GRANT_ORIGIN("seed", 0), &err);
     if (rc != 0) fprintf(stderr, "err: %s\n", err ? err : "?");
     assert(rc == 0);
     assert(grants_contains(g_db, "Quiet", "tool", "file_read"));
@@ -353,7 +353,7 @@ static void test_tools_exhaustive_vs_baseline(void) {
     /* Declared tools → exactly the declared set, nothing underneath. */
     rc = agent_definition_apply(g_db,
         "{\"name\":\"Narrow\",\"models\":[\"p/m\"],"
-        "\"grants\":{\"tools\":[\"file_read\",\"js_eval\"]}}", NULL, NULL, &err);
+        "\"grants\":{\"tools\":[\"file_read\",\"js_eval\"]}}", NULL, NULL, GRANT_ORIGIN("seed", 0), &err);
     assert(rc == 0);
     sqlite3_stmt *s;
     int ntools = -1;
@@ -423,7 +423,7 @@ static void test_memory_attach(void) {
     snprintf(def, sizeof(def),
              "{\"name\":\"Mate\",\"memory_blocks\":[{\"attach\":%lld},"
              "{\"label\":\"own\",\"description\":\"d\",\"value\":\"v\"}]}", (long long)mine);
-    assert(agent_definition_apply(g_db, def, "Sharer", NULL, &err) == 0);
+    assert(agent_definition_apply(g_db, def, "Sharer", NULL, GRANT_ORIGIN("agent_create", 0), &err) == 0);
     MemoryBlock *mb = memory_block_get(g_db, "Mate", "team");
     assert(mb && mb->id == mine && mb->read_only == 1);
     memory_block_free(mb);
@@ -434,13 +434,80 @@ static void test_memory_attach(void) {
     snprintf(def, sizeof(def),
              "{\"name\":\"Auditor\",\"models\":[\"p/m\"],"
              "\"memory_blocks\":[{\"attach\":%lld}]}", (long long)theirs);
-    int arc = agent_definition_apply(g_db, def, NULL, NULL, &err);
+    int arc = agent_definition_apply(g_db, def, NULL, NULL, GRANT_ORIGIN("seed", 0), &err);
     if (arc != 0) printf("  operator attach refused: %s\n", err ? err : "?");
     assert(arc == 0);
     mb = memory_block_get(g_db, "Auditor", "secrets");
     assert(mb && mb->read_only == 1);
     memory_block_free(mb);
     printf("  PASS test_memory_attach\n");
+}
+
+/* v60: every grant a definition writes says where it came from, and the
+ * creator-subset rule covers the new 'secret' kind on every path — declared,
+ * cloned, and added by update. */
+static int64_t grant_count(const char *where) {
+    char q[512];
+    snprintf(q, sizeof(q), "SELECT COUNT(*) FROM grants WHERE %s", where);
+    return db_scalar_i64(g_db, q, 0, -1);
+}
+
+static void test_provenance_and_secret_subset(void) {
+    sqlite3_exec(g_db, "INSERT INTO approvals(id, session_id, tool_name, state) VALUES"
+                       " (31,1,'create_agent','approved'),(32,1,'create_agent','approved'),"
+                       " (33,1,'update_agent','approved');", NULL, NULL, NULL);
+    seed_creator("Maker", "standard");
+    assert(agent_config_grant(g_db, "Maker", "tool", "web_fetch", 0, GRANT_ORIGIN("operator", 0)) == 0);
+    assert(agent_config_grant(g_db, "Maker", "secret", "S_ONE", 0, GRANT_ORIGIN("operator", 0)) == 0);
+    char *err = NULL;
+
+    /* Declared: a secret the creator holds is passed on, with this origin. */
+    assert(agent_definition_apply(g_db,
+        "{\"name\":\"Kidd\",\"grants\":{\"tools\":[\"web_fetch\"],\"secrets\":[\"S_ONE\"]}}",
+        "Maker", NULL, GRANT_ORIGIN("agent_create", 31), &err) == 0);
+    assert(grant_count("agent_name='Kidd'") == 2);
+    assert(grant_count("agent_name='Kidd' AND source='agent_create' AND approval_id=31") == 2);
+    assert(grant_count("agent_name='Kidd' AND kind='secret' AND value='S_ONE'") == 1);
+
+    /* ...and one it does not hold is refused, naming it. */
+    int rc = agent_definition_apply(g_db,
+        "{\"name\":\"Kidz\",\"grants\":{\"secrets\":[\"S_TWO\"]}}",
+        "Maker", NULL, GRANT_ORIGIN("agent_create", 31), &err);
+    assert(rc != 0 && err && strstr(err, "secret:S_TWO exceeds creator's grants"));
+    free(err); err = NULL;
+
+    /* Clone: copies are new rows of the new agent — this creation's origin,
+     * not the source's history. */
+    assert(agent_definition_apply(g_db, "{\"name\":\"Twin\",\"clone_from\":\"Kidd\"}",
+        "Maker", NULL, GRANT_ORIGIN("agent_create", 32), &err) == 0);
+    assert(grant_count("agent_name='Twin'") == 2);
+    assert(grant_count("agent_name='Twin' AND source='agent_create' AND approval_id=32") == 2);
+    /* Cloning an agent that holds a secret the creator lacks is refused. */
+    seed_creator("Rich", "standard");
+    assert(agent_config_grant(g_db, "Rich", "secret", "S_RICH", 0, GRANT_ORIGIN("operator", 0)) == 0);
+    rc = agent_definition_apply(g_db, "{\"name\":\"RichCopy\",\"clone_from\":\"Rich\"}",
+        "Maker", NULL, GRANT_ORIGIN("agent_create", 32), &err);
+    assert(rc != 0 && err && strstr(err, "clone_from grant secret:S_RICH exceeds"));
+    free(err); err = NULL;
+
+    /* Update: an approved change to an existing agent. */
+    assert(agent_config_grant(g_db, "Maker", "secret", "S_FOUR", 0, GRANT_ORIGIN("operator", 0)) == 0);
+    assert(agent_definition_update_apply(g_db,
+        "{\"name\":\"Kidd\",\"grants\":{\"secrets\":[\"S_FOUR\"]}}",
+        "Maker", 33, &err) == 0);
+    assert(grant_count("agent_name='Kidd' AND value='S_FOUR' AND source='approval'"
+                       " AND approval_id=33") == 1);
+    rc = agent_definition_update_apply(g_db,
+        "{\"name\":\"Kidd\",\"grants\":{\"secrets\":[\"S_RICH\"]}}", "Maker", 33, &err);
+    assert(rc != 0);
+    free(err); err = NULL;
+
+    /* Baseline toolset (no tools declared) carries the origin too. */
+    assert(agent_definition_apply(g_db, "{\"name\":\"Plain\"}", "Maker", NULL,
+                                  GRANT_ORIGIN("agent_create", 31), &err) == 0);
+    assert(grant_count("agent_name='Plain'") > 0);
+    assert(grant_count("agent_name='Plain' AND NOT (source='agent_create' AND approval_id=31)") == 0);
+    printf("  PASS test_provenance_and_secret_subset\n");
 }
 
 int main(void) {
@@ -458,6 +525,7 @@ int main(void) {
     test_memory_label_rejected();
     test_memory_attach();
     test_bad_input();
+    test_provenance_and_secret_subset();
     db_close(g_db);
     printf("\nAll agent_define tests passed.\n");
     return 0;

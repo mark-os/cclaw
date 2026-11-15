@@ -81,13 +81,14 @@ static int agent_exists(sqlite3 *db, const char *name) {
     return found;
 }
 
-/* Declared grants live at $.grants.{tools,hosts,read_paths,write_paths};
- * the grants-table kind for each. */
+/* Declared grants live at $.grants.{tools,hosts,read_paths,write_paths,
+ * secrets}; the grants-table kind for each. */
 static const struct { const char *path; const char *kind; } GRANT_KINDS[] = {
     { "$.grants.tools",       "tool" },
     { "$.grants.hosts",       "host" },
     { "$.grants.read_paths",  "read_path" },
     { "$.grants.write_paths", "write_path" },
+    { "$.grants.secrets",     "secret" },
 };
 #define GRANT_KIND_COUNT (sizeof(GRANT_KINDS) / sizeof(GRANT_KINDS[0]))
 
@@ -96,7 +97,8 @@ static const struct { const char *path; const char *kind; } GRANT_KINDS[] = {
  * json_each over a bound parameter pins no read snapshot, so the insert
  * mid-iteration is safe (see memory_blocks_seed). */
 static int grants_walk(sqlite3 *db, const char *json, const char *target,
-                       const char *creator, int apply, size_t ki, char **err) {
+                       const char *creator, int apply, size_t ki,
+                       GrantOrigin origin, char **err) {
     char sql[128];
     snprintf(sql, sizeof(sql),
              "SELECT value FROM json_each(COALESCE(json_extract(?1,'%s'),'[]'))",
@@ -126,7 +128,8 @@ static int grants_walk(sqlite3 *db, const char *json, const char *target,
                 break;
             }
         } else {
-            if (agent_config_grant(db, target, GRANT_KINDS[ki].kind, v, 0) != 0) {
+            if (agent_config_grant(db, target, GRANT_KINDS[ki].kind, v, 0,
+                                   origin) != 0) {
                 rc = fail(err, "grant insert failed");
                 break;
             }
@@ -329,7 +332,7 @@ static int validate_inner(sqlite3 *db, const char *json, const char *creator,
     free(clone);
 
     for (size_t i = 0; rc == 0 && i < GRANT_KIND_COUNT; i++)
-        rc = grants_walk(db, json, NULL, creator, 0, i, err);
+        rc = grants_walk(db, json, NULL, creator, 0, i, GRANT_ORIGIN(NULL, 0), err);
     if (rc == 0)
         rc = extensions_check(db, json, creator, err);
     if (rc == 0)
@@ -391,7 +394,8 @@ int agent_definition_validate(sqlite3 *db, const char *json,
  * the agents row (absent = keep), add declared grants, and re-stamp the
  * approval gate on approval-listed tools. */
 static int apply_fields_and_grants(sqlite3 *db, const char *name,
-                                   const char *json, char **err) {
+                                   const char *json, GrantOrigin origin,
+                                   char **err) {
     sqlite3_stmt *st;
     int rc = 0;
     const char *osql =
@@ -443,7 +447,7 @@ static int apply_fields_and_grants(sqlite3 *db, const char *name,
     }
 
     for (size_t i = 0; rc == 0 && i < GRANT_KIND_COUNT; i++)
-        rc = grants_walk(db, json, name, NULL, 1, i, err);
+        rc = grants_walk(db, json, name, NULL, 1, i, origin, err);
 
     /* Approval-required tools keep their gate however they were granted. */
     if (rc == 0) {
@@ -465,8 +469,10 @@ static int apply_fields_and_grants(sqlite3 *db, const char *name,
 }
 
 int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
-                           const char *agents_dir, char **err) {
+                           const char *agents_dir, GrantOrigin origin,
+                           char **err) {
     if (err) *err = NULL;
+    if (!origin.source) return fail(err, "no grant origin");
     char *name = NULL;
     if (validate_inner(db, json, creator, &name, err) != 0)
         return -1;
@@ -491,8 +497,11 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
              " SELECT ?1, ?3, system_prompt, description,"
              "  max_iterations, max_output_tokens, shell_timeout, shell_path,"
              "  sandbox_profile FROM agents WHERE name=?2"),
-            ("INSERT OR IGNORE INTO grants(agent_name, kind, value, approval_mode, expires_at)"
-             " SELECT ?1, kind, value, approval_mode, expires_at FROM grants"
+            /* The copies are new rows of a new agent: their origin is this
+             * creation, never the source agent's history. */
+            ("INSERT OR IGNORE INTO grants(agent_name, kind, value, approval_mode,"
+             " expires_at, source, approval_id)"
+             " SELECT ?1, kind, value, approval_mode, expires_at, ?4, ?5 FROM grants"
              " WHERE agent_name=?2"),
             ("INSERT OR IGNORE INTO agent_extensions(agent_name, extension_name, enabled)"
              " SELECT ?1, extension_name, enabled FROM agent_extensions WHERE agent_name=?2"),
@@ -507,6 +516,11 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
             if (i == 0) {
                 if (creator) sqlite3_bind_text(st, 3, creator, -1, SQLITE_STATIC);
                 else sqlite3_bind_null(st, 3);
+            }
+            if (i == 1) {
+                sqlite3_bind_text(st, 4, origin.source, -1, SQLITE_STATIC);
+                if (origin.approval_id > 0) sqlite3_bind_int64(st, 5, origin.approval_id);
+                else sqlite3_bind_null(st, 5);
             }
             if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
             sqlite3_finalize(st);
@@ -538,10 +552,10 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
             sqlite3_finalize(st);
         }
         if (!declared_tools)
-            agent_grant_defaults(db, name);
+            agent_grant_defaults(db, name, origin);
     }
     if (rc == 0)
-        rc = apply_fields_and_grants(db, name, json, err);
+        rc = apply_fields_and_grants(db, name, json, origin, err);
 
     /* Routing list provenance (R2): declared list applied above; otherwise
      * inherit the creator's list verbatim. An agent that would end up with
@@ -729,7 +743,7 @@ static int update_validate_inner(sqlite3 *db, const char *json,
     int rc = profile_capped(db, profile, caller, err);
     free(profile);
     for (size_t i = 0; rc == 0 && i < GRANT_KIND_COUNT; i++)
-        rc = grants_walk(db, json, NULL, caller, 0, i, err);
+        rc = grants_walk(db, json, NULL, caller, 0, i, GRANT_ORIGIN(NULL, 0), err);
     if (rc == 0)
         rc = models_check(db, json, caller, err);
     return rc;
@@ -742,7 +756,8 @@ int agent_definition_update_validate(sqlite3 *db, const char *json,
 }
 
 int agent_definition_update_apply(sqlite3 *db, const char *json,
-                                  const char *caller, char **err) {
+                                  const char *caller, int64_t approval_id,
+                                  char **err) {
     if (err) *err = NULL;
     /* Re-validate at apply: authorization or caps may have shifted between
      * park and approval (rename, expired grants). */
@@ -757,7 +772,9 @@ int agent_definition_update_apply(sqlite3 *db, const char *json,
         return fail(err, "cannot begin transaction");
     }
 
-    int rc = apply_fields_and_grants(db, name, json, err);
+    /* Grants an update adds are an approved change to an existing agent. */
+    int rc = apply_fields_and_grants(db, name, json,
+                                     GRANT_ORIGIN("approval", approval_id), err);
 
     if (sqlite3_exec(db, rc == 0 ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
         rc = -1;

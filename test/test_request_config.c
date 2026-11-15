@@ -6,6 +6,7 @@
 #include "tools.h"
 #include "tool_request_config.h"
 #include "agent_config.h"
+#include "approval.h"
 #include "config_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,7 +41,7 @@ static void apply_latest(sqlite3 *db, int64_t sid, char **receipt_out) {
     assert(sqlite3_step(s) == SQLITE_ROW);
     char *args = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
-    assert(request_config_changes_apply(db, "test", args, 0, 0, receipt_out) == 0);
+    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, receipt_out) == 0);
     free(args);
 }
 
@@ -447,7 +448,7 @@ static void test_provider_defaults(void) {
     char *args = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
     char *receipt = NULL;
-    assert(request_config_changes_apply(db, "test", args, 0, 0, &receipt) == 0);
+    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, &receipt) == 0);
     free(args);
     /* The receipt is a re-read: it names the endpoint now stored. */
     assert(receipt && strstr(receipt, "provider gateway -> "
@@ -742,7 +743,7 @@ static void test_batch_apply(void) {
     sqlite3_finalize(s);
 
     char *receipt = NULL;
-    rc = request_config_changes_apply(db, "test", args_copy, 0, 0, &receipt);
+    rc = request_config_changes_apply(db, "test", args_copy, 0, 0, 0, &receipt);
     assert(rc == 0);
     /* The receipt is a re-read of every section: the grants that are live,
      * the config value as stored, the provider row as it now stands. */
@@ -879,7 +880,7 @@ static void test_agent_routes_sections(void) {
     char *args_copy = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
 
-    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, NULL) == 0);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, 0, NULL) == 0);
     free(args_copy);
 
     /* models row seeded → the adopted id resolves. */
@@ -935,7 +936,7 @@ static void test_agent_routes_sections(void) {
     assert(sqlite3_step(s) == SQLITE_ROW);
     args_copy = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
-    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, NULL) == -1);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, 0, NULL) == -1);
     free(args_copy);
     assert(sqlite3_prepare_v2(db,
         "SELECT max_iterations FROM agents WHERE name='test'",
@@ -1009,7 +1010,7 @@ static void test_agent_models_effort(void) {
     assert(sqlite3_step(s) == SQLITE_ROW);
     char *args_copy = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
-    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, NULL) == 0);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, 0, NULL) == 0);
     free(args_copy);
     assert(sqlite3_prepare_v2(db,
         "SELECT model_id, reasoning_effort FROM agent_models"
@@ -1042,7 +1043,7 @@ static void test_agent_models_effort(void) {
     assert(sqlite3_step(s) == SQLITE_ROW);
     args_copy = strdup((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
-    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, NULL) == 0);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, 0, NULL) == 0);
     free(args_copy);
     assert(sqlite3_prepare_v2(db,
         "SELECT reasoning_effort IS NULL FROM agent_models"
@@ -1077,7 +1078,7 @@ static void test_apply_rollback(void) {
         "\"grants\":{\"tools\":[\"web_fetch\"]},"
         "\"config\":{\"nonexistent_key_xyz\":\"boom\"}}}";
 
-    int rc = request_config_changes_apply(db, "test", bad_args, 0, 0, NULL);
+    int rc = request_config_changes_apply(db, "test", bad_args, 0, 0, 0, NULL);
     assert(rc == -1); /* config_set fails for unregistered key */
 
     /* Verify the tool grant did NOT land (rollback). */
@@ -1152,8 +1153,8 @@ static void test_redundant_filtered(void) {
     int64_t sid = session_create(db, "t", "test", -1, 0);
     assert(sid > 0);
 
-    assert(agent_config_grant(db, "test", "host", "api.tiingo.com", 0) == 0);
-    assert(agent_config_grant(db, "test", "tool", "js_eval", 0) == 0);
+    assert(agent_config_grant(db, "test", "host", "api.tiingo.com", 0, GRANT_ORIGIN("operator", 0)) == 0);
+    assert(agent_config_grant(db, "test", "tool", "js_eval", 0, GRANT_ORIGIN("operator", 0)) == 0);
 
     RequestConfigCtx ctx = {
         .db = db, .agent_name = "test", .session_id = sid,
@@ -1303,7 +1304,7 @@ static void test_secret_bindings_section(void) {
     sqlite3_finalize(s);
 
     /* Apply mints both pairs, durably. */
-    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, NULL) == 0);
+    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, 0, NULL) == 0);
     free(args_copy);
     assert(sqlite3_prepare_v2(db,
         "SELECT COUNT(*) FROM secret_hosts WHERE secret_name='ALPACA_KEY'"
@@ -1350,8 +1351,8 @@ static void test_grants_remove(void) {
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
     int64_t sid = session_create(db, "t", "test", -1, 0);
-    assert(agent_config_grant(db, "test", "host", "api.example.com", 0) == 0);
-    assert(agent_config_grant(db, "test", "tool", "shell_exec", 0) == 0);
+    assert(agent_config_grant(db, "test", "host", "api.example.com", 0, GRANT_ORIGIN("operator", 0)) == 0);
+    assert(agent_config_grant(db, "test", "tool", "shell_exec", 0, GRANT_ORIGIN("operator", 0)) == 0);
 
     RequestConfigCtx ctx = {
         .db = db, .agent_name = "test", .session_id = sid,
@@ -1412,6 +1413,80 @@ static void test_grants_remove(void) {
     printf("  PASS test_grants_remove\n");
 }
 
+/* grants.secrets (v60): an agent asks to USE a secret like any other grant.
+ * Only a name an agent could be handed may be asked for — a stored
+ * agent-scope secret, or an environment secret the database knows through a
+ * binding — never a system secret, never a name nothing stands behind. The
+ * card names the secret plainly; the applied row records the approval. */
+static void test_grants_secrets(void) {
+    sqlite3 *db = test_db_open_seeded(":memory:");
+    assert(db);
+    config_registry_sync(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+    assert(sid > 0);
+    assert(sqlite3_exec(db,
+        "INSERT INTO secrets(name,value,scope) VALUES"
+        " ('STORED_KEY','enc:00','agent'),('SYS_KEY','enc:00','system');"
+        "INSERT INTO secret_hosts(secret_name,host) VALUES('ENV_TOKEN','api.example.com');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    RequestConfigCtx ctx = {
+        .db = db, .agent_name = "test", .session_id = sid,
+        .agents_dir = NULL, .current_tool_call_id = "gs1"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+
+    char *r = call_handler(&reg, "{\"changes\":{\"grants\":{\"secrets\":[\"NOPE\"]}}}");
+    assert(r && strstr(r, "grants.secrets names 'NOPE'"));
+    free(r);
+    r = call_handler(&reg, "{\"changes\":{\"grants\":{\"secrets\":[\"SYS_KEY\"]}}}");
+    assert(r && strstr(r, "grants.secrets names 'SYS_KEY'"));
+    free(r);
+    r = call_handler(&reg, "{\"changes\":{\"grants\":{\"secrets\":[7]}}}");
+    assert(r && strstr(r, "must be non-empty strings"));
+    free(r);
+
+    r = call_handler(&reg, "{\"changes\":{\"grants\":{\"secrets\":"
+                           "[\"STORED_KEY\",\"ENV_TOKEN\"]}}}");
+    assert(r == NULL);   /* parked */
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db, "SELECT id FROM approvals WHERE session_id=?1"
+        " AND state='pending' AND tool_call_id='gs1'", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    int64_t aid = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    Approval *a = approval_get_for_tool_call(db, sid, "gs1");
+    assert(a);
+    char *card = approval_format_summary(db, a);
+    assert(card && strstr(card, "secret STORED_KEY (may use its value in tool calls)"));
+    assert(strstr(card, "secret ENV_TOKEN (may use its value in tool calls)"));
+    free(card);
+    assert(grants_contains(db, "test", "secret", "STORED_KEY") == 0);
+    assert(request_config_changes_apply(db, "test", a->args_json, 0, sid, aid, NULL) == 0);
+    approval_free(a);
+    char q[256];
+    snprintf(q, sizeof(q), "SELECT COUNT(*) FROM grants WHERE agent_name='test'"
+             " AND kind='secret' AND source='approval' AND approval_id=%lld",
+             (long long)aid);
+    assert(db_scalar_i64(db, q, 0, -1) == 2);
+
+    /* Giving one back applies immediately, like any grant. */
+    ctx.current_tool_call_id = "gs2";
+    assert(session_set_state(db, sid, "tool_running") == 0);
+    r = call_handler(&reg, "{\"changes\":{\"grants\":{\"remove\":"
+                           "{\"secrets\":[\"ENV_TOKEN\"]}}}}");
+    assert(r && strstr(r, "removed"));
+    free(r);
+    assert(grants_contains(db, "test", "secret", "ENV_TOKEN") == 0);
+    assert(grants_contains(db, "test", "secret", "STORED_KEY") == 1);
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_grants_secrets\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_request_config:\n");
@@ -1434,6 +1509,7 @@ int main(void) {
     test_redundant_filtered();
     test_secret_bindings_section();
     test_grants_remove();
+    test_grants_secrets();
     printf("\nAll request_config tests passed.\n");
     return 0;
 }

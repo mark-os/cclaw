@@ -98,7 +98,7 @@ static int run_cli_p(const char *exe, const char *url, const char *prompt,
 
 static int64_t db_count(const char *sql) {
     sqlite3 *db;
-    if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) return -1;
+    if ((db = db_open(DB_PATH)) == NULL) return -1;
     sqlite3_stmt *s;
     int64_t v = -1;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
@@ -111,7 +111,7 @@ static int64_t db_count(const char *sql) {
 
 static int db_exec(const char *sql) {
     sqlite3 *db;
-    if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) return -1;
+    if ((db = db_open(DB_PATH)) == NULL) return -1;
     int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     sqlite3_close(db);
     return (rc == SQLITE_OK) ? 0 : -1;
@@ -228,8 +228,8 @@ int main(void) {
      * the two authorities must disagree, or we'd be testing the grant gate. */
     char sql[512];
     snprintf(sql, sizeof(sql),
-        "INSERT OR IGNORE INTO grants(agent_name,kind,value)"
-        "  SELECT agent_name,'tool','file_write' FROM sessions WHERE id=%lld;"
+        "INSERT OR IGNORE INTO grants(agent_name,kind,value,source)"
+        "  SELECT agent_name,'tool','file_write','operator' FROM sessions WHERE id=%lld;"
         "UPDATE sessions SET tool_filter='[\"file_read\"]' WHERE id=%lld;",
         (long long)sid, (long long)sid);
     if (db_exec(sql) != 0) { fprintf(stderr, "FAIL: could not install filter\n"); goto done; }

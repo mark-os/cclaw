@@ -18,6 +18,17 @@ void db_configure_logging(void);
  * Returns NULL on failure. */
 sqlite3 *db_open(const char *path);
 
+/* Handle identity for the change log (specs/operations.md). db_open registers
+ * cclaw_actor()/cclaw_context() on every handle with actor "unknown"; the
+ * opener names itself ("daemon", "cli", "dashboard", "llm_worker", ...).
+ * db_set_context labels what the handle is doing right now ("approval:41");
+ * NULL clears it. db_identity_register is for a handle db_open did not make
+ * (the `cclaw sqlite3` verb's). */
+int db_identity_register(sqlite3 *db, const char *actor);
+void db_set_actor(sqlite3 *db, const char *actor);
+void db_set_context(sqlite3 *db, const char *context);
+void db_get_context(sqlite3 *db, char *out, size_t out_sz);   /* "" when none */
+
 /* Open a database *file* to look at, not to use: read-only and immutable, so
  * SQLite creates no -wal/-shm beside it. For snapshots and kept copies that
  * must stay exactly the bytes they are (a snapshot about to be renamed into
@@ -346,7 +357,12 @@ int db_secret_host_unbind(sqlite3 *db, const char *secret_name, const char *host
  * db_secret_set: insert or replace name -> value (source/scope as given;
  * NULL scope = 'agent'). scope='system' rows are daemon-consumed provider
  * keys — excluded from db_secrets_load and thus from interpolation.
- * db_secret_rm: delete by name (0 even if absent).
+ * db_secret_rm: delete the name everywhere — its secrets row, its
+ * secret_hosts bindings and every 'secret' grant naming it — in one
+ * transaction (0 even if absent). removed (may be NULL) gets the three row
+ * counts in that order.
+ * db_secret_capture: an agent's own new secret (save_secret, secret_create):
+ * store it and grant it to that agent (source 'capture') atomically.
  * db_secret_exists: 1 if a row with this name exists, 0 otherwise/on error.
  * db_secrets_load: decrypt every scope='agent' row into a heap ShellSecret
  * array (caller frees with shell_secrets_free); *count=0/NULL if none or key
@@ -354,7 +370,9 @@ int db_secret_host_unbind(sqlite3 *db, const char *secret_name, const char *host
  * db_secret_get_system: decrypted value of one scope='system' secret. */
 int db_secret_set(sqlite3 *db, const char *name, const char *value,
                   const char *source, const char *scope);
-int db_secret_rm(sqlite3 *db, const char *name);
+int db_secret_rm(sqlite3 *db, const char *name, int removed[3]);
+int db_secret_capture(sqlite3 *db, const char *name, const char *value,
+                      const char *source, const char *agent);
 int db_secret_exists(sqlite3 *db, const char *name);
 ShellSecret *db_secrets_load(sqlite3 *db, size_t *count);
 char *db_secret_get_system(sqlite3 *db, const char *name);

@@ -18,6 +18,11 @@ ChannelCtx *channel_ctx_open(const char *db_path, const char *channel_name) {
     if (!db_path || !channel_name) return NULL;
     sqlite3 *db = db_open(db_path);
     if (!db) return NULL;
+    {   /* change_log actor: the channel runner process, by channel */
+        char who[32];
+        snprintf(who, sizeof(who), "channel:%s", channel_name);
+        db_set_actor(db, who);
+    }
     ChannelCtx *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) { db_close(db); return NULL; }
     ctx->db = db;

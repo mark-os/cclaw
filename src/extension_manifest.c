@@ -698,7 +698,8 @@ int extension_manifest_declares_persistent(sqlite3 *db, const char *store_dir) {
 /* ── install ────────────────────────────────────────────────────── */
 
 int extension_install(sqlite3 *db, const char *bundle_dir,
-                      const char *owner_agent, char **err_out) {
+                      const char *owner_agent, int64_t approval_id,
+                      char **err_out) {
     if (err_out) *err_out = NULL;
     if (!db || !bundle_dir) { xerr(err_out, "bad arguments"); return -1; }
 
@@ -870,12 +871,23 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
         /* Grants are the single authorization currency (D1): the promote approval
          * already enumerated these tools, so seed the owner's tool grants here.
          * Attach alone never authorizes — other agents go through request_config. */
-        rc |= run_ingest(db,
-            "INSERT OR IGNORE INTO grants(agent_name, kind, value, expires_at) "
-            "SELECT :owner, 'tool', json_extract(value,'$.name'), NULL "
-            "FROM json_each(COALESCE(json_extract(:m,'$.tools'),'[]')) "
-            "WHERE json_extract(value,'$.name') IS NOT NULL",
-            manifest, name, store, owner_agent);
+        sqlite3_stmt *gs;
+        if (sqlite3_prepare_v2(db,
+                "INSERT OR IGNORE INTO grants(agent_name, kind, value, expires_at,"
+                "                             source, approval_id) "
+                "SELECT ?1, 'tool', json_extract(value,'$.name'), NULL, 'extension', ?3 "
+                "FROM json_each(COALESCE(json_extract(?2,'$.tools'),'[]')) "
+                "WHERE json_extract(value,'$.name') IS NOT NULL",
+                -1, &gs, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(gs, 1, owner_agent, -1, SQLITE_STATIC);
+            sqlite3_bind_text(gs, 2, manifest, -1, SQLITE_STATIC);
+            if (approval_id > 0) sqlite3_bind_int64(gs, 3, approval_id);
+            else sqlite3_bind_null(gs, 3);
+            if (sqlite3_step(gs) != SQLITE_DONE) rc |= -1;
+            sqlite3_finalize(gs);
+        } else {
+            rc |= -1;
+        }
     }
 
     /* channel (at most one): joined to the extension by name. */
@@ -1004,8 +1016,13 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
                     free(prompt);
                 }
                 char *aerr = NULL;
+                /* A promoted extension's agent is created by that promotion's
+                 * approval; a built-in one ships in the binary (seed). */
+                GrantOrigin origin = creator
+                    ? GRANT_ORIGIN("agent_create", approval_id)
+                    : GRANT_ORIGIN("seed", 0);
                 if (agent_definition_apply(db, resolved ? resolved : def,
-                                           creator, NULL, &aerr) != 0) {
+                                           creator, NULL, origin, &aerr) != 0) {
                     if (err_out && !*err_out) {
                         size_t n = strlen(aname) + (aerr ? strlen(aerr) : 8) + 32;
                         char *m = malloc(n);
@@ -1100,7 +1117,7 @@ static int builtin_stage_install(sqlite3 *db, const char *base,
     }
 
     char *err = NULL;
-    if (rc == 0) rc = extension_install(db, staging, NULL, &err);
+    if (rc == 0) rc = extension_install(db, staging, NULL, 0, &err);
     if (rc != 0)
         LOG_ERROR_("builtin extension '%s' install failed: %s",
                    b->name, err ? err : "write failed");

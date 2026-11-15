@@ -161,7 +161,7 @@ int main(void) {
     /* Assert DB effects: agent row with declared profile, grants, approval. */
     {
         sqlite3 *db;
-        if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) { fprintf(stderr, "FAIL: db open\n"); goto done; }
+        if ((db = db_open(DB_PATH)) == NULL) { fprintf(stderr, "FAIL: db open\n"); goto done; }
         sqlite3_stmt *s;
         int ok = 0;
         if (sqlite3_prepare_v2(db,

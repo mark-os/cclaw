@@ -7,6 +7,7 @@
  * filter, so both have to be on screen. */
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "agent_config.h"
 #include "test_util.h"
 #include "tools.h"
 #include "tool_search_config.h"
@@ -31,8 +32,8 @@ static sqlite3 *setup_db(void) {
     assert(db != NULL);
     test_seed_agent(db, "default");
     assert(sqlite3_exec(db,
-        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','launch_agent');"
-        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','file_read');",
+        "INSERT INTO grants(agent_name,kind,value,source) VALUES('default','tool','launch_agent','operator');"
+        "INSERT INTO grants(agent_name,kind,value,source) VALUES('default','tool','file_read','operator');",
         NULL, NULL, NULL) == SQLITE_OK);
     return db;
 }
@@ -123,8 +124,8 @@ static void test_settings_models_providers(void) {
         "INSERT INTO models(id, provider_name, model)"
         " VALUES('claude-sonnet-4.6@gw','gw','claude-sonnet-4.6');"
         /* expired grant must be invisible in the per-kind listing */
-        "INSERT INTO grants(agent_name,kind,value,expires_at)"
-        " VALUES('default','tool','db_query', unixepoch()-10);"
+        "INSERT INTO grants(agent_name,kind,value,expires_at,source)"
+        " VALUES('default','tool','db_query', unixepoch()-10,'operator');"
         "INSERT INTO agent_models(agent_name,model_id,pos)"
         " VALUES('default','claude-opus-4.5@gw',0);",
         NULL, NULL, NULL) == SQLITE_OK);
@@ -205,8 +206,8 @@ static void test_format_json(void) {
         " VALUES('claude-opus-4.5@gw','gw','claude-opus-4.5',200000);"
         "INSERT INTO agent_models(agent_name,model_id,pos)"
         " VALUES('default','claude-opus-4.5@gw',0);"
-        "INSERT INTO grants(agent_name,kind,value)"
-        " VALUES('default','host','api.example.com');",
+        "INSERT INTO grants(agent_name,kind,value,source)"
+        " VALUES('default','host','api.example.com','operator');",
         NULL, NULL, NULL) == SQLITE_OK);
     int64_t sid = session_create(db, "plain", "default", -1, 0);
 
@@ -234,6 +235,8 @@ static void test_format_json(void) {
      * rather than as "none". */
     v = doc_get(db, doc, "$.secret_bindings");
     assert(v != NULL); free(v);
+    v = doc_get(db, doc, "$.grants.secrets");
+    assert(v && strcmp(v, "[]") == 0); free(v);
     v = doc_get(db, doc, "$.pending_approvals");
     assert(v && strcmp(v, "[]") == 0); free(v);
     v = doc_get(db, doc, "$.session.tool_filter");
@@ -248,6 +251,38 @@ static void test_format_json(void) {
     tools_free(&reg);
     db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_format_json\n");
+}
+
+/* Secrets (v60): an agent sees the secrets it may use — in its grants and,
+ * with their bindings, in secret_bindings — and nothing about the rest. */
+static void test_only_granted_secrets_shown(void) {
+    sqlite3 *db = setup_db();
+    int64_t sid = session_create(db, "plain", "default", -1, 0);
+    assert(sqlite3_exec(db,
+        "INSERT INTO secret_hosts(secret_name,host) VALUES"
+        " ('MINE_KEY','api.mine.test'),('THEIRS_KEY','api.theirs.test');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    assert(agent_config_grant(db, "default", "secret", "MINE_KEY", 0,
+                              GRANT_ORIGIN("operator", 0)) == 0);
+    ToolRegistry reg;
+    tools_init(&reg);
+    SearchConfigCtx ctx = {.db = db, .agent_name = "default", .session_id = sid};
+    assert(tool_search_config_register(&reg, &ctx) == 0);
+    char *txt = call_handler(&reg, "{}");
+    assert(txt && strstr(txt, "secrets: MINE_KEY"));
+    assert(strstr(txt, "MINE_KEY->api.mine.test"));
+    assert(!strstr(txt, "THEIRS_KEY"));
+    free(txt);
+    char *doc = call_handler(&reg, "{\"format\":\"json\"}");
+    char *v = doc_get(db, doc, "$.grants.secrets[0]");
+    assert(v && strcmp(v, "MINE_KEY") == 0); free(v);
+    v = doc_get(db, doc, "$.secret_bindings.MINE_KEY[0]");
+    assert(v && strcmp(v, "api.mine.test") == 0); free(v);
+    assert(!strstr(doc, "THEIRS_KEY"));
+    free(doc);
+    tools_free(&reg);
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_only_granted_secrets_shown\n");
 }
 
 /* Pending approvals surface in BOTH formats — id, age, one-line summary. */
@@ -302,6 +337,7 @@ int main(void) {
     test_settings_models_providers();
     test_format_json();
     test_pending_approvals_section();
+    test_only_granted_secrets_shown();
     printf("All search_config tests passed.\n");
     return 0;
 }

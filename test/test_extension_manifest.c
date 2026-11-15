@@ -147,7 +147,7 @@ static void test_install_ingests_rows(void) {
     assert(db);
 
     char *err = NULL;
-    int rc = extension_install(db, BUNDLE, "default", &err);
+    int rc = extension_install(db, BUNDLE, "default", 0, &err);
     if (rc != 0) fprintf(stderr, "install error: %s\n", err ? err : "?");
     assert(rc == 0);
     assert(err == NULL);
@@ -211,10 +211,10 @@ static void test_reinstall_is_idempotent(void) {
     setup_bundle();
     sqlite3 *db = open_seeded();
     char *err = NULL;
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     /* simulate a publish, then re-install: published must survive */
     sqlite3_exec(db, "UPDATE extensions SET published=1 WHERE name='nws'", NULL, NULL, NULL);
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     assert(qint(db, "SELECT published FROM extensions WHERE name='nws'") == 1);
     /* no duplicate tool rows */
     assert(qint(db, "SELECT count(*) FROM tools WHERE name='get_forecast'") == 1);
@@ -227,7 +227,7 @@ static void test_config_lifecycle(void) {
     setup_bundle();
     sqlite3 *db = open_seeded();
     char *err = NULL;
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
 
     /* config_set accepts an extension-registered key... */
     assert(config_set(db, "nws.units", "metric") == 0);
@@ -238,7 +238,7 @@ static void test_config_lifecycle(void) {
     assert(config_set(db, "rogue.key", "x") == -1);
 
     /* re-install: override preserved, defaults refreshed */
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     v = config_get(db, "nws.units");
     assert(v && strcmp(v, "metric") == 0); free(v);
 
@@ -251,7 +251,7 @@ static void test_config_lifecycle(void) {
     assert(end);
     memmove(cut, end + 1, strlen(end + 1) + 1);
     write_file(BUNDLE "/extension.json", patched);
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     assert(qint(db, "SELECT count(*) FROM config WHERE key='nws.units'") == 0);
     assert(qint(db, "SELECT count(*) FROM config WHERE key='nws.api_base'") == 1);
 
@@ -504,7 +504,7 @@ static void test_extension_fork_roundtrip(void) {
 
     /* The renamed manifest passes a real promote, under a new owner */
     char *err = NULL;
-    assert(extension_install(db, "/tmp/test_fork_ws/extensions/tg-ng", "default", &err) == 0);
+    assert(extension_install(db, "/tmp/test_fork_ws/extensions/tg-ng", "default", 0, &err) == 0);
     free(err);
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(db,
@@ -540,15 +540,15 @@ static void test_install_refuses_owner_takeover(void) {
     setup_bundle();
     sqlite3 *db = open_seeded();
     char *err = NULL;
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     free(err); err = NULL;
 
     /* same owner: refresh succeeds */
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     free(err); err = NULL;
 
     /* different owner: refused, existing row untouched */
-    assert(extension_install(db, BUNDLE, "intruder", &err) == -1);
+    assert(extension_install(db, BUNDLE, "intruder", 0, &err) == -1);
     assert(err && strstr(err, "owned by 'default'"));
     free(err); err = NULL;
     char *owner = q1(db, "SELECT owner_agent FROM extensions WHERE name='nws'");
@@ -692,8 +692,8 @@ static void test_manifest_agents(void) {
     sqlite3 *db = open_seeded();
     assert(db);
     db_agent_upsert(db, "Owner", NULL, NULL);
-    sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value)"
-                     " VALUES('Owner','tool','web_fetch')", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value,source)"
+                     " VALUES('Owner','tool','web_fetch','operator')", NULL, NULL, NULL);
     /* Owner needs a routing list — manifest agents inherit it (R2). */
     sqlite3_exec(db,
         "INSERT OR IGNORE INTO providers(name,base_url) VALUES('p','http://p');"
@@ -721,7 +721,7 @@ static void test_manifest_agents(void) {
     write_file(BUNDLE "/extension.json",
         "{ \"name\": \"nws\", \"agents\": [ { \"name\": \"WxScout\","
         "  \"grants\": { \"tools\": [\"shell_exec\"] } } ] }");
-    assert(extension_install(db, BUNDLE, "Owner", &err) != 0);
+    assert(extension_install(db, BUNDLE, "Owner", 0, &err) != 0);
     assert(err && strstr(err, "exceeds creator")); free(err); err = NULL;
 
     /* Good install creates the agent with resolved prompt + capped grants. */
@@ -731,7 +731,7 @@ static void test_manifest_agents(void) {
         "    \"sandbox_profile\": \"restricted\","
         "    \"system_prompt_file\": \"scout.md\","
         "    \"grants\": { \"tools\": [\"web_fetch\"] } } ] }");
-    int rc = extension_install(db, BUNDLE, "Owner", &err);
+    int rc = extension_install(db, BUNDLE, "Owner", 0, &err);
     if (rc != 0) fprintf(stderr, "install error: %s\n", err ? err : "?");
     assert(rc == 0);
     char *v = q1(db, "SELECT system_prompt FROM agents WHERE name='WxScout'");
@@ -744,7 +744,7 @@ static void test_manifest_agents(void) {
     /* Re-install: existing agent skipped, not overwritten. */
     sqlite3_exec(db, "UPDATE agents SET description='operator edit'"
                      " WHERE name='WxScout'", NULL, NULL, NULL);
-    assert(extension_install(db, BUNDLE, "Owner", &err) == 0);
+    assert(extension_install(db, BUNDLE, "Owner", 0, &err) == 0);
     v = q1(db, "SELECT description FROM agents WHERE name='WxScout'");
     assert(v && strcmp(v, "operator edit") == 0); free(v);
     assert(qint(db, "SELECT COUNT(*) FROM agents WHERE name='WxScout'") == 1);
@@ -763,7 +763,7 @@ static void test_install_seeds_grants(void) {
     assert(db);
 
     char *err = NULL;
-    int rc = extension_install(db, BUNDLE, "grantee", &err);
+    int rc = extension_install(db, BUNDLE, "grantee", 0, &err);
     assert(rc == 0 && err == NULL);
 
     /* The fixture manifest declares one tool: "get_forecast". Verify that a
@@ -780,11 +780,23 @@ static void test_install_seeds_grants(void) {
                                " AND kind='tool'");
     assert(grant_count == 1);
 
+    /* Provenance: the promotion's own grant, tied to its approval. */
+    assert(qint(db, "SELECT count(*) FROM grants WHERE agent_name='grantee'"
+                    " AND kind='tool' AND source='extension'") == 1);
+
     /* Re-install: idempotent — grant count unchanged (INSERT OR IGNORE). */
-    assert(extension_install(db, BUNDLE, "grantee", &err) == 0);
+    assert(extension_install(db, BUNDLE, "grantee", 0, &err) == 0);
     int grant_count2 = qint(db, "SELECT count(*) FROM grants WHERE agent_name='grantee'"
                                 " AND kind='tool'");
     assert(grant_count2 == grant_count);
+
+    /* A promote applied under approval #N records N. */
+    sqlite3_exec(db, "DELETE FROM grants WHERE agent_name='grantee';"
+                     "INSERT INTO approvals(id, session_id, tool_name, state)"
+                     " VALUES(77, 1, 'extension_promote', 'approved');", NULL, NULL, NULL);
+    assert(extension_install(db, BUNDLE, "grantee", 77, &err) == 0);
+    assert(qint(db, "SELECT count(*) FROM grants WHERE agent_name='grantee'"
+                    " AND source='extension' AND approval_id=77") == 1);
 
     db_close(db);
     printf("  PASS test_install_seeds_grants\n");

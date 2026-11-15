@@ -50,14 +50,14 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
          * detail carries the receipt (success) or the failing step. */
         if (request_config_changes_apply(proc_db(), agent, a->args_json,
                                          grant_expires_at, a->session_id,
-                                         detail) != 0) {
+                                         a->id, detail) != 0) {
             LOG_WARN_("request_changes apply failed");
             *apply_failed = 1; /* generic apply-failed: error result, no grant */
         }
     } else if (strcmp(a->tool_name, "extension_promote") == 0) {
         char *bundle = tool_args_str(proc_db(), a->args_json, "bundle");
         char *ierr = NULL;
-        if (!bundle || extension_install(proc_db(), bundle, agent, &ierr) != 0) {
+        if (!bundle || extension_install(proc_db(), bundle, agent, a->id, &ierr) != 0) {
             LOG_WARN_("extension_promote apply failed: %s", ierr ? ierr : "no bundle");
             *apply_failed = 1;
         }
@@ -66,7 +66,8 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
     } else if (strcmp(a->tool_name, "create_agent") == 0) {
         char *cerr = NULL;
         const char *adir = proc_tool_setup() ? proc_tool_setup()->req_cfg_ctx.agents_dir : NULL;
-        if (agent_definition_apply(proc_db(), a->args_json, agent, adir, &cerr) != 0) {
+        if (agent_definition_apply(proc_db(), a->args_json, agent, adir,
+                                   GRANT_ORIGIN("agent_create", a->id), &cerr) != 0) {
             LOG_WARN_("create_agent apply failed: %s", cerr ? cerr : "?");
             *apply_failed = 1; /* generic apply-failed: error result, no grant */
         } else if (detail) {
@@ -85,7 +86,8 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
         free(cerr);
     } else if (strcmp(a->tool_name, "update_agent") == 0) {
         char *cerr = NULL;
-        if (agent_definition_update_apply(proc_db(), a->args_json, agent, &cerr) != 0) {
+        if (agent_definition_update_apply(proc_db(), a->args_json, agent, a->id,
+                                          &cerr) != 0) {
             LOG_WARN_("update_agent apply failed: %s", cerr ? cerr : "?");
             *apply_failed = 1; /* generic apply-failed: error result, no grant */
         }
@@ -227,8 +229,25 @@ static void resolve_approval_post_window(const Approval *a, const char *agent,
 
 /* ── resolve_approval: approve/deny a parked approval ────────── */
 
+static void resolve_approval_inner(int64_t approval_id, ApprovalDecision decision,
+                                   const char *decided_via, int64_t grant_expires_at);
+
+/* Every row the decision changes is labelled with it in change_log
+ * (context 'approval:<id>'), cleared on the way out. resolve_approval re-enters
+ * run_advance, so a nested decision relabels for its own duration and the
+ * outer label is put back after. */
 void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via,
                       int64_t grant_expires_at) {
+    char label[48], outer[96] = "";
+    db_get_context(proc_db(), outer, sizeof(outer));
+    snprintf(label, sizeof(label), "approval:%lld", (long long)approval_id);
+    db_set_context(proc_db(), label);
+    resolve_approval_inner(approval_id, decision, decided_via, grant_expires_at);
+    db_set_context(proc_db(), outer[0] ? outer : NULL);
+}
+
+static void resolve_approval_inner(int64_t approval_id, ApprovalDecision decision,
+                                   const char *decided_via, int64_t grant_expires_at) {
     int approved = (decision != APPROVAL_DENY);
     Approval *a = approval_resolve(proc_db(), approval_id, approved, decided_via);
     if (!a) return;
@@ -297,7 +316,8 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                           a->tool_name ? a->tool_name : "?");
             } else {
                 /* "Allow and stop asking" — flip the standing mode to silent. */
-                agent_config_set_tool_mode(proc_db(), agent, a->tool_name, "silent");
+                agent_config_set_tool_mode(proc_db(), agent, a->tool_name, "silent",
+                                           GRANT_ORIGIN("approval", a->id));
             }
         }
         session_set_state(proc_db(), session_id, "tool_running");

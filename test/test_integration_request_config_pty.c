@@ -209,7 +209,7 @@ int main(void) {
     /* Assert DB effects: read_path grant, approved approval, resolved call. */
     {
         sqlite3 *db;
-        if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) { fprintf(stderr, "FAIL: db open\n"); goto done; }
+        if ((db = db_open(DB_PATH)) == NULL) { fprintf(stderr, "FAIL: db open\n"); goto done; }
         sqlite3_stmt *s;
         int ok = 0;
         if (sqlite3_prepare_v2(db,
@@ -259,7 +259,7 @@ int main(void) {
 
         /* Malformed-args call: gate wrote an error tool-result, the call is
          * done with decided_via bad_args, and no approval was created. */
-        if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) { fprintf(stderr, "FAIL: db reopen\n"); goto done; }
+        if ((db = db_open(DB_PATH)) == NULL) { fprintf(stderr, "FAIL: db reopen\n"); goto done; }
         ok = 0;
         if (sqlite3_prepare_v2(db,
                 "SELECT 1 FROM tool_calls WHERE call_id='call_pty3' AND status='done'",

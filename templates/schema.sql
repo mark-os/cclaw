@@ -170,10 +170,29 @@ CREATE TABLE IF NOT EXISTS agents (
 );
 
 -- ═══ Grants (normalized capabilities) ═══
+-- kind: tool | host | read_path | write_path | secret. A 'secret' grant
+-- (value = secret name) is what lets the agent have that secret interpolated
+-- into, or delivered to, its tool calls (specs/security.md); host bindings
+-- (secret_hosts) still limit where it may be sent.
 -- approval_mode applies only to kind='tool' rows (Axis B of §4 authority):
 --   'silent'       — granted tool runs freely (default)
 --   'always'       — every call parks for approval
 --   'tool_decides' — predicate decides; absent a predicate, fail-closed to 'always'
+-- source: how the row came to exist (later edits are in change_log). No
+-- default on purpose — a writer that does not say is refused.
+--   approval     — an approved request was applied (request_config, update_agent,
+--                  "always allow" on a parked call, a grant from history)
+--   operator     — the operator granted it directly (CLI, dashboard)
+--   agent_create — given to a new agent when it was defined (baseline, declared,
+--                  or copied by clone_from)
+--   extension    — a promoted extension's tools, granted to its owner
+--   seed         — startup bootstrap (Assistant, agent definitions on disk or in
+--                  built-in manifests)
+--   capture      — the agent captured or generated this secret itself
+--   migration    — written by a schema patch (v60: existing secret use)
+--   legacy       — existed before v60; origin unknown
+-- approval_id: the approval being applied when the row was written; NULL when
+-- none was (a re-grant that revives an expired row takes the new one).
 CREATE TABLE IF NOT EXISTS grants (
   agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,
   kind TEXT NOT NULL,
@@ -181,6 +200,9 @@ CREATE TABLE IF NOT EXISTS grants (
   approval_mode TEXT NOT NULL DEFAULT 'silent',
   expires_at INTEGER,
   created_at INTEGER DEFAULT (unixepoch()),
+  source TEXT NOT NULL CHECK (source IN ('approval','operator','agent_create',
+    'extension','seed','capture','migration','legacy')),
+  approval_id INTEGER REFERENCES approvals(id),
   PRIMARY KEY (agent_name, kind, value)
 );
 
@@ -760,3 +782,39 @@ CREATE TABLE IF NOT EXISTS processes (
   started_at   INTEGER NOT NULL DEFAULT (unixepoch()),
   heartbeat_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+
+-- ═══ Change log (specs/operations.md "Change log") ═══
+-- One row per changed row of a configuration table, written by triggers —
+-- never by C code — so no write path can skip it. The triggers are generated
+-- from the setting/measurement list in src/change_log.c (CHANGE_LOG_COLUMNS):
+-- they fire only when a *setting* changes, and old/new_values hold settings
+-- only. A secret's value never appears; its row records that it changed.
+-- actor: the writing handle (cclaw_actor(): daemon | cli | dashboard |
+-- sqlite3 | llm_worker | ...). context: what that handle was doing
+-- (cclaw_context(), e.g. 'approval:41'), NULL when nothing was labelled.
+-- row_key: JSON of the row's primary key (after the change; before it for a
+-- delete). Append-only: cclaw never updates or deletes a row, and the two
+-- triggers below refuse it. A write to a logged table from a SQLite that does
+-- not define cclaw_actor() (a plain system sqlite3) fails — use
+-- `cclaw sqlite3 --write`.
+CREATE TABLE IF NOT EXISTS change_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  at          INTEGER NOT NULL DEFAULT (unixepoch()),
+  actor       TEXT NOT NULL,
+  context     TEXT,
+  table_name  TEXT NOT NULL,
+  row_key     TEXT NOT NULL,
+  action      TEXT NOT NULL CHECK (action IN ('insert','update','delete')),
+  old_values  TEXT,                          -- JSON of settings; NULL on insert
+  new_values  TEXT                           -- JSON of settings; NULL on delete
+);
+CREATE TRIGGER IF NOT EXISTS change_log_append_only_upd
+BEFORE UPDATE ON change_log
+BEGIN
+  SELECT RAISE(ABORT, 'change_log is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS change_log_append_only_del
+BEFORE DELETE ON change_log
+BEGIN
+  SELECT RAISE(ABORT, 'change_log is append-only');
+END;

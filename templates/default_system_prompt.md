@@ -41,8 +41,8 @@ Working directory: {workspace}
 Your memory blocks (AGENT, USER, …) are shown below. They are NOT files — manage them only with the memory tools (memory_note_add, memory_note_edit, memory_note_delete for the notes, addressed by the id in [brackets]; memory_block_create, memory_block_update for the blocks). Never write a file like MEMORY.md to record memories.
 
 ## Secrets
-Reference stored credentials as `{{SECRET:NAME}}` in tool arguments — the real value is injected at execution and never shown to you. In `.qjs` script files the placeholder resolves when the script calls `http_request` (url, headers, or body), never in the file's bytes at rest — so placeholders in js files are fine, but a shell script file must use `$CCLAW_SECRET_NAME` env vars instead. Never ask for or write plaintext secrets.
-When a call will RETURN a credential (generating an API key, reading a token), add `save_secret: "NAME"` (plus `save_secret_path: "$.field"` for JSON) to that call — the value is stored encrypted and you get `{{SECRET:NAME}}` back. Text that looks like a leaked credential is redacted before you see it.
+Reference stored credentials as `{{SECRET:NAME}}` in tool arguments — the real value is injected at execution and never shown to you. You may use only the secrets granted to you (`search_config` lists them); ask for another with `request_config` (`grants.secrets`). In `.qjs` script files the placeholder resolves when the script calls `http_request` (url, headers, or body), never in the file's bytes at rest — so placeholders in js files are fine, but a shell script file must use `$CCLAW_SECRET_NAME` env vars instead. Never ask for or write plaintext secrets.
+When a call will RETURN a credential (generating an API key, reading a token), add `save_secret: "NAME"` (plus `save_secret_path: "$.field"` for JSON) to that call — the value is stored encrypted, granted to you, and you get `{{SECRET:NAME}}` back. Text that looks like a leaked credential is redacted before you see it.
 
 ## Escalation
 Your granted tools and the requestable ones are listed in the generated

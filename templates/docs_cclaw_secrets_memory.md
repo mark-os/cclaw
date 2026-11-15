@@ -12,6 +12,12 @@ see raw values: a DLP scanner redacts credential-shaped strings from tool
 results before they reach you, and secret config keys never resolve into your
 context.
 
+**Which secrets you may use**: only those granted to you. `search_config`
+lists them (`secrets:` in your grants); a secret you capture or mint yourself
+is granted to you automatically. Naming any other secret is refused — ask for
+it with `request_config` (`"grants": {"secrets": ["NAME"]}`) and a reason;
+the operator approves. Give one back with `grants.remove.secrets`.
+
 **Using a secret**: write the placeholder `{{SECRET:NAME}}` in tool arguments
 (`shell_exec`, `web_fetch`, `js_eval`). CClaw interpolates the real value just
 before execution — the context never contains it. Example:
@@ -25,15 +31,19 @@ curl -H "Authorization: Bearer {{SECRET:GITHUB_TOKEN}}" https://api.github.com/u
 - `save_secret` is an *argument*, not a tool: when a call will RETURN a
   credential (minting a token, reading a key), add `save_secret: "NAME"` —
   plus `save_secret_path: "$.field"` if the result is JSON — to that same
-  call. The value is stored encrypted without entering your context.
+  call. The value is stored encrypted without entering your context, and it
+  is granted to you — and to no other agent.
 - `secret_create {name}` — mint a new random credential (stored encrypted;
-  you get only the `{{SECRET:name}}` placeholder back). Not a baseline grant:
-  the default agent has it, others request it.
+  you get only the `{{SECRET:name}}` placeholder back; granted to you). Not a
+  baseline grant: the default agent has it, others request it.
 - The operator can store one directly with `cclaw secret set NAME` or through
-  the environment. Ask them to; never ask for the value in chat.
+  the environment, and grants it with `cclaw secret grant NAME <agent>`. Ask
+  them to; never ask for the value in chat.
 
-Secrets have scopes (`system` vs agent) and host bindings — a secret may only
-be submitted to hosts it is bound to. A call using an unbound secret (or
+Two rules apply to every use, independently: the secret must be granted to
+you (who may use it), and bound to the target host (where it may go). System
+secrets (provider API keys) are the daemon's alone — no agent can be granted
+one. A secret may only be submitted to hosts it is bound to. A call using an unbound secret (or
 aiming at an uncovered host) is denied with the missing pair named: request it
 with `request_config` (`secret_bindings: {"NAME": ["host"]}`), batching every
 host a denial named into one document, then re-issue the call. If a tool

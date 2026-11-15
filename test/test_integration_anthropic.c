@@ -95,7 +95,7 @@ static int run_cli_p(const char *exe, const char *prompt, int64_t sid,
 /* One integer, with an optional text parameter bound at ?1. */
 static int64_t db_int(const char *sql, const char *arg) {
     sqlite3 *db;
-    if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) return -1;
+    if ((db = db_open(DB_PATH)) == NULL) return -1;
     sqlite3_stmt *s;
     int64_t v = -1;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {

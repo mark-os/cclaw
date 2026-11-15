@@ -80,7 +80,7 @@ static void test_install_lands_in_draft(void) {
     assert(db);
 
     char *err = NULL;
-    int rc = extension_install(db, BUNDLE, "default", &err);
+    int rc = extension_install(db, BUNDLE, "default", 0, &err);
     if (rc != 0) fprintf(stderr, "install error: %s\n", err ? err : "?");
     assert(rc == 0);
 
@@ -97,7 +97,7 @@ static void test_check_then_activate(void) {
     setup_bundle();
     sqlite3 *db = open_seeded(TEST_DB);
     char *err = NULL;
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     db_close(db);
 
     /* --activate before --check must fail: not yet 'validated'. */
@@ -157,7 +157,7 @@ static void test_check_reports_js_error(void) {
 
     sqlite3 *db = open_seeded(TEST_DB);
     char *err = NULL;
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     db_close(db);
 
     err = NULL;
@@ -196,7 +196,7 @@ static void test_swap_and_revert(void) {
     setup_bundle();
     sqlite3 *db = open_seeded(TEST_DB);
     char *err = NULL;
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     assert(sqlite3_exec(db,
         "INSERT INTO extensions(name, path, version, owner_agent, published, enabled) "
         "VALUES('echo-ng', '/tmp/extensions/echo-ng', '0.0.0', 'default', 0, 1);",
@@ -239,7 +239,7 @@ static void test_notify_admins(void) {
     setup_bundle();
     sqlite3 *db = open_seeded(TEST_DB);
     char *err = NULL;
-    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     /* admin_ids is a registry key (<ext>.admin_ids) since specs/config.md. */
     assert(sqlite3_exec(db,
         "INSERT INTO config(key, value, default_value, description)"

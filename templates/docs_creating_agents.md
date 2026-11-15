@@ -57,7 +57,7 @@ One JSON schema everywhere an agent is defined (`create_agent` arguments,
   "models": ["openrouter/deepseek/deepseek-v4-flash"],
   "sandbox_profile": "standard",
   "grants": { "tools": ["web_fetch"], "hosts": ["api.weather.gov"],
-              "read_paths": [], "write_paths": [] },
+              "read_paths": [], "write_paths": [], "secrets": ["NWS_TOKEN"] },
   "extensions": ["nws"],
   "memory_blocks": [ { "label": "persona", "description": "…", "value": "…" },
                      { "attach": 12, "read_only": true } ],
@@ -81,7 +81,9 @@ registered through `request_config` look like `model@provider`.
 An agent you create can never exceed you:
 
 - `sandbox_profile` ≤ yours in looseness (host > standard > restricted).
-- Every grant ⊆ your own live grants. Exact values, no fuzzy matching.
+- Every grant ⊆ your own live grants. Exact values, no fuzzy matching. That
+  includes `secrets`: a child may use only secrets you may use yourself, and a
+  new agent gets none it was not given.
 - Extensions must be published, or owned by you.
 - `clone_from` cannot launder capabilities — the source is capped the same way.
 

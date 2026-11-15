@@ -39,6 +39,12 @@ cclaw sqlite3 <db> "SELECT ...;"
 - A read-only connection cannot run WAL recovery; if the daemon is down after
   a crash and the open errors, copy `<db>` and `<db>-wal` aside together and
   query the copy.
+- **Who changed a setting?** Configuration tables (agents, grants,
+  agent_models, providers, models, secrets) are logged by triggers in
+  `change_log` (schema v60+): actor, context (`approval:<id>`), table, row key,
+  old/new settings. `SELECT * FROM change_log ORDER BY id DESC LIMIT 20`.
+  A plain system `sqlite3` cannot *write* those tables ("no such function:
+  cclaw_actor") — use `cclaw sqlite3 --write`.
 
 ## Where to look
 

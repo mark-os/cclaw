@@ -35,8 +35,8 @@ int main(void) {
         " ('alpha_tool','does alpha','{}',1),"
         " ('beta_tool','does beta','{}',1),"
         " ('gamma_tool','disabled tool','{}',0);"
-        "INSERT INTO grants(agent_name, kind, value) VALUES"
-        " ('Tester','tool','alpha_tool');",
+        "INSERT INTO grants(agent_name, kind, value,source) VALUES"
+        " ('Tester','tool','alpha_tool','operator');",
         NULL, NULL, NULL) == SQLITE_OK);
 
     /* granted → Your Tools; ungranted → Requestable; disabled → absent */
@@ -75,8 +75,8 @@ int main(void) {
     /* expired grant counts as ungranted */
     printf("  expired_grant... ");
     assert(sqlite3_exec(db,
-        "INSERT INTO grants(agent_name, kind, value, expires_at)"
-        " VALUES('Tester','tool','beta_tool', unixepoch()-10);",
+        "INSERT INTO grants(agent_name, kind, value, expires_at,source)"
+        " VALUES('Tester','tool','beta_tool', unixepoch()-10,'operator');",
         NULL, NULL, NULL) == SQLITE_OK);
     p = build(db, "Tester");
     assert(!strstr(p, "## Your Tools"));

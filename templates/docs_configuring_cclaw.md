@@ -37,6 +37,7 @@ one approval covers the whole document:
 {"changes": {
    "grants": {"tools": ["shell_exec"], "hosts": [".example.com"],
               "read_paths": ["/abs/path"], "write_paths": ["/abs/path"],
+              "secrets": ["GITHUB_TOKEN"],
               "remove": {"hosts": ["old.example.com"]}},
    "agent": {"models": ["gemini-2.5-flash@gemini"], "max_iterations": 40},
    "routes": ["telegram:12345"],
@@ -55,6 +56,8 @@ one approval covers the whole document:
 - `grants`: host prefix `.` covers subdomains (`.example.com` covers
   `example.com` AND `api.example.com`); shell/web egress is default-deny.
   Paths must be absolute; `read_paths` and `write_paths` are separate.
+  `secrets` asks to USE a stored secret by name — you may only use secrets
+  granted to you (see the cclaw-secrets-memory skill).
 - `agent`: your own settings — `models` (your FULL replacement routing order:
   an array of canonical model ids exactly as `search_config` lists them, or
   ids this same document's `models` section registers; first entry is primary;
@@ -88,7 +91,7 @@ one approval covers the whole document:
 
 The document is a PATCH against what `search_config` shows: `agent.*` fields
 replace, `grants.*` add, `models`/`provider` upsert, and
-`grants.remove` (same four kinds) gives up grants you already hold — applied
+`grants.remove` (same five kinds) gives up grants you already hold — applied
 immediately, with no approval.
 
 Give a concrete `reason` — the operator sees it in the approval prompt. If the

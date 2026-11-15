@@ -372,6 +372,40 @@ static char *unknown_secret_name(const char *args,
     return miss;
 }
 
+/* First secret the call references that exists (in `all`) but is not granted
+ * to the agent (absent from `granted`), or NULL. Two ways to reference one:
+ * a {{SECRET:NAME}} placeholder, and — on the shell tier, where the child's
+ * environment carries it — a $CCLAW_SECRET_NAME variable. Caller frees. */
+static char *ungranted_secret_ref(const char *args, int shell_tier,
+                                  const ShellSecret *granted, size_t granted_n,
+                                  const ShellSecret *all, size_t all_n) {
+    if (!args || all_n == 0) return NULL;
+    char *hit = NULL;
+    size_t n = 0;
+    char **names = secret_placeholder_names(args, &n);
+    for (size_t i = 0; i < n && !hit; i++) {
+        int known = 0, ok = 0;
+        for (size_t j = 0; j < all_n; j++)
+            if (strcmp(names[i], all[j].name) == 0) { known = 1; break; }
+        for (size_t j = 0; j < granted_n; j++)
+            if (strcmp(names[i], granted[j].name) == 0) { ok = 1; break; }
+        if (known && !ok) hit = strdup(names[i]);
+    }
+    secret_names_free(names, n);
+    if (!hit && shell_tier) {
+        size_t rn = 0;
+        RunToolSecret *refs = shell_filter_secrets(args, all, all_n, &rn);
+        for (size_t i = 0; i < rn && !hit; i++) {
+            int ok = 0;
+            for (size_t j = 0; j < granted_n; j++)
+                if (strcmp(refs[i].name, granted[j].name) == 0) { ok = 1; break; }
+            if (!ok) hit = strdup(refs[i].name);
+        }
+        free(refs);
+    }
+    return hit;
+}
+
 /* Per-call egress state for one network-tier dispatch (specs/trust.md):
  *  - deny: sensitivity labels for req.deny_rules, minus labels covering an
  *    approved sensitive host (per-call exception, label-wide for exactly one
@@ -504,6 +538,7 @@ static void call_egress_free(CallEgress *ce) {
 static int dispatch_gate(int64_t session_id, const char *agent_name,
                          PendingToolCall *tc, ToolEntry *te,
                          const ShellSecret *secrets, size_t secret_count,
+                         const ShellSecret *all, size_t all_n,
                          char *sens_host, size_t sens_host_cap,
                          int *sens_once) {
     int sens_hit = 0;
@@ -638,6 +673,29 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 free(sens);
             }
             if (sens_hit && gate < HOOK_GATE_ASK) gate = HOOK_GATE_ASK;
+        }
+        /* Using a secret is a grant (specs/security.md): a call that names a
+         * secret this agent does not hold is refused here, before anything
+         * can park — the agent asks for the grant like any other. Only on
+         * the tiers that would resolve it (the same rule as the unknown-name
+         * check below): a file_write may carry a placeholder as text. */
+        if (te->recipe.needs_interp ||
+            (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier != SBX_FILE)) {
+            char *ng = ungranted_secret_ref(tc->arguments,
+                                            te->recipe.tier == SBX_SHELL &&
+                                            te->recipe.vehicle == EXEC_SANDBOX,
+                                            secrets, secret_count, all, all_n);
+            if (ng) {
+                char err[512];
+                snprintf(err, sizeof(err),
+                         "error: secret %.63s is not granted to agent %.63s — "
+                         "you may only use secrets granted to you. Ask with "
+                         "request_config (changes: {\"grants\": {\"secrets\": "
+                         "[\"%.63s\"]}}) and a reason; an operator approves.",
+                         ng, agent_name ? agent_name : "?", ng);
+                free(ng);
+                return tool_inline_error(session_id, tc, err, "secret:not_granted");
+            }
         }
         /* Fail-closed credential rule (specs/trust.md rule 2): a loaded
          * secret may only be submitted to its bound hosts. No park, no
@@ -811,7 +869,8 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
  * 0 wait, 1 handled, 2 parked, 3 parallel-safe async. */
 static int dispatch_inline(int64_t session_id, const char *agent_name,
                            PendingToolCall *tc, ToolEntry *te,
-                           const ShellSecret *secrets, size_t secret_count) {
+                           const ShellSecret *secrets, size_t secret_count,
+                           const ShellSecret *all, size_t all_n) {
     /* Interpolate {{SECRET:X}} only for tools that exec with credentials */
     char *interp_args = NULL;
     if (te->recipe.needs_interp && secret_count > 0)
@@ -848,6 +907,11 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
         /* Job ownership follows the advancing agent, not setup's init agent. */
         snprintf(kctx->agent_name, sizeof(kctx->agent_name), "%s",
                  agent_name ? agent_name : "");
+    } else if (te->user_data == &proc_tool_setup()->secret_create_ctx) {
+        /* The minted secret is granted to the agent that asked for it. */
+        ToolSecretCreateCtx *sctx = (ToolSecretCreateCtx *)te->user_data;
+        snprintf(sctx->agent_name, sizeof(sctx->agent_name), "%s",
+                 agent_name ? agent_name : "");
     } else if (te->user_data == &proc_tool_setup()->chan_send_ctx) {
         ToolChannelSendCtx *cctx = (ToolChannelSendCtx *)te->user_data;
         cctx->session_id = session_id;
@@ -859,9 +923,17 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
     /* Explicit failure status: preset to success, set by the handler at its
      * failure site, written straight through to entries.is_error below. The
      * result text is never parsed to decide this. */
+    /* request_config answers about "you" — what you already hold, which
+     * routes are yours: the advancing agent, not the agent the shared setup
+     * was initialised for (the daemon's default). Bound for this call only;
+     * the pointer is dispatch-scoped. (search_config runs on a tool thread
+     * that is handed the agent explicitly.) */
+    const char *rcfg_agent = proc_tool_setup()->req_cfg_ctx.agent_name;
+    if (agent_name) proc_tool_setup()->req_cfg_ctx.agent_name = agent_name;
     int is_err = 0;
     char *result = te->handler(interp_args ? interp_args : tc->arguments,
                                te->user_data, &is_err);
+    proc_tool_setup()->req_cfg_ctx.agent_name = rcfg_agent;
     if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
     /* A NULL result means the tool dispatched async work and left this
      * tool_call without an inline result. Shape depends on the tool's
@@ -893,9 +965,11 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
     /* Explicit capture first (needs the RAW result), then postprocess:
      * deinterpolate + secret scan/redact (scan runs even with no secrets
      * loaded — inline js_eval output can carry leaked credentials). */
-    { char *cap = secret_capture_apply(proc_db(), tc->arguments, result, is_err);
+    { char *cap = secret_capture_apply(proc_db(), agent_name, tc->arguments,
+                                       result, is_err);
       if (cap) { free(result); result = cap; } }
-    { char *pp = tool_result_postprocess(result, secrets, secret_count);
+    /* Masked with every known value, granted or not. */
+    { char *pp = tool_result_postprocess(result, all, all_n);
       if (pp) { free(result); result = pp; } }
 
     /* afterToolCall hooks: chained result replacement, after the secret
@@ -1178,9 +1252,14 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
     return blob;
 }
 
+/* secrets/secret_count: what this agent may use (its granted subset) — the
+ * only array that interpolates, ships to a child, or narrows egress.
+ * all/all_n: every loaded secret, for masking and for telling "not granted"
+ * from "no such secret". */
 static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                                PendingToolCall *tc,
-                               const ShellSecret *secrets, size_t secret_count) {
+                               const ShellSecret *secrets, size_t secret_count,
+                               const ShellSecret *all, size_t all_n) {
     if (child_count() >= CHILD_MAX) return -1;
 
     ToolEntry *te = proc_tool_setup() ? tools_lookup(&proc_tool_setup()->reg, tc->name) : NULL;
@@ -1221,7 +1300,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
     int sens_once = 0;
     {
         int g = dispatch_gate(session_id, agent_name, tc, te,
-                              secrets, secret_count,
+                              secrets, secret_count, all, all_n,
                               sens_host, sizeof(sens_host),
                               &sens_once);
         if (g != 0) return g;
@@ -1243,8 +1322,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             char err[256];
             snprintf(err, sizeof(err),
                      "error: {{SECRET:%s}} names no known secret — check the "
-                     "spelling; search_config's secret_bindings section lists "
-                     "the known names", miss);
+                     "spelling; search_config lists the secrets granted to "
+                     "you", miss);
             free(miss);
             return tool_inline_error(session_id, tc, err, "unknown_secret");
         }
@@ -1264,7 +1343,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 
     if (te->recipe.vehicle == EXEC_INLINE)
         return dispatch_inline(session_id, agent_name, tc, te,
-                               secrets, secret_count);
+                               secrets, secret_count, all, all_n);
 
 
     /* ── File-tier re-exec path: fork+exec a clean --run-tool child ────
@@ -1408,10 +1487,17 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 interp_cmd = secret_interpolate(command, secrets, secret_count);
             const char *resolved_cmd = interp_cmd ? interp_cmd : command;
 
-            /* Filter secrets to minimal set (only those referenced by command) */
+            /* Filter secrets to minimal set (only those referenced by command),
+             * and only environment secrets this agent holds a grant for — an
+             * ungranted $CCLAW_SECRET_X was refused at the gate. */
+            size_t env_n = 0;
+            ShellSecret *env_ok = secrets_granted(proc_db(), agent_name,
+                                                  sc->secrets, sc->secret_count,
+                                                  &env_n);
             size_t min_count = 0;
             RunToolSecret *min_secrets = shell_filter_secrets(
-                resolved_cmd, sc->secrets, sc->secret_count, &min_count);
+                resolved_cmd, env_ok, env_n, &min_count);
+            free(env_ok);
 
             /* Resolve agent_dir for proxy socket */
             char agent_dir[PATH_MAX];
@@ -1695,7 +1781,12 @@ int dispatch_tool(int64_t session_id, const char *agent_name,
     ShellSecret *snap = secrets_snapshot(proc_db(),
         proc_tool_setup() ? proc_tool_setup()->secrets : NULL,
         proc_tool_setup() ? proc_tool_setup()->secret_count : 0, &snap_n);
-    int rc = dispatch_tool_inner(session_id, agent_name, tc, snap, snap_n);
+    /* Using a secret is a grant: only the granted subset goes any further
+     * than masking. Read fresh per call, like the snapshot itself. */
+    size_t ok_n = 0;
+    ShellSecret *ok = secrets_granted(proc_db(), agent_name, snap, snap_n, &ok_n);
+    int rc = dispatch_tool_inner(session_id, agent_name, tc, ok, ok_n, snap, snap_n);
+    free(ok);
     secrets_snapshot_free(snap, snap_n);
     return rc;
 }
@@ -1768,18 +1859,21 @@ CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len)
      * parent's truncate_and_spill handles it as before. Secrets ride along
      * like any js dispatch — a cron script's {{SECRET:name}} resolves at the
      * fetch boundary in the child, never in the file itself. */
-    size_t snap_n = 0;
+    size_t snap_n = 0, ok_n = 0;
     ShellSecret *snap = secrets_snapshot(proc_db(),
         proc_tool_setup()->secrets, proc_tool_setup()->secret_count, &snap_n);
+    /* A script runs as its agent: only the secrets that agent is granted. */
+    ShellSecret *ok = secrets_granted(proc_db(), f->agent_name, snap, snap_n, &ok_n);
     char llm_source[96];
     snprintf(llm_source, sizeof(llm_source), "cron:%s",
              f->job_name ? f->job_name : "?");
     LlmBridge *bridge = NULL;
     char *blob = js_request_serialize(jc, f->agent_name, "js_eval", "{}",
-                                      NULL, snap, snap_n, params, 1, NULL,
+                                      NULL, ok, ok_n, params, 1, NULL,
                                       JSEVAL_DEFAULT_TIMEOUT,
                                       llm_source, f->session_id, 0, &bridge,
                                       &blob_len);
+    free(ok);
     secrets_snapshot_free(snap, snap_n);
     if (!blob) {
         snprintf(err, err_len, "the script request exceeds the 32KB wire cap");
@@ -1942,7 +2036,8 @@ static char *child_output_finalize(ChildProc *c, int status, char **hosts_out,
      * rationale as dispatch_tool) — a secret born mid-session must
      * be maskable in a reaped sandboxed child's output too. */
     if (c->tool_args) {
-        char *cap = secret_capture_apply(proc_db(), c->tool_args, output, *is_error);
+        char *cap = secret_capture_apply(proc_db(), c->agent_name, c->tool_args,
+                                         output, *is_error);
         if (cap) { free(output); output = cap; }
     }
     { size_t snap_n = 0;

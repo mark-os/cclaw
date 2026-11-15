@@ -62,6 +62,7 @@ static void *tool_thread_fn(void *arg) {
     ToolThreadJob *job = (ToolThreadJob *)arg;
     sqlite3 *db = db_open(g_db_path);
     if (db) db_set_child_pragmas(db);
+    db_set_actor(db, "tool_thread");
 
     /* Explicit failure status: the thread's handler sets it at its failure
      * site (tools.h), and it is what lands in entries.is_error — the result
@@ -82,7 +83,7 @@ static void *tool_thread_fn(void *arg) {
      * maskable here too (never share the dispatch-scoped snapshot — it
      * wouldn't outlive the async thread). */
     if (result && db) {
-        char *cap = secret_capture_apply(db, job->args, result, is_err);
+        char *cap = secret_capture_apply(db, job->agent_name, job->args, result, is_err);
         if (cap) { free(result); result = cap; }
     }
     if (result) {

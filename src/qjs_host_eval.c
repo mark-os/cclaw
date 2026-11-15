@@ -66,9 +66,10 @@ static char *js_resolve_secrets(const char *s, unsigned char *used,
             }
             if (!value) {
                 snprintf(errbuf, errcap,
-                         "{{SECRET:%.*s}} names no known secret — check the "
-                         "spelling; search_config's secret_bindings section "
-                         "lists the known names",
+                         "{{SECRET:%.*s}} names no secret granted to this "
+                         "agent — check the spelling (search_config lists your "
+                         "secrets), or ask for it with request_config "
+                         "(grants.secrets)",
                          (int)(name_len < 128 ? name_len : 128), name);
                 free(out);
                 return NULL;

@@ -128,12 +128,15 @@ $(BUILDDIR)/sqlite3.o: vendor/sqlite3/sqlite3.c | $(BUILDDIR)/
 # The upstream CLI shell, renamed so it can sit next to our own main().
 # SQLITE_OMIT_READLINE keeps it dependency-free (no libreadline/libedit on a
 # Pogoplug); it still reads piped stdin and -cmd arguments, which is what the
-# `cclaw sqlite3` verb is for.
+# `cclaw sqlite3` verb is for. SQLITE_SHELL_INIT_PROC is upstream's hook for
+# embedding: our init (src/main.c) registers cclaw_actor() on every connection
+# the shell opens, at the one moment that does not trip its configure checks.
 $(BUILDDIR)/sqlite3_shell.o: vendor/sqlite3/shell.c | $(BUILDDIR)/
 # gnu11 + _GNU_SOURCE are load-bearing, not cosmetic: under strict -std=c11 the
 # POSIX prototypes (strdup, realpath, readlink) stay hidden, so the shell's
 # calls become implicit int and silently truncate returned pointers on 64-bit.
 	$(CC) -std=gnu11 -D_GNU_SOURCE -O2 -Ivendor/sqlite3 -Dmain=sqlite3_shell_main \
+	      -DSQLITE_SHELL_INIT_PROC=cclaw_sqlite3_shell_init \
 	      -DSQLITE_OMIT_READLINE -DSQLITE_SHELL_IS_UTF8 \
 	      -Wno-unused-parameter -Wno-sign-compare -c -o $@ $<
 

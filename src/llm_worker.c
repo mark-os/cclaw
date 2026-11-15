@@ -131,6 +131,7 @@ static void job_delete(sqlite3 *db, int64_t job_id) {
 static void *worker_fn(void *arg) {
     (void)arg;
     sqlite3 *db = db_open(g_pool.db_path);
+    db_set_actor(db, "llm_worker");
     if (!db) {
         LOG_ERROR_("worker: db_open failed");
         pthread_mutex_lock(&g_pool.mtx);

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "secret_store.h"
 #include "db.h"
+#include "agent_config.h"   /* grants_contains */
 #include "tool_shell.h"   /* shell_secrets_free */
 #include "secret_interp.h"      /* tool_result_postprocess */
 #include "unicode_normalize.h"  /* utf8_sanitize */
@@ -49,6 +50,25 @@ ShellSecret *secrets_snapshot(sqlite3 *db, const ShellSecret *env_base,
 
 void secrets_snapshot_free(ShellSecret *secrets, size_t count) {
     shell_secrets_free(secrets, count);
+}
+
+int secret_granted(sqlite3 *db, const char *agent, const char *name) {
+    return grants_contains(db, agent, "secret", name);
+}
+
+ShellSecret *secrets_granted(sqlite3 *db, const char *agent,
+                             const ShellSecret *all, size_t n, size_t *out_n) {
+    *out_n = 0;
+    if (!all || n == 0 || !agent) return NULL;
+    ShellSecret *out = calloc(n, sizeof(*out));
+    if (!out) return NULL;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++)
+        if (all[i].name && secret_granted(db, agent, all[i].name))
+            out[k++] = all[i];          /* borrowed: names/values stay all's */
+    if (k == 0) { free(out); return NULL; }
+    *out_n = k;
+    return out;
 }
 
 /* Scan/redact + UTF-8-sanitize a result string of external origin — a

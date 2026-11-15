@@ -201,7 +201,8 @@ int admin_revoke_grant_by_id(sqlite3 *db, int64_t grant_id) {
 
 int admin_grant_capability(sqlite3 *db, const char *agent_name,
                            const char *kind, const char *value) {
-    return agent_config_grant(db, agent_name, kind, value, 0);
+    return agent_config_grant(db, agent_name, kind, value, 0,
+                              GRANT_ORIGIN("operator", 0));
 }
 
 int admin_list_tool_names(sqlite3 *db, char ***out, size_t *out_count) {
@@ -858,13 +859,14 @@ int admin_grant_from_history(sqlite3 *db, int64_t approval_id) {
         char *agent = session_get_agent_name(db, session_id);
         if (!agent) goto done;
 
-        /* Same all-or-nothing apply as apply_grant (main.c) — one code path
-         * for the document, no drift between the two grant routes. */
-        rc = request_config_changes_apply(db, agent, args_json, 0, 0, NULL);
-        free(agent);
-    }
-
-    if (rc == 0) {
+        /* The decision is recorded first, as its own approved row, so the
+         * grants it applies can name it (grants.approval_id) and the change
+         * log can label them with it. Not one transaction: the apply may
+         * probe a provider over the network, which must not run under a
+         * held write lock — so a failed apply removes the row again instead
+         * (nothing references it: the apply rolled its own writes back).
+         * Same all-or-nothing apply as apply_grant (resolve.c). */
+        int64_t new_id = 0;
         const char *isql =
             "INSERT INTO approvals(session_id, tool_name, park_reason, args_json,"
             " resolve, state, decided_via)"
@@ -874,9 +876,27 @@ int admin_grant_from_history(sqlite3 *db, int64_t approval_id) {
         if (sqlite3_prepare_v2(db, isql, -1, &ins, NULL) == SQLITE_OK) {
             sqlite3_bind_int64(ins, 1, session_id);
             sqlite3_bind_text(ins, 2, args_json, -1, SQLITE_STATIC);
-            sqlite3_step(ins);
+            if (sqlite3_step(ins) == SQLITE_DONE) new_id = sqlite3_last_insert_rowid(db);
             sqlite3_finalize(ins);
         }
+        if (new_id > 0) {
+            char label[48], outer[96] = "";
+            db_get_context(db, outer, sizeof(outer));
+            snprintf(label, sizeof(label), "approval:%lld", (long long)new_id);
+            db_set_context(db, label);
+            rc = request_config_changes_apply(db, agent, args_json, 0, 0, new_id, NULL);
+            db_set_context(db, outer[0] ? outer : NULL);
+            if (rc != 0) {
+                sqlite3_stmt *del;
+                if (sqlite3_prepare_v2(db, "DELETE FROM approvals WHERE id=?1",
+                                       -1, &del, NULL) == SQLITE_OK) {
+                    sqlite3_bind_int64(del, 1, new_id);
+                    sqlite3_step(del);
+                    sqlite3_finalize(del);
+                }
+            }
+        }
+        free(agent);
     }
 
 done:

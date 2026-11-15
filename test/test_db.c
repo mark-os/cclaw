@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "cclaw.h"
+#include "agent_config.h"
 #include "db.h"
 #include "config_registry.h"
 #include "util.h"
@@ -243,12 +244,45 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
+/* Turn a fresh (current) database back into the v59 shape: no change_log, no
+ * generated triggers, grants without source/approval_id. unshape_v59 starts
+ * here, so every patch test below v60 replays v60 over a real v59 shape. */
+static void unshape_v60(sqlite3 *db) {
+    char *err = NULL;
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db, "SELECT group_concat('DROP TRIGGER \"' || name || '\";', '')"
+        " FROM sqlite_master WHERE type='trigger' AND name LIKE 'log\\_%' ESCAPE '\\'",
+        -1, &st, NULL) == SQLITE_OK);
+    char *drops = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
+        drops = strdup((const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    if (drops) assert(sqlite3_exec(db, drops, NULL, NULL, &err) == SQLITE_OK);
+    free(drops);
+    int rc = sqlite3_exec(db,
+        "PRAGMA foreign_keys=OFF;"
+        "DROP TABLE change_log;"
+        "CREATE TABLE v59_g ("
+        "  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,"
+        "  kind TEXT NOT NULL, value TEXT NOT NULL,"
+        "  approval_mode TEXT NOT NULL DEFAULT 'silent', expires_at INTEGER,"
+        "  created_at INTEGER DEFAULT (unixepoch()),"
+        "  PRIMARY KEY (agent_name, kind, value));"
+        "INSERT INTO v59_g SELECT agent_name, kind, value, approval_mode, expires_at,"
+        "  created_at FROM grants;"
+        "DROP TABLE grants; ALTER TABLE v59_g RENAME TO grants;"
+        "PRAGMA foreign_keys=ON;", NULL, NULL, &err);
+    if (rc != SQLITE_OK) fprintf(stderr, "unshape_v60: %s\n", err ? err : "?");
+    assert(rc == SQLITE_OK);
+}
+
 /* Turn a fresh (current) database back into the v58 shape, so a test that
  * replays patches from an older version runs the v59 step over what a real
  * v58 database looked like: FK-less configuration tables, no purpose, the
  * dropped columns back, memory_blocks.agent_name. Shared by every patch test
  * that starts below v59; their own reverse-shaping runs after this. */
 static void unshape_v59(sqlite3 *db) {
+    unshape_v60(db);
     char *err = NULL;
     int rc = sqlite3_exec(db,
         "PRAGMA foreign_keys=OFF;"
@@ -439,15 +473,27 @@ static void test_schema_state(void) {
     printf("  PASS test_schema_state\n");
 }
 
-/* Canonical table shape: "table.column:type" lines, sorted. Views/indexes
- * excluded — the patch contract is about table shape. */
+/* Canonical shape: "table.column:type notnull pk" lines, every declared
+ * foreign key, and the name of every table/index/trigger, sorted. Compared
+ * by structure rather than sqlite_master.sql text, which comments and
+ * IF NOT EXISTS would make differ between schema.sql and a patch. */
 static char *schema_shape(sqlite3 *db) {
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(db,
         "SELECT group_concat(line, char(10) ORDER BY line) FROM ("
-        "  SELECT m.name || '.' || ti.name || ':' || ti.type AS line"
+        "  SELECT m.name || '.' || ti.name || ':' || ti.type || ' nn' || ti.\"notnull\""
+        "         || ' pk' || ti.pk AS line"
         "  FROM sqlite_master m JOIN pragma_table_info(m.name) ti"
-        "  WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%')",
+        "  WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%'"
+        "  UNION ALL"
+        "  SELECT 'fk ' || m.name || '.' || fk.\"from\" || ' -> ' || fk.\"table\" || '.'"
+        "         || COALESCE(fk.\"to\",'') || ' ' || fk.on_update || '/' || fk.on_delete"
+        "  FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) fk"
+        "  WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%'"
+        "  UNION ALL"
+        "  SELECT m.type || ' ' || m.name || ' on ' || m.tbl_name FROM sqlite_master m"
+        "  WHERE m.name NOT LIKE 'sqlite_%' AND m.type IN ('table','index','trigger')"
+        "    AND m.name NOT LIKE 'entries_fts_%')",
         -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     char *shape = strdup((const char *)sqlite3_column_text(s, 0));
@@ -1122,7 +1168,7 @@ static void test_schema_patch_v59(void) {
 
     assert(db_schema_compat(db) == 1);
     int uv = 0;
-    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == 59);
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_foreign_key_check;", 0, -1) == 0);
 
     /* Decision 11: every existing list is a chat list; effort survives. */
@@ -1206,6 +1252,86 @@ static void test_schema_patch_v59(void) {
 
 /* Decision 12: a media purpose needs the capability, on every write path —
  * insert, update of purpose, update of model — while chat rows never ask. */
+/* v59 -> v60 in isolation (plan v0.8 decisions 13–17): every existing grant
+ * becomes 'legacy' with no approval; every agent may still use every secret
+ * it could reach before — stored agent-scope secrets, environment secrets the
+ * database knows only through a binding, and the migrating process's own
+ * CCLAW_SECRET_* names — and gets nothing for a system secret; the migration
+ * is the first thing the new change log records, labelled schema:v60. */
+static void test_schema_patch_v60(void) {
+    const char *path = "/tmp/test_cclaw_schema_v60.sqlite";
+    char junk[192];
+    const char *suffixes[] = { "", "-wal", "-shm", ".v59.bak" };
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v60(db);
+    assert(sqlite3_exec(db,
+        "INSERT INTO agents(name, created_by) VALUES('Boss',NULL),('Kid','Boss');"
+        "INSERT INTO approvals(id, session_id, tool_name, state) VALUES"
+        " (7,1,'request_config','approved');"
+        "INSERT INTO grants(agent_name, kind, value, approval_mode, expires_at) VALUES"
+        " ('Boss','tool','shell_exec','always',NULL),('Boss','host','.ex.com','silent',NULL),"
+        " ('Boss','read_path','/srv','silent',NULL),('Kid','write_path','/tmp/k','silent',"
+        "  unixepoch()+60);"
+        "INSERT INTO secrets(name, value, source, scope) VALUES"
+        " ('STORED','enc:00','operator','agent'),('PROVIDER_KEY','enc:01','operator','system');"
+        "INSERT INTO secret_hosts(secret_name, host) VALUES"
+        " ('STORED','a.ex.com'),('ENV_BOUND','b.ex.com'),('ENV_BOUND','c.ex.com'),"
+        " ('PROVIDER_KEY','p.ex.com');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 59);
+    setenv("CCLAW_SECRET_ENV_UNBOUND", "env-value-12345", 1);
+    setenv("CCLAW_SECRET_PROVIDER_KEY", "shadowed-system", 1);
+    db_set_actor(db, "daemon");
+
+    assert(db_schema_compat(db) == 1);
+    unsetenv("CCLAW_SECRET_ENV_UNBOUND");
+    unsetenv("CCLAW_SECRET_PROVIDER_KEY");
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == 60);
+
+    /* Existing rows: untouched apart from provenance, which is unknown. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM grants WHERE kind!='secret'", 0, -1) == 4);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM grants WHERE kind!='secret'"
+        " AND source='legacy' AND approval_id IS NULL", 0, -1) == 4);
+    assert(db_scalar_i64(db, "SELECT approval_mode='always' FROM grants"
+        " WHERE agent_name='Boss' AND value='shell_exec'", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT expires_at > unixepoch() FROM grants"
+        " WHERE agent_name='Kid' AND kind='write_path'", 0, -1) == 1);
+    /* Secret use: three names x two agents, all 'migration'; none for the
+     * system secret (whether named by a row, a binding or the environment). */
+    assert(db_scalar_i64(db, "SELECT group_concat(agent_name||':'||value, ',')"
+        " = 'Boss:ENV_BOUND,Boss:ENV_UNBOUND,Boss:STORED,Kid:ENV_BOUND,Kid:ENV_UNBOUND,Kid:STORED'"
+        " FROM (SELECT agent_name, value FROM grants WHERE kind='secret'"
+        "       ORDER BY agent_name, value)", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM grants WHERE kind='secret'"
+        " AND (source!='migration' OR approval_id IS NOT NULL)", 0, -1) == 0);
+    /* The log opens with the migration, attributed and labelled. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM change_log", 0, -1) == 6);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM change_log WHERE actor='daemon'"
+        " AND context='schema:v60' AND table_name='grants' AND action='insert'", 0, -1) == 6);
+    /* Shape: the constraint is real, links hold, nothing dangles. */
+    assert(sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value)"
+        " VALUES('Boss','tool','x')", NULL, NULL, NULL) != SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_foreign_key_list('grants')"
+        " WHERE \"table\"='approvals' AND \"from\"='approval_id'", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_foreign_key_check", 0, -1) == 0);
+    /* An approval id written later must point at a real approval. */
+    assert(agent_config_grant(db, "Kid", "tool", "y", 0,
+                              GRANT_ORIGIN("approval", 7)) == 0);
+    assert(sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value,source,approval_id)"
+        " VALUES('Kid','tool','z','approval',99)", NULL, NULL, NULL) != SQLITE_OK);
+
+    db_close(db);
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    printf("  PASS test_schema_patch_v60\n");
+}
+
 static void test_agent_models_capability_gate(void) {
     const char *path = "/tmp/test_cclaw_db_capgate.sqlite";
     test_db_clean(path);
@@ -1282,6 +1408,7 @@ int main(void) {
     test_schema_patch_v50();
     test_schema_patch_v51();
     test_schema_patch_v59();
+    test_schema_patch_v60();
     test_agent_models_capability_gate();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");

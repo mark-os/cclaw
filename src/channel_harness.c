@@ -314,6 +314,7 @@ int channel_harness_run(const char *db_path, const char *channel_name, const cha
     snprintf(scratch_path, sizeof(scratch_path), "/tmp/cclaw_harness_%d.db", (int)getpid());
     unlink(scratch_path);
     sqlite3 *sdb = db_open(scratch_path);
+    db_set_actor(sdb, "channel_harness");
     if (!sdb || db_ensure_schema(sdb) != 0) {
         fprintf(stderr, "harness: scratch DB init failed\n");
         free(js_src); scenario_free(&sc);

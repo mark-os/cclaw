@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
 #include "cclaw.h"
+#include "change_log.h"
 #include "config_registry.h"
 #include "log.h"
 #include "secret_interp.h"
@@ -258,12 +259,88 @@ sqlite3 *db_open_immutable(const char *path) {
     return db;
 }
 
+/* ── Handle identity: who is writing (change_log, specs/operations.md) ──
+ * A property of the handle, not the thread or the process: the change_log
+ * triggers call cclaw_actor()/cclaw_context(), which read this handle's own
+ * DbIdentity through SQLite's per-connection client data. Nothing here is
+ * shared between handles, so no locking — each handle has one thread of
+ * control (AGENTS.md). */
+#define DB_IDENTITY_KEY "cclaw_identity"
+typedef struct {
+    char actor[32];
+    char context[96];
+} DbIdentity;
+
+static DbIdentity *db_identity(sqlite3 *db) {
+    return db ? sqlite3_get_clientdata(db, DB_IDENTITY_KEY) : NULL;
+}
+
+static void fn_cclaw_actor(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    (void)argc; (void)argv;
+    DbIdentity *id = db_identity(sqlite3_context_db_handle(ctx));
+    sqlite3_result_text(ctx, id && id->actor[0] ? id->actor : "unknown", -1,
+                        SQLITE_TRANSIENT);
+}
+
+static void fn_cclaw_context(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    (void)argc; (void)argv;
+    DbIdentity *id = db_identity(sqlite3_context_db_handle(ctx));
+    if (id && id->context[0])
+        sqlite3_result_text(ctx, id->context, -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_result_null(ctx);
+}
+
+int db_identity_register(sqlite3 *db, const char *actor) {
+    if (!db) return -1;
+    DbIdentity *id = calloc(1, sizeof(*id));
+    if (!id) return -1;
+    snprintf(id->actor, sizeof(id->actor), "%s", actor && actor[0] ? actor : "unknown");
+    if (sqlite3_set_clientdata(db, DB_IDENTITY_KEY, id, free) != SQLITE_OK) {
+        free(id);
+        return -1;
+    }
+    /* INNOCUOUS: called from triggers, so it must be usable from the schema;
+     * not DETERMINISTIC: the context changes while the handle lives. */
+    int flags = SQLITE_UTF8 | SQLITE_INNOCUOUS;
+    if (sqlite3_create_function(db, "cclaw_actor", 0, flags, NULL,
+                                fn_cclaw_actor, NULL, NULL) != SQLITE_OK ||
+        sqlite3_create_function(db, "cclaw_context", 0, flags, NULL,
+                                fn_cclaw_context, NULL, NULL) != SQLITE_OK)
+        return -1;
+    return 0;
+}
+
+void db_set_actor(sqlite3 *db, const char *actor) {
+    DbIdentity *id = db_identity(db);
+    if (id) snprintf(id->actor, sizeof(id->actor), "%s", actor && actor[0] ? actor : "unknown");
+}
+
+void db_set_context(sqlite3 *db, const char *context) {
+    DbIdentity *id = db_identity(db);
+    if (id) snprintf(id->context, sizeof(id->context), "%s", context ? context : "");
+}
+
+void db_get_context(sqlite3 *db, char *out, size_t out_sz) {
+    if (!out || out_sz == 0) return;
+    DbIdentity *id = db_identity(db);
+    snprintf(out, out_sz, "%s", id ? id->context : "");
+}
+
 sqlite3 *db_open(const char *path) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(path, &db);
     if (rc != SQLITE_OK) {
         LOG_ERROR_("db_open failed err=%s extended=%d",
                    sqlite3_errmsg(db), sqlite3_extended_errcode(db));
+        sqlite3_close(db);
+        return NULL;
+    }
+    /* Every handle can answer cclaw_actor(): the change_log triggers call it,
+     * and a write from a handle that cannot is refused ("no such function"),
+     * which is the point. The opener names itself with db_set_actor. */
+    if (db_identity_register(db, "unknown") != 0) {
+        LOG_ERROR_("db_open: cannot register the change_log identity functions");
         sqlite3_close(db);
         return NULL;
     }
@@ -318,6 +395,11 @@ int db_ensure_schema(sqlite3 *db) {
             sqlite3_free(err);  /* non-fatal — recall degrades, chat still works */
         }
     }
+
+    /* The change_log triggers are generated from the column list, not written
+     * in schema.sql (src/change_log.c says why). A no-op when they already
+     * match, so this costs a few sqlite_master reads per start. */
+    if (change_log_sync(db) != 0) return -1;
 
     /* Stamp the schema generation. Only reached for a fresh or already-current
      * DB — db_schema_compat() refuses stale ones before we get here. */
@@ -438,7 +520,7 @@ static int patch_v44_canonical_model_ids(sqlite3 *db) {
 static int v59_exec(sqlite3 *db, const char *sql) {
     char *err = NULL;
     if (sqlite3_exec(db, sql, NULL, NULL, &err) == SQLITE_OK) return 0;
-    LOG_ERROR_("schema v59: %s", err ? err : "?");
+    LOG_ERROR_("schema patch: %s", err ? err : "?");
     sqlite3_free(err);
     return -1;
 }
@@ -747,6 +829,152 @@ static int patch_v59_tidy(sqlite3 *db) {
     }
     sqlite3_finalize(st);
     return bad ? -1 : 0;
+}
+
+/* v60: grant provenance, using a secret is a grant, the change log
+ * (plan/projects/v0.8-data-and-explorer.md, decisions 13–17).
+ *
+ * grants gains source (no default — a writer must say) and approval_id; it is
+ * rebuilt because SQLite cannot add a NOT NULL column without a default.
+ * Every existing row becomes 'legacy': its origin is not recorded anywhere,
+ * and guessing would make the column lie.
+ *
+ * Secret use becomes a grant, and nothing an agent can use today may stop
+ * working, so every agent is granted (source 'migration') every secret it
+ * could reach before:
+ *  - every scope='agent' secrets row;
+ *  - every secret_hosts name with no secrets row — the only trace in the
+ *    database of a CCLAW_SECRET_* environment secret;
+ *  - every CCLAW_SECRET_* name in this process's environment. An environment
+ *    secret with no binding was still usable through $CCLAW_SECRET_<NAME> in
+ *    shell_exec (env delivery is not narrowed by bindings), and nothing in
+ *    the database names it. The patch runs before the daemon collects and
+ *    unsets those variables, so a daemon start sees exactly the set its
+ *    tools could use. A patch run by another process (a CLI verb without the
+ *    daemon's environment) grants only what the database shows.
+ * scope='system' secrets stay daemon-only and get no grant.
+ *
+ * The change_log triggers are installed before the secret grants are written,
+ * so the migration itself is the first thing the log records. */
+static const char V60_SQL[] =
+    "CREATE TABLE change_log ("
+    "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  at          INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "  actor       TEXT NOT NULL,"
+    "  context     TEXT,"
+    "  table_name  TEXT NOT NULL,"
+    "  row_key     TEXT NOT NULL,"
+    "  action      TEXT NOT NULL CHECK (action IN ('insert','update','delete')),"
+    "  old_values  TEXT,"
+    "  new_values  TEXT);"
+    "CREATE TRIGGER change_log_append_only_upd BEFORE UPDATE ON change_log"
+    " BEGIN SELECT RAISE(ABORT, 'change_log is append-only'); END;"
+    "CREATE TRIGGER change_log_append_only_del BEFORE DELETE ON change_log"
+    " BEGIN SELECT RAISE(ABORT, 'change_log is append-only'); END;"
+    "CREATE TEMP TABLE v60_hold AS SELECT * FROM grants;"
+    "DROP TABLE grants;"
+    "CREATE TABLE grants ("
+    "  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,"
+    "  kind TEXT NOT NULL,"
+    "  value TEXT NOT NULL,"
+    "  approval_mode TEXT NOT NULL DEFAULT 'silent',"
+    "  expires_at INTEGER,"
+    "  created_at INTEGER DEFAULT (unixepoch()),"
+    "  source TEXT NOT NULL CHECK (source IN ('approval','operator','agent_create',"
+    "    'extension','seed','capture','migration','legacy')),"
+    "  approval_id INTEGER REFERENCES approvals(id),"
+    "  PRIMARY KEY (agent_name, kind, value));"
+    "INSERT INTO grants(agent_name, kind, value, approval_mode, expires_at,"
+    "                   created_at, source, approval_id)"
+    "  SELECT agent_name, kind, value, approval_mode, expires_at, created_at,"
+    "         'legacy', NULL FROM v60_hold;"
+    "DROP TABLE v60_hold;";
+
+/* Grant secret `name` to every agent (source 'migration'), logging how many
+ * agents now hold it and why. */
+static int v60_grant_secret(sqlite3 *db, const char *name, const char *why) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR IGNORE INTO grants(agent_name, kind, value, source)"
+            " SELECT name, 'secret', ?1, 'migration' FROM agents ORDER BY name",
+            -1, &st, NULL) != SQLITE_OK) {
+        LOG_ERROR_("schema v60: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st) == SQLITE_DONE ? 0 : -1;
+    if (rc != 0) LOG_ERROR_("schema v60: grant %s: %s", name, sqlite3_errmsg(db));
+    else LOG_INFO_("schema v60: secret %s granted to %d agent(s) (%s)",
+                   name, sqlite3_changes(db), why);
+    sqlite3_finalize(st);
+    return rc;
+}
+
+/* Names from one query, collected before any write (never write inside an
+ * open SELECT). */
+static char **v60_names(sqlite3 *db, const char *sql, size_t *n_out) {
+    *n_out = 0;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
+    char **names = NULL;
+    size_t n = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        char **t = v ? realloc(names, (n + 1) * sizeof(*names)) : NULL;
+        if (!t) continue;
+        names = t;
+        if ((names[n] = strdup(v))) n++;
+    }
+    sqlite3_finalize(st);
+    *n_out = n;
+    return names;
+}
+
+static int patch_v60_authority(sqlite3 *db) {
+    if (v59_exec(db, V60_SQL) != 0) return -1;
+    if (change_log_sync(db) != 0) return -1;
+    db_set_context(db, "schema:v60");
+    int rc = 0;
+    static const struct { const char *sql; const char *why; } SRC[] = {
+        { "SELECT name FROM secrets WHERE scope='agent' ORDER BY name",
+          "stored secret, usable by every agent before v60" },
+        { "SELECT DISTINCT secret_name FROM secret_hosts"
+          " WHERE secret_name NOT IN (SELECT name FROM secrets) ORDER BY secret_name",
+          "bound environment secret, usable by every agent before v60" },
+    };
+    for (size_t s = 0; rc == 0 && s < sizeof(SRC) / sizeof(SRC[0]); s++) {
+        size_t n = 0;
+        char **names = v60_names(db, SRC[s].sql, &n);
+        for (size_t i = 0; i < n; i++) {
+            if (rc == 0) rc = v60_grant_secret(db, names[i], SRC[s].why);
+            free(names[i]);
+        }
+        free(names);
+    }
+    /* This process's own CCLAW_SECRET_* variables (see the comment above). A
+     * name that is a system secret is the daemon's, not an agent's. */
+    extern char **environ;
+    for (char **e = environ; rc == 0 && e && *e; e++) {
+        if (strncmp(*e, "CCLAW_SECRET_", 13) != 0) continue;
+        const char *eq = strchr(*e, '=');
+        if (!eq || eq - *e - 13 <= 0 || eq - *e - 13 >= 128) continue;
+        char name[128];
+        snprintf(name, sizeof(name), "%.*s", (int)(eq - *e - 13), *e + 13);
+        if (!is_valid_secret_name(name)) continue;
+        sqlite3_stmt *st;
+        int system = 0;
+        if (sqlite3_prepare_v2(db, "SELECT 1 FROM secrets WHERE name=?1 AND scope='system'",
+                               -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+            system = sqlite3_step(st) == SQLITE_ROW;
+            sqlite3_finalize(st);
+        }
+        if (!system)
+            rc = v60_grant_secret(db, name,
+                                  "environment secret of the migrating process");
+    }
+    db_set_context(db, NULL);
+    return rc;
 }
 
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
@@ -1138,6 +1366,9 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
     /* v59: agent_models.purpose, memory_blocks.created_by, declared
      * configuration-side links, dead columns dropped — see patch_v59_tidy. */
     { 59, NULL, patch_v59_tidy },
+    /* v60: grants.source/approval_id, secret use is a grant, change_log — see
+     * patch_v60_authority. */
+    { 60, NULL, patch_v60_authority },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
@@ -2732,15 +2963,57 @@ char *db_secret_get_system(sqlite3 *db, const char *name) {
     return plain;
 }
 
-int db_secret_rm(sqlite3 *db, const char *name) {
+/* BEGIN IMMEDIATE when the handle is idle, a savepoint inside a caller's
+ * transaction — so the helpers below are one atomic write either way. */
+static int db_write_begin(sqlite3 *db, int *own) {
+    *own = sqlite3_get_autocommit(db);
+    return sqlite3_exec(db, *own ? "BEGIN IMMEDIATE" : "SAVEPOINT db_write",
+                        NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
+}
+
+static int db_write_end(sqlite3 *db, int own, int ok) {
+    if (ok)
+        return sqlite3_exec(db, own ? "COMMIT" : "RELEASE db_write",
+                            NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
+    if (own) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    else sqlite3_exec(db, "ROLLBACK TO db_write; RELEASE db_write", NULL, NULL, NULL);
+    return -1;
+}
+
+int db_secret_capture(sqlite3 *db, const char *name, const char *value,
+                      const char *source, const char *agent) {
+    if (!db || !name || !value || !agent || !agent[0]) return -1;
+    int own = 0;
+    if (db_write_begin(db, &own) != 0) return -1;
+    int ok = db_secret_set(db, name, value, source, "agent") == 0 &&
+             agent_config_grant(db, agent, "secret", name, 0,
+                                GRANT_ORIGIN("capture", 0)) == 0;
+    return db_write_end(db, own, ok);
+}
+
+/* Bindings and grants name the secret by text, with no foreign key to
+ * cascade from (environment secrets have no secrets row) — so removing a
+ * name removes all three here, together. */
+int db_secret_rm(sqlite3 *db, const char *name, int removed[3]) {
+    if (removed) removed[0] = removed[1] = removed[2] = 0;
     if (!db || !name || !name[0]) return -1;
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "DELETE FROM secrets WHERE name=?1", -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
+    static const char *SQL[3] = {
+        "DELETE FROM secrets WHERE name=?1",
+        "DELETE FROM secret_hosts WHERE secret_name=?1",
+        "DELETE FROM grants WHERE kind='secret' AND value=?1",
+    };
+    int own = 0;
+    if (db_write_begin(db, &own) != 0) return -1;
+    int ok = 1;
+    for (int i = 0; ok && i < 3; i++) {
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, SQL[i], -1, &stmt, NULL) != SQLITE_OK) { ok = 0; break; }
+        sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        if (ok && removed) removed[i] = sqlite3_changes(db);
+        sqlite3_finalize(stmt);
+    }
+    return db_write_end(db, own, ok);
 }
 
 int db_secret_exists(sqlite3 *db, const char *name) {
@@ -2915,7 +3188,8 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
         }
         char *err = NULL;
         if (!merged ||
-            agent_definition_apply(db, merged, NULL, agents_dir, &err) != 0) {
+            agent_definition_apply(db, merged, NULL, agents_dir,
+                                   GRANT_ORIGIN("seed", 0), &err) != 0) {
             fprintf(stderr, "db_agent_seed: %s: %s\n", name,
                     err ? err : "definition apply failed");
             /* Fall back to a bare row so the agent still exists. */

@@ -190,12 +190,12 @@ static void test_not_in_default_baseline(void) {
     assert(strstr(defaults, "session_condense") == NULL);
     free(defaults);
 
-    agent_grant_defaults(db, AGENT);
+    agent_grant_defaults(db, AGENT, GRANT_ORIGIN("seed", 0));
     assert(grants_contains(db, AGENT, "tool", "js_eval") == 1);
     assert(grants_contains(db, AGENT, "tool", "session_condense") == 0);
 
     /* …and a grant is all it takes to have it. */
-    assert(agent_config_grant(db, AGENT, "tool", "session_condense", 0) == 0);
+    assert(agent_config_grant(db, AGENT, "tool", "session_condense", 0, GRANT_ORIGIN("operator", 0)) == 0);
     assert(grants_contains(db, AGENT, "tool", "session_condense") == 1);
 
     teardown(db);

@@ -439,7 +439,8 @@ static void render_grants(Buf *b, const char *agent) {
                    "<input type=hidden name=agent value=\"");
     buf_html(b, agent);
     buf_appendf(b, "\"><select name=kind><option>tool</option><option>host</option>"
-                   "<option>read_path</option><option>write_path</option></select>"
+                   "<option>read_path</option><option>write_path</option>"
+                   "<option>secret</option></select>"
                    "<input name=value size=32 list=tools>"
                    "<button>grant</button></form><datalist id=tools>");
     char **tools = NULL;

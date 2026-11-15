@@ -172,7 +172,7 @@ static void test_grant_caps_load(void) {
     db_agent_upsert(db, "bot", NULL, NULL);
 
     /* Grant with no expiry — should load */
-    agent_config_grant(db, "bot", "host", "tmp.io", 0);
+    agent_config_grant(db, "bot", "host", "tmp.io", 0, GRANT_ORIGIN("operator", 0));
     AgentCaps caps;
     agent_caps_load(db, "bot", &caps);
     assert(caps.host_count == 1);
@@ -244,25 +244,25 @@ static void test_tool_mode(void) {
     assert(agent_tool_mode(db, "bot", "email_send") == TOOL_MODE_SILENT);
 
     /* Grant it: still silent until a mode is set. */
-    agent_config_grant(db, "bot", "tool", "email_send", 0);
+    agent_config_grant(db, "bot", "tool", "email_send", 0, GRANT_ORIGIN("operator", 0));
     assert(agent_tool_mode(db, "bot", "email_send") == TOOL_MODE_SILENT);
 
     /* Tighten → always / tool_decides. */
-    assert(agent_config_set_tool_mode(db, "bot", "email_send", "always") == 0);
+    assert(agent_config_set_tool_mode(db, "bot", "email_send", "always", GRANT_ORIGIN("operator", 0)) == 0);
     assert(agent_tool_mode(db, "bot", "email_send") == TOOL_MODE_ALWAYS);
-    assert(agent_config_set_tool_mode(db, "bot", "email_send", "tool_decides") == 0);
+    assert(agent_config_set_tool_mode(db, "bot", "email_send", "tool_decides", GRANT_ORIGIN("operator", 0)) == 0);
     assert(agent_tool_mode(db, "bot", "email_send") == TOOL_MODE_DECIDES);
 
     /* Relax back to silent. */
-    assert(agent_config_set_tool_mode(db, "bot", "email_send", "silent") == 0);
+    assert(agent_config_set_tool_mode(db, "bot", "email_send", "silent", GRANT_ORIGIN("operator", 0)) == 0);
     assert(agent_tool_mode(db, "bot", "email_send") == TOOL_MODE_SILENT);
 
     /* Invalid mode rejected. */
-    assert(agent_config_set_tool_mode(db, "bot", "email_send", "bogus") == -1);
+    assert(agent_config_set_tool_mode(db, "bot", "email_send", "bogus", GRANT_ORIGIN("operator", 0)) == -1);
 
     /* Setting the mode of an ungranted tool upserts the grant: "stop asking"
      * must persist even when no standing grant row exists yet. */
-    assert(agent_config_set_tool_mode(db, "bot", "not_granted", "always") == 0);
+    assert(agent_config_set_tool_mode(db, "bot", "not_granted", "always", GRANT_ORIGIN("operator", 0)) == 0);
     assert(agent_tool_mode(db, "bot", "not_granted") == TOOL_MODE_ALWAYS);
     assert(grants_contains(db, "bot", "tool", "not_granted") == 1);
 
@@ -682,22 +682,22 @@ static void test_grant_expiry_extends(void) {
     db_agent_upsert(db, "bot", NULL, NULL);
 
     int64_t now = (int64_t)time(NULL);
-    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 60) == 0);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 60, GRANT_ORIGIN("operator", 0)) == 0);
     assert(grant_expiry(db, "bot", "host", "api.example.com") == now + 60);
 
     /* Re-approval with a later deadline extends the live grant. */
-    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 3600) == 0);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 3600, GRANT_ORIGIN("operator", 0)) == 0);
     assert(grant_expiry(db, "bot", "host", "api.example.com") == now + 3600);
 
     /* A shorter re-grant leaves the longer life alone. */
-    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 120) == 0);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 120, GRANT_ORIGIN("operator", 0)) == 0);
     assert(grant_expiry(db, "bot", "host", "api.example.com") == now + 3600);
 
     /* Permanent (no expiry) is the ultimate extension... */
-    assert(agent_config_grant(db, "bot", "host", "api.example.com", 0) == 0);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", 0, GRANT_ORIGIN("operator", 0)) == 0);
     assert(grant_expiry(db, "bot", "host", "api.example.com") == 0);
     /* ...and a later temporary re-grant must not claw it back. */
-    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 60) == 0);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", now + 60, GRANT_ORIGIN("operator", 0)) == 0);
     assert(grant_expiry(db, "bot", "host", "api.example.com") == 0);
 
     db_close(db);

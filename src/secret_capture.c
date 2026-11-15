@@ -52,7 +52,7 @@ static char *with_note(const char *result, const char *fmt, const char *arg) {
     return out ? out : strdup(result);
 }
 
-char *secret_capture_apply(sqlite3 *db, const char *tool_args,
+char *secret_capture_apply(sqlite3 *db, const char *agent, const char *tool_args,
                            const char *raw_result, int is_error) {
     if (!db || !tool_args || !raw_result) return NULL;
     if (!strstr(tool_args, "save_secret")) return NULL;  /* cheap pre-check */
@@ -98,7 +98,11 @@ char *secret_capture_apply(sqlite3 *db, const char *tool_args,
         goto done;
     }
 
-    if (db_secret_set(db, name, value, "captured", "agent") != 0) {
+    /* Stored and granted to the capturing agent in one transaction: the
+     * agent that fetched a credential may use it; nobody else may until the
+     * operator grants it (specs/security.md). */
+    if (!agent || !agent[0] ||
+        db_secret_capture(db, name, value, "captured", agent) != 0) {
         out = with_note(raw_result, "save_secret failed: store error%s", "");
         goto done;
     }
@@ -110,8 +114,9 @@ char *secret_capture_apply(sqlite3 *db, const char *tool_args,
     char *masked = secret_deinterpolate(raw_result, &s, 1);
     char note[192];
     snprintf(note, sizeof(note),
-             "saved {{SECRET:%s}} (%zu chars). No host bindings yet — first "
-             "use parks for approval; ALWAYS-approve a url-bearing call to bind it",
+             "saved {{SECRET:%s}} (%zu chars), usable by you only. No host "
+             "bindings yet — request them with request_config (secret_bindings) "
+             "before using it on the network",
              name, strlen(value));
     out = with_note(masked ? masked : raw_result, "%s", note);
     free(masked);

@@ -98,16 +98,17 @@ static void test_capture_skips_on_status(void) {
     uint8_t key[32];
     assert(secret_key_load_or_create(dbp, key) == 0);
     db_set_secret_key(key);
+    test_seed_agent(db, "TestAgent");
 
     /* Failure, phrased without the magic word: nothing may be captured. */
-    char *out = secret_capture_apply(db, "{\"save_secret\":\"S_KEY\"}",
+    char *out = secret_capture_apply(db, "TestAgent", "{\"save_secret\":\"S_KEY\"}",
                                      "HTTP 403 Forbidden", 1);
     CHECK("capture skipped on failure status", out && strstr(out, "skipped"));
     CHECK("nothing stored on failure", !db_secret_exists(db, "S_KEY"));
     free(out);
 
     /* Success whose text merely looks like an error: capture proceeds. */
-    out = secret_capture_apply(db, "{\"save_secret\":\"T_KEY\"}",
+    out = secret_capture_apply(db, "TestAgent", "{\"save_secret\":\"T_KEY\"}",
                                "error: not really — this is the token", 0);
     CHECK("capture proceeds on success status", out && strstr(out, "saved"));
     CHECK("value stored", db_secret_exists(db, "T_KEY"));

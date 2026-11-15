@@ -250,7 +250,7 @@ int main(void) {
                " && cp build/cclaw " REEXEC_BIN ".prev") != 0) FAIL("cp");
     {
         sqlite3 *adb = NULL;
-        if (sqlite3_open(DB_PATH, &adb) != SQLITE_OK) FAIL("arm open");
+        if ((adb = db_open(DB_PATH)) == NULL) FAIL("arm open");
         update_verify_arm(adb, "vtest");
         sqlite3_close(adb);
     }
@@ -326,7 +326,7 @@ int main(void) {
                " && cp build/cclaw " REEXEC_BIN ".prev") != 0) FAIL("cp");
     {
         sqlite3 *adb = NULL;
-        if (sqlite3_open(DB_PATH, &adb) != SQLITE_OK) FAIL("arm open");
+        if ((adb = db_open(DB_PATH)) == NULL) FAIL("arm open");
         update_verify_arm(adb, "vclean");
         sqlite3_close(adb);
     }
@@ -367,7 +367,7 @@ int main(void) {
     if (system("cp build/cclaw " REEXEC_BIN) != 0) FAIL("cp");
     {
         sqlite3 *adb = NULL;
-        if (sqlite3_open(DB_PATH, &adb) != SQLITE_OK) FAIL("arm open");
+        if ((adb = db_open(DB_PATH)) == NULL) FAIL("arm open");
         /* Pre-aged marker: this start is the third. */
         char v[128];
         snprintf(v, sizeof(v),

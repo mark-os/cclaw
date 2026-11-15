@@ -94,7 +94,9 @@ static char *tool_secret_create_handler(const char *arguments, void *user_data, 
         return tool_fail(is_error, "error: failed to generate random value");
     }
 
-    int rc = db_secret_set(ctx->db, name, value, "generated", "agent");
+    int rc = ctx->agent_name[0]
+        ? db_secret_capture(ctx->db, name, value, "generated", ctx->agent_name)
+        : -1;
     explicit_bzero(value, sizeof(value));
 
     char name_buf[64];
@@ -109,9 +111,9 @@ static char *tool_secret_create_handler(const char *arguments, void *user_data, 
     char *result = malloc(256);
     if (!result) return tool_fail(is_error, "error: out of memory");
     snprintf(result, 256,
-             "stored as {{SECRET:%s}} (%d chars, %s). No host bindings yet — "
-             "first use will require approval; ALWAYS-approve a url-bearing "
-             "call to bind it.",
+             "stored as {{SECRET:%s}} (%d chars, %s), usable by you only. No "
+             "host bindings yet — request them with request_config "
+             "(secret_bindings) before using it on the network.",
              name_buf, length, charset_buf);
     return result;
 }

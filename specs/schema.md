@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v59 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v60 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -50,8 +50,11 @@ Agents are the only entity with a rename verb, so as of v31 every
   needs them; they exist so a dangling write fails at write time and so the
   links can be read from `pragma_foreign_key_list`. Guard:
   `test_config_link_audit` (test/test_agent_rename.c).
-- Not declared, on purpose: `secret_hosts.secret_name` (a `CCLAW_SECRET_*`
-  environment secret has bindings but no `secrets` row), and the
+- `grants.approval_id` → `approvals(id)` (v60): the approval being applied
+  when the grant was written.
+- Not declared, on purpose: `secret_hosts.secret_name` and a `secret`
+  grant's `value` (a `CCLAW_SECRET_*` environment secret has bindings and
+  grants but no `secrets` row — `db_secret_rm` removes all three in code), and the
   conversation tables' `session_id`/`channel_name` columns and `-1`
   sentinels (entries, tool_calls, llm_responses, inbox, channel_outbox,
   channel_events) — parked until a later decision.
@@ -288,12 +291,19 @@ Normalized capability grants for agents, one typed row per capability.
 | Column | Type | Notes |
 |--------|------|-------|
 | `agent_name` | TEXT NOT NULL | FK → `agents(name)` ON UPDATE CASCADE |
-| `kind` | TEXT NOT NULL | capability axis: `tool`, `host`, `read_path`, `write_path` |
-| `value` | TEXT NOT NULL | the granted name/pattern |
+| `kind` | TEXT NOT NULL | capability axis: `tool`, `host`, `read_path`, `write_path`, `secret` (v60) |
+| `value` | TEXT NOT NULL | the granted name/pattern; for `secret`, the secret's name |
 | `approval_mode` | TEXT NOT NULL DEFAULT 'silent' | only for kind='tool' (see below) |
 | `expires_at` | INTEGER | unixepoch; NULL = permanent. Row is dead after this time. |
 | `created_at` | INTEGER DEFAULT (unixepoch()) | |
+| `source` | TEXT NOT NULL | how the row came to exist (v60), CHECK-enforced, **no default** — a writer that does not say is refused: `approval` (an approved request was applied: request_config, update_agent, "always allow", grant-from-history), `operator` (CLI / dashboard), `agent_create` (given to a new agent at definition: baseline, declared, clone copy), `extension` (a promoted extension's tools, to its owner), `seed` (startup bootstrap, on-disk / built-in agent definitions), `capture` (the agent captured or minted this secret), `migration` (a schema patch — v60's secret grants), `legacy` (existed before v60; origin unknown). A re-grant that revives an expired row takes the new origin; later edits are in `change_log` |
+| `approval_id` | INTEGER | FK → `approvals(id)` (v60): the approval being applied when the row was written; NULL when none |
 | PRIMARY KEY | (agent_name, kind, value) | |
+
+A `secret` grant is what lets an agent have that secret interpolated into, or
+delivered to, its tool calls (specs/security.md "Using a secret is a grant").
+v60 granted every existing agent every secret it could use before (source
+`migration`).
 
 `approval_mode` values (Axis B of authority, kind='tool' only):
 - `silent` — tool runs freely (default).
@@ -386,7 +396,7 @@ Fail-closed credential rule (specs/trust.md): a secret may only be submitted to 
 
 ## secrets
 
-Secret store (specs/security.md): the single home for every encrypted value, all AEAD-sealed with the master key. `scope` splits two audiences: `agent` secrets feed the per-call snapshot (`secrets_snapshot()` merges them with the env-collected `CCLAW_SECRET_*` base — env wins on a name collision) and are usable via `{{SECRET:name}}`; `system` secrets are provider API keys consumed by the daemon (`db_secret_get_system()`) and are **excluded from the snapshot**, so an agent can never interpolate them. Enforcement is `secret_hosts` having zero rows for the name (fail-closed, same as any other secret).
+Secret store (specs/security.md): the single home for every encrypted value, all AEAD-sealed with the master key. `scope` splits two audiences: `agent` secrets feed the per-call snapshot (`secrets_snapshot()` merges them with the env-collected `CCLAW_SECRET_*` base — env wins on a name collision) and are usable via `{{SECRET:name}}` by an agent holding a `secret` grant for the name (v60); `system` secrets are provider API keys consumed by the daemon (`db_secret_get_system()`) and are **excluded from the snapshot**, so no agent can interpolate them and none can be granted one. Two gates apply to every use: the grant (who) and `secret_hosts` (where — zero rows for the name denies, fail-closed).
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -396,7 +406,7 @@ Secret store (specs/security.md): the single home for every encrypted value, all
 | `scope` | TEXT NOT NULL DEFAULT 'agent' | `agent` (interpolatable/injectable) \| `system` (provider keys, daemon-only) |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
-Written by: `cclaw secret set\|rm\|list` (operator verb), the `secret_create` tool, `admin_set_key` (scope `system`), and `secret_capture_apply` (`save_secret` on web_fetch/shell_exec/js_eval). The DLP scanner never writes here — it redacts. (A `status` column marked scanner-quarantined rows until schema v20 removed quarantine.)
+Written by: `cclaw secret set\|rm\|list\|grant\|revoke` (operator verb), the `secret_create` tool, `admin_set_key` (scope `system`), and `secret_capture_apply` (`save_secret` on web_fetch/shell_exec/js_eval). The last two go through `db_secret_capture`, which stores the secret and grants it to that agent (source `capture`) in one transaction; `db_secret_rm` deletes the row, its `secret_hosts` rows and its `secret` grants in one transaction. The DLP scanner never writes here — it redacts. (A `status` column marked scanner-quarantined rows until schema v20 removed quarantine.)
 
 ---
 
@@ -1075,6 +1085,42 @@ Process registry for liveness detection. One row per live cclaw process (daemon 
 | `heartbeat_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 Sessions stamp `owner_instance` here; owner-scoped recovery reclaims only sessions whose owner is absent (crashed) or stale (no heartbeat within `PROCESS_TTL_SEC`).
+
+---
+
+## change_log
+
+One row per changed row of a configuration table (v60, plan v0.8 decisions
+14/15), written by generated triggers — never by C — so no write path can
+skip it. Logged tables and the setting/measurement class of every column are
+one list, `CHANGE_LOG_COLUMNS` in `src/change_log.c`; `change_log_sync()`
+generates three triggers per table (`log_<table>_ins/_upd/_del`) from it and
+is run by the v60 patch and on every start (`db_ensure_schema`), so a fresh
+and an upgraded database carry identical triggers. Logged now: `agents`,
+`grants`, `agent_models`, `providers`, `models`, `secrets`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+| `actor` | TEXT NOT NULL | `cclaw_actor()` of the writing handle: `daemon`, `cli`, `dashboard`, `sqlite3`, `llm_worker`, `tool_thread`, `llm_bridge`, `channel:<name>`, `doctor`, `channel_harness`, or `unknown` (a handle nobody named) |
+| `context` | TEXT | `cclaw_context()`: what the handle was doing — `approval:<id>` while an approval is applied, `schema:v60` during that patch; NULL otherwise |
+| `table_name` | TEXT NOT NULL | |
+| `row_key` | TEXT NOT NULL | JSON of the primary key, after the change (before it, for a delete) |
+| `action` | TEXT NOT NULL | `insert` \| `update` \| `delete` (CHECK) |
+| `old_values` | TEXT | JSON of the row's settings before; NULL on insert |
+| `new_values` | TEXT | JSON of the settings after; NULL on delete |
+
+Rules the triggers implement: an UPDATE fires only `OF` setting columns and
+only `WHEN` one of them actually changed (a counter update on `models` never
+evaluates it; a rewrite to the same value logs nothing); an ignored `INSERT OR
+IGNORE` logs nothing; an upsert logs the insert or the update that happened. A
+`secret`-class column (`secrets.value`) never appears: `"(set)"` on insert,
+`"(changed)"`/`"(unchanged)"` on update, absent from old values and deletes.
+`INSERT OR REPLACE` would log only the insert (recursive triggers are off);
+no cclaw writer uses it on a logged table. Append-only: two `BEFORE` triggers
+refuse UPDATE and DELETE. A connection without `cclaw_actor()` (a system
+`sqlite3`) cannot write a logged table.
 
 ---
 

@@ -252,3 +252,43 @@ someone a picture. State is one row in `shares`
   everything else is a download; every response carries
   `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff` and
   `Cache-Control: no-store`. An HTML file is served as `text/plain`.
+
+## Change log — who changed the configuration
+
+Every change to the configuration tables (`agents`, `grants`,
+`agent_models`, `providers`, `models`, `secrets`) is recorded in the
+`change_log` table by triggers, so no write path — an agent's approved
+request, the dashboard, a CLI verb, `cclaw sqlite3 --write` — can skip it.
+Shape and rules: [schema.md](schema.md#change_log). Rows are kept forever and
+are append-only (cclaw never updates or deletes one; triggers refuse it).
+
+Reading it (read-only, so it works on a live box):
+
+```sh
+cclaw sqlite3 ~/.cclaw/cclaw.db "SELECT datetime(at,'unixepoch'), actor,
+  context, table_name, action, row_key, old_values, new_values
+  FROM change_log ORDER BY id DESC LIMIT 20"
+# everything one approval changed
+cclaw sqlite3 ~/.cclaw/cclaw.db "SELECT * FROM change_log WHERE context='approval:41'"
+```
+
+- **actor** names the database handle that wrote: `daemon` (the event loop),
+  `cli` (an operator verb or an interactive `cclaw` session), `dashboard`
+  (the web server), `sqlite3` (`cclaw sqlite3 --write`), and the daemon's own
+  worker handles (`llm_worker` — a model's health status flipping, say).
+- **context** groups rows written for one reason: `approval:<id>` on every
+  row the daemon changed while applying that approval (including a
+  grant-from-history, which first records its own approved row);
+  `schema:v60` for the v60 migration's grants.
+- **Only settings are logged.** Counters, timestamps, health cooldowns and
+  leases change all the time and are not configuration; which column is
+  which is one list in `src/change_log.c`. A model's `status` is a setting,
+  so healthy/degraded/disabled transitions do appear.
+- **Secret values never appear** — not the plaintext, not the ciphertext. A
+  `secrets` row records its name, scope and source, and that the value was
+  set or changed.
+- **A plain system `sqlite3` cannot write a logged table** — the triggers
+  call `cclaw_actor()`, which only cclaw defines, and the write fails with
+  "no such function: cclaw_actor". That is deliberate: use
+  `cclaw sqlite3 --write`, which is logged as `sqlite3`. Reading and writing
+  other tables with any sqlite3 still works.

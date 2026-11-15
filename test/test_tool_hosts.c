@@ -53,8 +53,8 @@ static void test_declared_replaces_grants(void) {
     /* The agent holds a host grant for evil.example — the ambient reach that
      * arms shell/web/js. A promoted tool declaring api.weather.test must
      * reach the declared host and NOT the granted one. */
-    exec_ok("INSERT INTO grants(agent_name, kind, value)"
-            " VALUES('Alice','host','evil.example');"
+    exec_ok("INSERT INTO grants(agent_name, kind, value,source)"
+            " VALUES('Alice','host','evil.example','operator');"
             "INSERT INTO extensions(name, path, owner_agent, published)"
             " VALUES('weather','" HOME_DIR "/extensions/weather','Alice',1);"
             "INSERT INTO tools(name, extension_name, path, egress_hosts)"
@@ -120,7 +120,7 @@ static void test_draft_declaration_is_inert(void) {
     /* Positive control: promote the very same bundle and the same lookup now
      * answers — the declaration activates at promotion, and only there. */
     err = NULL;
-    assert(extension_install(g_db, BUNDLE, "Alice", &err) == 0);
+    assert(extension_install(g_db, BUNDLE, "Alice", 0, &err) == 0);
     free(err);
     h = db_tool_declared_hosts(g_db, "draft_tool", &n);
     assert(h && n == 1 && strcmp(h[0], "api.draft.test") == 0);

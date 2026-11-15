@@ -29,7 +29,7 @@ static void test_session_tmp_dir_agent(void) {
     char dbp[] = "/tmp/cclaw_test_ctx_edge.db";
     unlink(dbp);
     sqlite3 *db = NULL;
-    assert(sqlite3_open(dbp, &db) == SQLITE_OK);
+    assert((db = db_open(dbp)) != NULL);
     assert(sqlite3_exec(db,
         "CREATE TABLE sessions (id INTEGER PRIMARY KEY, agent_name TEXT);"
         "INSERT INTO sessions VALUES (7, 'alice'), (8, 'bad/name');",

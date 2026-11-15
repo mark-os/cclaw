@@ -266,6 +266,8 @@ static void seed_generic_row(sqlite3 *db, const char *table, const char *agent) 
                 "INSERT OR IGNORE INTO memory_blocks(id,label) VALUES(900001,'generic');",
                 NULL, NULL, NULL);
             snprintf(val, sizeof(val), "900001");
+        } else if (strcmp(table, "grants") == 0 && strcmp(name, "source") == 0) {
+            snprintf(val, sizeof(val), "'operator'");   /* CHECK-constrained */
         } else if (has_dflt || !notnull) {
             continue;  /* defaulted / nullable / autoincrement rowid — skip */
         } else if (type && (strstr(type, "INT") || strstr(type, "int"))) {

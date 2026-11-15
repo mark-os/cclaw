@@ -2,6 +2,7 @@
 #define CCLAW_AGENT_DEFINE_H
 
 #include <sqlite3.h>
+#include "agent_config.h"   /* GrantOrigin */
 
 /* One agent-definition JSON schema, applied identically from all three
  * declaration paths: disk seed (agent.json), create_agent tool, and
@@ -20,9 +21,12 @@ int agent_definition_validate(sqlite3 *db, const char *json,
 
 /* Validate then apply: agents row (or clone_from copy + overlay), default +
  * declared grants, agent_extensions, memory blocks, workspace dir under
- * agents_dir (skipped when agents_dir is NULL). */
+ * agents_dir (skipped when agents_dir is NULL). Every grant the new agent
+ * gets is written with `origin` (agent_create + the approval that created
+ * it, or seed for a definition shipped on disk / in a built-in manifest). */
 int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
-                           const char *agents_dir, char **err);
+                           const char *agents_dir, GrantOrigin origin,
+                           char **err);
 
 /* Update an existing agent (update_agent tool). Authorization is
  * creator-or-self via agents.created_by; caps (profile, grants) apply against
@@ -31,6 +35,7 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
 int agent_definition_update_validate(sqlite3 *db, const char *json,
                                      const char *caller, char **err);
 int agent_definition_update_apply(sqlite3 *db, const char *json,
-                                  const char *caller, char **err);
+                                  const char *caller, int64_t approval_id,
+                                  char **err);
 
 #endif

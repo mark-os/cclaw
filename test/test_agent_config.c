@@ -15,7 +15,7 @@ static void test_whitelist_add_remove(void) {
     assert(db != NULL);
     db_agent_upsert(db, "bot", NULL, NULL);
 
-    assert(agent_config_grant(db, "bot", "host", "api.example.com", 0) == 0);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", 0, GRANT_ORIGIN("operator", 0)) == 0);
     AgentCaps caps;
     agent_caps_load(db, "bot", &caps);
     assert(caps.host_count == 1);
@@ -23,13 +23,13 @@ static void test_whitelist_add_remove(void) {
     agent_caps_free(&caps);
 
     /* Duplicate is no-op */
-    assert(agent_config_grant(db, "bot", "host", "api.example.com", 0) == 0);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", 0, GRANT_ORIGIN("operator", 0)) == 0);
     agent_caps_load(db, "bot", &caps);
     assert(caps.host_count == 1);
     agent_caps_free(&caps);
 
     /* Add second */
-    assert(agent_config_grant(db, "bot", "host", "api.github.com", 0) == 0);
+    assert(agent_config_grant(db, "bot", "host", "api.github.com", 0, GRANT_ORIGIN("operator", 0)) == 0);
     agent_caps_load(db, "bot", &caps);
     assert(caps.host_count == 2);
     agent_caps_free(&caps);
@@ -52,8 +52,8 @@ static void test_add_tool(void) {
     assert(db);
     db_agent_upsert(db, "bot", NULL, NULL);
 
-    assert(agent_config_grant(db, "bot", "tool", "shell_exec", 0) == 0);
-    assert(agent_config_grant(db, "bot", "tool", "web_fetch", 0) == 0);
+    assert(agent_config_grant(db, "bot", "tool", "shell_exec", 0, GRANT_ORIGIN("operator", 0)) == 0);
+    assert(agent_config_grant(db, "bot", "tool", "web_fetch", 0, GRANT_ORIGIN("operator", 0)) == 0);
 
     AgentCaps caps;
     agent_caps_load(db, "bot", &caps);
@@ -88,23 +88,23 @@ static void test_db_path_grant_refused(void) {
     db_agent_upsert(db, "bot", NULL, NULL);
 
     /* Positive control: ordinary paths are grantable, read and write. */
-    assert(agent_config_grant(db, "bot", "read_path", "/usr/share", 0) == 0);
-    assert(agent_config_grant(db, "bot", "write_path", "/tmp/cclaw_grantok", 0) == 0);
+    assert(agent_config_grant(db, "bot", "read_path", "/usr/share", 0, GRANT_ORIGIN("operator", 0)) == 0);
+    assert(agent_config_grant(db, "bot", "write_path", "/tmp/cclaw_grantok", 0, GRANT_ORIGIN("operator", 0)) == 0);
 
     /* The DB file itself, either flag — the ro/rw distinction is irrelevant,
      * read is reconnaissance on the policy store and write is escalation. */
-    assert(agent_config_grant(db, "bot", "read_path", dbp, 0) != 0);
-    assert(agent_config_grant(db, "bot", "write_path", dbp, 0) != 0);
+    assert(agent_config_grant(db, "bot", "read_path", dbp, 0, GRANT_ORIGIN("operator", 0)) != 0);
+    assert(agent_config_grant(db, "bot", "write_path", dbp, 0, GRANT_ORIGIN("operator", 0)) != 0);
 
     /* Any ancestor directory, not just the immediate one. */
-    assert(agent_config_grant(db, "bot", "read_path", "/tmp", 0) != 0);
+    assert(agent_config_grant(db, "bot", "read_path", "/tmp", 0, GRANT_ORIGIN("operator", 0)) != 0);
 
     /* The directory containing it, and the -wal/-shm siblings. */
-    assert(agent_config_grant(db, "bot", "read_path", "/tmp/cclaw_grantdb", 0) != 0);
+    assert(agent_config_grant(db, "bot", "read_path", "/tmp/cclaw_grantdb", 0, GRANT_ORIGIN("operator", 0)) != 0);
     assert(agent_config_grant(db, "bot", "read_path",
-                              "/tmp/cclaw_grantdb/cclaw.db-wal", 0) != 0);
+                              "/tmp/cclaw_grantdb/cclaw.db-wal", 0, GRANT_ORIGIN("operator", 0)) != 0);
     assert(agent_config_grant(db, "bot", "read_path",
-                              "/tmp/cclaw_grantdb/cclaw.db-shm", 0) != 0);
+                              "/tmp/cclaw_grantdb/cclaw.db-shm", 0, GRANT_ORIGIN("operator", 0)) != 0);
 
     /* The key file that decrypts the secrets table lives beside the DB and is
      * off limits the same way. It has to exist for this to bite: a missing
@@ -112,19 +112,19 @@ static void test_db_path_grant_refused(void) {
      * ordinary existing file in the same directory is grantable. */
     system("touch /tmp/cclaw_grantdb/.cclaw_key /tmp/cclaw_grantdb/notes.txt");
     assert(agent_config_grant(db, "bot", "read_path",
-                              "/tmp/cclaw_grantdb/.cclaw_key", 0) != 0);
+                              "/tmp/cclaw_grantdb/.cclaw_key", 0, GRANT_ORIGIN("operator", 0)) != 0);
     assert(agent_config_grant(db, "bot", "write_path",
-                              "/tmp/cclaw_grantdb/.cclaw_key", 0) != 0);
+                              "/tmp/cclaw_grantdb/.cclaw_key", 0, GRANT_ORIGIN("operator", 0)) != 0);
     assert(agent_config_grant(db, "bot", "read_path",
-                              "/tmp/cclaw_grantdb/notes.txt", 0) == 0);
+                              "/tmp/cclaw_grantdb/notes.txt", 0, GRANT_ORIGIN("operator", 0)) == 0);
 
     /* A path that does not exist yet still resolves through its nearest
      * existing ancestor — otherwise "grant me ~/.cclaw/x" walks straight in. */
     assert(agent_config_grant(db, "bot", "read_path",
-                              "/tmp/cclaw_grantdb/nested/deep", 0) != 0);
+                              "/tmp/cclaw_grantdb/nested/deep", 0, GRANT_ORIGIN("operator", 0)) != 0);
 
     /* Non-path kinds are untouched by the rule. */
-    assert(agent_config_grant(db, "bot", "tool", "shell_exec", 0) == 0);
+    assert(agent_config_grant(db, "bot", "tool", "shell_exec", 0, GRANT_ORIGIN("operator", 0)) == 0);
 
     /* Nothing was written for any refused grant: only the four accepted. */
     AgentCaps caps;

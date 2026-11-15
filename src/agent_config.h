@@ -43,11 +43,23 @@ void agent_caps_free(AgentCaps *caps);
  * no file (`:memory:`). */
 int grant_path_hits_db(sqlite3 *db, const char *kind, const char *value);
 
+/* Where a grant came from (grants.source / grants.approval_id,
+ * templates/schema.sql). Every writer says, truthfully: source is one of
+ * approval | operator | agent_create | extension | seed | capture | migration
+ * (legacy is only ever written by the v60 patch), and approval_id is the
+ * approval being applied, 0 when none is. */
+typedef struct {
+    const char *source;
+    int64_t approval_id;
+} GrantOrigin;
+#define GRANT_ORIGIN(src, aid) ((GrantOrigin){ (src), (aid) })
+
 /* Uniform grant/revoke API over the grants table. Refuses (-1, nothing
  * written) a path grant that grant_path_hits_db() rejects — the single insert
- * chokepoint, so every grant route inherits the rule. */
+ * chokepoint, so every grant route inherits the rule. A re-grant that revives
+ * an expired row (or extends a temporary one) takes the new origin. */
 int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
-                       const char *value, int64_t expires_at);
+                       const char *value, int64_t expires_at, GrantOrigin origin);
 int agent_config_revoke(sqlite3 *db, const char *agent, const char *kind,
                         const char *value);
 
@@ -60,7 +72,7 @@ int grants_contains(sqlite3 *db, const char *agent, const char *kind,
 /* Seed an agent's baseline tool grants (the safe default toolset; excludes
  * shell_exec/web_fetch/db_query, which require an explicit request_config
  * grant). Idempotent — uses INSERT OR IGNORE per tool. */
-void agent_grant_defaults(sqlite3 *db, const char *agent);
+void agent_grant_defaults(sqlite3 *db, const char *agent, GrantOrigin origin);
 
 /* §4 Axis B — per-(agent,tool) approval mode. */
 typedef enum {
@@ -73,11 +85,12 @@ typedef enum {
  * (uninstrumented tools keep their run-freely default). */
 ToolApprovalMode agent_tool_mode(sqlite3 *db, const char *agent, const char *tool);
 
-/* Set approval_mode on an existing tool grant. mode is one of
- * "silent"/"always"/"tool_decides". Returns 0 on success (a row was updated),
- * -1 on error or if the tool is not granted. */
+/* Set approval_mode on a tool grant, inserting the row (with `origin`) when
+ * there is none. mode is one of "silent"/"always"/"tool_decides". Returns 0
+ * on success, -1 on error or a bad mode. */
 int agent_config_set_tool_mode(sqlite3 *db, const char *agent,
-                               const char *tool, const char *mode);
+                               const char *tool, const char *mode,
+                               GrantOrigin origin);
 
 /* Returns malloc'd JSON array string (e.g. '["a","b"]'). Caller frees. */
 char *grants_json(sqlite3 *db, const char *agent, const char *kind);

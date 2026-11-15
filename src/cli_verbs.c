@@ -15,6 +15,7 @@
 #include "config.h"
 #include "config_registry.h"
 #include "dashboard.h"
+#include "agent_config.h"
 #include "db.h"
 #include "log.h"
 #include "models_cache.h"
@@ -32,6 +33,7 @@ static sqlite3 *verb_db_open(void) {
     if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return NULL; }
     sqlite3 *db = db_open(db_path);
     if (!db) { fprintf(stderr, "error: cannot open %s\n", db_path); free(db_path); return NULL; }
+    db_set_actor(db, "cli");   /* change_log: an operator verb did this */
     if (!db_schema_compat(db)) {
         fprintf(stderr, "error: %s was created by a different cclaw schema — delete it\n", db_path);
         sqlite3_close(db); free(db_path); return NULL;
@@ -118,12 +120,15 @@ int secret_bind_main(int argc, char *argv[]) {
     return rc;
 }
 
-/* `cclaw secret set <NAME> [value] | rm <NAME> | list` — operator verb for
- * the DB-backed secret store (specs/security.md). `set` with no value arg
- * reads one line from stdin, keeping the plaintext out of shell history.
- * `list` never prints values. A newly set secret has zero secret_hosts rows
- * (unless pre-seeded with `cclaw secret-bind`), so its first use always
- * parks — the same fail-closed rule as env-collected secrets. */
+/* `cclaw secret set <NAME> [value] | rm <NAME> | list | grant <NAME> <agent>
+ * | revoke <NAME> <agent>` — operator verb for the DB-backed secret store
+ * (specs/security.md). `set` with no value arg reads one line from stdin,
+ * keeping the plaintext out of shell history. `list` never prints values.
+ * A newly set secret is granted to no agent (using a secret is a grant) and
+ * has zero secret_hosts rows (unless pre-seeded with `cclaw secret-bind`):
+ * `grant` decides who may use it, bindings decide where it may go. `grant`
+ * also takes the name of an environment (CCLAW_SECRET_*) secret, which has no
+ * row here. `rm` removes the name's bindings and grants with it. */
 int secret_main(int argc, char *argv[]) {
     char *db_path = util_resolve_db_path();
     if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return 1; }
@@ -134,25 +139,82 @@ int secret_main(int argc, char *argv[]) {
 
     int rc = 0;
     if (argc >= 3 && strcmp(argv[2], "list") == 0) {
+        /* Stored secrets, then names granted with no stored row (environment
+         * secrets); for each, who may use it. */
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
-                "SELECT name, source, scope, created_at FROM secrets ORDER BY name",
+                "SELECT n.name, s.source, s.scope, s.created_at,"
+                "  (SELECT group_concat(agent_name, ',') FROM (SELECT agent_name"
+                "     FROM grants g WHERE g.kind='secret' AND g.value=n.name"
+                "      AND (g.expires_at IS NULL OR g.expires_at > unixepoch())"
+                "    ORDER BY agent_name))"
+                " FROM (SELECT name FROM secrets UNION"
+                "       SELECT value FROM grants WHERE kind='secret') n"
+                " LEFT JOIN secrets s ON s.name=n.name ORDER BY n.name",
                 -1, &st, NULL) == SQLITE_OK) {
             int any = 0;
             while (sqlite3_step(st) == SQLITE_ROW) {
-                printf("%s  source=%s  scope=%s  created=%lld\n",
-                       sqlite3_column_text(st, 0), sqlite3_column_text(st, 1),
-                       sqlite3_column_text(st, 2),
-                       (long long)sqlite3_column_int64(st, 3));
+                const char *who = (const char *)sqlite3_column_text(st, 4);
+                if (sqlite3_column_type(st, 1) == SQLITE_NULL)
+                    printf("%s  (environment)  granted=%s\n",
+                           sqlite3_column_text(st, 0), who ? who : "(nobody)");
+                else
+                    printf("%s  source=%s  scope=%s  created=%lld  granted=%s\n",
+                           sqlite3_column_text(st, 0), sqlite3_column_text(st, 1),
+                           sqlite3_column_text(st, 2),
+                           (long long)sqlite3_column_int64(st, 3),
+                           strcmp((const char *)sqlite3_column_text(st, 2), "system") == 0
+                               ? "(daemon only)" : who ? who : "(nobody)");
                 any = 1;
             }
             sqlite3_finalize(st);
             if (!any) printf("(no secrets)\n");
         }
     } else if (argc >= 4 && strcmp(argv[2], "rm") == 0) {
-        rc = db_secret_rm(db, argv[3]) == 0 ? 0 : 1;
-        if (rc == 0) printf("secret removed: %s\n", argv[3]);
+        int n[3];
+        rc = db_secret_rm(db, argv[3], n) == 0 ? 0 : 1;
+        if (rc == 0)
+            printf("secret removed: %s (%d stored value, %d host binding(s), "
+                   "%d grant(s))\n", argv[3], n[0], n[1], n[2]);
         else fprintf(stderr, "error: rm failed\n");
+    } else if (argc >= 5 && (strcmp(argv[2], "grant") == 0 ||
+                             strcmp(argv[2], "revoke") == 0)) {
+        const char *name = argv[3], *agent = argv[4];
+        int grant = strcmp(argv[2], "grant") == 0;
+        int system = 0, agent_ok = 0;
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT EXISTS(SELECT 1 FROM secrets WHERE name=?1 AND scope='system'),"
+                "       EXISTS(SELECT 1 FROM agents WHERE name=?2)",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(st, 2, agent, -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                system = sqlite3_column_int(st, 0);
+                agent_ok = sqlite3_column_int(st, 1);
+            }
+            sqlite3_finalize(st);
+        }
+        if (!is_valid_secret_name(name)) {
+            fprintf(stderr, "error: invalid secret name (expected ^[A-Z][A-Z0-9_]*$)\n");
+            rc = 2;
+        } else if (!agent_ok) {
+            fprintf(stderr, "error: no agent named '%s'\n", agent);
+            rc = 2;
+        } else if (grant && system) {
+            fprintf(stderr, "error: %s is a system secret (a provider key) — the "
+                            "daemon uses it; no agent can be granted it\n", name);
+            rc = 2;
+        } else if (grant) {
+            rc = agent_config_grant(db, agent, "secret", name, 0,
+                                    GRANT_ORIGIN("operator", 0)) == 0 ? 0 : 1;
+            if (rc == 0) printf("agent %s may now use secret %s\n", agent, name);
+            else fprintf(stderr, "error: grant failed\n");
+        } else {
+            rc = agent_config_revoke(db, agent, "secret", name) == 0 ? 0 : 1;
+            if (rc == 0) printf("agent %s may no longer use secret %s\n", agent, name);
+            else fprintf(stderr, "error: revoke failed\n");
+        }
     } else if (argc >= 3 && strcmp(argv[2], "set") == 0) {
         const char *name = (argc >= 4) ? argv[3] : NULL;
         if (!name || !is_valid_secret_name(name)) {
@@ -179,14 +241,31 @@ int secret_main(int argc, char *argv[]) {
                 rc = 1;
             } else {
                 rc = db_secret_set(db, name, value, "operator", "agent") == 0 ? 0 : 1;
-                if (rc == 0) printf("secret set: %s\n", name);
+                if (rc == 0) {
+                    char *who = NULL;
+                    sqlite3_stmt *st;
+                    if (sqlite3_prepare_v2(db,
+                            "SELECT group_concat(agent_name, ', ') FROM grants"
+                            " WHERE kind='secret' AND value=?1", -1, &st, NULL) == SQLITE_OK) {
+                        sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+                        if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
+                            who = strdup((const char *)sqlite3_column_text(st, 0));
+                        sqlite3_finalize(st);
+                    }
+                    if (who) printf("secret set: %s (usable by: %s)\n", name, who);
+                    else printf("secret set: %s — no agent may use it yet: "
+                                "cclaw secret grant %s <agent>\n", name, name);
+                    free(who);
+                }
                 else fprintf(stderr, "error: set failed\n");
             }
             if (value) { explicit_bzero(value, strlen(value)); free(value); }
         }
     } else {
         fprintf(stderr, "usage: cclaw secret set <NAME> [value] | rm <NAME> | list\n"
+                        "                    | grant <NAME> <agent> | revoke <NAME> <agent>\n"
                         "  set with no value reads one line from stdin\n"
+                        "  a new secret is usable by no agent until granted\n"
                         "  name: ^[A-Z][A-Z0-9_]*$\n");
         rc = 2;
     }

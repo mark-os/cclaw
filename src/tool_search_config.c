@@ -111,15 +111,22 @@ static const char SQL_CONFIG_DOC[] =
     "       AND (expires_at IS NULL OR expires_at>unixepoch()))),"
     "   'write_paths', json((SELECT json_group_array(value) FROM grants"
     "     WHERE agent_name=?1 AND kind='write_path'"
+    "       AND (expires_at IS NULL OR expires_at>unixepoch()))),"
+    "   'secrets', json((SELECT json_group_array(value) FROM grants"
+    "     WHERE agent_name=?1 AND kind='secret'"
     "       AND (expires_at IS NULL OR expires_at>unixepoch())))),"
     " 'session', json_object('id', ?2,"
     "   'tool_filter', json((SELECT COALESCE(tool_filter,'null') FROM sessions"
     "                        WHERE id=?2))),"
     " 'sensitive_hosts', json((SELECT json_group_array(value)"
     "   FROM sensitive_targets WHERE kind='host')),"
+    /* Bindings of the secrets this agent may use — only those: a secret
+     * granted to nobody here is not this agent's business. */
     " 'secret_bindings', json((SELECT COALESCE(json_group_object(secret_name,"
     "     json(hosts)),'{}') FROM (SELECT secret_name,"
     "       json_group_array(host) AS hosts FROM secret_hosts"
+    "       WHERE secret_name IN (SELECT value FROM grants WHERE agent_name=?1"
+    "         AND kind='secret' AND (expires_at IS NULL OR expires_at>unixepoch()))"
     "       GROUP BY secret_name))),"
     " 'providers', json((SELECT json_group_array(json_object("
     "     'name', name, 'endpoint_type', endpoint_type, 'base_url', base_url,"
@@ -264,8 +271,8 @@ static char *render_text(SearchConfigCtx *ctx, const char *query,
     }
 
     /* Report grants per kind */
-    static const char *kinds[] = {"host", "tool", "read_path", "write_path"};
-    for (int ki = 0; ki < 4; ki++) {
+    static const char *kinds[] = {"host", "tool", "read_path", "write_path", "secret"};
+    for (int ki = 0; ki < 5; ki++) {
         rc = sqlite3_prepare_v2(ctx->db,
             "SELECT COALESCE(group_concat(value, ', '), '(none)')"
             " FROM grants WHERE agent_name=?1 AND kind=?2"
@@ -318,13 +325,17 @@ static char *render_text(SearchConfigCtx *ctx, const char *query,
         sqlite3_finalize(st);
     }
 
-    /* Secret-host bindings: which hosts each secret may be submitted to.
-     * A {{SECRET:X}} aimed anywhere else is denied with the missing pair
-     * named; the binding is requested via request_config. */
+    /* Secret-host bindings of the secrets granted to this agent: which hosts
+     * each may be submitted to. A {{SECRET:X}} aimed anywhere else is denied
+     * with the missing pair named; the binding is requested via
+     * request_config. Secrets not granted here are not listed at all. */
     rc = sqlite3_prepare_v2(ctx->db,
         "SELECT COALESCE(group_concat(secret_name || '->' || host, ', '), '(none)')"
-        " FROM secret_hosts", -1, &st, NULL);
+        " FROM secret_hosts WHERE secret_name IN (SELECT value FROM grants"
+        "   WHERE agent_name=?1 AND kind='secret'"
+        "     AND (expires_at IS NULL OR expires_at > unixepoch()))", -1, &st, NULL);
     if (rc == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
             const char *v = (const char *)sqlite3_column_text(st, 0);
             buf_appendf(&out,

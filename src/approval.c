@@ -659,6 +659,10 @@ static const char *SQL_CHANGES_AUTHORITY_AGENT =
     " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.changes.grants.hosts')"
     " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.changes.grants.read_paths')"
     " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.changes.grants.write_paths')"
+    /* The secret by name, and what granting it means — the approver decides
+     * whether this agent may use that credential at all. */
+    " UNION ALL SELECT format('%-7s%s (may use its value in tool calls)','secret',atom)"
+    "   FROM json_each(?1,'$.changes.grants.secrets')"
     " UNION ALL SELECT format('%-7s%s','route',atom) FROM json_each(?1,'$.changes.routes')";
 
 /* Agent settings, with a diff against live state. Two hazards, both seen in
@@ -772,6 +776,8 @@ static const char *SQL_CREATE_AGENT_LINES =
     " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.grants.hosts')"
     " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.grants.read_paths')"
     " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.grants.write_paths')"
+    " UNION ALL SELECT format('%-7s%s (may use its value in tool calls)','secret',atom)"
+    "   FROM json_each(?1,'$.grants.secrets')"
     " UNION ALL SELECT format('%-7s%s','ext',atom) FROM json_each(?1,'$.extensions')"
     /* the models array IS the routing order — render each entry in pos order */
     " UNION ALL SELECT format('model  #%d %s', key+1, atom)"
@@ -855,6 +861,8 @@ static const char *SQL_UPDATE_AGENT_LINES =
     " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.grants.hosts')"
     " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.grants.read_paths')"
     " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.grants.write_paths')"
+    " UNION ALL SELECT format('%-7s%s (may use its value in tool calls)','secret',atom)"
+    "   FROM json_each(?1,'$.grants.secrets')"
     " UNION ALL SELECT format('model  #%d %s', key+1, atom)"
     "   FROM json_each(?1,'$.models')"
     " UNION ALL SELECT format('%s = %s', key,"

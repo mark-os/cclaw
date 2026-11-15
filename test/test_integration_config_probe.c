@@ -86,7 +86,7 @@ static void test_probe_success_applies(void) {
     mock_server_enqueue(200, PROBE_RESPONSE);
 
     char *receipt = NULL;
-    assert(request_config_changes_apply(db, "test", SWITCH_DOC, 0, sid, &receipt) == 0);
+    assert(request_config_changes_apply(db, "test", SWITCH_DOC, 0, sid, 0, &receipt) == 0);
     assert(receipt);
     /* The receipt reports the model that actually answered, not the intent. */
     assert(strstr(receipt, "probed OK"));
@@ -117,7 +117,7 @@ static void test_probe_failure_reverts(void) {
     mock_server_enqueue(404, "{\"error\":{\"message\":\"no such model\"}}");
 
     char *receipt = NULL;
-    assert(request_config_changes_apply(db, "test", SWITCH_DOC, 0, sid, &receipt) == -1);
+    assert(request_config_changes_apply(db, "test", SWITCH_DOC, 0, sid, 0, &receipt) == -1);
     assert(receipt);
     assert(strstr(receipt, "probe failed"));
     assert(strstr(receipt, "http 404"));
@@ -166,7 +166,7 @@ static void test_probe_timeout_is_failure(void) {
     int64_t sid = seed(db, url);
 
     char *receipt = NULL;
-    assert(request_config_changes_apply(db, "test", SWITCH_DOC, 0, sid, &receipt) == -1);
+    assert(request_config_changes_apply(db, "test", SWITCH_DOC, 0, sid, 0, &receipt) == -1);
     assert(receipt);
     assert(strstr(receipt, "probe failed: timed out"));
     assert(strstr(receipt, "reverted to models=model-a@mockp"));
@@ -195,7 +195,7 @@ static void test_grants_only_does_not_probe(void) {
     char *receipt = NULL;
     const char *doc = "{\"action\":\"request_changes\",\"changes\":"
                       "{\"grants\":{\"tools\":[\"shell_exec\"]}}}";
-    assert(request_config_changes_apply(db, "test", doc, 0, sid, &receipt) == 0);
+    assert(request_config_changes_apply(db, "test", doc, 0, sid, 0, &receipt) == 0);
     assert(receipt && strstr(receipt, "grants now"));
     assert(!strstr(receipt, "probed"));
     assert(mock_server_request_count() == 0);

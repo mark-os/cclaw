@@ -33,7 +33,8 @@ static const char *PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"changes\":{\"type\":\"object\",\"description\":\"Any subset of "
     "{grants:{tools:[names],hosts:[hostnames],read_paths:[abs paths],write_paths:[abs paths],"
-    "remove:{tools:[],hosts:[],read_paths:[],write_paths:[]}}, "
+    "secrets:[SECRET_NAME],"
+    "remove:{tools:[],hosts:[],read_paths:[],write_paths:[],secrets:[]}}, "
     "agent:{models?:[canonical model id or {id,effort?:off|minimal|low|medium|high}, "
     "in routing order],max_iterations?,shell_timeout?}, "
     "routes:['channel:chat_id',...], "
@@ -55,7 +56,9 @@ static const char *PARAMS_JSON =
     "already-registered provider (status:'disabled' retires one); one document can "
     "define a provider, register a model on it, AND adopt it via agent.models "
     "(the full replacement routing order — first entry is primary). "
-    "secret_bindings bind a saved secret to the hosts it may be submitted to — a "
+    "grants.secrets asks to USE a stored secret ({{SECRET:NAME}} / $CCLAW_SECRET_NAME) — "
+    "you may only use secrets granted to you; secret_bindings bind a secret to the "
+    "hosts it may be submitted to — a "
     "{{SECRET:X}} call is denied when its target isn't bound; batch every host a "
     "denial named into one document. grants.remove gives up grants you already "
     "hold — it applies immediately, with no approval\"},"
@@ -119,6 +122,7 @@ GRANT_KINDS[] = {
     { "hosts",       "$.grants.hosts",       "host" },
     { "read_paths",  "$.grants.read_paths",  "read_path" },
     { "write_paths", "$.grants.write_paths", "write_path" },
+    { "secrets",     "$.grants.secrets",     "secret" },
 };
 #define GRANT_KIND_COUNT (sizeof(GRANT_KINDS) / sizeof(GRANT_KINDS[0]))
 
@@ -140,14 +144,14 @@ static char *grants_remove_apply(sqlite3 *db, const char *agent,
     if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.grants.remove')='object'",
                  changes))
         return strdup("error: grants.remove must be an object of "
-                      "{tools|hosts|read_paths|write_paths: [values]}");
+                      "{tools|hosts|read_paths|write_paths|secrets: [values]}");
     char *bad = q1_text(db,
         "SELECT key FROM json_each(?1,'$.grants.remove')"
-        " WHERE key NOT IN ('tools','hosts','read_paths','write_paths') LIMIT 1",
-        changes);
+        " WHERE key NOT IN ('tools','hosts','read_paths','write_paths','secrets')"
+        " LIMIT 1", changes);
     if (bad) {
         char *m = errf("error: unknown grants.remove kind '%s' (use tools, "
-                       "hosts, read_paths, write_paths) — removal touches "
+                       "hosts, read_paths, write_paths, secrets) — removal touches "
                        "grants only, never sandbox_profile or system config",
                        bad);
         free(bad);
@@ -228,11 +232,11 @@ static char *validate_grants(sqlite3 *db, const char *changes) {
         return strdup("error: changes.grants must be an object");
     char *bad = q1_text(db,
         "SELECT key FROM json_each(?1,'$.grants')"
-        " WHERE key NOT IN ('tools','hosts','read_paths','write_paths') LIMIT 1",
-        changes);
+        " WHERE key NOT IN ('tools','hosts','read_paths','write_paths','secrets')"
+        " LIMIT 1", changes);
     if (bad) {
         char *m = errf("error: unknown grants key '%s' (use tools, hosts, "
-                       "read_paths, write_paths, remove)", bad);
+                       "read_paths, write_paths, secrets, remove)", bad);
         free(bad);
         return m;
     }
@@ -257,6 +261,24 @@ static char *validate_grants(sqlite3 *db, const char *changes) {
             return errf("error: grants.%s entries must be non-empty strings",
                         GRANT_KINDS[i].key);
         }
+    }
+    /* A secret grant names a secret this agent could actually be handed: a
+     * stored agent-scope secret, or an environment secret the database knows
+     * of through a host binding. A system secret (a provider key) is the
+     * daemon's alone — no grant reaches it. Naming nothing would mint a grant
+     * that silently arms itself the day someone stores a secret by that name. */
+    char *sname = q1_text(db,
+        "SELECT atom FROM json_each(?1,'$.grants.secrets') j"
+        " WHERE EXISTS(SELECT 1 FROM secrets s WHERE s.name=j.atom AND s.scope='system')"
+        "    OR NOT (EXISTS(SELECT 1 FROM secrets s WHERE s.name=j.atom)"
+        "            OR EXISTS(SELECT 1 FROM secret_hosts h WHERE h.secret_name=j.atom))"
+        " LIMIT 1", changes);
+    if (sname) {
+        char *m = errf("error: grants.secrets names '%s', which is not a secret an "
+                       "agent can be given — check the name with the user, or have "
+                       "them store it first (cclaw secret set)", sname);
+        free(sname);
+        return m;
     }
     char *relpath = q1_text(db,
         "SELECT atom FROM ("
@@ -1185,6 +1207,8 @@ static char *filter_satisfied(sqlite3 *db, const char *agent,
         "      THEN '$.grants.read_paths' ELSE '$.zz' END,"
         " CASE WHEN json_array_length(?1,'$.grants.write_paths')=0"
         "      THEN '$.grants.write_paths' ELSE '$.zz' END,"
+        " CASE WHEN json_array_length(?1,'$.grants.secrets')=0"
+        "      THEN '$.grants.secrets' ELSE '$.zz' END,"
         " CASE WHEN json_array_length(?1,'$.routes')=0"
         "      THEN '$.routes' ELSE '$.zz' END)", cur, agent);
     if (next) { free(cur); cur = next; }
@@ -1456,7 +1480,8 @@ static const char *RECEIPT_SQL =
 
 int request_config_changes_apply(sqlite3 *db, const char *agent,
                                  const char *args_json, int64_t expires_at,
-                                 int64_t session_id, char **detail_out) {
+                                 int64_t session_id, int64_t approval_id,
+                                 char **detail_out) {
     if (detail_out) *detail_out = NULL;
     if (!db || !agent || !args_json) return -1;
 
@@ -1477,6 +1502,7 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             " UNION ALL SELECT 'host', atom FROM json_each(?1,'$.changes.grants.hosts')"
             " UNION ALL SELECT 'read_path', atom FROM json_each(?1,'$.changes.grants.read_paths')"
             " UNION ALL SELECT 'write_path', atom FROM json_each(?1,'$.changes.grants.write_paths')"
+            " UNION ALL SELECT 'secret', atom FROM json_each(?1,'$.changes.grants.secrets')"
             " UNION ALL SELECT 'config:'||key, atom FROM json_each(?1,'$.changes.config')"
             " UNION ALL SELECT 'secret_bind:'||s.key, h.atom"
             "   FROM json_each(?1,'$.changes.secret_bindings') s, json_each(s.value) h",
@@ -1518,7 +1544,8 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                                           lines[i].value);
             else
                 lrc = agent_config_grant(db, agent, lines[i].kind,
-                                         lines[i].value, expires_at);
+                                         lines[i].value, expires_at,
+                                         GRANT_ORIGIN("approval", approval_id));
             if (lrc != 0) {
                 LOG_WARN_("request_changes apply failed %s=%s",
                           lines[i].kind, lines[i].value);

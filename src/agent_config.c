@@ -240,8 +240,8 @@ int grant_path_hits_db(sqlite3 *db, const char *kind, const char *value) {
 }
 
 int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
-                       const char *value, int64_t expires_at) {
-    if (!db || !agent || !kind || !value) return -1;
+                       const char *value, int64_t expires_at, GrantOrigin origin) {
+    if (!db || !agent || !kind || !value || !origin.source) return -1;
     if (grant_path_hits_db(db, kind, value)) {
         LOG_WARN_("refusing %s grant on cclaw.db path '%s' for agent %s",
                   kind, value, agent);
@@ -262,12 +262,14 @@ int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
      * a still-live temporary grant when the operator re-approves it, which is
      * plainly what "grant this again" means. A re-grant never *shortens* a
      * grant's life: the update only fires when it moves expires_at later, and
-     * a permanent row (expires_at IS NULL) is left alone. */
+     * a permanent row (expires_at IS NULL) is left alone. A revived row is a
+     * new grant, so it takes this grant's origin. */
     const char *sql =
-        "INSERT INTO grants (agent_name, kind, value, expires_at)"
-        " VALUES (?1, ?2, ?3, ?4)"
+        "INSERT INTO grants (agent_name, kind, value, expires_at, source, approval_id)"
+        " VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
         " ON CONFLICT(agent_name, kind, value) DO UPDATE SET"
-        "   expires_at=excluded.expires_at"
+        "   expires_at=excluded.expires_at, source=excluded.source,"
+        "   approval_id=excluded.approval_id"
         " WHERE grants.expires_at IS NOT NULL"
         "   AND (grants.expires_at <= unixepoch()"
         "        OR excluded.expires_at IS NULL"
@@ -281,6 +283,9 @@ int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
         sqlite3_bind_int64(stmt, 4, expires_at);
     else
         sqlite3_bind_null(stmt, 4);
+    sqlite3_bind_text(stmt, 5, origin.source, -1, SQLITE_STATIC);
+    if (origin.approval_id > 0) sqlite3_bind_int64(stmt, 6, origin.approval_id);
+    else sqlite3_bind_null(stmt, 6);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;
@@ -307,17 +312,19 @@ ToolApprovalMode agent_tool_mode(sqlite3 *db, const char *agent, const char *too
 }
 
 int agent_config_set_tool_mode(sqlite3 *db, const char *agent,
-                               const char *tool, const char *mode) {
-    if (!db || !agent || !tool || !mode) return -1;
+                               const char *tool, const char *mode,
+                               GrantOrigin origin) {
+    if (!db || !agent || !tool || !mode || !origin.source) return -1;
     if (strcmp(mode, "silent") != 0 && strcmp(mode, "always") != 0 &&
         strcmp(mode, "tool_decides") != 0)
         return -1;
     /* Upsert: "stop asking" must persist even when no grant row exists yet
      * (e.g. a tool raised to ASK by a policy/hook rather than a standing
-     * grant). A bare UPDATE would silently no-op and drop the user's intent. */
+     * grant). A bare UPDATE would silently no-op and drop the user's intent.
+     * An existing row keeps its origin: only its mode changes. */
     const char *sql =
-        "INSERT INTO grants (agent_name, kind, value, approval_mode)"
-        " VALUES (?1, 'tool', ?2, ?3)"
+        "INSERT INTO grants (agent_name, kind, value, approval_mode, source, approval_id)"
+        " VALUES (?1, 'tool', ?2, ?3, ?4, ?5)"
         " ON CONFLICT(agent_name, kind, value)"
         " DO UPDATE SET approval_mode=excluded.approval_mode;";
     sqlite3_stmt *stmt;
@@ -325,6 +332,9 @@ int agent_config_set_tool_mode(sqlite3 *db, const char *agent,
     sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, tool, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, mode, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, origin.source, -1, SQLITE_STATIC);
+    if (origin.approval_id > 0) sqlite3_bind_int64(stmt, 5, origin.approval_id);
+    else sqlite3_bind_null(stmt, 5);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;
@@ -360,8 +370,8 @@ int grants_contains(sqlite3 *db, const char *agent, const char *kind,
     return found;
 }
 
-void agent_grant_defaults(sqlite3 *db, const char *agent) {
-    if (!db || !agent) return;
+void agent_grant_defaults(sqlite3 *db, const char *agent, GrantOrigin origin) {
+    if (!db || !agent || !origin.source) return;
 
     /* agent_default_tools (JSON array) from the config registry — config_get
      * falls back to the registry default when there is no override, so no
@@ -370,17 +380,20 @@ void agent_grant_defaults(sqlite3 *db, const char *agent) {
     char *list = config_get(db, "agent_default_tools");
     if (!list) return;
     const char *sql =
-        "INSERT INTO grants (agent_name, kind, value, expires_at)"
-        " SELECT ?1, 'tool', value, NULL FROM json_each(?2)"
+        "INSERT INTO grants (agent_name, kind, value, expires_at, source, approval_id)"
+        " SELECT ?1, 'tool', value, NULL, ?3, ?4 FROM json_each(?2)"
         " WHERE true"
         " ON CONFLICT(agent_name, kind, value) DO UPDATE SET"
-        "   expires_at=NULL"
+        "   expires_at=NULL, source=excluded.source, approval_id=excluded.approval_id"
         " WHERE grants.expires_at IS NOT NULL"
         "   AND grants.expires_at <= unixepoch();";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 2, list, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, origin.source, -1, SQLITE_STATIC);
+        if (origin.approval_id > 0) sqlite3_bind_int64(stmt, 4, origin.approval_id);
+        else sqlite3_bind_null(stmt, 4);
         sqlite3_step(stmt);
         sqlite3_finalize(stmt);
     }

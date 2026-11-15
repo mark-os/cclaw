@@ -102,6 +102,7 @@ static void check_db(const char *db_path, sqlite3 **out_db) {
 
     /* Try to open */
     sqlite3 *db = db_open(db_path);
+    db_set_actor(db, "doctor");
     if (!db) {
         print_fail("open", "db_open() returned NULL");
         return;

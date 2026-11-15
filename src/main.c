@@ -78,6 +78,22 @@
 /* vendor/sqlite3/shell.c, compiled with -Dmain=sqlite3_shell_main */
 int sqlite3_shell_main(int argc, char **argv);
 
+/* Every connection the shell opens can answer cclaw_actor(), so a --write to
+ * a logged table lands in change_log as actor "sqlite3" instead of failing
+ * the way a plain system sqlite3 does. */
+static int sqlite3_verb_identity(sqlite3 *db, char **err, const void *api) {
+    (void)err; (void)api;
+    return db_identity_register(db, "sqlite3") == 0 ? SQLITE_OK : SQLITE_ERROR;
+}
+
+/* Called by the shell (SQLITE_SHELL_INIT_PROC, see Makefile) after it has
+ * made its sqlite3_config() calls and in place of its own initialize. */
+void cclaw_sqlite3_shell_init(void);
+void cclaw_sqlite3_shell_init(void) {
+    sqlite3_initialize();
+    sqlite3_auto_extension((void (*)(void))sqlite3_verb_identity);
+}
+
 /* `cclaw sqlite3` wrapper enforcing the two safety properties the bare
  * upstream shell lacks (design settled 2026-07-21, ruled 2026-08-29):
  *   - read-only by default; `--write` (ours, stripped) opts into writes.
@@ -302,10 +318,13 @@ static void ensure_default_agent(const char *base_dir) {
          * no birthright agent-minting / global publishing / credential
          * minting). The FIRST agent is the operator's interface; proposing a
          * create/publish still parks an approval, which is the actual gate. */
-        agent_grant_defaults(proc_db(), "Assistant");
-        agent_config_grant(proc_db(), "Assistant", "tool", "create_agent", 0);
-        agent_config_grant(proc_db(), "Assistant", "tool", "extension_publish", 0);
-        agent_config_grant(proc_db(), "Assistant", "tool", "secret_create", 0);
+        agent_grant_defaults(proc_db(), "Assistant", GRANT_ORIGIN("seed", 0));
+        agent_config_grant(proc_db(), "Assistant", "tool", "create_agent", 0,
+                           GRANT_ORIGIN("seed", 0));
+        agent_config_grant(proc_db(), "Assistant", "tool", "extension_publish", 0,
+                           GRANT_ORIGIN("seed", 0));
+        agent_config_grant(proc_db(), "Assistant", "tool", "secret_create", 0,
+                           GRANT_ORIGIN("seed", 0));
         /* Disabled 'heartbeat' bare-wake job — visible/enable-able in cron_list. */
         cron_seed_heartbeat(proc_db(), "Assistant");
         /* default_agent needs no write — 'Assistant' is the registry default */
@@ -1026,6 +1045,7 @@ int main(int argc, char *argv[]) {
 
     proc_set_db(db_open(db_path));
     if (!proc_db()) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }
+    db_set_actor(proc_db(), daemon_mode ? "daemon" : "cli");
 
     /* Post-update crash-loop guard: count this start against an armed
      * update.verify marker BEFORE db_schema_compat below, which is where the
@@ -1117,6 +1137,7 @@ int main(int argc, char *argv[]) {
         int rc = channel_runner_check(db_path, channel_mode, &err);
         if (rc == 0) {
             sqlite3 *cdb = db_open(db_path);
+            if (cdb) db_set_actor(cdb, "cli");
             int trc = cdb ? channel_mark_validated(cdb, channel_mode) : -1;
             if (cdb) db_close(cdb);
             if (trc == 0)

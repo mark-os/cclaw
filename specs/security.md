@@ -218,6 +218,7 @@ When a tool call arrives from the model, `dispatch_tool()` (`src/dispatch.c`) ev
 4. **tools.policy** — `policy_eval(args, policy_json)`. Per-argument restrict rules on the tool definition; DENY or ASK.
 5. **Hooks** — `hook_dispatch_gate_tool_call()`. Extension hooks run (veto-only: can escalate to ASK or DENY, never relax).
 6. **Sensitivity scan** — `host_in_text()` over the raw args against `sensitive_targets` (registered-domain+subdomain, lookalike-robust). Match → ASK, approval tagged `action='sensitive'`.
+6a. **Secret grant check** — a `{{SECRET:X}}` placeholder (and, on the shell tier, a `$CCLAW_SECRET_X` reference) naming a secret this agent holds no live `kind='secret'` grant for → inline DENY naming the secret and the agent, pointing at `request_config` `grants.secrets`. Before anything can park. Only the granted subset of the per-call snapshot is used past this point (interpolation, env delivery, egress narrowing, the js child's blob); see [Using a secret is a grant](#using-a-secret-is-a-grant).
 7. **Credential-binding check** — `used_secret_names()` over the args. Any used secret with zero `secret_hosts` bindings, or (web tier) a url host not covered by every used secret's bindings → inline DENY naming the secret and host, pointing at `request_config` `secret_bindings`. No park, no approval class (D17) — the agent requests the binding like it requests a host grant.
 8. **Approval park** — if gate == ASK: look up existing approval; if none or pending, park session (`awaiting_approval`). Resume on approve/deny.
 
@@ -260,6 +261,19 @@ Each grant row carries an `approval_mode` column (`'silent'` | `'always'` | `'to
 
 Set via `agent_config_set_tool_mode()` or the `--auto-approve` path.
 
+### grants.source / grants.approval_id (provenance)
+
+Every grant row says how it came to exist (v60): `source` is one of
+`approval`, `operator`, `agent_create`, `extension`, `seed`, `capture`,
+`migration`, `legacy` (CHECK-enforced, deliberately **no default** — a writer
+that does not say is refused by SQLite), and `approval_id` names the approval
+being applied when it was written. The approval's id is threaded through the
+apply path (`apply_grant` → `request_config_changes_apply`,
+`agent_definition_apply`/`_update_apply`, `extension_install`,
+`agent_config_set_tool_mode`), never looked up afterwards. Rows that existed
+before v60 are `legacy`: their origin was never recorded. Every later change
+to a grant is in `change_log` ([operations.md](operations.md#change-log--who-changed-the-configuration)).
+
 ### grants.expires_at (self-expiring grants)
 
 Grant rows may carry an `expires_at` unix timestamp. `grants_json()` (`src/agent_config.c`) filters expired rows with `expires_at IS NULL OR expires_at > unixepoch()`, so they silently vanish without manual cleanup. Used by `--auto-approve` to issue time-bounded ambient grants.
@@ -285,6 +299,7 @@ The `request_changes` document batches everything an agent needs into one approv
 | `grants.hosts` | array of hostnames (prefix `.` covers subdomains) | inserts `grants` rows (kind='host') |
 | `grants.read_paths` | array of absolute paths | inserts `grants` rows (kind='read_path') |
 | `grants.write_paths` | array of absolute paths | inserts `grants` rows (kind='write_path') |
+| `grants.secrets` | array of secret names | inserts `grants` rows (kind='secret') — the agent may use that secret. A name must be a stored agent-scope secret or an environment secret with a binding; system secrets are refused |
 | `agent` | whitelisted own settings (models — the full replacement routing list — max_iterations, shell_timeout) | updates the caller's routing list / `agents` row |
 | `routes` | array of `channel:chat_id` strings | creates a session bound to the caller + a `channel_routes` pin (`explicit`, first-come; no wildcards — channel defaults are operator config) |
 | `config` | object of key→value-string | calls `config_set()` per key |
@@ -389,9 +404,9 @@ Regression coverage is `test/test_sandbox_key_mask.c`. The load-bearing case is 
 
 The one remaining exposure is **`host`** (per agent, or `--trust-host`; the answer on a host without a containment backend, see [portability.md](portability.md)): it runs with *no* sandbox, so a shell child reads the host filesystem directly, key included. That is the documented price of `host` — never run untrusted-derived work at `host` on a box whose `.cclaw_key` matters. See [Sandbox Profile Policy Bundles](#sandbox-profile-policy-bundles).
 
-### All secrets are injectable
+### Secrets are referenced by name
 
-Every secret cclaw stores is referenceable by the model via `{{SECRET:name}}`. This is the only model that makes sense: if the model needs to use a secret — typing a password into a browser field, passing a token in a curl header, authenticating an API call — it needs to know the name to write the placeholder. The security property is that the **value** never enters the context window, not that the name is hidden.
+A secret is referenced by the model via `{{SECRET:name}}`: if the model needs to use a secret — typing a password into a browser field, passing a token in a curl header, authenticating an API call — it needs to know the name to write the placeholder. The security property is that the **value** never enters the context window, not that the name is hidden. *Which* agent may use a name is a grant (below).
 
 Which secrets the model is *told about* in the system prompt is a separate authoring concern. Operator-provisioned secrets (API tokens cclaw uses autonomously) go in the system prompt explicitly. User-provided credentials (a Gmail password for a login task) the model learns about through conversation — the user says "log into Gmail", the model asks what secret to use, the user says "it's stored as GMAIL_PASSWORD". Either way the contract is the same: model writes the placeholder, cclaw interpolates the value, value never hits context.
 
@@ -415,25 +430,64 @@ Three ways a secret enters the `secrets` table — every one intentional and nam
 2. **`secret_create` tool** — the agent mints a random credential (`getrandom()`, rejection-sampled into an `alnum`/`hex`/`full` charset, 8–128 chars) for a service that needs a *new* password (e.g. signing up for Trello). The generated value is written straight to the DB and never appears in the tool's arguments or result — only its `{{SECRET:name}}` placeholder does.
 3. **`save_secret` capture** (`src/secret_capture.c`) — a tool call that will *return* a credential (generating a GitHub API key, reading a token endpoint) names it on the call: `web_fetch`/`shell_exec`/`js_eval` accept `save_secret: "NAME"` plus optional `save_secret_path: "$.token"` (JSON path via `json_extract`; omitted = whole trimmed result). The value is extracted from the RAW result before any masking, stored encrypted (`source='captured'`), and every occurrence in the result is masked to `{{SECRET:NAME}}` — the plaintext never enters the context window. Existing names are refused (no clobbering), error results are skipped, extractions over 8KB are rejected with a note.
 
-**Per-call snapshot, not a cached array.** `secrets_snapshot(db, env_base, env_count)` (`src/secret_store.c`) merges the immutable env-collected base (`g_tool_setup->secrets`, fixed for the process lifetime) with a *fresh* `db_secrets_load()` read on every dispatch call — env wins on a name collision. This is why a secret created mid-turn is usable on the agent's very next tool call: nothing caches the DB read, and nothing mutates the borrowed env array (`tool_thread.h`'s "immutable post-setup" contract for `AgentSetup.secrets` holds). `EXEC_THREAD` tools re-snapshot on their own thread's db handle rather than receiving the dispatch-scoped snapshot, which wouldn't outlive the async thread.
+**Per-call snapshot, not a cached array.** `secrets_snapshot(db, env_base, env_count)` (`src/secret_store.c`) merges the immutable env-collected base (`g_tool_setup->secrets`, fixed for the process lifetime) with a *fresh* `db_secrets_load()` read on every dispatch call — env wins on a name collision. Only the agent's granted subset of it is used for anything but masking ([Using a secret is a grant](#using-a-secret-is-a-grant)). This is why a secret created mid-turn is usable on the agent's very next tool call: nothing caches the DB read, and nothing mutates the borrowed env array (`tool_thread.h`'s "immutable post-setup" contract for `AgentSetup.secrets` holds). `EXEC_THREAD` tools re-snapshot on their own thread's db handle rather than receiving the dispatch-scoped snapshot, which wouldn't outlive the async thread.
 
-**No status column.** Every row in the store is a real secret someone meant to put there, and all of them participate equally in interpolation and masking. Enforcement is the fail-closed binding rule below: a secret with zero `secret_hosts` rows always parks on first use, however it was born. (A `status='pending'` column once marked scanner-quarantined captures; it was dropped in schema v20 when quarantine was removed — pending rows fed the deinterpolation mask and false positives corrupted every later tool result.)
+**No status column.** Every row in the store is a real secret someone meant to put there; all of them participate in masking, and each is interpolated only for agents granted it. A secret with zero `secret_hosts` rows is denied on first use, however it was born. (A `status='pending'` column once marked scanner-quarantined captures; it was dropped in schema v20 when quarantine was removed — pending rows fed the deinterpolation mask and false positives corrupted every later tool result.)
 
-### Secret scoping (design — not yet implemented)
+### Using a secret is a grant
 
-Each secret has a scope: `"*"` (all agents) or a comma-separated agent name list. Daemon enforces scope at injection time — an agent only receives secrets it is scoped for. Sub-agents inherit the intersection of their own scope and the parent's (same privilege-reduction rule as tools and hosts).
+An agent may have a secret interpolated into, or delivered to, a tool call
+only if it holds a live grant for it: `grants` row `kind='secret'`,
+`value=<name>` (schema v60; plan v0.8 decisions 16/17). The rule is by
+name, so it covers stored secrets and `CCLAW_SECRET_*` environment secrets
+alike. `scope='system'` secrets (provider keys) are outside it entirely: they
+never enter the snapshot and no grant can name one.
 
-**Today**, secrets reach tool children via `CCLAW_SECRET_*` env vars collected by `shell_secrets_collect()` (`src/tool_shell.c`) at process startup, merged per-call with the DB-backed `secrets` table (see [Secret Store](#secret-store)). There is no per-agent scope enforcement yet — all secrets available to the process are available to all agents in it.
+- **Where it is enforced.** `dispatch_tool()` takes the per-call snapshot
+  (every loaded secret) and derives the agent's granted subset
+  (`secrets_granted()`, `src/secret_store.c`, a fresh grants read per call).
+  Only that subset interpolates `{{SECRET:X}}` (inline tools and the shell,
+  web and js tiers), is delivered as `CCLAW_SECRET_X` to a shell child, narrows
+  egress to bound hosts, and is shipped (with its bound hosts) to the js child
+  for fetch-boundary resolution. Cron scripts get the subset for the job's
+  agent. A call that names an ungranted secret is refused at the gate, before
+  anything can park (gate step 6a above), with the way to ask. **Masking is
+  not gated**: results are masked with every known value, so a secret an
+  agent may not use is still never shown to it.
+- **Two gates, independent.** The grant says *who* may use a secret; its
+  `secret_hosts` bindings say *where* it may be sent. Both apply to every
+  call; neither replaces the other.
+- **New secrets.** A secret the operator adds (`cclaw secret set`) is usable
+  by no agent until granted (`cclaw secret grant NAME <agent>`, the dashboard's
+  grant form with kind `secret`, or an approved `request_config`
+  `grants.secrets`). A secret an agent captures (`save_secret`) or mints
+  (`secret_create`) is granted to that agent — `source='capture'`, in the
+  same transaction as the store (`db_secret_capture`) — and to nobody else.
+- **Sub-agents.** `create_agent` / `update_agent` / `clone_from` apply the
+  ordinary creator-subset rule to `kind='secret'` like every other kind: a
+  child may use only secrets its creator may use.
+- **What an agent sees.** `search_config` lists the secrets granted to the
+  agent (`secrets:` in its grants) and the bindings of those secrets only;
+  other secrets are not mentioned.
+- **Upgrade.** v60 granted every existing agent every secret it could use
+  before (`source='migration'`): each `scope='agent'` row, each
+  `secret_hosts` name with no row (an environment secret), and each
+  `CCLAW_SECRET_*` name in the migrating process's environment (an
+  environment secret with no binding was still usable through
+  `$CCLAW_SECRET_X`, and only the daemon's environment knows it exists).
+- **Removal.** `db_secret_rm` / `cclaw secret rm` deletes the row, its
+  bindings and its grants in one transaction (no foreign key exists to
+  cascade from: environment secrets have no row).
 
-**Three orthogonal axes.** Secret access is *scope* — do not collapse it into sandbox_profile:
+**Three orthogonal axes.** Secret access is a *grant* — do not collapse it into sandbox_profile:
 
 | Axis | Mechanism | Question it answers |
 |------|-----------|---------------------|
-| Stored | storage provider (DB / keychain) | does cclaw hold the value at all? |
-| Scoped | `scope: "*"` or agent list | which agents *receive* it at injection? |
-| Disclosed | system-prompt authoring | which agents are *told the name*? |
+| Stored | storage provider (DB / keychain) or the daemon's environment | does cclaw hold the value at all? |
+| Granted | `grants` kind `secret` | which agents may *use* it? |
+| Bound | `secret_hosts` | which hosts may it be *sent to*? |
 
-sandbox_profile governs sandbox strictness (env scrub, network, rlimits) — what a compromised agent can *do*, not which secrets it sees. The axes compose (a `restricted` agent with empty scope sees nothing and can reach nothing) but must stay independent: never gate secret access on sandbox_profile by accident.
+sandbox_profile governs sandbox strictness (env scrub, network, rlimits) — what a compromised agent can *do*, not which secrets it may use. The axes compose (a `restricted` agent granted a secret still reaches no host) but must stay independent: never gate secret access on sandbox_profile.
 
 ### Storage providers (design — not yet implemented)
 
@@ -506,7 +560,7 @@ Injection is restricted to tools that actually exec with credentials (`ToolRecip
 
 Placeholder interpolation is the **primary** channel: it is robust to quoting. Note the single-quote case — `'Bearer: {{SECRET:X}}'` interpolates correctly, but `'Bearer: $CCLAW_SECRET_X'` would **not** expand (single quotes suppress shell expansion). Env injection is a secondary mechanism for tools that read credentials from the environment, not an interchangeable alternative.
 
-**Env injection is scoped to referenced secrets.** A shell child receives `CCLAW_SECRET_<NAME>` only for the secrets whose `$CCLAW_SECRET_<NAME>` token actually appears in the command (`shell_filter_secrets()`). Secrets used via `{{SECRET:NAME}}` are already interpolated into the command and get no env var. This is least-privilege: without it, every command would carry the agent's entire scoped credential set, and a single `cat /proc/self/environ` would dump them all.
+**Env injection is scoped to referenced, granted secrets.** A shell child receives `CCLAW_SECRET_<NAME>` only for environment secrets the agent is granted whose `$CCLAW_SECRET_<NAME>` token actually appears in the command (`shell_filter_secrets()`); a reference to an ungranted one is refused at the gate. (Env delivery carries environment secrets only, and is not narrowed by bindings — a `$CCLAW_SECRET_X` reference is not a `{{SECRET:X}}` placeholder, so `call_egress_build` does not see it.) Secrets used via `{{SECRET:NAME}}` are already interpolated into the command and get no env var. This is least-privilege: without it, every command would carry the agent's entire scoped credential set, and a single `cat /proc/self/environ` would dump them all.
 
 **Why argv exposure of the in-use secret is bounded, not a hole.** A secret the command *uses* must be plaintext somewhere in that process — argv (`/proc/self/cmdline`), env (`/proc/self/environ`), or its heap. You cannot hide a value from the command that consumes it. What matters is not "can the child read it" but two containment properties, both of which hold:
 
@@ -640,7 +694,7 @@ The js tier has **two resolution sites**, one rule:
 
 Fail-loud, both sites: a placeholder naming no loaded secret is a hard error (parent gate for args; a thrown JS `TypeError` at the fetch call site for everything else) — never a literal pass-through, which is how a placeholder used to reach a remote API as the credential and misdiagnose as "invalid key" (the Aug 2026 Tiingo 403 / Alpaca 401 class).
 
-**Binding enforcement travels with the value.** Every secret resolved into a request must be bound (`secret_hosts`) to the request's host — the same rule the daemon enforces for `web_fetch`. The parent ships each secret's bound-host list in the `--run-tool` blob (the child has no DB); an unbound secret or an unmatched host throws before anything is sent, pointing at `request_config` (`secret_bindings`). A loaded-but-unused secret constrains nothing.
+**Binding enforcement travels with the value.** Every secret resolved into a request must be bound (`secret_hosts`) to the request's host — the same rule the daemon enforces for `web_fetch`. The parent ships only the secrets the agent is granted, each with its bound-host list, in the `--run-tool` blob (the child has no DB) — so a file body naming an ungranted secret fails as an unknown name; an unbound secret or an unmatched host throws before anything is sent, pointing at `request_config` (`secret_bindings`). A loaded-but-unused secret constrains nothing.
 
 Writing a placeholder **into** a file (`file_write`) is always legal — a file is a document, not a resolution site; the placeholder resolves (or errors) later, when the script fetches. Shell script files are deliberately NOT covered: a `{{SECRET:x}}` inside a `.sh` file executed by `shell_exec` does not resolve — shell files use `$CCLAW_SECRET_X` env injection instead.
 

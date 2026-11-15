@@ -192,6 +192,44 @@ static void test_set_model_fallback(void) {
     printf("  PASS: test_set_model_fallback\n");
 }
 
+/* "Grant now" from the denial history: the decision is recorded as its own
+ * approved row first, so every grant it applies names that row and the change
+ * log labels them with it. The denied original is left as it was. */
+static void test_grant_from_history_provenance(void) {
+    sqlite3 *db = setup_db();
+    db_agent_upsert(db, "histagent", NULL, NULL);
+    int64_t sid = session_create(db, "h", "histagent", -1, 0);
+    assert(sid > 0);
+    assert(sqlite3_exec(db,
+        "INSERT INTO approvals(id, session_id, tool_name, park_reason, args_json,"
+        " resolve, state, decided_via) VALUES(50, 1, 'request_config',"
+        " 'approval_required', '{\"changes\":{\"grants\":{\"hosts\":[\"hist.example\"]}}}',"
+        " 'apply', 'denied', 'channel:x')", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE approvals SET session_id=(SELECT MAX(id) FROM sessions)"
+                        " WHERE id=50", NULL, NULL, NULL) == SQLITE_OK);
+    db_set_actor(db, "dashboard");
+    assert(admin_grant_from_history(db, 50) == 0);
+    int64_t nid = db_scalar_i64(db, "SELECT MAX(id) FROM approvals", 0, -1);
+    assert(nid > 50);
+    assert(db_scalar_i64(db, "SELECT state='denied' FROM approvals WHERE id=50", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT state='approved' FROM approvals WHERE id=?1", nid, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM grants WHERE agent_name='histagent'"
+        " AND value='hist.example' AND source='approval' AND approval_id=?1", nid, -1) == 1);
+    char want[64];
+    snprintf(want, sizeof(want), "approval:%lld", (long long)nid);
+    char *ctx = db_scalar_text(db, "SELECT context FROM change_log WHERE table_name='grants'"
+        " AND actor='dashboard' ORDER BY id DESC LIMIT 1", 0);
+    assert(ctx && strcmp(ctx, want) == 0);
+    free(ctx);
+    /* The handle's label does not outlive the work. */
+    char now[16];
+    db_get_context(db, now, sizeof(now));
+    assert(now[0] == '\0');
+    db_close(db);
+    test_db_clean(DB_PATH);
+    printf("  PASS: test_grant_from_history_provenance\n");
+}
+
 static void test_admin_grant_capability(void) {
     sqlite3 *db = setup_db();
     db_agent_upsert(db, "testagent", NULL, NULL);
@@ -214,6 +252,9 @@ static void test_admin_grant_capability(void) {
     assert(strcmp(caps.hosts[0], "example.com") == 0);
     assert(caps.read_count == 1);
     agent_caps_free(&caps);
+    /* The operator's own grants say so. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM grants WHERE agent_name='testagent'"
+        " AND source='operator' AND approval_id IS NULL", 0, -1) == 2);
 
     db_close(db);
     test_db_clean(DB_PATH);
@@ -526,6 +567,7 @@ int main(void) {
     test_set_endpoint_primary();
     test_set_model_fallback();
     test_admin_grant_capability();
+    test_grant_from_history_provenance();
     test_admin_list_grants();
     test_admin_revoke_grant_by_id();
     test_admin_list_tool_names();

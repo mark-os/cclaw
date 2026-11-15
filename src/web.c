@@ -362,6 +362,7 @@ int web_start(Config *cfg, const char *db_path) {
     if (!db_path) return -1;
     s_db = db_open(db_path);
     if (!s_db) return -1;
+    db_set_actor(s_db, "dashboard");
     s_db_path = strdup(db_path);
     s_start_time = time(NULL);
 

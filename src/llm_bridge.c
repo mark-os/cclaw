@@ -107,6 +107,7 @@ static void *bridge_thread(void *arg) {
     /* Own connection: the poll-loop thread's handle is not ours to share, and
      * a fresh WAL reader sees every write (the update-detector lesson). */
     sqlite3 *db = db_open(b->db_path);
+    db_set_actor(db, "llm_bridge");
     while (b->running) {
         struct pollfd p = { .fd = b->listen_fd, .events = POLLIN };
         int pr = poll(&p, 1, 300);

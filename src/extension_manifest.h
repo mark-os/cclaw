@@ -2,6 +2,7 @@
 #define CCLAW_EXTENSION_MANIFEST_H
 
 #include <sqlite3.h>
+#include <stdint.h>
 
 /* Declarative extension manifest loader + shared-store installer.
  *
@@ -35,9 +36,12 @@ int extension_manifest_declares_persistent(sqlite3 *db, const char *store_dir);
  * row (published=0); NULL = an extension shipped in the binary (no owner, no
  * attachment, no grants, no cron seeding). Returns 0 on success, -1 on error (with *err_out set when
  * non-NULL). Re-installing the same name refreshes its rows in place
- * (preserving the published flag). */
+ * (preserving the published flag). approval_id is the promote approval being
+ * applied (0 for a built-in install); the owner's tool grants and any
+ * agents[] the manifest defines record it as their origin. */
 int extension_install(sqlite3 *db, const char *bundle_dir,
-                      const char *owner_agent, char **err_out);
+                      const char *owner_agent, int64_t approval_id,
+                      char **err_out);
 
 /* True if `path` (absolute) lies inside the shared extension store
  * (<db_dir>/extensions/...). Promoted code may live nowhere else: the

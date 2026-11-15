@@ -16,7 +16,7 @@ prevent.
 | Axis | Question | Mechanism | Enforced by |
 |------|----------|-----------|-------------|
 | **Containment** | What can a tool child touch if it misbehaves? | `agents.sandbox_profile` → policy bundle | containment backend: kernel (namespaces, rlimits, netns+proxy) on Linux; nothing under `host` |
-| **Authority** | What is this agent allowed to do? | `grants` rows (kind/value, `approval_mode`, `expires_at`) | dispatch gate in the trusted process |
+| **Authority** | What is this agent allowed to do? | `grants` rows (kind/value, `approval_mode`, `expires_at`; kinds tool/host/read_path/write_path/secret; `source`/`approval_id` say where each came from) | dispatch gate in the trusted process |
 | **Escalation** | Does this call need a human right now? | `approvals` park/resolve (`rerun`/`apply`), `request_config` | dispatch gate + channel/CLI approver |
 | **Sensitivity** | Is this *target* special regardless of grants? | `sensitive_targets` labels + `secret_hosts` bindings | dispatch gate + proxy deny |
 
@@ -56,8 +56,16 @@ pair (known-sensitive vs unknown-plus-credential); neither may be
 arrives as a `CCLAW_SECRET_*` env var at startup, via `cclaw secret set`, via
 the `secret_create` tool, or via a `save_secret` capture on a tool call
 (specs/security.md), it lands with zero `secret_hosts` rows — so its very
-first use is denied until a binding is granted, no matter how it was born. No
-secret-store-specific enforcement exists or is needed.
+first use is denied until a binding is granted, no matter how it was born.
+
+**Using a secret is authority, not sensitivity** (v60). Rule 2 says where a
+credential may go; *whether this agent may use it at all* is a grant
+(`kind='secret'`, value = name), on the authority axis like a tool or a host:
+additive, absence is the denial, checked at the dispatch gate before any
+binding check, subset-capped for sub-agents. A new secret is granted to
+nobody — except the agent that captured or minted it — until the operator or
+an approved `request_config` says otherwise. System secrets are on no axis an
+agent can reach. Details: [security.md](security.md#using-a-secret-is-a-grant).
 
 ## The invariant
 
@@ -70,7 +78,8 @@ secret, or host access depend on the profile, it is on the wrong axis — expres
 it as a grant. Concretely:
 
 - Gating a privileged tool (e.g. a future `secret_store_write`) is a
-  `grants` row, never a profile check or a magic profile value.
+  `grants` row, never a profile check or a magic profile value. So is using a
+  secret (`kind='secret'`).
 - `js_eval` today has exactly `web_fetch`'s reach (same proxy, same host
   rules, same sensitivity deny and credential narrowing), so its grant cost
   already tracks its reach. When `cclaw.exec` lands (JS→shell bridge), that

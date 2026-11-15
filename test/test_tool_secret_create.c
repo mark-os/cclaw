@@ -28,6 +28,7 @@ static sqlite3 *fresh_db(void) {
     uint8_t key[32];
     assert(secret_key_load_or_create(DB_PATH, key) == 0);
     db_set_secret_key(key);
+    test_seed_agent(db, "TestAgent");   /* the capturing / minting agent */
     return db;
 }
 
@@ -35,7 +36,7 @@ static void test_register(void) {
     sqlite3 *db = fresh_db();
     ToolRegistry reg;
     tools_init(&reg);
-    ToolSecretCreateCtx ctx = { .db = db };
+    ToolSecretCreateCtx ctx = { .db = db, .agent_name = "TestAgent" };
     assert(tool_secret_create_register(&reg, &ctx) == 0);
     ToolEntry *e = tools_lookup(&reg, "secret_create");
     assert(e && strcmp(e->name, "secret_create") == 0);
@@ -49,7 +50,7 @@ static void test_creates_encrypted_row_and_hides_value(void) {
     sqlite3 *db = fresh_db();
     ToolRegistry reg;
     tools_init(&reg);
-    ToolSecretCreateCtx ctx = { .db = db };
+    ToolSecretCreateCtx ctx = { .db = db, .agent_name = "TestAgent" };
     tool_secret_create_register(&reg, &ctx);
     ToolEntry *e = tools_lookup(&reg, "secret_create");
 
@@ -57,6 +58,10 @@ static void test_creates_encrypted_row_and_hides_value(void) {
     assert(r);
     assert(strstr(r, "{{SECRET:TRELLO_PW}}"));
     assert(db_secret_exists(db, "TRELLO_PW"));
+    /* Granted to the minting agent, in the same transaction. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM grants WHERE kind='secret'"
+        " AND value='TRELLO_PW' AND agent_name='TestAgent' AND source='capture'",
+        0, -1) == 1);
 
     /* The raw row is enc:-prefixed ciphertext, never the plaintext. */
     sqlite3_stmt *st;
@@ -84,7 +89,7 @@ static void test_duplicate_name_errors(void) {
     sqlite3 *db = fresh_db();
     ToolRegistry reg;
     tools_init(&reg);
-    ToolSecretCreateCtx ctx = { .db = db };
+    ToolSecretCreateCtx ctx = { .db = db, .agent_name = "TestAgent" };
     tool_secret_create_register(&reg, &ctx);
     ToolEntry *e = tools_lookup(&reg, "secret_create");
 
@@ -105,7 +110,7 @@ static void test_bad_name_errors(void) {
     sqlite3 *db = fresh_db();
     ToolRegistry reg;
     tools_init(&reg);
-    ToolSecretCreateCtx ctx = { .db = db };
+    ToolSecretCreateCtx ctx = { .db = db, .agent_name = "TestAgent" };
     tool_secret_create_register(&reg, &ctx);
     ToolEntry *e = tools_lookup(&reg, "secret_create");
 
@@ -123,7 +128,7 @@ static void test_charset_and_length(void) {
     sqlite3 *db = fresh_db();
     ToolRegistry reg;
     tools_init(&reg);
-    ToolSecretCreateCtx ctx = { .db = db };
+    ToolSecretCreateCtx ctx = { .db = db, .agent_name = "TestAgent" };
     tool_secret_create_register(&reg, &ctx);
     ToolEntry *e = tools_lookup(&reg, "secret_create");
 

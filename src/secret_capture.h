@@ -12,7 +12,8 @@
  *
  * secret_capture_apply parses tool_args for those keys and, when present,
  * extracts the value from the RAW result (before any masking), stores it
- * encrypted (source='captured', zero host bindings — first use parks), and
+ * encrypted (source='captured', zero host bindings) and granted to `agent`
+ * — the capturing agent, and only it — in the same transaction, and
  * returns a replacement result with every occurrence of the value masked to
  * {{SECRET:name}} plus a confirmation note. On a capture error the original
  * result is returned with an error note appended (nothing stored).
@@ -23,7 +24,7 @@
  * result text.
  *
  * Returns NULL when args carry no save_secret — caller keeps its result. */
-char *secret_capture_apply(sqlite3 *db, const char *tool_args,
+char *secret_capture_apply(sqlite3 *db, const char *agent, const char *tool_args,
                            const char *raw_result, int is_error);
 
 #endif /* CCLAW_SECRET_CAPTURE_H */

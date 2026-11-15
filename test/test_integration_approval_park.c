@@ -123,7 +123,7 @@ static int run_cli_p(const char *exe, const char *url, const char *prompt,
 /* Single-integer query against the test DB. Returns -1 on any failure. */
 static int64_t db_count(const char *sql) {
     sqlite3 *db;
-    if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) return -1;
+    if ((db = db_open(DB_PATH)) == NULL) return -1;
     sqlite3_stmt *s;
     int64_t v = -1;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {

@@ -281,7 +281,7 @@ static void test_subagent_draft_never_globally_callable(void) {
      * valid all along, so it is *registration*, not authoring, that makes a
      * tool callable. */
     char *err = NULL;
-    assert(extension_install(g_db, SUBWS "/extensions/subx", "worker", &err) == 0);
+    assert(extension_install(g_db, SUBWS "/extensions/subx", "worker", 0, &err) == 0);
     assert(err == NULL);
     assert(scalar("SELECT COUNT(*) FROM tools WHERE name='sub_backdoor'") == 1);
     assert(callable_by("worker", "sub_backdoor"));   /* owner sees its own */

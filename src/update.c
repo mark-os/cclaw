@@ -189,6 +189,7 @@ static sqlite3 *update_db_open(void) {
     if (!path) { fprintf(stderr, "error: cannot resolve DB path\n"); return NULL; }
     sqlite3 *db = db_open(path);
     if (!db) { fprintf(stderr, "error: cannot open %s\n", path); free(path); return NULL; }
+    db_set_actor(db, "cli");
     if (!db_schema_compat(db)) {
         fprintf(stderr, "error: %s was created by a different cclaw schema\n", path);
         sqlite3_close(db); free(path); return NULL;
@@ -878,6 +879,7 @@ void update_verify_rollback(const char *db_path) {
     /* Whichever database is at db_path now — the snapshot when it worked, the
      * migrated one when nothing moved. Opened plainly, never migrated. */
     sqlite3 *db = db_open(db_path);
+    db_set_actor(db, "daemon");   /* the startup guard, inside the daemon */
     if (rc == 1) {
         snprintf(note, sizeof(note),
                  "cclaw %.63s kept dying after migrating the database and "
@@ -1490,6 +1492,7 @@ int rollback_main(int argc, char *argv[]) {
      * work from the build whose migration is the thing being undone. */
     db = db_open(db_path);
     if (!db) { fprintf(stderr, "error: cannot open %s\n", db_path); goto out; }
+    db_set_actor(db, "cli");
     int64_t discard = db_scalar_i64(db, "SELECT COUNT(*) FROM entries WHERE id > ?",
                                     snap_max, 0);
     tag = config_get(db, "update.installed_tag");

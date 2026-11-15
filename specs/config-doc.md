@@ -31,7 +31,7 @@ never happened and a receipt that says it did).
 | Section | Shape | Scope | Kind |
 |---------|-------|-------|------|
 | `agent` | `{models?: [id \| {id, effort?}], max_iterations?: n, shell_timeout?: n}` | this agent | settings |
-| `grants` | `{tools?, hosts?, read_paths?, write_paths?: [value], remove?: {…same kinds}}` | this agent | authority |
+| `grants` | `{tools?, hosts?, read_paths?, write_paths?, secrets?: [value], remove?: {…same kinds}}` | this agent | authority |
 | `routes` | `["channel:chat_id"]` | this agent | authority |
 | `secret_bindings` | `{SECRET_NAME: [host]}` | this agent | authority |
 | `config` | `{key: "value"}` | system-wide | settings |
@@ -62,7 +62,7 @@ description states it in one line so the model does not have to guess:
 | Section | Verb | Meaning |
 |---------|------|---------|
 | `agent.*` | **replace** | Each named field replaces its current value. `agent.models` is the *whole* chat routing list (`agent_models` rows with `purpose='chat'`), in order, first = primary; unnamed fields keep their values. The agent's `image`/`audio` lists are not part of this document and are left untouched. An entry is a canonical id string or `{id, effort}`, where `effort` (`off\|minimal\|low\|medium\|high`) sets `agent_models.reasoning_effort` for that model — omitted means NULL, i.e. send nothing and take the provider default. `models.effort_map` (how a level spells on the wire) is operator-only, never part of this document. |
-| `grants.*` | **add** | Values are added to what the agent already holds. Values it already has are filtered out before parking, so an approver only decides what is new. |
+| `grants.*` | **add** | Values are added to what the agent already holds. Values it already has are filtered out before parking, so an approver only decides what is new. `grants.secrets` names secrets the agent may use (v60): each must be a stored agent-scope secret or an environment secret with a binding; system secrets are refused. Applied rows record `source='approval'` and the approval's id. |
 | `grants.remove` | **remove, immediately** | See below. |
 | `routes` | **add** | First-come; a route owned by another agent is refused. |
 | `secret_bindings` | **add** | (secret, host) pairs are added; existing pairs are filtered out. |

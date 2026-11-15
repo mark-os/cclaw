@@ -9,7 +9,7 @@ request for `host:port` over a Unix domain socket to a proxy thread in the
 per-call broker. A program that honors the proxy variables reaches allowlisted
 hosts by name; a program that does not has no network.
 
-Secrets reach a child two ways: the trusted parent interpolates `{{SECRET:name}}` in the tool arguments just before dispatch, and referenced secrets are also set as `CCLAW_SECRET_<NAME>` environment variables. The stored command keeps the placeholder, never the value. Output is masked before storage. See [security.md](security.md).
+Secrets reach a child two ways: the trusted parent interpolates `{{SECRET:name}}` in the tool arguments just before dispatch, and referenced secrets are also set as `CCLAW_SECRET_<NAME>` environment variables — in both cases only secrets the agent is granted (grants kind `secret`, [security.md](security.md#using-a-secret-is-a-grant)). The stored command keeps the placeholder, never the value. Output is masked before storage. See [security.md](security.md).
 
 ## Security Layers
 

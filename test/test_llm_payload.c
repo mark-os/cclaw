@@ -490,7 +490,7 @@ static void test_payload_with_tools(void) {
         "INSERT INTO tools(name,description,parameters_json) VALUES("
         "'file_read','Read a file',"
         "'{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}');"
-        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','file_read');",
+        "INSERT INTO grants(agent_name,kind,value,source) VALUES('default','tool','file_read','operator');",
         NULL, NULL, NULL);
 
     Config cfg = {0};
@@ -838,7 +838,7 @@ static void test_extension_tool_grant_filtering(void) {
         "INSERT INTO tools(name, description, parameters_json, enabled)"
         " VALUES('file_read','Read a file',"
         "'{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}',1);"
-        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','file_read');",
+        "INSERT INTO grants(agent_name,kind,value,source) VALUES('default','tool','file_read','operator');",
         NULL, NULL, NULL);
 
     Config cfg = {0};
@@ -870,7 +870,7 @@ static void test_extension_tool_grant_filtering(void) {
 
     /* Now grant the extension tool to 'default'. */
     sqlite3_exec(db,
-        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','get_forecast');",
+        "INSERT INTO grants(agent_name,kind,value,source) VALUES('default','tool','get_forecast','operator');",
         NULL, NULL, NULL);
 
     /* Rebuild payload — both tools should now appear. */
@@ -917,8 +917,8 @@ static void test_launch_agent_description_embeds_roster_and_worker_tools(void) {
         "'launch_agent','Delegate a task.','{\"type\":\"object\"}');"
         "INSERT INTO tools(name,description,parameters_json) VALUES("
         "'file_read','Read a file.','{\"type\":\"object\"}');"
-        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','launch_agent');"
-        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','file_read');",
+        "INSERT INTO grants(agent_name,kind,value,source) VALUES('default','tool','launch_agent','operator');"
+        "INSERT INTO grants(agent_name,kind,value,source) VALUES('default','tool','file_read','operator');",
         NULL, NULL, NULL);
 
     Config cfg = {0};
@@ -1804,8 +1804,8 @@ static void test_anthropic_payload(void) {
     assert(sqlite3_exec(db,
         "INSERT OR REPLACE INTO tools(name, description, parameters_json, enabled)"
         " VALUES('noargs','takes nothing','{}',1);"
-        "INSERT OR IGNORE INTO grants(agent_name,kind,value)"
-        " VALUES('default','tool','noargs');", NULL, NULL, NULL) == SQLITE_OK);
+        "INSERT OR IGNORE INTO grants(agent_name,kind,value,source)"
+        " VALUES('default','tool','noargs','operator');", NULL, NULL, NULL) == SQLITE_OK);
     Config base = {0};
     base.provider.model = "claude-sonnet-5-5";
     base.context_window = 128000;

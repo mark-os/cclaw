@@ -41,7 +41,17 @@ static void exec_sql(const char *sql) {
 /* Seed one claimed tool call the way the dispatch loop would see it and run
  * it through dispatch_tool. Returns the dispatch rc; *out_result (optional)
  * gets the tool-result content if one was written for this call. */
+static int run_call_as(const char *agent, int64_t sid, const char *tool,
+                       const char *args, char **out_result);
 static int run_call(const char *tool, const char *args, char **out_result) {
+    return run_call_as("bot", g_sid, tool, args, out_result);
+}
+
+static int run_call_as(const char *agent, int64_t sid, const char *tool,
+                       const char *args, char **out_result) {
+    int64_t g_sid_saved = g_sid;
+    g_sid = sid;
+    int rc;
     char call_id[32];
     snprintf(call_id, sizeof(call_id), "call_%d", ++g_call_seq);
 
@@ -59,7 +69,7 @@ static int run_call(const char *tool, const char *args, char **out_result) {
         .call_id = call_id, .name = (char *)tool, .arguments = (char *)args,
         .entry_id = eid, .iteration_id = 1,
     };
-    int rc = dispatch_tool(g_sid, "bot", &tc);
+    rc = dispatch_tool(g_sid, agent, &tc);
 
     if (out_result) {
         /* Inline errors append a role-3 entry but don't stamp
@@ -79,6 +89,7 @@ static int run_call(const char *tool, const char *args, char **out_result) {
         }
         sqlite3_finalize(s);
     }
+    g_sid = g_sid_saved;
     return rc;
 }
 
@@ -90,6 +101,37 @@ static int approvals_count(void) {
     int n = sqlite3_column_int(s, 0);
     sqlite3_finalize(s);
     return n;
+}
+
+/* Using a secret is a grant (v60): before the agent holds a 'secret' grant,
+ * naming the secret is refused inline — before any binding check, before
+ * anything can park — and the refusal names the secret, the agent and the
+ * way to ask. Covers both reference forms: {{SECRET:X}} on the web tier and
+ * $CCLAW_SECRET_X on the shell tier. Both secrets here are ENVIRONMENT
+ * secrets (CCLAW_SECRET_*), which have no secrets row: the rule is by name. */
+static void test_ungranted_secret_refused(void) {
+    char *r = NULL;
+    int rc = run_call("web_fetch",
+        "{\"url\":\"https://api.x.test/e\","
+        "\"headers\":\"k: {{SECRET:ALPACA_KEY}}\"}", &r);
+    assert(rc == 1);
+    assert(r && strstr(r, "secret ALPACA_KEY is not granted to agent bot"));
+    assert(strstr(r, "grants"));
+    assert(strstr(r, "request_config"));
+    free(r);
+    r = NULL;
+    rc = run_call("shell_exec", "{\"command\":\"echo $CCLAW_SECRET_GH_TOKEN\"}", &r);
+    assert(rc == 1);
+    assert(r && strstr(r, "secret GH_TOKEN is not granted to agent bot"));
+    free(r);
+    /* An unknown name is still the typo error, not a grant refusal. */
+    r = NULL;
+    rc = run_call("web_fetch",
+        "{\"url\":\"https://api.x.test/e\",\"headers\":\"k: {{SECRET:NOPE}}\"}", &r);
+    assert(rc == 1 && r && strstr(r, "names no known secret"));
+    free(r);
+    assert(approvals_count() == 0);
+    printf("  PASS test_ungranted_secret_refused\n");
 }
 
 /* Unbound secret, static url: inline error names secret + url host and the
@@ -158,8 +200,6 @@ static void test_bound_covered_passes(void) {
  * parent-composed note naming the secret and its bindings — so the model
  * learns the deny was a missing binding, not a missing host grant. */
 static void test_runtime_deny_note(void) {
-    exec_sql("INSERT INTO grants(agent_name,kind,value)"
-             " VALUES('bot','tool','shell_exec');");
     assert(db_secret_host_bind(g_db, "GH_TOKEN", "api.other.test") == 0);
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(g_db,
@@ -229,6 +269,27 @@ static void test_sensitivity_still_parks(void) {
     printf("  PASS test_sensitivity_still_parks\n");
 }
 
+/* The shared tool setup is initialised for one agent (the daemon's default),
+ * but request_config answers about the agent whose turn it is — what it
+ * already holds decides what is left to ask for. Before this was bound per
+ * call, a second agent asking for a secret the first agent held was told
+ * "already in effect" and nothing parked (seen on a throwaway daemon). */
+static void test_request_config_answers_for_the_caller(void) {
+    db_agent_upsert(g_db, "Eve", NULL, NULL);
+    exec_sql("INSERT INTO grants(agent_name,kind,value,source)"
+             " VALUES('Eve','tool','request_config','operator');");
+    int64_t eve_sid = session_create(g_db, "e", "Eve", -1, 0);
+    char *r = NULL;
+    int rc = run_call_as("Eve", eve_sid, "request_config",
+        "{\"changes\":{\"grants\":{\"secrets\":[\"ALPACA_KEY\"]}}}", &r);
+    if (r) fprintf(stderr, "  request_config answered: %s\n", r);
+    assert(rc == 2 && r == NULL);              /* parked for Eve */
+    assert(db_scalar_i64(g_db, "SELECT COUNT(*) FROM approvals WHERE session_id=?1"
+                         " AND tool_name='request_config' AND state='pending'",
+                         eve_sid, -1) == 1);
+    printf("  PASS test_request_config_answers_for_the_caller\n");
+}
+
 int main(int argc, char *argv[]) {
     /* The positive control re-execs this binary as the --run-tool broker. */
     if (argc >= 2 && strcmp(argv[1], "--run-tool") == 0)
@@ -252,8 +313,9 @@ int main(int argc, char *argv[]) {
     g_db = test_db_open(DB_PATH);
     assert(g_db);
     db_agent_upsert(g_db, "bot", NULL, NULL);
-    exec_sql("INSERT INTO grants(agent_name,kind,value)"
-             " VALUES('bot','tool','web_fetch');");
+    exec_sql("INSERT INTO grants(agent_name,kind,value,source)"
+             " VALUES('bot','tool','web_fetch','operator'),"
+             "       ('bot','tool','shell_exec','operator');");
     g_sid = session_create(g_db, "t", "bot", -1, 0);
     assert(g_sid > 0);
 
@@ -265,11 +327,18 @@ int main(int argc, char *argv[]) {
     assert(agent_setup_init(&setup, g_db, g_sid, cfg, "bot") == 0);
     proc_set_tool_setup(&setup);
 
+    test_ungranted_secret_refused();
+    /* From here on the agent may use both: the binding rule is what's left. */
+    assert(agent_config_grant(g_db, "bot", "secret", "ALPACA_KEY", 0,
+                              GRANT_ORIGIN("operator", 0)) == 0);
+    assert(agent_config_grant(g_db, "bot", "secret", "GH_TOKEN", 0,
+                              GRANT_ORIGIN("operator", 0)) == 0);
     test_unbound_denies_inline();
     test_uncovered_host_denies();
     test_bound_covered_passes();
     test_runtime_deny_note();
     test_sensitivity_still_parks();
+    test_request_config_answers_for_the_caller();
 
     agent_setup_destroy(&setup);
     config_free(cfg);

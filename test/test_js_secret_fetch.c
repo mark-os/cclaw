@@ -91,7 +91,7 @@ static void expect_js_error(const char *name, const JsHostSecret *sec,
 static void test_unknown_name(void) {
     expect_js_error("unknown_name", &SEC_BOUND,
         "\"http_request('http://127.0.0.1:1/x', {headers:{Authorization:'Bearer {{SECRET:TYPO}}'}})\"",
-        "{{SECRET:TYPO}} names no known secret");
+        "{{SECRET:TYPO}} names no secret granted to this agent");
 }
 
 static void test_unbound_secret(void) {
@@ -109,7 +109,7 @@ static void test_wrong_host(void) {
 static void test_no_secrets_loaded(void) {
     expect_js_error("no_secrets_loaded", NULL,
         "\"http_request('http://127.0.0.1:1/x', {headers:{Authorization:'Bearer {{SECRET:TOK}}'}})\"",
-        "{{SECRET:TOK}} names no known secret");
+        "{{SECRET:TOK}} names no secret granted to this agent");
 }
 
 /* ── success paths: placeholder resolves; server sees plaintext ── */

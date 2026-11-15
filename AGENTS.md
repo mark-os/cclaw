@@ -36,6 +36,7 @@ CClaw shamelessly borrows ideas from these projects:
 - Self-augmenting via QuickJS plugin system — agents load JS extensions from workspace at startup.
 - One tool at a time during development. Prove each layer works before adding the next.
 - No backward compatibility in code — delete old code, don't version it. DB schema changes are the one exception: they ship as forward-only patches (see Running).
+- **The standard for a feature is the average person running an agent.** Think about what they would want from it and build that, well. CClaw has one operator today; that is not the bar. Before adding, keeping or cutting a feature, ask whether that person would want it and whether it is good enough for them.
 
 ## Working With the Grain
 

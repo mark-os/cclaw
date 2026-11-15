@@ -225,6 +225,14 @@ answer to "can I delete this?".
 
 [error-handling.md]: error-handling.md
 
+## Dashboard and data explorer — `/admin`, `/admin/explore`
+
+`cclaw dashboard` prints `<base>/admin?token=…`. Opening it once puts the
+token in a cookie; after that `/admin` (the server-rendered admin page) and
+`/admin/explore` (a read-only view of every table, what each column means and
+how rows link) work in that browser. The explorer and its JSON API
+(`/admin/api/`) are described in [explorer.md](explorer.md).
+
 ## Shared files — `/share`
 
 `share_file` (an agent tool, not in the default grants) puts one workspace

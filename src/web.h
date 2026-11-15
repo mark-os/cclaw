@@ -12,9 +12,11 @@
 int web_start(Config *cfg, const char *db_path);
 
 /* The web server's handle is shared by civetweb's worker threads, so a
- * handler holds this lock for the whole request it serves — one request's
+ * handler holds this lock while it uses the database — one request's
  * statements never interleave with another's. Every handler that reads or
- * writes the database takes it. */
+ * writes the database takes it. Most hold it for the whole request; the data
+ * explorer (explore.c) releases it before writing its response, so a slow
+ * client never holds up an approval click. */
 void web_db_lock(void);
 void web_db_unlock(void);
 

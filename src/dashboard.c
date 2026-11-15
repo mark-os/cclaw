@@ -7,6 +7,7 @@
 #include "civetweb.h"
 #include "config_registry.h"
 #include "db.h"
+#include "explore.h"
 #include "approval.h"
 #include "wake.h"
 #include "web.h"
@@ -902,6 +903,12 @@ static int handle_admin_locked(struct mg_connection *conn);
 
 static int handle_admin(struct mg_connection *conn, void *cbdata) {
     (void)cbdata;
+    /* The data explorer (specs/explorer.md) locks per query, not per
+     * request: it writes its response after releasing the lock. */
+    const char *uri = mg_get_request_info(conn)->local_uri;
+    if (uri && (strncmp(uri, "/admin/api/", 11) == 0 ||
+                strcmp(uri, "/admin/explore") == 0 || strcmp(uri, "/admin/explore/") == 0))
+        return explore_handle(conn, s_db);
     web_db_lock();
     int rc = handle_admin_locked(conn);
     web_db_unlock();

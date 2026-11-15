@@ -1,0 +1,929 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>cclaw data</title>
+<style>
+/* The data explorer (specs/explorer.md). One page, no external requests:
+   system fonts, no images, everything drawn with textContent. */
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --fg: #171b24; --muted: #5a6272; --line: #d9dde4;
+  --link: #0a3fc9; --focus: #0a3fc9;
+  --ok: #1f7a45; --ok-bg: #e3f3e9; --warn: #8a5200; --warn-bg: #fbefd6;
+  --bad: #b3261e; --bad-bg: #fbe4e2; --tag-bg: #eceff4;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --surface: #1a1e27; --fg: #e6e9ef; --muted: #9aa3b4; --line: #2e3442;
+    --link: #8fb0ff; --focus: #8fb0ff;
+    --ok: #6fcf97; --ok-bg: #173324; --warn: #e6b455; --warn-bg: #3a2c0f;
+    --bad: #f28b82; --bad-bg: #3d1c1a; --tag-bg: #262b37;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 var(--sans); }
+a { color: var(--link); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, summary:focus-visible, main:focus-visible {
+  outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 3px;
+}
+main:focus { outline: none; }
+.top { border-bottom: 1px solid var(--line); background: var(--surface); }
+.top-in, .page { max-width: 980px; margin: 0 auto; padding: 0 16px; }
+.top-in { display: flex; align-items: baseline; gap: 12px; padding-top: 10px; padding-bottom: 10px; }
+.brand { font-weight: 600; color: var(--fg); text-decoration: none; }
+.top .sub { color: var(--muted); font-size: .85rem; }
+.page { padding-top: 16px; padding-bottom: 64px; }
+nav.crumbs { font-size: .85rem; color: var(--muted); margin-bottom: 14px; overflow-wrap: anywhere; }
+nav.crumbs ol { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 2px 6px; }
+nav.crumbs li + li::before { content: "\203A"; margin-right: 6px; color: var(--muted); }
+h1 { font-size: 1.6rem; line-height: 1.2; font-weight: 600; margin: 0 0 4px; overflow-wrap: anywhere; }
+h2 a, h2 .muted { text-transform: none; letter-spacing: 0; font-weight: 400; }
+h2 { font-size: .75rem; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
+     color: var(--muted); margin: 0 0 8px; }
+p { margin: 0 0 10px; }
+.lede { color: var(--muted); margin-bottom: 18px; max-width: 70ch; }
+.muted, .none { color: var(--muted); }
+.none { font-style: italic; }
+.small { font-size: .82rem; }
+.mono, code, pre { font-family: var(--mono); font-size: .86em; }
+section.card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+               padding: 14px 16px; margin-bottom: 16px; min-width: 0; }
+.rows { display: flex; flex-direction: column; }
+.row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+       padding: 8px 0; border-top: 1px solid var(--line); min-width: 0; }
+.row:first-child { border-top: 0; padding-top: 2px; }
+.row > .l { min-width: 0; overflow-wrap: anywhere; }
+.row > .r { color: var(--muted); text-align: right; min-width: 0; overflow-wrap: anywhere;
+            font-variant-numeric: tabular-nums; flex-shrink: 0; max-width: 55%; }
+.why { display: block; color: var(--muted); font-size: .82rem; line-height: 1.45; }
+.pill { display: inline-block; font-size: .72rem; font-weight: 500; padding: 1px 8px; border-radius: 999px;
+        background: var(--tag-bg); color: var(--muted); white-space: nowrap; vertical-align: 1px; }
+.pill.ok { background: var(--ok-bg); color: var(--ok); }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+.pill.bad { background: var(--bad-bg); color: var(--bad); }
+.pills { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: baseline; justify-content: flex-end; }
+.pills > a { font-size: .78rem; }
+.grp + .grp { margin-top: 12px; }
+.grp h3 { font-size: .85rem; font-weight: 600; margin: 0 0 2px; }
+/* fields */
+dl.fields { margin: 0; }
+dl.fields > div { display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); gap: 4px 16px;
+                  padding: 9px 0; border-top: 1px solid var(--line); }
+dl.fields > div:first-child { border-top: 0; padding-top: 2px; }
+dl.fields dt { font-family: var(--mono); font-size: .85rem; overflow-wrap: anywhere; }
+dl.fields dt .why { font-family: var(--sans); white-space: pre-line; margin-top: 2px; }
+dl.fields dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.val-text { white-space: pre-wrap; }
+.clamp { max-height: 9.5em; overflow: hidden; position: relative; }
+.raw { color: var(--muted); font-size: .8rem; margin-left: 6px; font-family: var(--mono); }
+pre.json { margin: 4px 0 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line);
+           border-radius: 6px; overflow-x: auto; white-space: pre; max-height: 30em; }
+details > summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
+button.link { font: inherit; font-size: .85rem; color: var(--link); background: none; border: 0;
+              padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+button.more { font: inherit; font-size: .9rem; padding: 6px 14px; border: 1px solid var(--line);
+              border-radius: 6px; background: var(--surface); color: var(--fg); cursor: pointer; margin-top: 10px; }
+/* lists */
+.tw { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table.list { border-collapse: collapse; width: 100%; font-size: .9rem; }
+table.list th, table.list td { text-align: left; padding: 8px 12px; border-top: 1px solid var(--line);
+                               vertical-align: top; }
+table.list th { border-top: 0; font-size: .7rem; letter-spacing: .07em; text-transform: uppercase;
+                color: var(--muted); font-weight: 600; white-space: nowrap; }
+table.list td { max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.list td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; padding: 2px 4px 2px 10px;
+        border: 1px solid var(--line); border-radius: 999px; background: var(--surface); }
+.chip a { text-decoration: none; padding: 0 6px; border-radius: 999px; }
+.note { color: var(--muted); font-size: .88rem; }
+.msg { border: 1px solid var(--line); border-left: 4px solid var(--muted); background: var(--surface);
+       border-radius: 6px; padding: 12px 14px; margin-bottom: 16px; max-width: 70ch; }
+.msg.bad { border-left-color: var(--bad); }
+.doc { white-space: pre-line; }
+@media (max-width: 640px) {
+  dl.fields > div { grid-template-columns: minmax(0, 1fr); }
+  h1 { font-size: 1.35rem; }
+  .row > .r { max-width: 50%; }
+}
+</style>
+</head>
+<body>
+<header class="top"><div class="top-in"><a class="brand" href="#/" data-nav>cclaw data</a>
+<span class="sub">read-only</span></div></header>
+<div class="page">
+<nav class="crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
+<main id="main" tabindex="-1" aria-live="polite"></main>
+</div>
+<script>
+"use strict";
+/* Reading is generic: one list page and one row page serve every table,
+   drawn from /admin/api/meta. Three tables get a few extra sections built
+   from the same API (agents, providers, channels). Every value from the
+   database is untrusted text and only ever reaches the page as textContent. */
+
+var META = null, TABLES = {};
+var MAIN = document.getElementById("main");
+var CRUMBS = document.getElementById("crumbs");
+var renderSeq = 0;
+
+/* ── tiny DOM builder: strings become text nodes, never markup ── */
+function h(tag, attrs) {
+  var el = document.createElement(tag);
+  if (attrs) for (var k in attrs) {
+    var v = attrs[k];
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k.slice(0, 2) === "on") el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (var i = 2; i < arguments.length; i++) add(el, arguments[i]);
+  return el;
+}
+function add(el, c) {
+  if (c === null || c === undefined || c === false) return;
+  if (Array.isArray(c)) { c.forEach(function (x) { add(el, x); }); return; }
+  el.appendChild(typeof c === "object" ? c : document.createTextNode(String(c)));
+}
+function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+
+/* ── API ── */
+function ApiError(status, message) { this.status = status; this.message = message; }
+function api(what, params) {
+  var qs = new URLSearchParams();
+  if (params) for (var k in params) if (params[k] !== undefined && params[k] !== null) qs.set(k, params[k]);
+  var url = "/admin/api/" + what + (qs.toString() ? "?" + qs.toString() : "");
+  return fetch(url, { credentials: "same-origin", cache: "no-store" }).then(function (r) {
+    return r.text().then(function (t) {
+      var body = null;
+      try { body = JSON.parse(t); } catch (e) { body = null; }
+      if (!r.ok) throw new ApiError(r.status, body && body.error ? body.error : ("HTTP " + r.status));
+      if (!body) throw new ApiError(r.status, "the server's answer was not JSON");
+      return body;
+    });
+  }, function () { throw new ApiError(0, "the server could not be reached"); });
+}
+function rows(table, filter, limit, after) {
+  return api("rows", { table: table, filter: filter ? JSON.stringify(filter) : null,
+                       limit: limit || null, after: after ? JSON.stringify(after) : null });
+}
+function getRow(table, key) { return api("row", { table: table, key: JSON.stringify(key) }); }
+
+/* ── names and values for people ── */
+var TITLES = { cron_jobs: "Schedules", models_cache: "Models offered by providers",
+  llm_responses: "LLM responses", llm_jobs: "LLM jobs", channel_chats: "Chats",
+  agent_models: "Agent model lists", agent_memory_blocks: "Memory attachments",
+  memory_notes: "Memory notes", secret_hosts: "Secret hosts", channel_outbox: "Channel outbox",
+  config: "Settings" };
+function title(t) {
+  if (TITLES[t]) return TITLES[t];
+  var s = t.replace(/_/g, " ");
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+function colOf(t, c) {
+  var m = TABLES[t];
+  if (!m) return null;
+  for (var i = 0; i < m.columns.length; i++) if (m.columns[i].name === c) return m.columns[i];
+  return null;
+}
+function firstSentence(s) {
+  if (!s) return "";
+  var p = s.split("\n\n")[0].replace(/\n/g, " ");
+  var m = p.match(/^(.{20,}?[.;:])(\s|$)/);
+  return m ? m[1] : p;
+}
+function isObj(v) { return v !== null && typeof v === "object"; }
+function fmtNum(n) { return typeof n === "number" ? n.toLocaleString() : String(n); }
+function when(ts) {
+  var d = new Date(ts * 1000);
+  return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric",
+                                       hour: "2-digit", minute: "2-digit" });
+}
+function ago(ts) {
+  var s = Math.round(Date.now() / 1000 - ts), f = s < 0, a = Math.abs(s), u;
+  if (a < 60) u = a + " s";
+  else if (a < 3600) u = Math.round(a / 60) + " min";
+  else if (a < 86400 * 2) u = Math.round(a / 3600) + " h";
+  else if (a < 86400 * 60) u = Math.round(a / 86400) + " days";
+  else return when(ts);
+  return f ? "in " + u : u + " ago";
+}
+function codeWord(t, c, v) {
+  var m = META.codes[t + "." + c];
+  return m && m[String(v)] !== undefined ? m[String(v)] : null;
+}
+function looksJson(s) {
+  if (typeof s !== "string") return null;
+  var x = s.trim();
+  if (!(x.charAt(0) === "{" && x.charAt(x.length - 1) === "}") &&
+      !(x.charAt(0) === "[" && x.charAt(x.length - 1) === "]")) return null;
+  try { return JSON.parse(x); } catch (e) { return null; }
+}
+
+/* Short form, for list cells and summaries. */
+function shortVal(t, c, v) {
+  var col = colOf(t, c) || {};
+  if (v === null || v === undefined) return h("span", { class: "none", text: "none" });
+  if (isObj(v)) {
+    if (v.hidden) return h("span", { class: "pill", text: "hidden" });
+    if (v.blob !== undefined) return h("span", { class: "muted", text: "binary, " + fmtNum(v.blob) + " bytes" });
+    if (v.preview !== undefined) return h("span", { title: fmtNum(v.length) + " characters" }, v.preview + "…");
+  }
+  if (col.display === "code") {
+    var w = codeWord(t, c, v);
+    if (w !== null) return h("span", { title: String(v) }, w);
+  }
+  if (col.display === "bool" && (v === 0 || v === 1)) return v ? "yes" : "no";
+  if (col.display === "time" && typeof v === "number" && v > 0)
+    return h("span", { title: when(v) + " (" + v + ")" }, ago(v));
+  return String(v);
+}
+
+/* Full form, for a row page. */
+function longVal(t, c, v) {
+  var col = colOf(t, c) || {};
+  if (v === null || v === undefined) return h("span", { class: "none", text: "none" });
+  if (isObj(v)) {
+    if (v.hidden) return [h("span", { class: "pill", text: "hidden" }),
+      h("span", { class: "why", text: "This value never leaves the server." })];
+    if (v.blob !== undefined) return h("span", { class: "muted", text: "binary, " + fmtNum(v.blob) + " bytes (not shown)" });
+    if (v.preview !== undefined) return [textBlock(v.preview),
+      h("span", { class: "why", text: "Showing the first " + fmtNum(v.preview.length) + " of " +
+                  fmtNum(v.length) + " characters." })];
+  }
+  if (col.display === "code") {
+    var w = codeWord(t, c, v);
+    if (w !== null) return [w, h("span", { class: "raw", text: String(v) })];
+  }
+  if (col.display === "bool" && (v === 0 || v === 1))
+    return [v ? "yes" : "no", h("span", { class: "raw", text: String(v) })];
+  if (col.display === "time" && typeof v === "number" && v > 0)
+    return [when(v), h("span", { class: "muted", text: " · " + ago(v) }), h("span", { class: "raw", text: String(v) })];
+  if (typeof v === "number") return col.pk || /(^|_)id$/.test(c) ? String(v) : fmtNum(v);
+  var j = looksJson(v);
+  if (j !== null) return jsonBlock(j);
+  return textBlock(v);
+}
+function jsonBlock(j) {
+  var text = JSON.stringify(j, null, 2), lines = text.split("\n").length;
+  if (lines <= 1 || text.length < 60) return h("code", { text: text.replace(/\s*\n\s*/g, " ") });
+  var n = Array.isArray(j) ? j.length + (j.length === 1 ? " item" : " items")
+                           : Object.keys(j).length + (Object.keys(j).length === 1 ? " key" : " keys");
+  return h("details", { open: lines <= 14 }, h("summary", { text: "JSON, " + n }),
+           h("pre", { class: "json", text: text }));
+}
+function textBlock(s) {
+  var long = s.length > 700 || s.split("\n").length > 8;
+  var el = h("div", { class: "val-text" + (long ? " clamp" : ""), text: s });
+  if (!long) return el;
+  var btn = h("button", { class: "link", type: "button", text: "Show all " + fmtNum(s.length) + " characters" });
+  btn.addEventListener("click", function () {
+    var open = el.classList.toggle("clamp");
+    btn.textContent = open ? "Show all " + fmtNum(s.length) + " characters" : "Show less";
+  });
+  return h("div", null, el, btn);
+}
+
+/* ── routes ── */
+function keyFromSegments(t, segs) {
+  var m = TABLES[t];
+  return segs.map(function (s, i) {
+    var name = m.key[i], col = colOf(t, name);
+    var integer = name === "rowid" || (col && /INT/i.test(col.type));
+    return integer && /^-?\d+$/.test(s) ? Number(s) : s;
+  });
+}
+function rowHash(t, key) {
+  return "#/r/" + encodeURIComponent(t) + "/" + key.map(function (k) {
+    return encodeURIComponent(String(k));
+  }).join("/");
+}
+function listHash(t, filter) {
+  return "#/t/" + encodeURIComponent(t) +
+         (filter && Object.keys(filter).length ? "?f=" + encodeURIComponent(JSON.stringify(filter)) : "");
+}
+function parseRoute(hash) {
+  var hs = (hash || "").replace(/^#/, "");
+  var q = "", i = hs.indexOf("?");
+  if (i >= 0) { q = hs.slice(i + 1); hs = hs.slice(0, i); }
+  var segs = hs.split("/").filter(function (s) { return s !== ""; }).map(function (s) {
+    try { return decodeURIComponent(s); } catch (e) { return s; }
+  });
+  var params = new URLSearchParams(q), filter = null;
+  if (params.get("f")) { try { filter = JSON.parse(params.get("f")); } catch (e) { filter = "bad"; } }
+  if (segs[0] === "tables") return { kind: "tables" };
+  if (segs[0] === "t" && segs[1]) return { kind: "list", table: segs[1], filter: filter };
+  if (segs[0] === "r" && segs[1] && segs.length > 2) return { kind: "row", table: segs[1], segs: segs.slice(2) };
+  return { kind: "home" };
+}
+function filterText(f) {
+  return Object.keys(f).map(function (k) {
+    var v = f[k];
+    return k + (v === null ? " is none" : Array.isArray(v) ? " in " + v.join(", ") : " = " + v);
+  }).join(", ");
+}
+
+/* ── breadcrumbs: the path actually taken, kept in history.state ── */
+function naturalTrail(route) {
+  var t = [{ hash: "#/", label: "Home" }];
+  if (route.kind === "tables") t.push({ hash: "#/tables", label: "All tables" });
+  if (route.kind === "list") t.push({ hash: location.hash, label: listLabel(route.table, route.filter) });
+  if (route.kind === "row") {
+    t.push({ hash: listHash(route.table), label: title(route.table) });
+    t.push({ hash: location.hash, label: route.segs.join(" · ") });
+  }
+  return t;
+}
+function listLabel(t, f) {
+  return title(t) + (f && f !== "bad" && Object.keys(f).length ? " (" + filterText(f) + ")" : "");
+}
+function currentTrail() {
+  var st = history.state;
+  if (st && Array.isArray(st.trail) && st.trail.length &&
+      st.trail[st.trail.length - 1].hash === location.hash) return st.trail;
+  return naturalTrail(parseRoute(location.hash));
+}
+function navigate(hash, label) {
+  var trail = currentTrail().slice(), found = -1;
+  for (var i = 0; i < trail.length; i++) if (trail[i].hash === hash) found = i;
+  if (hash === "#/" || hash === "#" || hash === "") { trail = []; found = -1; hash = "#/"; }
+  if (found >= 0) trail = trail.slice(0, found + 1);
+  else {
+    if (!trail.length) trail.push({ hash: "#/", label: "Home" });
+    if (hash !== "#/") trail.push({ hash: hash, label: label || hash });
+  }
+  if (hash === location.hash) history.replaceState({ trail: trail }, "", hash);
+  else history.pushState({ trail: trail }, "", hash);
+  render();
+}
+/* The page's own name, once known, replaces the placeholder in the trail. */
+function nameCurrent(label) {
+  var trail = currentTrail().slice();
+  trail[trail.length - 1] = { hash: location.hash, label: label };
+  history.replaceState({ trail: trail }, "", location.hash);
+  drawCrumbs(trail);
+}
+function drawCrumbs(trail) {
+  clear(CRUMBS);
+  var shown = trail.length > 7 ? [trail[0], null].concat(trail.slice(-5)) : trail;
+  var ol = h("ol");
+  shown.forEach(function (c, i) {
+    if (!c) { ol.appendChild(h("li", { class: "muted", text: "…" })); return; }
+    var last = i === shown.length - 1;
+    ol.appendChild(h("li", null, last ? h("span", { "aria-current": "page", text: c.label })
+                                      : link(c.hash, c.label)));
+  });
+  CRUMBS.appendChild(ol);
+}
+function link(hash, text, label) {
+  return h("a", { href: hash, "data-nav": true, "data-label": label || (typeof text === "string" ? text : null) }, text);
+}
+document.addEventListener("click", function (e) {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  var a = e.target.closest ? e.target.closest("a[data-nav]") : null;
+  if (!a) return;
+  e.preventDefault();
+  navigate(a.getAttribute("href"), a.getAttribute("data-label") || a.textContent);
+});
+window.addEventListener("popstate", function () { render(); });
+
+/* ── page frame and states ── */
+function page(seq) { return seq === renderSeq; }
+function setPage(nodes, docTitle) {
+  clear(MAIN);
+  add(MAIN, nodes);
+  document.title = (docTitle ? docTitle + " · " : "") + "cclaw data";
+}
+function loading() { setPage(h("p", { class: "muted", text: "Loading…" })); }
+function failure(err, what) {
+  if (err && err.status === 403) {
+    setPage([h("h1", { text: "Not signed in" }),
+      h("div", { class: "msg bad" },
+        h("p", null, "This page needs the dashboard's admin token, and this browser does not have it (or it has changed)."),
+        h("p", null, "On the machine running cclaw, run ", h("code", { text: "cclaw dashboard" }),
+          ". It prints a link with the token; open it once in this browser, then reload this page.")),
+    ], "Not signed in");
+    return;
+  }
+  setPage([h("h1", { text: "Something went wrong" }),
+    h("div", { class: "msg bad" },
+      h("p", null, "Could not load " + (what || "this page") + ": " + (err && err.message ? err.message : String(err)) + "."),
+      h("p", null, h("button", { class: "link", type: "button", text: "Try again", onclick: function () { start(); } }),
+        " · ", link("#/", "Home")))], "Error");
+}
+function section(heading, body, extra) {
+  return h("section", { class: "card" }, h("h2", null, heading, extra || null), body);
+}
+function rowLine(left, right) {
+  return h("div", { class: "row" }, h("div", { class: "l" }, left), h("div", { class: "r" }, right));
+}
+function pill(text, kind) { return h("span", { class: "pill" + (kind ? " " + kind : ""), text: text }); }
+
+/* ── home ── */
+function renderHome() {
+  var a = META.attention, out = [h("h1", { text: "Your cclaw" }),
+    h("p", { class: "lede", text: "What this cclaw is made of. Open anything to see what each field means and what it links to. Nothing here can be changed." })];
+  var list = h("div", { class: "rows" });
+  META.home.forEach(function (item) {
+    var t0 = item.tables[0];
+    var left = h("div", null, link(listHash(t0), item.title, title(t0)), h("span", { class: "why", text: item.doc }));
+    var extra = homeExtra(t0, a);
+    if (extra) left.appendChild(h("span", { class: "why" }, extra));
+    var counts = item.tables.map(function (t, i) {
+      var n = TABLES[t] ? TABLES[t].count : 0;
+      var lab = item.tables.length > 1 ? fmtNum(n) + " " + title(t).toLowerCase() : fmtNum(n);
+      return [i ? ", " : "", item.tables.length > 1 ? link(listHash(t), lab, title(t)) : lab];
+    });
+    list.appendChild(rowLine(left, counts));
+  });
+  out.push(section("Main data", list));
+  out.push(h("p", { class: "note" }, link("#/tables", "All " + META.tables.length + " tables"),
+    " — everything else, including queues, logs and conversation history."));
+  setPage(out, null);
+}
+function homeExtra(t, a) {
+  if (t === "sessions" && a.sessions_active) return a.sessions_active + " busy now";
+  if (t === "memory_blocks" && a.memory_shared) return a.memory_shared + " shared between agents";
+  if (t === "channels" && a.chats_unrouted)
+    return link(listHash("channel_chats", { session_id: null }), a.chats_unrouted + " chats not routed", "Chats not routed");
+  if (t === "approvals" && a.approvals_pending)
+    return link(listHash("approvals", { state: "pending" }), a.approvals_pending + " waiting for a decision", "Waiting approvals");
+  return null;
+}
+
+function renderTables() {
+  var list = h("div", { class: "rows" });
+  META.tables.forEach(function (t) {
+    list.appendChild(rowLine(h("div", null, link(listHash(t.name), title(t.name)),
+        h("span", { class: "why" }, h("span", { class: "mono", text: t.name }),
+          t.doc ? " — " + firstSentence(t.doc) : "")), fmtNum(t.count)));
+  });
+  setPage([h("h1", { text: "All tables" }),
+    h("p", { class: "lede", text: "Every table in the database, with what it holds. Counts are rows right now." }),
+    section("Tables", list)], "All tables");
+}
+
+/* ── list page (any table) ── */
+var PRIORITY = ["name", "label", "title", "agent_name", "provider_name", "model", "model_id", "purpose",
+  "pos", "kind", "value", "type", "role", "tool_name", "state", "status", "session_id", "channel_name",
+  "chat_id", "source", "approval_mode", "event", "key", "action", "table_name", "updated_at", "created_at"];
+var CONTENTISH = ["content", "text", "task", "payload", "args_json", "description", "guidance", "path"];
+function listColumns(t, filter) {
+  var m = TABLES[t], have = {}, cols = [];
+  m.columns.forEach(function (c) { have[c.name] = c; });
+  function take(n) {
+    if (!have[n] || cols.indexOf(n) >= 0 || (filter && n in filter && !Array.isArray(filter[n]))) return;
+    if (have[n].hidden === "always") return;
+    cols.push(n);
+  }
+  m.key.forEach(function (k) { if (k !== "rowid") take(k); });
+  if (m.key[0] === "rowid") cols = [];
+  PRIORITY.forEach(function (n) { if (cols.length < 5) take(n); });
+  for (var i = 0; i < CONTENTISH.length; i++) if (have[CONTENTISH[i]] && cols.indexOf(CONTENTISH[i]) < 0) { take(CONTENTISH[i]); break; }
+  m.columns.forEach(function (c) { if (cols.length < 4) take(c.name); });
+  return cols;
+}
+function renderList(route, seq) {
+  var t = route.table, m = TABLES[t];
+  if (!m) return notFound("There is no table called “" + t + "”.");
+  if (route.filter === "bad") return notFound("The filter in this address is not readable.");
+  var filter = route.filter || {};
+  var cols = listColumns(t, filter);
+  var plain = homeDoc(t), lede = plain || (m.doc ? firstSentence(m.doc) : "");
+  if (lede.toLowerCase() === title(t).toLowerCase() || lede.toLowerCase() === t) lede = "";
+  var head = [h("h1", { text: title(t) }), h("p", { class: "lede" },
+    h("span", { class: "mono", text: t }), lede ? " — " + lede : "")];
+  if (m.doc && (plain || firstSentence(m.doc) !== m.doc))
+    head.push(h("details", { class: "lede" }, h("summary", { text: "About this table" }),
+                h("p", { class: "doc small", text: m.doc })));
+  if (Object.keys(filter).length) {
+    var chips = h("div", { class: "chips", "aria-label": "Filters" });
+    Object.keys(filter).forEach(function (k) {
+      var rest = {};
+      Object.keys(filter).forEach(function (o) { if (o !== k) rest[o] = filter[o]; });
+      var one = {}; one[k] = filter[k];
+      chips.appendChild(h("span", { class: "chip" }, title(t) + " where " + filterText(one),
+        h("a", { href: listHash(t, rest), "data-nav": true, "data-label": listLabel(t, rest),
+                 "aria-label": "Remove this filter", title: "Remove this filter", text: "×" })));
+    });
+    head.push(chips);
+  }
+  var tbody = h("tbody"), more = h("div"), status = h("p", { class: "note" });
+  var table = h("div", { class: "tw" }, h("table", { class: "list" },
+    h("thead", null, h("tr", null, cols.map(function (c) { return h("th", { scope: "col", text: c }); }),
+      cols.length ? null : h("th", { text: "row" }))), tbody));
+  var shown = 0;
+  function addRows(res) {
+    res.rows.forEach(function (r) {
+      var tr = h("tr");
+      if (!cols.length) tr.appendChild(h("td", null, link(rowHash(t, r.key), "#" + r.key.join(" · "), rowLabelOf(t, r))));
+      cols.forEach(function (c, i) {
+        var v = r.values[c], cell = shortVal(t, c, v);
+        var td = h("td", { class: typeof v === "number" && colOf(t, c).display !== "time" &&
+                                   colOf(t, c).display !== "code" ? "num" : null });
+        if (i === 0) td.appendChild(link(rowHash(t, r.key), cell instanceof Node ? cell.textContent : cell, rowLabelOf(t, r)));
+        else add(td, cell);
+        if (typeof v === "string") td.title = v;
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    shown += res.rows.length;
+    clear(more);
+    if (res.next) {
+      more.appendChild(h("button", { class: "more", type: "button", text: "Load more", onclick: function (e) {
+        e.target.disabled = true; e.target.textContent = "Loading…";
+        rows(t, filter, 50, res.next).then(addRows, function (err) {
+          clear(more); more.appendChild(h("div", { class: "msg bad", text: "Could not load more rows: " + err.message }));
+        });
+      } }));
+    }
+    var total = Object.keys(filter).length ? null : m.count;
+    status.textContent = total !== null ? "Showing " + fmtNum(shown) + " of " + fmtNum(total) + "."
+                                        : "Showing " + fmtNum(shown) + (res.next ? " so far." : ".");
+  }
+  setPage(head.concat([h("p", { class: "muted", text: "Loading…" })]), title(t));
+  rows(t, Object.keys(filter).length ? filter : null, 50).then(function (res) {
+    if (!page(seq)) return;
+    if (!res.rows.length) {
+      setPage(head.concat([h("div", { class: "msg" },
+        h("p", null, Object.keys(filter).length ? "No " + title(t).toLowerCase() + " where " + filterText(filter) + "."
+                                               : "Nothing in " + title(t).toLowerCase() + " yet."),
+        m.doc ? h("p", { class: "muted small doc", text: "What would appear here: " + firstSentence(m.doc) }) : null)]), title(t));
+      return;
+    }
+    setPage(head.concat([status, table, more]), title(t));
+    addRows(res);
+  }, function (err) { if (page(seq)) failure(err, title(t).toLowerCase()); });
+}
+/* The home page's plain description, for the first table of a home entry. */
+function homeDoc(t) {
+  for (var i = 0; i < META.home.length; i++) if (META.home[i].tables[0] === t) return META.home[i].doc;
+  return null;
+}
+function notFound(msg) {
+  setPage([h("h1", { text: "Not found" }), h("div", { class: "msg" }, h("p", { text: msg }),
+    h("p", null, link("#/", "Home"), " · ", link("#/tables", "All tables")))], "Not found");
+}
+
+/* What to call a row. */
+function rowLabelOf(t, r) {
+  var v = r.values || {}, k = r.key;
+  function s(x) { return typeof x === "string" && x ? x : null; }
+  if (t === "channel_chats") return s(v.title) || k[1];
+  var own = s(v.label) || s(v.title);
+  if (own) return own;
+  var named = TABLES[t].key[0] !== "name" ? s(v.name) : null;
+  if (TABLES[t].key.length === 1 && typeof k[0] === "number")
+    return named ? "#" + k[0] + " " + named : "#" + k[0];
+  if (named && TABLES[t].key.length > 1) return named;
+  return k.join(" · ");
+}
+
+/* ── row page (any table) ── */
+function renderRow(route, seq) {
+  var t = route.table, m = TABLES[t];
+  if (!m) return notFound("There is no table called “" + t + "”.");
+  if (route.segs.length !== m.key.length)
+    return notFound("A row of " + title(t).toLowerCase() + " is named by " + m.key.join(", ") + ".");
+  var key = keyFromSegments(t, route.segs);
+  loading();
+  getRow(t, key).then(function (res) {
+    if (!page(seq)) return;
+    var label = rowLabelOf(t, res.row);
+    nameCurrent(label);
+    var out = [h("h1", { text: label }), h("p", { class: "lede" }, "A row of ",
+      link(listHash(t), title(t)), " ", h("span", { class: "mono", text: "(" + t + ")" }))];
+    var shaped = SHAPED[t] ? h("div") : null;
+    if (shaped) out.push(shaped);
+    out.push(fieldsSections(t, res));
+    out.push(linksOut(t, res));
+    out.push(linksIn(t, res));
+    setPage(out, label);
+    if (shaped) SHAPED[t](res, shaped, seq);
+  }, function (err) {
+    if (!page(seq)) return;
+    if (err.status === 404) notFound("There is no row " + key.join(" · ") + " in " + title(t).toLowerCase() + ". It may have been removed.");
+    else failure(err, "this row");
+  });
+}
+function fieldsSections(t, res) {
+  var m = TABLES[t], groups = { setting: [], measurement: [], other: [] }, classified = false;
+  var linkByCol = {};
+  (res.links_out || []).forEach(function (l) {
+    if (l && l.from_columns.length === 1 && l.exists) linkByCol[l.from_columns[0]] = l;
+  });
+  m.columns.forEach(function (c) {
+    if (c.class) classified = true;
+    var g = c.class === "measurement" ? "measurement" : c.class ? "setting" : "other";
+    groups[g].push(field(t, c, res.row.values[c.name], linkByCol[c.name]));
+  });
+  if (!classified) return section("Fields", h("dl", { class: "fields" }, groups.other));
+  var out = [];
+  if (groups.setting.length) out.push(section("What you configured", h("dl", { class: "fields" }, groups.setting)));
+  if (groups.measurement.length) out.push(section("What cclaw observed", h("dl", { class: "fields" }, groups.measurement)));
+  if (groups.other.length) out.push(section("Other fields", h("dl", { class: "fields" }, groups.other)));
+  return out;
+}
+function field(t, c, v, l) {
+  var dd = h("dd");
+  if (l && !isObj(v) && v !== null) {
+    var key = l.values;
+    dd.appendChild(TABLES[l.to] && sameCols(l.to_columns, TABLES[l.to].key)
+      ? link(rowHash(l.to, key), String(v)) : link(listHash(l.to, colsFilter(l.to_columns, key)), String(v), title(l.to)));
+    var w = longVal(t, c.name, v);
+    if (c.display) { dd.appendChild(h("span", { class: "muted" }, " · ")); add(dd, w); }
+  } else add(dd, longVal(t, c.name, v));
+  return h("div", null, h("dt", null, c.name, c.doc ? h("span", { class: "why", text: c.doc }) : null), dd);
+}
+function sameCols(a, b) { return a.length === b.length && a.every(function (x, i) { return x === b[i]; }); }
+function colsFilter(cols, vals) { var f = {}; cols.forEach(function (c, i) { f[c] = vals[i]; }); return f; }
+
+function linksOut(t, res) {
+  var ls = (res.links_out || []).filter(function (l) { return l; });
+  if (!ls.length) return null;
+  var list = h("div", { class: "rows" });
+  ls.forEach(function (l) {
+    var target = l.values.map(String).join(" · ");
+    var go = !l.exists ? h("span", null, h("span", { class: "mono", text: target }), " ", pill("no such row", "warn"))
+      : sameCols(l.to_columns, TABLES[l.to].key) ? link(rowHash(l.to, l.values), target)
+      : link(listHash(l.to, colsFilter(l.to_columns, l.values)), target, title(l.to));
+    list.appendChild(rowLine(h("div", null, h("span", { class: "mono", text: l.from_columns.join(", ") }),
+      h("span", { class: "why" }, "→ " + title(l.to) + " (" + l.to_columns.join(", ") + ")",
+        l.declared ? "" : " · by convention, not declared in the schema")), go));
+  });
+  return section("Links from this row", list);
+}
+function linksIn(t, res) {
+  var ls = res.links_in || [];
+  if (!ls.length) return null;
+  var list = h("div", { class: "rows" });
+  ls.slice().sort(function (a, b) { return (b.count > 0) - (a.count > 0); }).forEach(function (l) {
+    var n = l.count > l.count_capped ? fmtNum(l.count_capped) + "+" : fmtNum(l.count);
+    var by = l.from_columns.join(", ") + (l.when ? " (" + filterText(l.when) + ")" : "");
+    var left = h("div", null, l.count ? link(listHash(l.from, l.filter), title(l.from), title(l.from))
+                                      : h("span", { class: "muted", text: title(l.from) }),
+      h("span", { class: "why" }, "by " + by, l.declared ? "" : " · by convention"));
+    list.appendChild(rowLine(left, l.count ? n : h("span", { class: "none", text: "none" })));
+  });
+  return section("Rows that point here", list);
+}
+
+/* ── shaped views: agents, providers, channels ── */
+var ORD = ["1st choice", "2nd choice", "3rd choice"];
+function ordinal(i) { return ORD[i] || (i + 1) + "th choice"; }
+function sub(container, heading, seq, promise, draw) {
+  var body = h("p", { class: "muted", text: "Loading…" }), sec = section(heading, body);
+  container.appendChild(sec);
+  promise.then(function (x) {
+    if (!page(seq)) return;
+    var nodes = draw(x, sec.querySelector("h2"));
+    sec.replaceChild(h("div", null, nodes), body);
+  }, function (err) {
+    if (page(seq)) sec.replaceChild(h("div", { class: "msg bad", text: "Could not load this part: " + err.message }), body);
+  });
+}
+function countIn(res, from, col) {
+  var l = (res.links_in || []).filter(function (x) { return x.from === from && x.from_columns[0] === col; })[0];
+  return l ? l.count : 0;
+}
+function more(h2, text, hash, label) { h2.appendChild(h("span", { class: "muted" }, " · ", link(hash, text, label))); }
+function emptyLine(text) { return h("p", { class: "none", text: text }); }
+
+var SHAPED = {
+  agents: function (res, el, seq) {
+    var name = res.row.values.name, by = { agent_name: name };
+    el.appendChild(h("p", { class: "lede" }, res.row.values.description ? res.row.values.description.replace(/\.?$/, ". ") : "",
+      res.row.values.created_by ? ["Created by ", link(rowHash("agents", [res.row.values.created_by]), res.row.values.created_by), "."] : ""));
+    sub(el, "Models", seq, rows("agent_models", by, 200), function (r, h2) {
+      more(h2, "as a list", listHash("agent_models", by), "Model lists");
+      var groups = { chat: [], image: [], audio: [] };
+      r.rows.forEach(function (x) { (groups[x.values.purpose] = groups[x.values.purpose] || []).push(x.values); });
+      var list = h("div", { class: "rows" });
+      [["chat", "Chat"], ["image", "Images"], ["audio", "Audio"]].forEach(function (p) {
+        var g = (groups[p[0]] || []).sort(function (a, b) { return a.pos - b.pos; });
+        if (!g.length) {
+          list.appendChild(rowLine(h("span", null, p[1], h("span", { class: "why",
+            text: p[0] === "chat" ? "No models: this agent cannot run." : "No list: the global pick by capability is used." })), h("span", { class: "none", text: "none" })));
+        }
+        g.forEach(function (v, i) {
+          list.appendChild(rowLine(p[1] + ", " + ordinal(i), [link(rowHash("models", [v.model_id]), v.model_id),
+            v.reasoning_effort ? ", effort " + v.reasoning_effort : ""]));
+        });
+      });
+      return list;
+    });
+    sub(el, "Grants", seq, rows("grants", by, 200), function (r, h2) {
+      more(h2, r.rows.length + " as a list", listHash("grants", by), "Grants");
+      if (!r.rows.length) return emptyLine("No grants: this agent can use nothing.");
+      var kinds = {}, order = ["tool", "host", "read_path", "write_path", "secret"];
+      r.rows.forEach(function (x) { (kinds[x.values.kind] = kinds[x.values.kind] || []).push(x); });
+      Object.keys(kinds).forEach(function (k) { if (order.indexOf(k) < 0) order.push(k); });
+      var KIND = { tool: "Tools", host: "Hosts it may reach", read_path: "Paths it may read",
+                   write_path: "Paths it may write", secret: "Secrets it may use" };
+      var MODE = { silent: ["runs freely", ""], always: ["asks each time", "warn"], tool_decides: ["tool decides", ""] };
+      return order.filter(function (k) { return kinds[k]; }).map(function (k) {
+        var list = h("div", { class: "rows" });
+        kinds[k].forEach(function (x) {
+          var v = x.values, target = k === "tool" ? "tools" : k === "secret" ? "secrets" : null;
+          var name = target ? link(rowHash(target, [v.value]), v.value) : h("span", { class: "mono", text: v.value });
+          var pills = h("span", { class: "pills" });
+          if (k === "tool") { var md = MODE[v.approval_mode] || [v.approval_mode, ""]; pills.appendChild(pill(md[0], md[1])); }
+          pills.appendChild(pill("from " + v.source));
+          if (v.expires_at) pills.appendChild(pill((v.expires_at < Date.now() / 1000 ? "expired " : "expires ") + ago(v.expires_at),
+                                                   v.expires_at < Date.now() / 1000 ? "bad" : ""));
+          pills.appendChild(link(rowHash("grants", x.key), "details", "Grant"));
+          list.appendChild(rowLine(name, pills));
+        });
+        return h("div", { class: "grp" }, h("h3", { text: KIND[k] || k + " (" + kinds[k].length + ")" }), list);
+      });
+    });
+    sub(el, "Sessions", seq, rows("sessions", by, 20).then(function (s) {
+      var ids = s.rows.map(function (x) { return x.key[0]; });
+      var chats = s.rows.map(function (x) { return x.values.chat_id; }).filter(function (x) { return x; });
+      return Promise.all([s, ids.length ? rows("channel_chats", { session_id: ids }, 200) : { rows: [] },
+                          chats.length ? rows("channel_chats", { chat_id: chats }, 200) : { rows: [] }]);
+    }), function (r, h2) {
+      var s = r[0], pins = {}, titles = {};
+      r[1].rows.forEach(function (c) { pins[c.values.session_id] = c; });
+      r[2].rows.forEach(function (c) { titles[c.key[0] + "\u0000" + c.key[1]] = c; });
+      more(h2, countIn(res, "sessions", "agent_name") > s.rows.length ? "all " + countIn(res, "sessions", "agent_name") : "as a list",
+           listHash("sessions", by), "Sessions");
+      if (!s.rows.length) return emptyLine("No sessions yet.");
+      var list = h("div", { class: "rows" });
+      s.rows.forEach(function (x) {
+        var v = x.values, where, state;
+        if (!v.channel_name) where = h("span", { class: "why", text: "no chat" });
+        else {
+          var c = titles[v.channel_name + "\u0000" + v.chat_id];
+          var ct = c && c.values.title ? c.values.title : v.chat_id;
+          where = h("span", { class: "why" }, v.channel_name + ", ",
+            link(rowHash("channel_chats", [v.channel_name, v.chat_id]), ct, ct));
+        }
+        var pills = h("span", { class: "pills" });
+        state = v.state === "idle" ? pill("idle") : pill(v.state.replace(/_/g, " "), "ok");
+        pills.appendChild(state);
+        if (pins[x.key[0]]) pills.appendChild(pill("live in its chat", "ok"));
+        else if (v.channel_name) pills.appendChild(pill("left behind"));
+        list.appendChild(rowLine(h("span", null, link(rowHash("sessions", x.key), rowLabelOf("sessions", x)), where), pills));
+      });
+      return [list, h("p", { class: "note small", text: "“Live in its chat”: the chat sends its messages to this session. “Left behind”: the chat has moved on to another session (for example after /new)." })];
+    });
+    sub(el, "Memory", seq, rows("agent_memory_blocks", by, 200).then(function (a) {
+      var ids = a.rows.map(function (x) { return x.values.block_id; });
+      return Promise.all([a, ids.length ? rows("memory_blocks", { id: ids }, 200) : { rows: [] }]);
+    }), function (r, h2) {
+      var att = {};
+      r[0].rows.forEach(function (x) { att[x.values.block_id] = x.values; });
+      if (r[1].rows.length) more(h2, "as a list", listHash("memory_blocks", { id: Object.keys(att).map(Number) }), "Memory blocks");
+      if (!r[1].rows.length) return emptyLine("No memory blocks attached.");
+      var list = h("div", { class: "rows" });
+      r[1].rows.forEach(function (x) {
+        var v = x.values, a = att[x.key[0]];
+        var pills = h("span", { class: "pills" }, pill(a.read_only || v.read_only ? "read only" : "reads and writes", a.read_only || v.read_only ? "" : "ok"),
+          pill(v.placement === "system" ? "in the system prompt" : "in each turn's context"));
+        list.appendChild(rowLine(h("span", null, link(rowHash("memory_blocks", x.key), v.label),
+          h("span", { class: "why", text: (v.description || "") + (v.created_by === name ? " · made by this agent" : v.created_by ? " · made by " + v.created_by : " · made by the operator") })), pills));
+      });
+      return list;
+    });
+    sub(el, "Extensions", seq, Promise.all([rows("agent_extensions", by, 200), rows("extensions", { owner_agent: name }, 200)]), function (r) {
+      var list = h("div", { class: "rows" }), lines = {}, order = [];
+      function line(n) {
+        if (!lines[n]) { lines[n] = h("span", { class: "pills" }); order.push(n); }
+        return lines[n];
+      }
+      r[1].rows.forEach(function (x) {
+        line(x.key[0]).appendChild(pill("owns it"));
+        line(x.key[0]).appendChild(pill(x.values.published ? "published" : "draft"));
+      });
+      r[0].rows.forEach(function (x) {
+        var p = line(x.values.extension_name);
+        p.appendChild(pill("attached"));
+        p.appendChild(x.values.enabled ? pill("enabled", "ok") : pill("disabled"));
+      });
+      order.forEach(function (n) { list.appendChild(rowLine(link(rowHash("extensions", [n]), n), lines[n])); });
+      return list.childNodes.length ? list : emptyLine("No extensions.");
+    });
+    sub(el, "Schedules", seq, rows("cron_jobs", by, 200), function (r) {
+      if (!r.rows.length) return emptyLine("No schedules.");
+      var list = h("div", { class: "rows" });
+      r.rows.forEach(function (x) {
+        var v = x.values, when_ = v.cron_expr ? "cron " + v.cron_expr : v.interval_s ? "every " + fmtNum(v.interval_s) + " s"
+                 : v.run_at ? "once, " + when(v.run_at) : "";
+        list.appendChild(rowLine(h("span", null, link(rowHash("cron_jobs", x.key), v.name), h("span", { class: "why mono", text: when_ })),
+          v.enabled ? pill("on", "ok") : pill("off")));
+      });
+      return list;
+    });
+  },
+
+  providers: function (res, el, seq) {
+    var name = res.row.values.name, keyName = res.row.values.api_key_env;
+    var kl = (res.links_out || []).filter(function (l) { return l && l.to === "secrets"; })[0];
+    el.appendChild(section("API key", rowLine(
+      !keyName ? h("span", { class: "none", text: "No key configured." })
+        : kl && kl.exists ? h("span", null, "Stored as the secret ", link(rowHash("secrets", [keyName]), keyName))
+        : h("span", null, "Not in the secret store. Read from the environment variable ",
+            h("span", { class: "mono", text: keyName }), " if it is set."),
+      kl && kl.exists ? pill("stored", "ok") : keyName ? pill("environment only", "warn") : null)));
+    sub(el, "Models registered here", seq, rows("models", { provider_name: name }, 200), function (r, h2) {
+      more(h2, "as a list", listHash("models", { provider_name: name }), "Models");
+      if (!r.rows.length) return emptyLine("No models registered on this provider: nothing routes to it.");
+      var list = h("div", { class: "rows" });
+      r.rows.forEach(function (x) {
+        var v = x.values, st = v.status === "healthy" ? pill("healthy", "ok") : v.status === "disabled" ? pill("disabled") : pill(v.status, "warn");
+        list.appendChild(rowLine(h("span", null, link(rowHash("models", x.key), x.key[0]),
+          h("span", { class: "why", text: [v.context_window ? fmtNum(v.context_window) + " tokens" : null,
+            looksJson(v.capabilities) && looksJson(v.capabilities).length ? looksJson(v.capabilities).join(", ") : null,
+            v.total_requests ? fmtNum(v.total_requests) + " requests" : null].filter(Boolean).join(" · ") })), st));
+      });
+      return list;
+    });
+    var offered = countIn(res, "models_cache", "provider_name");
+    sub(el, "Offered by the provider", seq, rows("models_cache", { provider_name: name }, 5), function (r, h2) {
+      if (!r.rows.length) return emptyLine("No list fetched from this provider yet.");
+      more(h2, "all " + (offered > 1000 ? "1,000+" : fmtNum(offered)), listHash("models_cache", { provider_name: name }), "Models offered");
+      var list = h("div", { class: "rows" });
+      r.rows.forEach(function (x) {
+        var v = x.values;
+        list.appendChild(rowLine(h("span", null, link(rowHash("models_cache", x.key), v.id),
+          h("span", { class: "why", text: [v.context_length ? fmtNum(v.context_length) + " tokens" : null, v.modality].filter(Boolean).join(" · ") })), ""));
+      });
+      return [h("p", { class: "note", text: fmtNum(offered) + (offered > 1000 ? "+" : "") + " models on offer, list fetched " + ago(r.rows[0].values.synced_at) + "." }), list];
+    });
+  },
+
+  channels: function (res, el, seq) {
+    var name = res.row.values.name, da = res.row.values.default_agent;
+    el.appendChild(section("Unknown chats", rowLine(da ? h("span", null, "Get a new session with ", link(rowHash("agents", [da]), da), ".")
+      : h("span", null, "Dropped; the operator is told once per chat."), da ? pill("open door", "warn") : pill("closed", "ok"))));
+    sub(el, "Chats", seq, rows("channel_chats", { channel_name: name }, 200).then(function (c) {
+      var ids = c.rows.map(function (x) { return x.values.session_id; }).filter(function (x) { return x !== null; });
+      return Promise.all([c, ids.length ? rows("sessions", { id: ids }, 200) : { rows: [] }]);
+    }), function (r, h2) {
+      more(h2, "as a list", listHash("channel_chats", { channel_name: name }), "Chats");
+      var sess = {};
+      r[1].rows.forEach(function (x) { sess[x.key[0]] = x; });
+      var routed = r[0].rows.filter(function (x) { return x.values.session_id !== null; });
+      var unrouted = r[0].rows.filter(function (x) { return x.values.session_id === null; });
+      function chatLine(x) {
+        var v = x.values, label = v.title || v.chat_id;
+        var pills = h("span", { class: "pills" });
+        if (v.kind) pills.appendChild(pill(v.kind === "dm" ? "direct message" : "group"));
+        pills.appendChild(pill(v.delivery_mode === "explicit" ? "replies only by channel_send" : v.delivery_mode === "auto" ? "final message posts" : "replies: " + v.delivery_mode));
+        var why;
+        if (v.session_id !== null) {
+          var s = sess[v.session_id];
+          why = h("span", { class: "why" }, "→ ", link(rowHash("sessions", [v.session_id]), s ? rowLabelOf("sessions", s) : "#" + v.session_id),
+            s && s.values.agent_name ? [" (", link(rowHash("agents", [s.values.agent_name]), s.values.agent_name), ")"] : "");
+        } else {
+          why = h("span", { class: "why", text: "not routed" + (v.notified_at ? " · operator told " + ago(v.notified_at) : "") +
+                                              (v.last_message_at ? " · last message " + ago(v.last_message_at) : "") });
+        }
+        return rowLine(h("span", null, link(rowHash("channel_chats", x.key), label, label), why), pills);
+      }
+      var out = [];
+      out.push(h("div", { class: "grp" }, h("h3", { text: "Routed (" + routed.length + ")" }),
+        routed.length ? h("div", { class: "rows" }, routed.map(chatLine)) : emptyLine("No chat is routed to a session.")));
+      out.push(h("div", { class: "grp" }, h("h3", { text: "Not routed (" + unrouted.length + ")" }),
+        unrouted.length ? h("div", { class: "rows" }, unrouted.map(chatLine)) : emptyLine("Every chat seen is routed.")));
+      return out;
+    });
+  }
+};
+
+/* ── dispatch ── */
+function render() {
+  var seq = ++renderSeq, route = parseRoute(location.hash);
+  drawCrumbs(currentTrail());
+  if (route.kind === "home") renderHome();
+  else if (route.kind === "tables") renderTables();
+  else if (route.kind === "list") renderList(route, seq);
+  else renderRow(route, seq);
+  window.scrollTo(0, 0);
+  if (document.activeElement && document.activeElement.closest && document.activeElement.closest("#main, #crumbs"))
+    MAIN.focus({ preventScroll: true });
+}
+function start() {
+  loading();
+  api("meta").then(function (m) {
+    META = m;
+    TABLES = {};
+    m.tables.forEach(function (t) { TABLES[t.name] = t; });
+    if (!history.state) history.replaceState({ trail: naturalTrail(parseRoute(location.hash)) }, "", location.hash || "#/");
+    render();
+  }, function (err) { failure(err, "the description of the database"); });
+}
+start();
+</script>
+</body>
+</html>

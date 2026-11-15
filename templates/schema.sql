@@ -19,12 +19,16 @@ CREATE TABLE IF NOT EXISTS config (
 
 -- ═══ Providers ═══
 CREATE TABLE IF NOT EXISTS providers (
-  name TEXT PRIMARY KEY,
-  base_url TEXT NOT NULL,
-  endpoint_type TEXT NOT NULL DEFAULT 'openai',
-  api_key_env TEXT NOT NULL DEFAULT '',
-  default_model TEXT,
-  priority INTEGER NOT NULL DEFAULT 0,
+  name TEXT PRIMARY KEY,                      -- the key models and secrets refer to it by
+  base_url TEXT NOT NULL,                     -- API endpoint requests are sent to
+  endpoint_type TEXT NOT NULL DEFAULT 'openai',  -- wire format: openai | gemini | anthropic | responses |
+                                                 -- gemini_interactions
+  api_key_env TEXT NOT NULL DEFAULT '',       -- name of the key: an environment variable, else a system
+                                              -- secret of that name; empty = no key
+  default_model TEXT,                         -- fresh-install seed sugar only (seed.sql); not a routing
+                                              -- setting
+  priority INTEGER NOT NULL DEFAULT 0,        -- order providers are listed in (lowest first); new providers
+                                              -- go last
   -- JSON merged (json_patch, RFC 7386) into every outgoing request body for
   -- this provider as the LAST step of payload assembly, so it can override
   -- anything cclaw built. The escape hatch for provider-specific request
@@ -36,12 +40,13 @@ CREATE TABLE IF NOT EXISTS providers (
 -- A model belongs to one provider: removing a provider that still has models
 -- is refused (delete or move its models first).
 CREATE TABLE IF NOT EXISTS models (
-  id TEXT PRIMARY KEY,
-  provider_name TEXT NOT NULL REFERENCES providers(name) ON UPDATE CASCADE,
-  model TEXT NOT NULL,
-  context_window INTEGER,
-  max_output_tokens INTEGER,
-  capabilities TEXT DEFAULT '[]',
+  id TEXT PRIMARY KEY,                        -- canonical "<provider>/<model>" id that routing lists use
+  provider_name TEXT NOT NULL REFERENCES providers(name) ON UPDATE CASCADE,  -- the provider that serves it
+  model TEXT NOT NULL,                        -- the model name as the provider spells it on the wire
+  context_window INTEGER,                     -- tokens the model can read; NULL = unknown
+  max_output_tokens INTEGER,                  -- cap on tokens per reply; NULL = provider default
+  capabilities TEXT DEFAULT '[]',             -- JSON array, e.g. ["tools","image","audio"]; image/audio make
+                                              -- it eligible for media lists
   -- How this model spells reasoning effort on the wire, as JSON:
   --   {"format": "openrouter|openai|deepseek|gemini-level|gemini-budget",
   --    "levels": {"off":..,"minimal":..,"low":..,"medium":..,"high":..}}
@@ -50,16 +55,17 @@ CREATE TABLE IF NOT EXISTS models (
   -- and a request for it clamps to the nearest level that does. NULL column =
   -- use the endpoint's default map (see specs/providers.md).
   effort_map TEXT,
-  status TEXT NOT NULL DEFAULT 'healthy',
-  degraded_until INTEGER,
-  total_requests INTEGER DEFAULT 0,
-  total_tokens_in INTEGER DEFAULT 0,
-  total_tokens_out INTEGER DEFAULT 0,
-  total_cost_nano INTEGER DEFAULT 0,
-  consec_failures INTEGER DEFAULT 0,
-  last_success_at INTEGER,
-  last_error_at INTEGER,
-  synced_at INTEGER,
+  status TEXT NOT NULL DEFAULT 'healthy',     -- healthy | degraded (failing, sinks in routing until
+                                              -- degraded_until) | disabled (operator)
+  degraded_until INTEGER,                     -- end of the current degraded cooldown
+  total_requests INTEGER DEFAULT 0,           -- requests sent to this model, ever
+  total_tokens_in INTEGER DEFAULT 0,          -- prompt tokens, summed
+  total_tokens_out INTEGER DEFAULT 0,         -- completion tokens, summed
+  total_cost_nano INTEGER DEFAULT 0,          -- cost reported by providers, in billionths of a dollar
+  consec_failures INTEGER DEFAULT 0,          -- failed requests in a row; zeroed by a success
+  last_success_at INTEGER,                    -- last successful request
+  last_error_at INTEGER,                      -- last failed request
+  synced_at INTEGER,                          -- no writer today
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
@@ -74,10 +80,10 @@ CREATE TABLE IF NOT EXISTS models (
 -- capability pick (llm_proc.c model_pick_for_media). A media row is refused
 -- unless the model's capabilities include that purpose (trigger below).
 CREATE TABLE IF NOT EXISTS agent_models (
-  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,
+  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,  -- whose list this is
   purpose TEXT NOT NULL DEFAULT 'chat' CHECK (purpose IN ('chat','image','audio')),
-  model_id TEXT NOT NULL REFERENCES models(id),
-  pos INTEGER NOT NULL,
+  model_id TEXT NOT NULL REFERENCES models(id),  -- the model at this place in the list
+  pos INTEGER NOT NULL,                       -- place in the list, 0 = first choice
   -- How hard this agent wants this model to think: off|minimal|low|medium|high.
   -- NULL (the default) sends nothing, which is what every model did before the
   -- knob existed. The level is translated to wire form at build time through
@@ -134,14 +140,14 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
 
 -- ═══ Extensions ═══
 CREATE TABLE IF NOT EXISTS extensions (
-  name TEXT PRIMARY KEY,
+  name TEXT PRIMARY KEY,                      -- the key tools, hooks and channels refer to it by
   path TEXT NOT NULL,                       -- shared store dir: ~/.cclaw/extensions/<name>
-  version TEXT DEFAULT '0.0.0',
+  version TEXT DEFAULT '0.0.0',               -- the manifest's version
   owner_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,
                                             -- the agent that promoted it; NULL for an
                                             -- extension shipped in the binary
   published INTEGER NOT NULL DEFAULT 0,     -- the single publish flag
-  enabled INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1,         -- 0 = installed but switched off
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
@@ -152,14 +158,16 @@ CREATE TABLE IF NOT EXISTS extensions (
 -- No ON DELETE clause anywhere: there is no agent-delete verb, so the default
 -- NO ACTION refuses deleting an in-use agent — fail-closed until one exists.
 CREATE TABLE IF NOT EXISTS agents (
-  name TEXT PRIMARY KEY,
-  system_prompt TEXT,
-  description TEXT,
-  max_iterations INTEGER DEFAULT 25,
-  max_output_tokens INTEGER,
-  shell_timeout INTEGER DEFAULT 30,
+  name TEXT PRIMARY KEY,                      -- the key every agent_name column refers to
+  system_prompt TEXT,                         -- prompt template; NULL = the default prompt (tools, memory,
+                                              -- skills are added after it)
+  description TEXT,                           -- one line saying what the agent is for
+  max_iterations INTEGER DEFAULT 25,          -- LLM requests allowed per turn
+  max_output_tokens INTEGER,                  -- cap on tokens per reply; NULL = the model's
+  shell_timeout INTEGER DEFAULT 30,           -- seconds a shell_exec call may run
   shell_path TEXT,               -- interpreter for shell_exec's -c; NULL = /bin/sh
-  sandbox_profile TEXT DEFAULT 'standard',
+  sandbox_profile TEXT DEFAULT 'standard',    -- containment: host | standard | restricted (specs/sandbox-
+                                              -- profiles.md)
   created_by TEXT REFERENCES agents(name) ON UPDATE CASCADE,
                                  -- creating agent (update_agent authorization); NULL = operator
   hold_until INTEGER,            -- quiesce lease (cclaw rename-agent): while in the
@@ -194,11 +202,11 @@ CREATE TABLE IF NOT EXISTS agents (
 -- approval_id: the approval being applied when the row was written; NULL when
 -- none was (a re-grant that revives an expired row takes the new one).
 CREATE TABLE IF NOT EXISTS grants (
-  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,
-  kind TEXT NOT NULL,
-  value TEXT NOT NULL,
-  approval_mode TEXT NOT NULL DEFAULT 'silent',
-  expires_at INTEGER,
+  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,  -- who holds the grant
+  kind TEXT NOT NULL,                         -- tool | host | read_path | write_path | secret
+  value TEXT NOT NULL,                        -- the tool name, host, path or secret name granted
+  approval_mode TEXT NOT NULL DEFAULT 'silent',  -- tool grants only: silent | always | tool_decides
+  expires_at INTEGER,                         -- when the grant stops counting; NULL = never
   created_at INTEGER DEFAULT (unixepoch()),
   source TEXT NOT NULL CHECK (source IN ('approval','operator','agent_create',
     'extension','seed','capture','migration','legacy')),
@@ -207,10 +215,10 @@ CREATE TABLE IF NOT EXISTS grants (
 );
 
 CREATE TABLE IF NOT EXISTS agent_extensions (
-  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
-  extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,
-  config TEXT,
-  enabled INTEGER NOT NULL DEFAULT 1,
+  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,  -- the agent the extension is attached to
+  extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,  -- the attached extension
+  config TEXT,                                -- per-agent extension settings (JSON); NULL = none
+  enabled INTEGER NOT NULL DEFAULT 1,         -- 0 = attached but switched off for this agent
   PRIMARY KEY (agent_name, extension_name)
 );
 
@@ -221,14 +229,14 @@ CREATE TABLE IF NOT EXISTS agent_extensions (
 -- that state. A crash-looping channel stays 'active' and is retried on a
 -- backoff; 'broken' exists only in rows an older build left (--check lifts it).
 CREATE TABLE IF NOT EXISTS channels (
-  name TEXT PRIMARY KEY,
+  name TEXT PRIMARY KEY,                      -- the key chats, sessions and the outbox refer to it by
   extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,
                                             -- the code fronting this channel; NULL = none
   prev_extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,
                                             -- revert target recorded by channel swap
   type TEXT NOT NULL DEFAULT '',            -- manifest $.channel.type (display only)
   status TEXT NOT NULL DEFAULT 'draft',
-  pid INTEGER,
+  pid INTEGER,                                -- process id of the running channel runner; NULL = not running
   default_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,
                     -- Channel open-door policy: non-NULL = unknown chats are
                     -- accepted and get a new session bound to this agent;
@@ -305,28 +313,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_chats_session
 -- ═══ Sessions ═══
 CREATE TABLE IF NOT EXISTS sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT,
-  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
-  channel_name TEXT,                        -- the chat this session belongs to (both NULL =
-  chat_id TEXT,                             -- none). Older sessions left behind by /new still
-                                            -- point at their chat; channel_chats.session_id
-                                            -- says which session the chat is pinned to now.
-  parent_session_id INTEGER DEFAULT -1,
-  parent_tool_call_id TEXT,
-  depth INTEGER NOT NULL DEFAULT 0,
+  name TEXT,                                  -- a human label for the conversation
+  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,  -- the agent that runs this session (never
+                                                              -- changes)
+  channel_name TEXT,                        -- the channel of the chat this session belongs
+                                            -- to; NULL = no chat
+  chat_id TEXT,                             -- the chat this session belongs to, with
+                                            -- channel_name; NULL = no chat. Older sessions
+                                            -- left behind by /new still point at their chat;
+                                            -- channel_chats.session_id says which session the
+                                            -- chat is pinned to now.
+  parent_session_id INTEGER DEFAULT -1,       -- the session that launched this one; -1 = none
+  parent_tool_call_id TEXT,                   -- the parent's launch_agent call this session answers
+  depth INTEGER NOT NULL DEFAULT 0,           -- how many launches deep: 0 = top level
   tool_filter TEXT,                         -- JSON array of tool names; NULL = unrestricted.
                                             -- Positive scope frozen at spawn (launch_agent),
                                             -- intersected with grants per turn — never grants
                                             -- anything itself. A chat's filter is not copied
                                             -- here: channel_chats.tool_filter is read live.
-  state TEXT NOT NULL DEFAULT 'idle',
+  state TEXT NOT NULL DEFAULT 'idle',         -- idle | llm_running | tool_running | awaiting_approval |
+                                              -- compacting | rate_limited
   owner_instance TEXT,                      -- live owner (processes.instance_id); NULL ⟺ state='idle'
-  turn_iteration INTEGER NOT NULL DEFAULT 0,
+  turn_iteration INTEGER NOT NULL DEFAULT 0,  -- LLM requests made so far in the current turn
   turn_context TEXT,                        -- <RELEVANT_CONTEXT> block, materialized once at turn
                                             -- start (llm_proc.c) and reused verbatim by every
                                             -- tool-loop iteration so the request prefix stays
                                             -- byte-stable for prompt caching. NULL = no block.
-  leaf_id INTEGER DEFAULT -1,
+  leaf_id INTEGER DEFAULT -1,                 -- the newest entry of the active branch; -1 = none
   compaction_fail_count INTEGER NOT NULL DEFAULT 0,  -- consecutive failed compaction attempts;
                                             -- zeroed on success. At 3 the operator channel gets
                                             -- one notice (llm_proc.c) — the agent is never told.
@@ -375,9 +388,9 @@ CREATE TABLE IF NOT EXISTS delivery_edges (
 -- ═══ Entries ═══
 CREATE TABLE IF NOT EXISTS entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER NOT NULL,
-  parent_id INTEGER NOT NULL DEFAULT -1,
-  original_parent_id INTEGER,
+  session_id INTEGER NOT NULL,                -- the session this entry belongs to
+  parent_id INTEGER NOT NULL DEFAULT -1,      -- the entry before this one on its branch; -1 = first
+  original_parent_id INTEGER,                 -- the parent before compaction moved it
   turn_id INTEGER,          -- the turn this entry belongs to. Minted when a user entry
                             -- follows a non-user entry (the inbox drain's first message,
                             -- or a directly appended user entry); every entry after it
@@ -386,21 +399,24 @@ CREATE TABLE IF NOT EXISTS entries (
   iteration_id INTEGER,     -- one LLM request/response *inside* a turn: minted per request
                             -- by db_next_iteration_id, shared by the assistant message,
                             -- its tool_call parts and their tool results.
-  type TEXT NOT NULL DEFAULT 'user_message',
+  type TEXT NOT NULL DEFAULT 'user_message',  -- user_message | assistant_message | tool_call | tool_result |
+                                              -- reasoning | compaction | cron_result | ...
   part_index INTEGER NOT NULL DEFAULT 0,
-  role INTEGER NOT NULL DEFAULT 1,
-  content TEXT,
+  role INTEGER NOT NULL DEFAULT 1,            -- who speaks: 0 system, 1 user, 2 assistant, 3 tool, 4
+                                              -- compaction
+  content TEXT,                               -- the text (for a tool call: its JSON arguments)
   tool_calls TEXT,
-  tool_call_id TEXT,
-  tool_name TEXT,
-  is_error INTEGER NOT NULL DEFAULT 0,
-  stop_reason INTEGER NOT NULL DEFAULT 0,
-  model TEXT,
-  usage_in INTEGER,
-  usage_out INTEGER,
+  tool_call_id TEXT,                          -- pairs a tool call with its result
+  tool_name TEXT,                             -- the tool that was called or answered
+  is_error INTEGER NOT NULL DEFAULT 0,        -- 1 = a failed tool result or error message
+  stop_reason INTEGER NOT NULL DEFAULT 0,     -- why the model stopped: 1 stop, 2 length, 3 tool use, 4 error,
+                                              -- 5 aborted
+  model TEXT,                                 -- the model that wrote an assistant entry
+  usage_in INTEGER,                           -- prompt tokens of the request that produced it
+  usage_out INTEGER,                          -- completion tokens
   cached_tokens INTEGER,   -- subset of usage_in the provider served from cache
                            -- (NULL when the provider doesn't report it)
-  cost_nano INTEGER,
+  cost_nano INTEGER,                          -- cost in billionths of a dollar
   token_estimate INTEGER,
   content_bytes INTEGER,
   tool_call_count INTEGER NOT NULL DEFAULT 0,
@@ -572,16 +588,16 @@ CREATE INDEX IF NOT EXISTS idx_inbox_pending ON inbox(session_id, consumed) WHER
 
 -- ═══ Tools ═══
 CREATE TABLE IF NOT EXISTS tools (
-  name TEXT PRIMARY KEY,
+  name TEXT PRIMARY KEY,                      -- the name the model calls it by
   extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,
                                              -- NULL for built-in C tools
-  description TEXT,
-  parameters_json TEXT,
+  description TEXT,                           -- what the model is told the tool does
+  parameters_json TEXT,                       -- JSON schema of its arguments
   path TEXT,                                 -- handler file (in the shared store)
   agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
                                              -- owner scope, NULL = global
-  enabled INTEGER NOT NULL DEFAULT 1,
-  policy TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,         -- 0 = registered but switched off
+  policy TEXT,                                -- JSON per-argument rules (allow / ask / deny); NULL = none
   egress_hosts TEXT                          -- comma-separated hosts declared by the
                                              -- manifest ($.tools[].hosts). Non-NULL
                                              -- REPLACES the agent's host grants for
@@ -634,13 +650,15 @@ CREATE INDEX IF NOT EXISTS idx_hook_directives_session ON hook_directives(sessio
 CREATE TABLE IF NOT EXISTS memory_blocks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   created_by TEXT REFERENCES agents(name) ON UPDATE CASCADE,
-  label TEXT NOT NULL,
-  description TEXT,
-  char_limit INTEGER NOT NULL DEFAULT 5000,
+  label TEXT NOT NULL,                        -- the name agents address the block by
+  description TEXT,                           -- what the block is for, shown to agents
+  char_limit INTEGER NOT NULL DEFAULT 5000,   -- most characters the notes may hold, for agents (the operator
+                                              -- is not bound)
   read_only INTEGER NOT NULL DEFAULT 0,   -- 1 = no agent may change it
-  placement TEXT NOT NULL DEFAULT 'system',
+  placement TEXT NOT NULL DEFAULT 'system',   -- 'system' (system prompt) or 'context' (each turn's context
+                                              -- block)
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),  -- last change to the block or its notes
   UNIQUE(created_by, label)
 );
 
@@ -662,8 +680,8 @@ CREATE TABLE IF NOT EXISTS agent_memory_blocks (
 -- current, and a stale one is indistinguishable from one written yesterday.
 CREATE TABLE IF NOT EXISTS memory_notes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  block_id INTEGER NOT NULL REFERENCES memory_blocks(id) ON DELETE CASCADE,
-  text TEXT NOT NULL,
+  block_id INTEGER NOT NULL REFERENCES memory_blocks(id) ON DELETE CASCADE,  -- the block the note is in
+  text TEXT NOT NULL,                         -- the note
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())  -- last time the text changed
 );
@@ -678,26 +696,29 @@ CREATE INDEX IF NOT EXISTS idx_memory_notes_block
 -- bare wake (the agent pulse).
 CREATE TABLE IF NOT EXISTS cron_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
-  name TEXT NOT NULL,
-  cron_expr TEXT NOT NULL,
+  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,  -- the agent the job belongs to
+  name TEXT NOT NULL,                         -- the job name, unique per agent
+  cron_expr TEXT NOT NULL,                    -- 5-field schedule; '' when run_at or interval_s is used
   run_at INTEGER,                            -- one-shot: fire once at this time
   interval_s INTEGER,                        -- fixed period: refire every N seconds
-  session_id INTEGER NOT NULL,
-  task TEXT NOT NULL,
+  session_id INTEGER NOT NULL,                -- the session the job was set from
+  task TEXT NOT NULL,                         -- the message the agent gets when it fires
   script TEXT,                               -- workspace-relative QJS path; runs sandboxed at
                                              -- fire time. NULL = no script payload
-  channel_name TEXT,                         -- chat stamp: the durable identity a fire routes
-  chat_id TEXT,                              -- through (channel_chats.session_id, resolved at
-                                             -- fire time); both NULL = no chat
+  channel_name TEXT,                         -- chat stamp, with chat_id: the durable identity
+                                             -- a fire routes through; NULL = no chat
+  chat_id TEXT,                              -- chat stamp, with channel_name: a fire goes to
+                                             -- the session this chat pins
+                                             -- (channel_chats.session_id, resolved at fire
+                                             -- time); NULL = no chat
   target TEXT,                               -- NULL = follow the conversation (stamped chat,
                                              -- else stamped session_id); 'pin' = explicit
                                              -- session pin; 'new' = fresh session per fire
   target_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,
                                              -- agent for 'new'-mode fires; NULL = agent_name
-  enabled INTEGER NOT NULL DEFAULT 1,
-  next_run_at INTEGER NOT NULL DEFAULT 0,
-  last_run_at INTEGER,
+  enabled INTEGER NOT NULL DEFAULT 1,         -- 0 = paused
+  next_run_at INTEGER NOT NULL DEFAULT 0,     -- when it fires next
+  last_run_at INTEGER,                        -- when it last fired
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   FOREIGN KEY (channel_name, chat_id) REFERENCES channel_chats(channel_name, chat_id)
     ON UPDATE CASCADE
@@ -713,18 +734,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_cron_jobs_name ON cron_jobs(agent_name, na
 -- They do not overlap now that once-scope is gone.
 CREATE TABLE IF NOT EXISTS approvals (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id   INTEGER NOT NULL,
-  tool_call_id TEXT,
+  session_id   INTEGER NOT NULL,              -- the session that asked
+  tool_call_id TEXT,                          -- the tool call that parked
   tool_name    TEXT,                         -- WHAT parked: the tool that asked
   park_reason  TEXT,                         -- WHY it parked: 'approval_required' (the
                                              -- gate/tool asked) or 'sensitive_target'
                                              -- (specs/trust.md rule 1 — per-call, never
                                              -- satisfiable by a standing grant)
-  args_json    TEXT,
-  resolve      TEXT NOT NULL DEFAULT 'rerun',
-  state        TEXT NOT NULL DEFAULT 'pending',
-  decided_via  TEXT,
-  requested_at INTEGER DEFAULT (unixepoch()),
+  args_json    TEXT,                          -- the call as asked ({{SECRET:name}} placeholders, never
+                                              -- values)
+  resolve      TEXT NOT NULL DEFAULT 'rerun',  -- 'rerun' (run the call on approval) or 'apply' (apply the
+                                               -- request document)
+  state        TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | consumed | denied | expired
+  decided_via  TEXT,                          -- who or what decided (dashboard, a channel, auto:...)
+  requested_at INTEGER DEFAULT (unixepoch()),  -- when it was asked
   expires_at   INTEGER
 );
 CREATE INDEX IF NOT EXISTS approvals_pending ON approvals(session_id, state) WHERE state='pending';
@@ -790,9 +813,10 @@ CREATE TABLE IF NOT EXISTS secret_hosts (
 -- loaded into the agent-facing snapshot — an agent cannot interpolate them.
 CREATE TABLE IF NOT EXISTS secrets (
   name       TEXT PRIMARY KEY,                    -- ^[A-Z][A-Z0-9_]*$
-  value      TEXT NOT NULL,
+  value      TEXT NOT NULL,                   -- encrypted; never shown, logged or sent to a model
   source     TEXT NOT NULL DEFAULT 'operator',      -- 'operator'|'generated'|'captured'
-  scope      TEXT NOT NULL DEFAULT 'agent'
+  scope      TEXT NOT NULL DEFAULT 'agent'    -- 'agent' (usable in tool calls when granted) or 'system'
+                                              -- (provider keys, daemon only)
              CHECK (scope IN ('agent','system')),
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );

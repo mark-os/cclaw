@@ -1,5 +1,6 @@
 /* Test: capability-routed transcription plumbing —
- * model_pick_by_capability (healthy/degraded/disabled/missing-cap filtering)
+ * model_pick_by_capability (healthy/degraded/disabled/missing-cap filtering),
+ * model_pick_for_media (an agent's purpose list first, global pick otherwise)
  * and transcribe_build_body (gemini + openai request shapes). */
 #define _POSIX_C_SOURCE 200809L
 #include "llm_proc.h"
@@ -84,6 +85,73 @@ static void test_picker_degraded_expired(sqlite3 *db) {
         if (strcmp(out[i].id, "oai/audio-degraded") == 0) seen = 1;
     if (!seen) FAIL("expired-degraded should be eligible again");
     exec_sql(db, "UPDATE models SET degraded_until=unixepoch()+600 WHERE id='oai/audio-degraded';");
+    PASS();
+}
+
+/* agent_models.purpose (v59): an agent's audio/image list is the whole policy
+ * for that purpose — pos order, models in their cooldown sunk below healthy
+ * ones, 'disabled' dropped, and nothing from the global pick appended. */
+static void test_media_pick_agent_list(sqlite3 *db) {
+    TEST(media_pick_agent_list);
+    exec_sql(db,
+        "INSERT OR IGNORE INTO agents(name) VALUES('Ears');"
+        "INSERT INTO agent_models(agent_name, purpose, model_id, pos) VALUES"
+        " ('Ears','audio','oai/audio-degraded',0),"
+        " ('Ears','audio','oai/audio2',1),"
+        " ('Ears','audio','oai/audio-disabled',2);");
+    ModelCandidate out[8];
+    int n = model_pick_for_media(db, "Ears", "audio", out, 8);
+    if (n != 2) { printf("FAIL: expected 2 candidates, got %d\n", n); return; }
+    if (strcmp(out[0].id, "oai/audio2") != 0) FAIL("healthy row should lead");
+    if (strcmp(out[1].id, "oai/audio-degraded") != 0) FAIL("degraded row should sink, not vanish");
+    for (int i = 0; i < n; i++)
+        if (strcmp(out[i].id, "gem/audio") == 0) FAIL("global pick must not be appended");
+    PASS();
+}
+
+/* Rows present but every one in its cooldown: the agent's choice still
+ * stands (health reorders, never empties) — the media is not rerouted to a
+ * model nobody picked for this agent. */
+static void test_media_pick_agent_all_unhealthy(sqlite3 *db) {
+    TEST(media_pick_agent_all_unhealthy);
+    exec_sql(db,
+        "INSERT OR IGNORE INTO agents(name) VALUES('Sick');"
+        "INSERT INTO agent_models(agent_name, purpose, model_id, pos) VALUES"
+        " ('Sick','audio','oai/audio-degraded',0);");
+    ModelCandidate out[8];
+    int n = model_pick_for_media(db, "Sick", "audio", out, 8);
+    if (n != 1 || strcmp(out[0].id, "oai/audio-degraded") != 0)
+        FAIL("expected only the agent's own (degraded) model");
+    /* Only disabled rows: the agent chose, and chose nothing usable. */
+    exec_sql(db,
+        "INSERT OR IGNORE INTO agents(name) VALUES('Off');"
+        "INSERT INTO agent_models(agent_name, purpose, model_id, pos) VALUES"
+        " ('Off','audio','oai/audio-disabled',0);");
+    if (model_pick_for_media(db, "Off", "audio", out, 8) != 0)
+        FAIL("disabled-only list should yield no candidate, not the global pick");
+    PASS();
+}
+
+/* No rows for the purpose (chat rows don't count), or no agent at all:
+ * exactly today's global capability pick. One purpose never leaks into the
+ * other. */
+static void test_media_pick_fallback(sqlite3 *db) {
+    TEST(media_pick_fallback);
+    exec_sql(db,
+        "INSERT OR IGNORE INTO agents(name) VALUES('Plain');"
+        "INSERT INTO agent_models(agent_name, purpose, model_id, pos) VALUES"
+        " ('Plain','chat','oai/chat',0),"
+        " ('Plain','image','gem/audio',0);");
+    ModelCandidate a[8], b[8];
+    int na = model_pick_for_media(db, "Plain", "audio", a, 8);
+    int nb = model_pick_by_capability(db, "audio", b, 8);
+    if (na != nb || na != 2) { printf("FAIL: %d vs %d\n", na, nb); return; }
+    for (int i = 0; i < na; i++)
+        if (strcmp(a[i].id, b[i].id) != 0) FAIL("fallback differs from global pick");
+    if (model_pick_for_media(db, NULL, "audio", a, 8) != 2) FAIL("NULL agent → global");
+    if (model_pick_for_media(db, "Ghost", "audio", a, 8) != 2) FAIL("unknown agent → global");
+    int ni = model_pick_for_media(db, "Plain", "image", a, 8);
+    if (ni != 1 || strcmp(a[0].id, "gem/audio") != 0) FAIL("image list ignored");
     PASS();
 }
 
@@ -223,6 +291,9 @@ int main(void) {
     test_picker_filters(db);
     test_picker_no_match(db);
     test_picker_degraded_expired(db);
+    test_media_pick_agent_list(db);
+    test_media_pick_agent_all_unhealthy(db);
+    test_media_pick_fallback(db);
     test_body_gemini_audio(db);
     test_body_openai_audio(db);
     test_body_gemini_image(db);

@@ -858,10 +858,10 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
         "  required=excluded.required",
         manifest, name, store, owner_agent);
 
-    /* attach to the owner (published stays 0 until publish). "system" is not
-     * an agents row (v31 FK would refuse it): builtin installs stay global —
-     * tools carry agent_name NULL and attachment happens per-agent later. */
-    if (owner_agent && strcmp(owner_agent, "system") != 0) {
+    /* attach to the owner (published stays 0 until publish). A builtin
+     * install has no owner (NULL): it stays global — tools carry agent_name
+     * NULL and attachment happens per-agent later. */
+    if (owner_agent) {
         rc |= run_ingest(db,
             "INSERT OR IGNORE INTO agent_extensions(agent_name, extension_name, enabled) "
             "VALUES(:owner, :name, 1)",
@@ -890,12 +890,11 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
              * (default_agent, prev_extension_name, created_at) must survive
              * a reinstall — install owns only the code-identity columns. */
             rc |= run_ingest(db,
-                "INSERT INTO channels(name, extension_name, type, binary_path, status) "
-                "VALUES(:name, :name, json_extract(:m,'$.channel.type'), "
-                "       :store || '/' || json_extract(:m,'$.channel.handler'), 'draft') "
+                "INSERT INTO channels(name, extension_name, type, status) "
+                "VALUES(:name, :name, json_extract(:m,'$.channel.type'), 'draft') "
                 "ON CONFLICT(name) DO UPDATE SET "
                 "  extension_name=excluded.extension_name, type=excluded.type, "
-                "  binary_path=excluded.binary_path, status='draft'",
+                "  status='draft'",
                 manifest, name, store, owner_agent);
             /* Every channel extension has an 'enabled' key, default off —
              * the launch gate reads it (specs/config.md). Declared keys win
@@ -915,7 +914,7 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
      * owns its own write and computes next_run_at). Routing is refined in
      * Layer 5. Documents are collected first: cron_upsert reads cron_jobs, so
      * writing mid-iteration of `st` would nest a real-table read inside it. */
-    if (rc == 0) {
+    if (rc == 0 && owner_agent) {
         char **docs = NULL;
         size_t ndocs = 0;
         sqlite3_stmt *st;
@@ -956,13 +955,12 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
 
     /* agents[]: apply each definition through the shared path
      * (specs/self-configuration.md). Caps are enforced against the promoting
-     * agent; the builtin owner 'system' is the operator (no caps). An agent
+     * agent; a builtin (no owner) applies as the operator (no caps). An agent
      * name that already exists is skipped, never overwritten — first-come,
      * which also keeps re-promote idempotent. Runs outside the txn because
      * agent_definition_apply owns its own transaction. */
     if (rc == 0) {
-        const char *creator =
-            (owner_agent && strcmp(owner_agent, "system") != 0) ? owner_agent : NULL;
+        const char *creator = owner_agent;
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
                 "SELECT json(value), json_extract(value,'$.name'), "
@@ -1059,7 +1057,7 @@ typedef struct {
     size_t nfiles;
 } BuiltinBundle;
 
-/* True when an extensions row of this name exists and is NOT system-owned —
+/* True when an extensions row of this name exists and has an owning agent —
  * belt-and-suspenders: the takeover guard in extension_install already
  * refuses this (unreachable in practice), but never fight a foreign row. */
 static int builtin_row_foreign(sqlite3 *db, const char *name) {
@@ -1071,14 +1069,14 @@ static int builtin_row_foreign(sqlite3 *db, const char *name) {
         sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
         if (sqlite3_step(s) == SQLITE_ROW) {
             const char *o = (const char *)sqlite3_column_text(s, 0);
-            foreign = (o && strcmp(o, "system") != 0);
+            foreign = (o && o[0]);
         }
         sqlite3_finalize(s);
     }
     return foreign;
 }
 
-/* Stage a builtin bundle beside the store and install it as 'system'.
+/* Stage a builtin bundle beside the store and install it with no owner.
  * The store dir is the bundle's final home, so installing from a sibling
  * staging dir avoids copy_tree src==dst. Bundle code ships in the binary;
  * the files on disk are a cache, rewritten on every start so a binary
@@ -1102,7 +1100,7 @@ static int builtin_stage_install(sqlite3 *db, const char *base,
     }
 
     char *err = NULL;
-    if (rc == 0) rc = extension_install(db, staging, "system", &err);
+    if (rc == 0) rc = extension_install(db, staging, NULL, &err);
     if (rc != 0)
         LOG_ERROR_("builtin extension '%s' install failed: %s",
                    b->name, err ? err : "write failed");

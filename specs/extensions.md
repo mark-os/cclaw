@@ -479,15 +479,17 @@ There is **one extension model**, not two. Extensions shipped in the binary
 (the `telegram`, `discord` and `whatsapp` channels and the `cclaw-docs` skills
 bundle) are installed at every daemon start via
 `extension_install_builtin()`, which stages the embedded templates and runs
-them through the same `extension_install()` path as an agent's promote, under
-the reserved owner name `'system'` (agent names are PascalCase-enforced, so
-`'system'` can never collide with one). They carry a real `extension.json`
+them through the same `extension_install()` path as an agent's promote, with
+no owner: `extensions.owner_agent` is NULL (a declared FK to `agents` since
+v59; before that the string `'system'` stood in). No owner means no
+attachment, no grants and no cron rows are minted for one. The agent-facing
+`extension_list` still shows such an extension as owned by `system`. They carry a real `extension.json`
 like any other bundle — no manifest synthesis, no `builtin` flag.
 
 **Name ownership is first-come (npm-style), not shadowing.** A promote may
 never change the owner of an existing extension name — `extension_install()`
 refuses the ingest if the name is already owned by someone else, even for the
-system-owned `telegram` name. This closes a takeover hole: without the guard,
+shipped (ownerless) `telegram` name. This closes a takeover hole: without the guard,
 any agent could `extension_promote` a bundle named `telegram` and silently
 redirect the daemon's channel routing. Overriding what code fronts a channel
 is a deliberate operator/CLI verb (`cclaw channel swap`), never a side effect

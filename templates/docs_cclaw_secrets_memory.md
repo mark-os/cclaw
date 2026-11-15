@@ -57,7 +57,7 @@ Each block's header reads
 - `placement: system` — part of the system prompt, rendered once per session;
   an edit shows from your next session. Only for stable identity content.
 - `read-only` — you can see the block but not change it.
-- `shared` — another agent owns the block and you see the same notes.
+- `shared` — another agent created the block and you see the same notes.
 
 - Use blocks for durable facts: who the operator is, standing preferences,
   project state that must survive sessions.
@@ -75,5 +75,5 @@ Tools: `memory_block_create` (label, description, placement) and
 `memory_note_add` (block, text), `memory_note_edit` (block, notes:
 [{id, text}]) and `memory_note_delete` (block, ids) for notes. Agent
 definitions and extension manifests can seed initial blocks via
-`memory_blocks[]`; `{"attach": <block id>}` there shares one of your own
-blocks with the new agent (read-only unless `read_only` is false).
+`memory_blocks[]`; `{"attach": <block id>}` there shares a block you hold
+with the new agent (read-only unless `read_only` is false).

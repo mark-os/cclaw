@@ -350,6 +350,7 @@ static void test_model_context_window(void) {
 
     sqlite3_exec(db,
         "INSERT INTO agents(name) VALUES ('a-id'),('a-null');"
+        "INSERT INTO providers(name, base_url) VALUES ('p','http://p');"
         "INSERT INTO models(id, provider_name, model, context_window) VALUES"
         "  ('m-big','p','vendor/big',200000),"
         "  ('m-null','p','vendor/null',NULL);"

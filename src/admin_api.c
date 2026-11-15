@@ -333,7 +333,7 @@ int admin_switch_model(sqlite3 *db, const char *model_id, char *prev, size_t pre
 
     /* Previous head (first agent's pos 0) — reported, not load-bearing. */
     if (prev && prev_sz && sqlite3_prepare_v2(db,
-            "SELECT model_id FROM agent_models"
+            "SELECT model_id FROM agent_models WHERE purpose='chat'"
             " ORDER BY agent_name, pos LIMIT 1", -1, &stmt, NULL) == SQLITE_OK) {
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             const char *v = (const char *)sqlite3_column_text(stmt, 0);
@@ -349,13 +349,15 @@ int admin_switch_model(sqlite3 *db, const char *model_id, char *prev, size_t pre
         return -1;
     int rc = 0;
     if (sqlite3_prepare_v2(db,
-            "DELETE FROM agent_models WHERE model_id=?1", -1, &stmt, NULL) == SQLITE_OK) {
+            "DELETE FROM agent_models WHERE model_id=?1 AND purpose='chat'",
+            -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
         if (sqlite3_step(stmt) != SQLITE_DONE) rc = -1;
         sqlite3_finalize(stmt);
     } else rc = -1;
     if (rc == 0 && sqlite3_exec(db,
-            "UPDATE agent_models SET pos = pos + 1;", NULL, NULL, NULL) != SQLITE_OK)
+            "UPDATE agent_models SET pos = pos + 1 WHERE purpose='chat';",
+            NULL, NULL, NULL) != SQLITE_OK)
         rc = -1;
     if (rc == 0) {
         if (sqlite3_prepare_v2(db,
@@ -566,9 +568,9 @@ int admin_list_agents(sqlite3 *db, AdminAgent **out, size_t *out_count) {
     const char *sql =
         "SELECT name,"
         " (SELECT model_id FROM agent_models am WHERE am.agent_name=agents.name"
-        "   ORDER BY pos LIMIT 1),"
+        "   AND am.purpose='chat' ORDER BY pos LIMIT 1),"
         " (SELECT model_id FROM agent_models am WHERE am.agent_name=agents.name"
-        "   ORDER BY pos LIMIT 1 OFFSET 1),"
+        "   AND am.purpose='chat' ORDER BY pos LIMIT 1 OFFSET 1),"
         " max_iterations, sandbox_profile FROM agents ORDER BY name;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
@@ -623,7 +625,8 @@ int admin_set_agent_model(sqlite3 *db, const char *agent_name,
         return -1;
     int rc = 0;
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "DELETE FROM agent_models WHERE agent_name=?1",
+    if (sqlite3_prepare_v2(db, "DELETE FROM agent_models WHERE agent_name=?1"
+                               " AND purpose='chat'",
                            -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
         if (sqlite3_step(stmt) != SQLITE_DONE) rc = -1;

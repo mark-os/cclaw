@@ -1021,6 +1021,14 @@ static void test_agent_models_effort(void) {
     assert(sqlite3_step(s) == SQLITE_DONE);
     sqlite3_finalize(s);
 
+    /* agent.models is the chat list only (v59): a media list the operator
+     * set must survive the agent replacing its chat routing. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO models(id, provider_name, model, capabilities)"
+        " VALUES('ears@openrouter','openrouter','ears','[\"audio\"]');"
+        "INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+        " VALUES('test','audio','ears@openrouter',0);", NULL, NULL, NULL) == SQLITE_OK);
+
     /* Bare-string replacement clears the effort (whole-list replace). */
     ctx.current_tool_call_id = "ef2";
     r = call_handler(&reg,
@@ -1042,6 +1050,10 @@ static void test_agent_models_effort(void) {
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(sqlite3_column_int(s, 0) == 1);
     sqlite3_finalize(s);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_models WHERE agent_name='test'"
+        " AND purpose='audio' AND model_id='ears@openrouter'", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_models WHERE agent_name='test'"
+        " AND purpose='chat'", 0, -1) == 1);
 
     tools_free(&reg);
     db_close(db);

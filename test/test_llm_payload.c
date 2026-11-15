@@ -1454,6 +1454,7 @@ static char *effort_probe(sqlite3 *db, int64_t sid, const ContextPlan *plan,
 
 static void put_effort_map(sqlite3 *db, const char *id, const char *map) {
     char *sql = sqlite3_mprintf(
+        "INSERT OR IGNORE INTO providers(name, base_url) VALUES('wire_test','http://w');"
         "INSERT INTO models(id, provider_name, model, effort_map)"
         " VALUES(%Q,'wire_test','test-model',%Q)"
         " ON CONFLICT(id) DO UPDATE SET effort_map=excluded.effort_map;", id, map);
@@ -1789,6 +1790,8 @@ static void test_anthropic_payload(void) {
 
     /* The model row's own output cap wins over the floor. */
     assert(sqlite3_exec(db,
+        "INSERT OR IGNORE INTO providers(name, base_url, endpoint_type)"
+        " VALUES('anthropic','http://a','anthropic');"
         "INSERT INTO models(id, provider_name, model, max_output_tokens)"
         " VALUES('big@anthropic','anthropic','claude-sonnet-5-5',64000);",
         NULL, NULL, NULL) == SQLITE_OK);

@@ -55,8 +55,8 @@ static sqlite3 *seed(const char *deaf_timeout) {
         " VALUES('" CH "', '/tmp/test_channel_deaf_ext', '0.0.0', 'default', 0, 1);",
         NULL, NULL, NULL) == SQLITE_OK);
     assert(sqlite3_exec(db,
-        "INSERT INTO channels(name, extension_name, type, binary_path, status)"
-        " VALUES('" CH "', '" CH "', 'stub', '', 'active');",
+        "INSERT INTO channels(name, extension_name, type, status)"
+        " VALUES('" CH "', '" CH "', 'stub', 'active');",
         NULL, NULL, NULL) == SQLITE_OK);
     assert(sqlite3_exec(db,
         "INSERT INTO config(key, value, default_value, description)"

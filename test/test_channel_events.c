@@ -230,9 +230,10 @@ static void test_channel_events_wildcard_fallback(void) {
     chdir_work();
 
     assert(sqlite3_exec(db,
-        "INSERT INTO channels(name, extension_name, type, binary_path,"
+        "INSERT OR IGNORE INTO extensions(name, path) VALUES('mychannel','/x');"
+        "INSERT INTO channels(name, extension_name, type,"
         "                     status, default_agent)"
-        " VALUES('mychannel','mychannel','test','/x','active','testagent');",
+        " VALUES('mychannel','mychannel','test','active','testagent');",
         NULL, NULL, NULL) == SQLITE_OK);
     test_event_insert(db, "mychannel", "message", "{\"chat_id\":\"userX\",\"text\":\"hi\"}");
 
@@ -279,12 +280,13 @@ static void test_channel_events_no_binding(void) {
 static void test_gate_channel_seed(sqlite3 *db, const char *name, const char *admin_ids) {
     char sql[512];
     snprintf(sql, sizeof(sql),
-        "INSERT OR REPLACE INTO channels(name, extension_name, type, binary_path, status)"
-        " VALUES('%s','%s','test','/x','active');"
+        "INSERT OR IGNORE INTO extensions(name, path) VALUES('%s','/x');"
+        "INSERT OR REPLACE INTO channels(name, extension_name, type, status)"
+        " VALUES('%s','%s','test','active');"
         "INSERT INTO config(key, value, default_value, description)"
         " VALUES('%s.admin_ids','%s','','admins')"
         " ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
-        name, name, name, admin_ids);
+        name, name, name, name, admin_ids);
     assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
 }
 

@@ -5,7 +5,7 @@
 All provider configuration lives in `cclaw.db`:
 - `providers` table: name, base_url, endpoint_type, api_key_env — **transport only**
 - `models` table: canonical id (`model@provider`), context_window, max_output_tokens, capabilities, effort_map, health status
-- `agent_models` table: each agent's routing list, in `pos` order
+- `agent_models` table: each agent's routing lists, one per `purpose` (`chat`, `image`, `audio`), each in `pos` order
 - `secrets` table (scope `system`): encrypted API keys, named by the provider's `api_key_env` (e.g. `OPENROUTER_API_KEY`)
 
 Agents never store provider keys. The trusted process decrypts a key when it loads config and uses it on its LLM worker threads. Provider keys never reach tool children (see Security Model below).
@@ -44,7 +44,24 @@ Routing does not walk the `providers` table. Each request walks the agent's
 `agent_models` list in `pos` order (`load_candidates`, `src/llm_proc.c`).
 Health reorders that list and a failure moves to the next candidate; the
 policy is in [error-handling.md](error-handling.md). A candidate whose
-provider key does not resolve drops out, as described above.
+provider key does not resolve drops out, as described above. Chat routing
+reads only the `purpose='chat'` rows.
+
+### Media models (image / audio)
+
+Inbound media (a voice note, a photo) is always turned into text by a
+separate model before the agent sees it. Which model: the session's agent's
+`agent_models` rows for that purpose (`image` or `audio`), in `pos` order
+(`model_pick_for_media`, `src/llm_proc.c`). An agent with no rows for the
+purpose gets the global pick: every non-disabled model whose `capabilities`
+contain the purpose and that is not in an error cooldown, in catalog order
+(`model_pick_by_capability`). With rows, the list is the whole policy, the
+same rule as chat: a model in its cooldown sinks below the healthy ones but is
+still tried, `disabled` drops out, and the global pick is never appended — so
+media is never sent to a model nobody chose for that agent. A row is only
+accepted for a model whose `capabilities` include the purpose (enforced by a
+trigger on `agent_models`). There is no agent-facing way to set these lists
+yet; the operator writes the rows.
 
 `providers.priority` has one remaining use: at config load, the first
 provider in `priority` order whose key resolves becomes `cfg->provider`.
@@ -88,7 +105,7 @@ row is all the setup there is; the seed ships both, inert until
 ```sql
 -- route an agent to it (or use a request_config document's agent.models)
 UPDATE agent_models SET model_id='anthropic/claude-sonnet-5-5'
- WHERE agent_name='Assistant' AND pos=0;
+ WHERE agent_name='Assistant' AND purpose='chat' AND pos=0;
 ```
 
 What the builder does that the other two don't, and why:

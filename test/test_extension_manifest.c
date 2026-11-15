@@ -56,7 +56,7 @@ static sqlite3 *open_seeded(void) {
     test_seed_agent(db, "default");
     test_seed_agent(db, "grantee");
     test_seed_agent(db, "intruder");
-    test_seed_agent(db, "system");   /* extension_install_builtin owner */
+    /* No 'system' agent: a builtin install has no owner at all (v59). */
     return db;
 }
 
@@ -474,9 +474,9 @@ static void test_extension_fork_roundtrip(void) {
         "\"channel\":{\"type\":\"telegram\",\"handler\":\"channel.qjs\"}}\n");
     assert(sqlite3_exec(db,
         "INSERT INTO extensions(name, path, owner_agent, published)"
-        " VALUES('tg','/tmp/test_fork_src','system',1);"
-        "INSERT INTO channels(name, extension_name, type, binary_path, status)"
-        " VALUES('tg','tg','telegram','/tmp/test_fork_src/channel.qjs','active');",
+        " VALUES('tg','/tmp/test_fork_src',NULL,1);"
+        "INSERT INTO channels(name, extension_name, type, status)"
+        " VALUES('tg','tg','telegram','active');",
         NULL, NULL, NULL) == SQLITE_OK);
 
     ToolRegistry reg;
@@ -519,6 +519,7 @@ static void test_extension_fork_roundtrip(void) {
     r = t->handler("{\"name\":\"nope\"}", t->user_data, &(int){0});
     assert(r && strstr(r, "not registered")); free(r);
     assert(sqlite3_exec(db,
+        "INSERT OR IGNORE INTO agents(name) VALUES('someone-else');"
         "INSERT INTO extensions(name, path, published, owner_agent)"
         " VALUES('private','/tmp/test_fork_src',0,'someone-else');",
         NULL, NULL, NULL) == SQLITE_OK);
@@ -557,7 +558,7 @@ static void test_install_refuses_owner_takeover(void) {
     printf("  PASS test_install_refuses_owner_takeover\n");
 }
 
-/* extension_install_builtin on a fresh scratch DB: telegram lands owner=system
+/* extension_install_builtin on a fresh scratch DB: telegram lands with no owner
  * published=1 with a manifest on disk; the channel row exists ('draft'); a
  * second run preserves an 'active' status. */
 static void test_install_builtin(void) {
@@ -571,9 +572,9 @@ static void test_install_builtin(void) {
 
     assert(extension_install_builtin(db, TEST_DB) == 0);
 
-    /* cclaw-docs: skills-only, system-owned, published, backfilled. */
-    char *downer = q1(db, "SELECT owner_agent FROM extensions WHERE name='cclaw-docs'");
-    assert(downer && strcmp(downer, "system") == 0); free(downer);
+    /* cclaw-docs: skills-only, shipped (no owner), published, backfilled. */
+    assert(qint(db, "SELECT owner_agent IS NULL FROM extensions"
+                    " WHERE name='cclaw-docs'") == 1);
     assert(qint(db, "SELECT published FROM extensions WHERE name='cclaw-docs'") == 1);
     struct stat dst;
     assert(stat("/tmp/extensions/cclaw-docs/skills/configuring-cclaw/SKILL.md", &dst) == 0);
@@ -589,8 +590,12 @@ static void test_install_builtin(void) {
     assert(extension_install_builtin(db, TEST_DB) == 0);
     assert(qint(db, "SELECT enabled FROM agent_extensions"
                     " WHERE agent_name='OldTimer' AND extension_name='cclaw-docs'") == 0);
-    char *owner = q1(db, "SELECT owner_agent FROM extensions WHERE name='telegram'");
-    assert(owner && strcmp(owner, "system") == 0); free(owner);
+    assert(qint(db, "SELECT owner_agent IS NULL FROM extensions"
+                    " WHERE name='telegram'") == 1);
+    /* No owner means no owner-side rows either: no attachment or grants
+     * minted for a phantom 'system' agent. */
+    assert(qint(db, "SELECT count(*) FROM grants g JOIN tools t ON t.name=g.value"
+                    " WHERE t.extension_name='telegram'") == 0);
     assert(qint(db, "SELECT published FROM extensions WHERE name='telegram'") == 1);
     struct stat st;
     assert(stat("/tmp/extensions/telegram/extension.json", &st) == 0);

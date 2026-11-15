@@ -138,6 +138,7 @@ static void test_grants_superset_refused(void) {
 static void test_extension_gate(void) {
     seed_creator("Extender", "standard");
     sqlite3_exec(g_db,
+        "INSERT OR IGNORE INTO agents(name) VALUES('Someone');"
         "INSERT INTO extensions(name, path, owner_agent, published, enabled)"
         " VALUES('privext','/x','Someone',0,1),"
         "       ('pubext','/y','Someone',1,1),"
@@ -172,6 +173,12 @@ static void test_clone_from(void) {
     sqlite3_exec(g_db,
         "UPDATE agents SET description='tmpl', system_prompt='sp',"
         " max_iterations=11 WHERE name='Template'", NULL, NULL, NULL);
+    /* A media list too: a clone copies routing for every purpose. */
+    assert(sqlite3_exec(g_db,
+        "INSERT INTO models(id,provider_name,model,capabilities)"
+        " VALUES('p/ears','p','ears','[\"audio\"]');"
+        "INSERT INTO agent_models(agent_name,purpose,model_id,pos)"
+        " VALUES('Template','audio','p/ears',0);", NULL, NULL, NULL) == SQLITE_OK);
 
     char *err = NULL;
     int rc = agent_definition_apply(g_db,
@@ -191,6 +198,12 @@ static void test_clone_from(void) {
     assert(strcmp((const char *)sqlite3_column_text(s, 3), "restricted") == 0);
     sqlite3_finalize(s);
     assert(grants_contains(g_db, "Copy", "tool", "web_fetch"));
+    assert(sqlite3_prepare_v2(g_db,
+        "SELECT group_concat(purpose||':'||model_id, ' ' ORDER BY purpose, pos)"
+        " FROM agent_models WHERE agent_name='Copy'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "audio:p/ears chat:p/m") == 0);
+    sqlite3_finalize(s);
 
     /* Clone laundering refused: creator without the source's grants. */
     seed_creator("Poor", "standard");

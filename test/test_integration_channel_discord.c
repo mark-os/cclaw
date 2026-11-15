@@ -340,8 +340,11 @@ static void seed_db(int port, int rest_port) {
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", rest_port);
     snprintf(gw_url, sizeof(gw_url), "ws://127.0.0.1:%d/", port);
 
-    sqlite3_exec(db, "INSERT OR REPLACE INTO extensions(name,path)"
-        " VALUES('discord','" EXT_DIR "');", NULL, NULL, NULL);
+    /* An owner marks the row as not the shipped bundle (owner NULL since
+     * v59), so the runner's builtin install leaves this test copy alone. */
+    sqlite3_exec(db, "INSERT OR IGNORE INTO agents(name) VALUES('Tester');"
+        "INSERT OR REPLACE INTO extensions(name,path,owner_agent)"
+        " VALUES('discord','" EXT_DIR "','Tester');", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT OR REPLACE INTO channels(name,extension_name)"
         " VALUES('discord','discord');", NULL, NULL, NULL);
 

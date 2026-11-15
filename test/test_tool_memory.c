@@ -310,7 +310,7 @@ static void test_shared_block(void) {
     assert(memory_block_attach(f.db, "other", bid, 1) == 0);
     MemoryBlock *mb = memory_block_get(f.db, "other", "team");
     assert(mb && mb->id == bid && mb->read_only == 1);
-    assert(strcmp(mb->agent_name, "bot") == 0);        /* owner unchanged */
+    assert(strcmp(mb->created_by, "bot") == 0);        /* creator unchanged */
     memory_block_free(mb);
     r = call(&g, "memory_note_add", "{\"block\":\"team\",\"text\":\"x\"}", &err);
     assert(err && strstr(r, "read-only")); free(r);

@@ -263,7 +263,8 @@ operator verb (future `cclaw agent rm`), never a side effect.
 (`system_prompt_file` allowed). Validation (`extension_manifest_validate`)
 checks name shape, profile value, and grants shape; caps are enforced at
 install time against the promoting agent (`creator = owner_agent`; builtin
-bundles install as `system` = operator, uncapped).
+bundles install with no owner — `owner_agent` NULL — and apply as the
+operator, uncapped).
 
 An `agents[]` name that already exists is **skipped, never overwritten** —
 first-come, mirroring extension-name ownership, and it keeps re-promoting the
@@ -294,7 +295,7 @@ and set its config keys (`extension_attach` + the `config` section of a
 Agents learn what they can do the same way they learn anything else:
 **skills**, with the index giving one-line progressive disclosure and the
 body loaded on demand. Self-docs ship as a builtin, skills-only extension
-`cclaw-docs` (owner `system`), installed at daemon start like the telegram
+`cclaw-docs` (no owner: `owner_agent` NULL), installed at daemon start like the telegram
 builtin, containing operational how-tos distilled from specs/:
 
 | Skill | Covers |

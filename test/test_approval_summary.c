@@ -21,6 +21,10 @@ static sqlite3 *fresh_db(void) {
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db != NULL);
     test_seed_agent(db, "bot");
+    /* Provider the tests' bare 'p' models hang off (models.provider_name is
+     * a declared FK). */
+    assert(sqlite3_exec(db, "INSERT OR IGNORE INTO providers(name,base_url)"
+                            " VALUES('p','http://p');", NULL, NULL, NULL) == SQLITE_OK);
     return db;
 }
 
@@ -182,7 +186,7 @@ static void test_create_agent_discloses_scalars(void) {
 
     /* A shared block is named with its owner and whether the new agent may
      * write to it — loudly when it may. */
-    exec_sql(db, "INSERT INTO memory_blocks(id,agent_name,label) VALUES(41,'bot','TEAM')");
+    exec_sql(db, "INSERT INTO memory_blocks(id,created_by,label) VALUES(41,'bot','TEAM')");
     s = summarize(db, "create_agent", APPROVAL_PARK_REQUIRED,
         "{\"name\":\"mate\",\"memory_blocks\":[{\"attach\":41},"
         "{\"attach\":41,\"read_only\":false},{\"attach\":999}]}");

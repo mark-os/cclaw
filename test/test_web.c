@@ -411,7 +411,7 @@ static void test_admin_dashboard(void) {
     {
         char *v = query_text(db, "SELECT b.id FROM memory_blocks b"
             " JOIN agent_memory_blocks a ON a.block_id=b.id"
-            " WHERE b.label='NOTES' AND b.agent_name='Assistant'"
+            " WHERE b.label='NOTES' AND b.created_by='Assistant'"
             "   AND a.agent_name='Assistant' AND a.read_only=0");
         assert(v); blk = atoll(v); free(v);
     }

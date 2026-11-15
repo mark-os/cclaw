@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v56 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v59 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -40,9 +40,21 @@ Agents are the only entity with a rename verb, so as of v31 every
   rename audit backs it up.
 - Outside the DB, two references stay name-keyed by hand: the workspace dir
   `agents/<name>/` and `config.default_agent` — the rename verb owns both.
-- `extension_name`/`channel_name` remain convention (FK-less): no rename
-  verbs exist for them. If one grows a rename verb, it inherits this same
-  FK treatment first.
+- Configuration-side links are declared FKs too (v59,
+  plan/projects/v0.8-data-and-explorer.md decision 19), all `ON UPDATE
+  CASCADE` with no `ON DELETE`: `models.provider_name` → `providers`;
+  `tools`/`hooks`/`agent_extensions.extension_name` and
+  `channels.extension_name`/`prev_extension_name` → `extensions`;
+  `extensions.owner_agent` → `agents`; `channel_state.channel_name` →
+  `channels`; `approval_decisions.approval_id` → `approvals`. No rename verb
+  needs them; they exist so a dangling write fails at write time and so the
+  links can be read from `pragma_foreign_key_list`. Guard:
+  `test_config_link_audit` (test/test_agent_rename.c).
+- Not declared, on purpose: `secret_hosts.secret_name` (a `CCLAW_SECRET_*`
+  environment secret has bindings but no `secrets` row), and the
+  conversation tables' `session_id`/`channel_name` columns and `-1`
+  sentinels (entries, tool_calls, llm_responses, inbox, channel_outbox,
+  channel_events) — parked until a later decision.
 
 ---
 
@@ -67,7 +79,10 @@ Extensions register keys too: `extension_install` ingests the manifest's `config
 
 ## providers
 
-LLM API endpoints. Multiple providers enable fallback routing.
+LLM API endpoints. Multiple providers enable fallback routing. Health is
+tracked per model (`models.status`), never per provider (the never-read
+`providers.status` column was dropped in v59). A provider that still has
+models cannot be deleted (`models.provider_name` FK).
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -77,7 +92,6 @@ LLM API endpoints. Multiple providers enable fallback routing.
 | `api_key_env` | TEXT NOT NULL DEFAULT '' | env var name holding the key |
 | `default_model` | TEXT | fresh-install seed sugar only — models are registered in `models` |
 | `priority` | INTEGER NOT NULL DEFAULT 0 | lower = preferred |
-| `status` | TEXT NOT NULL DEFAULT 'healthy' | healthy / degraded / down |
 | `request_extra` | TEXT | JSON merged (`json_patch`, RFC 7386) into every outgoing request body for this provider, last — so it overrides anything cclaw built. NULL = no-op. Seeded on `openrouter` with `{"provider":{"ignore":["StreamLake"]}}` |
 
 ---
@@ -90,7 +104,7 @@ here orders candidates.
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | TEXT PRIMARY KEY | canonical routing key; new registrations are `model@provider` |
-| `provider_name` | TEXT NOT NULL | FK-ish to `providers.name` |
+| `provider_name` | TEXT NOT NULL | FK → `providers(name)` ON UPDATE CASCADE (v59) |
 | `model` | TEXT NOT NULL | wire model id sent to the provider |
 | `context_window` | INTEGER | |
 | `max_output_tokens` | INTEGER | |
@@ -117,11 +131,25 @@ candidates in `pos` order, nothing appended after the list. Health reorders it
 (degraded rows sink at selection), never empties it. `models` rows referenced
 here can't be deleted — fix lists first; `disabled` is the soft option.
 
+One ordered list per `purpose` (v59): `chat` drives the agent's turns (every
+list that existed before v59 became `chat`); `image` and `audio` choose the
+model that turns inbound media into text for the agent's sessions
+(`model_pick_for_media`, `src/llm_proc.c`). An agent with no rows for a media
+purpose uses the global capability pick (`model_pick_by_capability`). With
+rows, that list is the policy exactly as for chat: pos order, a model in its
+error cooldown sinks below healthy ones, `disabled` drops out, nothing global
+is appended. Triggers `agent_models_capability_bi`/`_bu` refuse an `image` or
+`audio` row (insert, or update of `purpose`/`model_id`) whose model's
+`capabilities` array does not contain that purpose — one check every write
+path goes through. Removing a capability from a model that is already
+assigned is not checked.
+
 | Column | Type | Notes |
 |--------|------|-------|
 | `agent_name` | TEXT NOT NULL | FK agents(name), ON UPDATE CASCADE ON DELETE CASCADE |
+| `purpose` | TEXT NOT NULL DEFAULT 'chat' | `chat\|image\|audio` (CHECK-enforced) |
 | `model_id` | TEXT NOT NULL | FK models(id) |
-| `pos` | INTEGER NOT NULL | 0 = primary; PK (agent_name, pos) |
+| `pos` | INTEGER NOT NULL | 0 = first; PK (agent_name, purpose, pos) |
 | `reasoning_effort` | TEXT | `off\|minimal\|low\|medium\|high` (CHECK-enforced), or NULL = send nothing. Translated per model through `models.effort_map` at request-build time — see [providers.md](providers.md#reasoning-effort) |
 
 ---
@@ -159,10 +187,10 @@ Transient work queue. The daemon poll loop writes one row per LLM request or com
 | `agent_name` | TEXT NOT NULL | FK → `agents(name)` ON UPDATE CASCADE |
 | `recall` | INTEGER NOT NULL DEFAULT 0 | whether to run FTS recall before this request |
 | `job_type` | INTEGER NOT NULL DEFAULT 0 | 0 = LLM request for a turn, 1 = compaction |
-| `status` | TEXT NOT NULL DEFAULT 'pending' | always `pending`; completion deletes the row |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
-Index: `idx_llm_jobs_pending ON llm_jobs(status) WHERE status='pending'`.
+The row's existence is its state (completion deletes it); the always-`pending`
+`status` column and its index were dropped in v59.
 
 ---
 
@@ -225,7 +253,7 @@ Shared extension registry. Each extension is a directory in the shared store `~/
 | `name` | TEXT PRIMARY KEY | |
 | `path` | TEXT NOT NULL | shared store directory |
 | `version` | TEXT DEFAULT '0.0.0' | |
-| `owner_agent` | TEXT | who promoted it ('system' for extensions shipped in the binary) |
+| `owner_agent` | TEXT | FK → `agents(name)` ON UPDATE CASCADE (v59): the agent that promoted it; NULL = shipped in the binary (was the string `'system'` before v59) |
 | `published` | INTEGER NOT NULL DEFAULT 0 | single publish flag |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
@@ -321,7 +349,7 @@ periodic tick drains any row whose wake was lost.
 
 | Column | Type | Meaning |
 |--------|------|---------|
-| `approval_id` | INTEGER PRIMARY KEY | The approval the decision is for. |
+| `approval_id` | INTEGER PRIMARY KEY | The approval the decision is for. FK → `approvals(id)` (v59): a decision for an approval that does not exist is refused. |
 | `decision` | TEXT | `deny`, `once` or `always`. |
 | `decided_via` | TEXT | Copied to `approvals.decided_via` (for example `dashboard`). |
 | `created_at` | INTEGER | Unix time of the decision. |
@@ -349,7 +377,7 @@ Fail-closed credential rule (specs/trust.md): a secret may only be submitted to 
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `secret_name` | TEXT NOT NULL | matches the `{{SECRET:name}}` placeholder |
+| `secret_name` | TEXT NOT NULL | matches the `{{SECRET:name}}` placeholder. Deliberately **not** an FK to `secrets`: a `CCLAW_SECRET_*` environment secret is bound here but has no `secrets` row |
 | `host` | TEXT NOT NULL | exact host or `.suffix` rule |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | PRIMARY KEY | (secret_name, host) | |
@@ -379,7 +407,7 @@ Links agents to their enabled extensions.
 | Column | Type | Notes |
 |--------|------|-------|
 | `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; NULL = global |
-| `extension_name` | TEXT NOT NULL | FK-ish to `extensions.name` |
+| `extension_name` | TEXT NOT NULL | FK → `extensions(name)` ON UPDATE CASCADE (v59) |
 | `config` | TEXT | JSON config blob |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | PRIMARY KEY | (agent_name, extension_name) | |
@@ -393,10 +421,9 @@ Channel processes managed by the daemon. The extension system writes these rows.
 | Column | Type | Notes |
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
-| `extension_name` | TEXT NOT NULL DEFAULT '' | |
-| `prev_extension_name` | TEXT | revert target recorded by channel swap |
-| `type` | TEXT NOT NULL DEFAULT '' | the manifest's `$.channel.type` (`telegram`, `discord`, `whatsapp`, …) |
-| `binary_path` | TEXT NOT NULL DEFAULT '' | the channel's JS handler file in the shared store (`<store>/<$.channel.handler>`) |
+| `extension_name` | TEXT | FK → `extensions(name)` ON UPDATE CASCADE (v59); the code fronting the channel. NULL = none (was `''` before v59) — such a channel never launches |
+| `prev_extension_name` | TEXT | FK → `extensions(name)` ON UPDATE CASCADE (v59); revert target recorded by channel swap |
+| `type` | TEXT NOT NULL DEFAULT '' | the manifest's `$.channel.type` (`telegram`, `discord`, `whatsapp`, …); display only (the dashboard's channel list). `binary_path` (written, never read) was dropped in v59 — the runner resolves the handler through `extensions.path` |
 | `status` | TEXT NOT NULL DEFAULT 'draft' | see lifecycle below |
 | `pid` | INTEGER | daemon tracks the running process |
 | `default_agent` | TEXT | FK → `agents(name)`. Open-door policy: non-NULL = unrouted chats are accepted and get a new session for this agent; NULL = fail-closed |
@@ -417,7 +444,7 @@ Channel-private persistent key-value store (offsets, cursors, tokens).
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `channel_name` | TEXT NOT NULL | |
+| `channel_name` | TEXT NOT NULL | FK → `channels(name)` ON UPDATE CASCADE (v59) |
 | `key` | TEXT NOT NULL | |
 | `value` | TEXT | |
 | PRIMARY KEY | (channel_name, key) | |
@@ -689,7 +716,7 @@ Tool registry. Built-in C tools have NULL `extension_name`/`path`; JS tools poin
 | Column | Type | Notes |
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
-| `extension_name` | TEXT | NULL for built-in C tools |
+| `extension_name` | TEXT | FK → `extensions(name)` ON UPDATE CASCADE (v59); NULL for built-in C tools |
 | `description` | TEXT | |
 | `parameters_json` | TEXT | JSON Schema for arguments |
 | `path` | TEXT | handler file in extension store |
@@ -706,7 +733,7 @@ Extension-provided hooks. Same provenance model as tools — the DB holds config
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `extension_name` | TEXT NOT NULL | |
+| `extension_name` | TEXT NOT NULL | FK → `extensions(name)` ON UPDATE CASCADE (v59) |
 | `event` | TEXT NOT NULL | one of the six hook lifecycle events |
 | `path` | TEXT NOT NULL | handler file in extension store |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
@@ -739,7 +766,7 @@ Named memory blocks. A block is a pure **container**: it carries a label, char l
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `agent_name` | TEXT | **Owner** — the agent that created the block. FK → `agents(name)` ON UPDATE CASCADE; NULL = made by the operator. Not who sees it (that is `agent_memory_blocks`) |
+| `created_by` | TEXT | The agent that created the block (v59; was `agent_name`). History, not a permission: it grants nothing. FK → `agents(name)` ON UPDATE CASCADE; NULL = made by the operator. Who sees or writes it is `agent_memory_blocks` alone |
 | `label` | TEXT NOT NULL | how an agent addresses the block |
 | `description` | TEXT | tells agent what block is for |
 | `char_limit` | INTEGER NOT NULL DEFAULT 5000 | budget for the notes' total length |
@@ -747,7 +774,7 @@ Named memory blocks. A block is a pure **container**: it carries a label, char l
 | `placement` | TEXT NOT NULL DEFAULT 'system' | `system` = rendered into the system prompt once per session (`agent_config.c`); `context` = rendered into the `<RELEVANT_CONTEXT>` block at each turn start. New blocks default to `context` via `memory_block_create` (the API default every insert path goes through — the column DEFAULT is inert); only the Assistant's seeded AGENT/USER identity blocks ask for `system` |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
-| UNIQUE | (agent_name, label) | |
+| UNIQUE | (created_by, label) | |
 
 ---
 
@@ -896,7 +923,6 @@ seconds) — the unused fields are `''` / NULL / NULL respectively
 | `cron_expr` | TEXT NOT NULL | Fields are matched in the **daemon's local timezone** (`localtime_r`/`mktime`), so a "9am" job follows DST; the `<current_time>` line in the turn-context block states that zone so the model can write the expression. `''` sentinel when `run_at` or `interval_s` is used instead (kept NOT NULL — SQLite can't relax it without a table rebuild) |
 | `run_at` | INTEGER | one-shot fire time; row is deleted (not rescheduled) once fired |
 | `interval_s` | INTEGER | fixed-period cadence; not exposed on the model-facing `cron_set` schema and no longer written by anything — a legal column that only pre-v41 rows still use |
-| `kind` | TEXT NOT NULL DEFAULT 'task' | vestigial: always `'task'`. Pre-v41 DBs held `'heartbeat'` rows; the v41 patch converts them to bare-wake jobs and no writer names the column any more |
 | `session_id` | INTEGER NOT NULL | meaning follows `target`: the pinned session (`'pin'`), else the fire anchor — the session that set the job, and for `'new'` the most recently fired one. `0` = resolve to the agent's most recently active session at fire time (its state is not a filter: a fire into a busy session queues and lands at the next turn boundary) |
 | `task` | TEXT NOT NULL | injected message — the model-facing name is `prompt`; `''` = no prompt payload (with no `script` either, the fire is a bare wake) |
 | `script` | TEXT | QJS path run sandboxed at fire time under the target agent's profile+grants; composes with `task` (script first). NULL = no script payload. Workspace-relative when an agent set the job (existence checked at set time, so a typo fails then rather than unattended hours later); absolute-inside-the-shared-extension-store when `extension_promote` seeded it from a manifest `scripts[]` entry. Both shapes are re-validated at fire time, and nothing else is accepted |
@@ -1061,6 +1087,6 @@ Sessions stamp `owner_instance` here; owner-scoped recovery reclaims only sessio
 5. **INTEGER ids for rows, names for entities** — sessions, entries and queues use integer ids (fast joins, natural ordering); agents, extensions and channels are keyed by name (see String keys above).
 6. **parent_id tree** — supports branching (Pi model); walk leaf→root via recursive CTE.
 7. **Inbox/outbox as tables** — durable queues; survive crashes; atomic consumption.
-8. **Agent scoping** — `agent_name` column on sessions, memory_blocks, grants scopes data per-agent within the shared DB.
+8. **Agent scoping** — `agent_name` column on sessions, grants, agent_models scopes data per-agent within the shared DB; memory is scoped by attachment (`agent_memory_blocks`).
 9. **Grants not config** — authority is typed grant rows; `approval_mode` + `expires_at` give fine-grained, time-bounded authority.
 10. **Extensions as paths** — DB stores definition + path, never code; JS lives in files.

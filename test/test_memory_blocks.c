@@ -42,7 +42,7 @@ static void test_create_and_get(void) {
 
     MemoryBlock *mb = memory_block_get(db, "TestAgent", "persona");
     assert(mb);
-    assert(strcmp(mb->agent_name, "TestAgent") == 0);
+    assert(strcmp(mb->created_by, "TestAgent") == 0);
     assert(strcmp(mb->label, "persona") == 0);
     assert(strcmp(mb->description, "Agent identity") == 0);
     assert(mb->char_limit == 5000);

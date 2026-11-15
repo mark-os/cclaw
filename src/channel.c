@@ -341,7 +341,7 @@ int channel_swap(sqlite3 *db, const char *name, const char *extension) {
      * the rollback pointer with itself. */
     const char *sql =
         "UPDATE channels SET prev_extension_name=extension_name, extension_name=?2"
-        " WHERE name=?1 AND extension_name != ?2;";
+        " WHERE name=?1 AND extension_name IS NOT ?2;";
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
     sqlite3_bind_text(s, 2, extension, -1, SQLITE_STATIC);

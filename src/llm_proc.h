@@ -96,6 +96,14 @@ void compaction_record_outcome(sqlite3 *db, const char *db_path,
  * (e.g. "audio"), ordered by priority. Fills out (max slots), returns count. */
 int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, int max);
 
+/* Media model candidates for one agent and purpose ("image" | "audio"): the
+ * agent's agent_models rows of that purpose in pos order, models inside an
+ * error cooldown sunk to the end, 'disabled' rows dropped — nothing appended.
+ * An agent with no rows for the purpose (or agent_name NULL) gets
+ * model_pick_by_capability instead. Returns the candidate count. */
+int model_pick_for_media(sqlite3 *db, const char *agent_name, const char *purpose,
+                         ModelCandidate *out, int max);
+
 /* Build the transcription request body for a media_jobs row (audio inlined
  * from payload.media), shaped per endpoint type. Malloc'd; NULL on error.
  * Exposed for tests. */

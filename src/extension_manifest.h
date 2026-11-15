@@ -32,7 +32,8 @@ int extension_manifest_declares_persistent(sqlite3 *db, const char *store_dir);
  *      passes via json_each, seed channels + cron for declared scripts.
  *
  * owner_agent is recorded as the promoter and gets the first agent_extensions
- * row (published=0). Returns 0 on success, -1 on error (with *err_out set when
+ * row (published=0); NULL = an extension shipped in the binary (no owner, no
+ * attachment, no grants, no cron seeding). Returns 0 on success, -1 on error (with *err_out set when
  * non-NULL). Re-installing the same name refreshes its rows in place
  * (preserving the published flag). */
 int extension_install(sqlite3 *db, const char *bundle_dir,

@@ -412,6 +412,343 @@ static int patch_v44_canonical_model_ids(sqlite3 *db) {
     return 0;
 }
 
+/* v59: the v0.8 tidy-up (plan/projects/v0.8-data-and-explorer.md, decisions
+ * 11/12/18/19/20).
+ *
+ * Links on the configuration side become declared foreign keys, which needs a
+ * table rebuild each (SQLite cannot add an FK in place). The runner holds
+ * foreign_keys=ON inside the patch transaction, so every rebuilt row is
+ * checked as it is copied — which is why rows that point at nothing are dealt
+ * with first, one rule per column, each change logged:
+ *  - a row that is only a pointer to nothing the code can act on is deleted:
+ *    routing rows of a model whose provider is gone (routing already skipped
+ *    them — its JOIN found no provider) and that model, the tools, hooks and
+ *    attachments of an extension that does not exist (their loaders JOIN
+ *    extensions), channel_state of a channel with no row, a decision for an
+ *    approval that does not exist;
+ *  - a reference on a row worth keeping is NULLed: a channel whose extension
+ *    is empty or gone keeps its row and operator settings (NULL = no
+ *    extension); a missing revert target or default agent becomes NULL (for
+ *    default_agent that is the fail-closed setting); an extension whose owner
+ *    is not an agent keeps its row with no owner;
+ *  - extensions.owner_agent 'system' (the shipped-in-the-binary marker, never
+ *    an agents row) becomes NULL, which is how the code now reads it.
+ * secret_hosts gets no FK: bindings of CCLAW_SECRET_* environment secrets
+ * have no secrets row to point at. */
+static int v59_exec(sqlite3 *db, const char *sql) {
+    char *err = NULL;
+    if (sqlite3_exec(db, sql, NULL, NULL, &err) == SQLITE_OK) return 0;
+    LOG_ERROR_("schema v59: %s", err ? err : "?");
+    sqlite3_free(err);
+    return -1;
+}
+
+/* Log every row `sel` returns (column 0 describes it), then run `act`
+ * (NULL: the table rebuild below applies the change as it copies). */
+static int v59_fix(sqlite3 *db, const char *what, const char *sel, const char *act) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sel, -1, &st, NULL) != SQLITE_OK) {
+        LOG_ERROR_("schema v59: %s: %s", what, sqlite3_errmsg(db));
+        return -1;
+    }
+    int n = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *d = (const char *)sqlite3_column_text(st, 0);
+        LOG_WARN_("schema v59: %s: %s", what, d ? d : "?");
+        n++;
+    }
+    sqlite3_finalize(st);
+    return n && act ? v59_exec(db, act) : 0;
+}
+
+#define V59_NO_PROVIDER \
+    "(SELECT id FROM models WHERE provider_name NOT IN (SELECT name FROM providers))"
+#define V59_NO_EXT(col) \
+    "(" col " IS NOT NULL AND " col " NOT IN (SELECT name FROM extensions))"
+#define V59_NO_AGENT(col) \
+    "(" col " IS NOT NULL AND " col " NOT IN (SELECT name FROM agents))"
+
+static int patch_v59_orphans(sqlite3 *db) {
+    static const struct { const char *what, *sel, *act; } FIX[] = {
+        { "removed routing row (its model's provider is gone)",
+          "SELECT agent_name||' pos '||pos||' -> '||model_id FROM agent_models"
+          " WHERE model_id IN " V59_NO_PROVIDER,
+          "DELETE FROM agent_models WHERE model_id IN " V59_NO_PROVIDER },
+        { "removed model (its provider is gone)",
+          "SELECT id||' (provider '||provider_name||')' FROM models"
+          " WHERE provider_name NOT IN (SELECT name FROM providers)",
+          "DELETE FROM models WHERE provider_name NOT IN (SELECT name FROM providers)" },
+        { "removed routing row (agent or model is gone)",
+          "SELECT agent_name||' pos '||pos||' -> '||model_id FROM agent_models"
+          " WHERE agent_name NOT IN (SELECT name FROM agents)"
+          "    OR model_id NOT IN (SELECT id FROM models)",
+          "DELETE FROM agent_models WHERE agent_name NOT IN (SELECT name FROM agents)"
+          "    OR model_id NOT IN (SELECT id FROM models)" },
+        { "extension owner is not an agent, owner now NULL",
+          "SELECT name||' (owner '||owner_agent||')' FROM extensions"
+          " WHERE owner_agent <> 'system' AND " V59_NO_AGENT("owner_agent"),
+          "UPDATE extensions SET owner_agent=NULL"
+          " WHERE owner_agent <> 'system' AND " V59_NO_AGENT("owner_agent") },
+        { "tool with an empty extension_name, now NULL",
+          "SELECT name FROM tools WHERE extension_name=''",
+          "UPDATE tools SET extension_name=NULL WHERE extension_name=''" },
+        { "removed tool (its extension or owning agent is gone)",
+          "SELECT name||' (extension '||COALESCE(extension_name,'-')||', agent '"
+          "||COALESCE(agent_name,'-')||')' FROM tools"
+          " WHERE " V59_NO_EXT("extension_name") " OR " V59_NO_AGENT("agent_name"),
+          "DELETE FROM tools"
+          " WHERE " V59_NO_EXT("extension_name") " OR " V59_NO_AGENT("agent_name") },
+        { "removed hook (its extension is gone)",
+          "SELECT extension_name||' '||event||' '||path FROM hooks"
+          " WHERE " V59_NO_EXT("extension_name"),
+          "DELETE FROM hooks WHERE " V59_NO_EXT("extension_name") },
+        { "removed extension attachment (extension or agent is gone)",
+          "SELECT COALESCE(agent_name,'-')||' -> '||extension_name FROM agent_extensions"
+          " WHERE " V59_NO_EXT("extension_name") " OR " V59_NO_AGENT("agent_name"),
+          "DELETE FROM agent_extensions"
+          " WHERE " V59_NO_EXT("extension_name") " OR " V59_NO_AGENT("agent_name") },
+        /* The old column is NOT NULL: the channels copy does the NULLing. */
+        { "channel extension is empty or gone, now NULL",
+          "SELECT name||' (extension \"'||extension_name||'\")' FROM channels"
+          " WHERE extension_name NOT IN (SELECT name FROM extensions)",
+          NULL },
+        { "channel revert target is empty or gone, now NULL",
+          "SELECT name||' (prev_extension_name \"'||prev_extension_name||'\")'"
+          " FROM channels"
+          " WHERE prev_extension_name NOT IN (SELECT name FROM extensions)",
+          NULL },
+        { "channel default agent is gone, now NULL (unknown chats drop)",
+          "SELECT name||' (default_agent '||default_agent||')' FROM channels"
+          " WHERE " V59_NO_AGENT("default_agent"),
+          "UPDATE channels SET default_agent=NULL WHERE " V59_NO_AGENT("default_agent") },
+        { "removed channel_state (no such channel)",
+          "SELECT channel_name||'.'||key FROM channel_state"
+          " WHERE channel_name NOT IN (SELECT name FROM channels)",
+          "DELETE FROM channel_state WHERE channel_name NOT IN (SELECT name FROM channels)" },
+        { "removed approval decision (no such approval)",
+          "SELECT approval_id||' '||decision FROM approval_decisions"
+          " WHERE approval_id NOT IN (SELECT id FROM approvals)",
+          "DELETE FROM approval_decisions WHERE approval_id NOT IN (SELECT id FROM approvals)" },
+    };
+    for (size_t i = 0; i < sizeof(FIX) / sizeof(*FIX); i++)
+        if (v59_fix(db, FIX[i].what, FIX[i].sel, FIX[i].act) != 0) return -1;
+    int64_t sys = db_scalar_i64(db,
+        "SELECT COUNT(*) FROM extensions WHERE owner_agent='system'", 0, 0);
+    if (sys > 0) {
+        if (v59_exec(db, "UPDATE extensions SET owner_agent=NULL"
+                         " WHERE owner_agent='system'") != 0) return -1;
+        LOG_INFO_("schema v59: %lld shipped extension(s): owner 'system' -> NULL",
+                  (long long)sys);
+    }
+    return 0;
+}
+
+/* Rebuild order matters with foreign_keys=ON: a parent is rebuilt before any
+ * table that gains an FK to it (DROP TABLE on a referenced parent checks its
+ * children), and agent_models — the one existing child of models — is held
+ * aside while models is rebuilt. Each table is created under its final name,
+ * so sqlite_master reads like a fresh database's. */
+static const char V59_REBUILD[] =
+    "CREATE TEMP TABLE v59_hold AS SELECT * FROM extensions;"
+    "DROP TABLE extensions;"
+    "CREATE TABLE extensions ("
+    "  name TEXT PRIMARY KEY,"
+    "  path TEXT NOT NULL,"
+    "  version TEXT DEFAULT '0.0.0',"
+    "  owner_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+    "  published INTEGER NOT NULL DEFAULT 0,"
+    "  enabled INTEGER NOT NULL DEFAULT 1,"
+    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+    "INSERT INTO extensions(name, path, version, owner_agent, published, enabled, created_at)"
+    "  SELECT name, path, version, owner_agent, published, enabled, created_at FROM v59_hold;"
+    "DROP TABLE v59_hold;"
+
+    "CREATE TEMP TABLE v59_hold AS SELECT * FROM channels;"
+    "DROP TABLE channels;"
+    "CREATE TABLE channels ("
+    "  name TEXT PRIMARY KEY,"
+    "  extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,"
+    "  prev_extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,"
+    "  type TEXT NOT NULL DEFAULT '',"
+    "  status TEXT NOT NULL DEFAULT 'draft',"
+    "  pid INTEGER,"
+    "  default_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+    "  default_tool_filter TEXT,"
+    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+    /* binary_path is not carried over (decision 20: written, never read). */
+    "INSERT INTO channels(name, extension_name, prev_extension_name, type, status, pid,"
+    "                     default_agent, default_tool_filter, created_at)"
+    "  SELECT name,"
+    "         CASE WHEN extension_name IN (SELECT name FROM extensions)"
+    "              THEN extension_name END,"
+    "         CASE WHEN prev_extension_name IN (SELECT name FROM extensions)"
+    "              THEN prev_extension_name END,"
+    "         type, status, pid,"
+    "         default_agent, default_tool_filter, created_at FROM v59_hold;"
+    "DROP TABLE v59_hold;"
+
+    "CREATE TEMP TABLE v59_am AS SELECT * FROM agent_models;"
+    "DROP TABLE agent_models;"
+    "CREATE TEMP TABLE v59_hold AS SELECT * FROM models;"
+    "DROP TABLE models;"
+    "CREATE TABLE models ("
+    "  id TEXT PRIMARY KEY,"
+    "  provider_name TEXT NOT NULL REFERENCES providers(name) ON UPDATE CASCADE,"
+    "  model TEXT NOT NULL,"
+    "  context_window INTEGER,"
+    "  max_output_tokens INTEGER,"
+    "  capabilities TEXT DEFAULT '[]',"
+    "  effort_map TEXT,"
+    "  status TEXT NOT NULL DEFAULT 'healthy',"
+    "  degraded_until INTEGER,"
+    "  total_requests INTEGER DEFAULT 0,"
+    "  total_tokens_in INTEGER DEFAULT 0,"
+    "  total_tokens_out INTEGER DEFAULT 0,"
+    "  total_cost_nano INTEGER DEFAULT 0,"
+    "  consec_failures INTEGER DEFAULT 0,"
+    "  last_success_at INTEGER,"
+    "  last_error_at INTEGER,"
+    "  synced_at INTEGER,"
+    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+    "INSERT INTO models(id, provider_name, model, context_window, max_output_tokens,"
+    "                   capabilities, effort_map, status, degraded_until, total_requests,"
+    "                   total_tokens_in, total_tokens_out, total_cost_nano,"
+    "                   consec_failures, last_success_at, last_error_at, synced_at,"
+    "                   created_at)"
+    "  SELECT id, provider_name, model, context_window, max_output_tokens,"
+    "         capabilities, effort_map, status, degraded_until, total_requests,"
+    "         total_tokens_in, total_tokens_out, total_cost_nano,"
+    "         consec_failures, last_success_at, last_error_at, synced_at,"
+    "         created_at FROM v59_hold;"
+    "DROP TABLE v59_hold;"
+    "CREATE TABLE agent_models ("
+    "  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,"
+    "  purpose TEXT NOT NULL DEFAULT 'chat' CHECK (purpose IN ('chat','image','audio')),"
+    "  model_id TEXT NOT NULL REFERENCES models(id),"
+    "  pos INTEGER NOT NULL,"
+    "  reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN"
+    "    ('off','minimal','low','medium','high')),"
+    "  PRIMARY KEY (agent_name, purpose, pos));"
+    /* Every list that exists today is a chat list. */
+    "INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort)"
+    "  SELECT agent_name, 'chat', model_id, pos, reasoning_effort FROM v59_am;"
+    "DROP TABLE v59_am;"
+    "CREATE TRIGGER agent_models_capability_bi"
+    " BEFORE INSERT ON agent_models"
+    " WHEN NEW.purpose <> 'chat' AND NOT EXISTS ("
+    "   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)"
+    "                                          THEN m.capabilities ELSE '[]' END) c"
+    "    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)"
+    " BEGIN"
+    "   SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose');"
+    " END;"
+    "CREATE TRIGGER agent_models_capability_bu"
+    " BEFORE UPDATE OF purpose, model_id ON agent_models"
+    " WHEN NEW.purpose <> 'chat' AND NOT EXISTS ("
+    "   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)"
+    "                                          THEN m.capabilities ELSE '[]' END) c"
+    "    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)"
+    " BEGIN"
+    "   SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose');"
+    " END;"
+
+    "CREATE TEMP TABLE v59_hold AS SELECT * FROM agent_extensions;"
+    "DROP TABLE agent_extensions;"
+    "CREATE TABLE agent_extensions ("
+    "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+    "  extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,"
+    "  config TEXT,"
+    "  enabled INTEGER NOT NULL DEFAULT 1,"
+    "  PRIMARY KEY (agent_name, extension_name));"
+    "INSERT INTO agent_extensions(agent_name, extension_name, config, enabled)"
+    "  SELECT agent_name, extension_name, config, enabled FROM v59_hold;"
+    "DROP TABLE v59_hold;"
+
+    "CREATE TEMP TABLE v59_hold AS SELECT * FROM channel_state;"
+    "DROP TABLE channel_state;"
+    "CREATE TABLE channel_state ("
+    "  channel_name TEXT NOT NULL REFERENCES channels(name) ON UPDATE CASCADE,"
+    "  key TEXT NOT NULL,"
+    "  value TEXT,"
+    "  PRIMARY KEY (channel_name, key));"
+    "INSERT INTO channel_state(channel_name, key, value)"
+    "  SELECT channel_name, key, value FROM v59_hold;"
+    "DROP TABLE v59_hold;"
+
+    "CREATE TEMP TABLE v59_hold AS SELECT * FROM tools;"
+    "DROP TABLE tools;"
+    "CREATE TABLE tools ("
+    "  name TEXT PRIMARY KEY,"
+    "  extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,"
+    "  description TEXT,"
+    "  parameters_json TEXT,"
+    "  path TEXT,"
+    "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+    "  enabled INTEGER NOT NULL DEFAULT 1,"
+    "  policy TEXT,"
+    "  egress_hosts TEXT);"
+    "INSERT INTO tools(name, extension_name, description, parameters_json, path,"
+    "                  agent_name, enabled, policy, egress_hosts)"
+    "  SELECT name, extension_name, description, parameters_json, path,"
+    "         agent_name, enabled, policy, egress_hosts FROM v59_hold;"
+    "DROP TABLE v59_hold;"
+
+    "CREATE TEMP TABLE v59_hold AS SELECT * FROM hooks;"
+    "DROP TABLE hooks;"
+    "CREATE TABLE hooks ("
+    "  extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,"
+    "  event TEXT NOT NULL,"
+    "  path TEXT NOT NULL,"
+    "  enabled INTEGER NOT NULL DEFAULT 1,"
+    "  PRIMARY KEY (extension_name, event, path));"
+    "INSERT INTO hooks(extension_name, event, path, enabled)"
+    "  SELECT extension_name, event, path, enabled FROM v59_hold;"
+    "DROP TABLE v59_hold;"
+
+    "CREATE TEMP TABLE v59_hold AS SELECT * FROM approval_decisions;"
+    "DROP TABLE approval_decisions;"
+    "CREATE TABLE approval_decisions ("
+    "  approval_id INTEGER PRIMARY KEY REFERENCES approvals(id) ON UPDATE CASCADE,"
+    "  decision    TEXT NOT NULL CHECK (decision IN ('deny','once','always')),"
+    "  decided_via TEXT NOT NULL,"
+    "  created_at  INTEGER NOT NULL DEFAULT (unixepoch()));"
+    "INSERT INTO approval_decisions(approval_id, decision, decided_via, created_at)"
+    "  SELECT approval_id, decision, decided_via, created_at FROM v59_hold;"
+    "DROP TABLE v59_hold;"
+
+    /* Decision 18: history, not a permission. RENAME keeps the FK and the
+     * UNIQUE constraint, now over (created_by, label). */
+    "ALTER TABLE memory_blocks RENAME COLUMN agent_name TO created_by;"
+
+    /* Decision 20: columns nothing reads (re-checked for v59). */
+    "ALTER TABLE providers DROP COLUMN status;"
+    "DROP INDEX IF EXISTS idx_llm_jobs_pending;"
+    "ALTER TABLE llm_jobs DROP COLUMN status;"
+    "ALTER TABLE cron_jobs DROP COLUMN kind;";
+
+static int patch_v59_tidy(sqlite3 *db) {
+    if (patch_v59_orphans(db) != 0) return -1;
+    if (v59_exec(db, V59_REBUILD) != 0) return -1;
+    /* Proof, not hope: nothing in a touched table may point at nothing. */
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT c.\"table\", c.rowid, c.parent FROM pragma_foreign_key_check c"
+            " WHERE c.\"table\" IN ('models','agent_models','extensions','channels',"
+            "   'channel_state','tools','hooks','agent_extensions','approval_decisions',"
+            "   'memory_blocks','providers','llm_jobs','cron_jobs')",
+            -1, &st, NULL) != SQLITE_OK) return -1;
+    int bad = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        LOG_ERROR_("schema v59: %s rowid %lld points at a missing %s row",
+                   (const char *)sqlite3_column_text(st, 0),
+                   (long long)sqlite3_column_int64(st, 1),
+                   (const char *)sqlite3_column_text(st, 2));
+        bad++;
+    }
+    sqlite3_finalize(st);
+    return bad ? -1 : 0;
+}
+
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
     /* Frozen at v40 (2026-07-31, D16): entries.turn_id/llm_responses.turn_id
      * were renamed to iteration_id (they always identified one LLM request) and
@@ -798,6 +1135,9 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "UPDATE entries SET fence_id = lower(hex(randomblob(8)))"
       "  WHERE network_hosts IS NOT NULL;",
       NULL },
+    /* v59: agent_models.purpose, memory_blocks.created_by, declared
+     * configuration-side links, dead columns dropped — see patch_v59_tidy. */
+    { 59, NULL, patch_v59_tidy },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
@@ -2899,7 +3239,7 @@ void db_tool_call_free_pending(PendingToolCall *list, int count) {
 
 void memory_block_free(MemoryBlock *mb) {
     if (!mb) return;
-    free(mb->agent_name);
+    free(mb->created_by);
     free(mb->label);
     free(mb->description);
     free(mb->placement);
@@ -2936,7 +3276,7 @@ int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *lab
                             const char *placement) {
     if (!label || !is_valid_name(label)) return -1;
     if (agent_name && agent_has_label(db, agent_name, label)) return -1;
-    const char *sql = "INSERT INTO memory_blocks(agent_name, label, description, char_limit, placement)"
+    const char *sql = "INSERT INTO memory_blocks(created_by, label, description, char_limit, placement)"
                       " VALUES(?,?,?,?,?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
@@ -2959,7 +3299,7 @@ int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *lab
 }
 
 MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *label) {
-    const char *sql = "SELECT b.id, b.agent_name, b.label, b.description, b.char_limit,"
+    const char *sql = "SELECT b.id, b.created_by, b.label, b.description, b.char_limit,"
                       " (b.read_only OR a.read_only), b.placement, b.created_at, b.updated_at"
                       " FROM agent_memory_blocks a JOIN memory_blocks b ON b.id=a.block_id"
                       " WHERE a.agent_name=? AND b.label=?;";
@@ -2971,7 +3311,7 @@ MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *l
     MemoryBlock *mb = calloc(1, sizeof(MemoryBlock));
     mb->id = sqlite3_column_int64(stmt, 0);
     const char *s;
-    s = (const char *)sqlite3_column_text(stmt, 1); mb->agent_name = s ? strdup(s) : strdup("");
+    s = (const char *)sqlite3_column_text(stmt, 1); mb->created_by = s ? strdup(s) : strdup("");
     s = (const char *)sqlite3_column_text(stmt, 2); mb->label = s ? strdup(s) : strdup("");
     s = (const char *)sqlite3_column_text(stmt, 3); mb->description = s ? strdup(s) : strdup("");
     mb->char_limit = sqlite3_column_int(stmt, 4);

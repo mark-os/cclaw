@@ -1439,7 +1439,8 @@ static const char *RECEIPT_SQL =
     "             FROM (SELECT model_id"
     "                   ||COALESCE(' (effort '||reasoning_effort||')','') m"
     "                   FROM agent_models"
-    "                   WHERE agent_name=?2 ORDER BY pos)),'(none)')"
+    "                   WHERE agent_name=?2 AND purpose='chat'"
+    "                   ORDER BY pos)),'(none)')"
     "         ||', max_iterations='||a.max_iterations"
     "         ||', shell_timeout='||a.shell_timeout"
     "    FROM agents a WHERE a.name=?2"
@@ -1615,7 +1616,8 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                         "='array'", args_json)) {
             sqlite3_stmt *ms;
             if (sqlite3_prepare_v2(db,
-                    "DELETE FROM agent_models WHERE agent_name=?1",
+                    "DELETE FROM agent_models WHERE agent_name=?1"
+                    " AND purpose='chat'",
                     -1, &ms, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(ms, 1, agent, -1, SQLITE_STATIC);
                 if (sqlite3_step(ms) != SQLITE_DONE) rc = -1;

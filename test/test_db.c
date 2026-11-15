@@ -243,6 +243,107 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
+/* Turn a fresh (current) database back into the v58 shape, so a test that
+ * replays patches from an older version runs the v59 step over what a real
+ * v58 database looked like: FK-less configuration tables, no purpose, the
+ * dropped columns back, memory_blocks.agent_name. Shared by every patch test
+ * that starts below v59; their own reverse-shaping runs after this. */
+static void unshape_v59(sqlite3 *db) {
+    char *err = NULL;
+    int rc = sqlite3_exec(db,
+        "PRAGMA foreign_keys=OFF;"
+        "DROP TRIGGER agent_models_capability_bi;"
+        "DROP TRIGGER agent_models_capability_bu;"
+        "CREATE TABLE v58_am ("
+        "  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,"
+        "  model_id TEXT NOT NULL REFERENCES models(id),"
+        "  pos INTEGER NOT NULL,"
+        "  reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN"
+        "    ('off','minimal','low','medium','high')),"
+        "  PRIMARY KEY (agent_name, pos));"
+        "INSERT INTO v58_am SELECT agent_name, model_id, pos, reasoning_effort"
+        "  FROM agent_models WHERE purpose='chat';"
+        "DROP TABLE agent_models; ALTER TABLE v58_am RENAME TO agent_models;"
+        "CREATE TABLE v58_m ("
+        "  id TEXT PRIMARY KEY, provider_name TEXT NOT NULL, model TEXT NOT NULL,"
+        "  context_window INTEGER, max_output_tokens INTEGER,"
+        "  capabilities TEXT DEFAULT '[]', effort_map TEXT,"
+        "  status TEXT NOT NULL DEFAULT 'healthy', degraded_until INTEGER,"
+        "  total_requests INTEGER DEFAULT 0, total_tokens_in INTEGER DEFAULT 0,"
+        "  total_tokens_out INTEGER DEFAULT 0, total_cost_nano INTEGER DEFAULT 0,"
+        "  consec_failures INTEGER DEFAULT 0, last_success_at INTEGER,"
+        "  last_error_at INTEGER, synced_at INTEGER,"
+        "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+        "INSERT INTO v58_m SELECT id, provider_name, model, context_window,"
+        "  max_output_tokens, capabilities, effort_map, status, degraded_until,"
+        "  total_requests, total_tokens_in, total_tokens_out, total_cost_nano,"
+        "  consec_failures, last_success_at, last_error_at, synced_at, created_at"
+        "  FROM models;"
+        "DROP TABLE models; ALTER TABLE v58_m RENAME TO models;"
+        "CREATE TABLE v58_e ("
+        "  name TEXT PRIMARY KEY, path TEXT NOT NULL, version TEXT DEFAULT '0.0.0',"
+        "  owner_agent TEXT, published INTEGER NOT NULL DEFAULT 0,"
+        "  enabled INTEGER NOT NULL DEFAULT 1,"
+        "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+        "INSERT INTO v58_e SELECT name, path, version, owner_agent, published,"
+        "  enabled, created_at FROM extensions;"
+        "DROP TABLE extensions; ALTER TABLE v58_e RENAME TO extensions;"
+        "CREATE TABLE v58_ae ("
+        "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+        "  extension_name TEXT NOT NULL, config TEXT,"
+        "  enabled INTEGER NOT NULL DEFAULT 1,"
+        "  PRIMARY KEY (agent_name, extension_name));"
+        "INSERT INTO v58_ae SELECT agent_name, extension_name, config, enabled"
+        "  FROM agent_extensions;"
+        "DROP TABLE agent_extensions; ALTER TABLE v58_ae RENAME TO agent_extensions;"
+        "CREATE TABLE v58_c ("
+        "  name TEXT PRIMARY KEY, extension_name TEXT NOT NULL DEFAULT '',"
+        "  prev_extension_name TEXT, type TEXT NOT NULL DEFAULT '',"
+        "  binary_path TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'draft',"
+        "  pid INTEGER, default_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+        "  default_tool_filter TEXT,"
+        "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+        "INSERT INTO v58_c(name, extension_name, prev_extension_name, type, status,"
+        "                  pid, default_agent, default_tool_filter, created_at)"
+        "  SELECT name, COALESCE(extension_name,''), prev_extension_name, type,"
+        "         status, pid, default_agent, default_tool_filter, created_at"
+        "  FROM channels;"
+        "DROP TABLE channels; ALTER TABLE v58_c RENAME TO channels;"
+        "CREATE TABLE v58_cs (channel_name TEXT NOT NULL, key TEXT NOT NULL,"
+        "  value TEXT, PRIMARY KEY (channel_name, key));"
+        "INSERT INTO v58_cs SELECT channel_name, key, value FROM channel_state;"
+        "DROP TABLE channel_state; ALTER TABLE v58_cs RENAME TO channel_state;"
+        "CREATE TABLE v58_t ("
+        "  name TEXT PRIMARY KEY, extension_name TEXT, description TEXT,"
+        "  parameters_json TEXT, path TEXT,"
+        "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+        "  enabled INTEGER NOT NULL DEFAULT 1, policy TEXT, egress_hosts TEXT);"
+        "INSERT INTO v58_t SELECT name, extension_name, description, parameters_json,"
+        "  path, agent_name, enabled, policy, egress_hosts FROM tools;"
+        "DROP TABLE tools; ALTER TABLE v58_t RENAME TO tools;"
+        "CREATE TABLE v58_h (extension_name TEXT NOT NULL, event TEXT NOT NULL,"
+        "  path TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,"
+        "  PRIMARY KEY (extension_name, event, path));"
+        "INSERT INTO v58_h SELECT extension_name, event, path, enabled FROM hooks;"
+        "DROP TABLE hooks; ALTER TABLE v58_h RENAME TO hooks;"
+        "CREATE TABLE v58_ad ("
+        "  approval_id INTEGER PRIMARY KEY,"
+        "  decision    TEXT NOT NULL CHECK (decision IN ('deny','once','always')),"
+        "  decided_via TEXT NOT NULL,"
+        "  created_at  INTEGER NOT NULL DEFAULT (unixepoch()));"
+        "INSERT INTO v58_ad SELECT approval_id, decision, decided_via, created_at"
+        "  FROM approval_decisions;"
+        "DROP TABLE approval_decisions; ALTER TABLE v58_ad RENAME TO approval_decisions;"
+        "ALTER TABLE memory_blocks RENAME COLUMN created_by TO agent_name;"
+        "ALTER TABLE providers ADD COLUMN status TEXT NOT NULL DEFAULT 'healthy';"
+        "ALTER TABLE llm_jobs ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';"
+        "CREATE INDEX idx_llm_jobs_pending ON llm_jobs(status) WHERE status='pending';"
+        "ALTER TABLE cron_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'task';"
+        "PRAGMA foreign_keys=ON;", NULL, NULL, &err);
+    if (rc != SQLITE_OK) fprintf(stderr, "unshape_v59: %s\n", err ? err : "?");
+    assert(rc == SQLITE_OK);
+}
+
 /* db_seed_defaults runs on every start, not only on an empty providers table.
  * It used to early-return whenever any provider row existed, so a DB created
  * before a catalog entry was added never saw it — the reason DBs predating the
@@ -483,18 +584,20 @@ static void test_schema_patch_application(void) {
     assert(uv == CCLAW_SCHEMA_VERSION);
 
     /* Converted in place, enabled kept — an operator who turned the pulse on
-     * keeps it running, now as an ordinary bare-wake job. */
+     * keeps it running, now as an ordinary bare-wake job (and v59 dropped the
+     * kind column that once told them apart). */
     sqlite3_stmt *hb;
     assert(sqlite3_prepare_v2(old_db,
-        "SELECT kind, task, cron_expr, interval_s, enabled FROM cron_jobs"
+        "SELECT task, cron_expr, interval_s, enabled FROM cron_jobs"
         " WHERE agent_name='Pulse' AND name='heartbeat'", -1, &hb, NULL) == SQLITE_OK);
     assert(sqlite3_step(hb) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(hb, 0), "task") == 0);
-    assert(sqlite3_column_text(hb, 1)[0] == '\0');
-    assert(strcmp((const char *)sqlite3_column_text(hb, 2), "*/30 * * * *") == 0);
-    assert(sqlite3_column_type(hb, 3) == SQLITE_NULL);
-    assert(sqlite3_column_int(hb, 4) == 1);
+    assert(sqlite3_column_text(hb, 0)[0] == '\0');
+    assert(strcmp((const char *)sqlite3_column_text(hb, 1), "*/30 * * * *") == 0);
+    assert(sqlite3_column_type(hb, 2) == SQLITE_NULL);
+    assert(sqlite3_column_int(hb, 3) == 1);
     sqlite3_finalize(hb);
+    assert(db_scalar_i64(old_db, "SELECT COUNT(*) FROM pragma_table_info('cron_jobs')"
+        " WHERE name='kind';", 0, -1) == 0);
 
     /* v42: every pre-existing child got a standing parent edge at 'turn' (the
      * contract it was launched under); the delivered child's cursor sits at
@@ -560,6 +663,7 @@ static void test_schema_patch_v47(void) {
     }
     sqlite3 *db = db_open(path);
     assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v59(db);
 
     /* Reverse-shape to v46: FK-less cron_jobs, no lease columns, the old
      * dual-purpose approvals.action. */
@@ -657,6 +761,7 @@ static void test_schema_patch_v48(void) {
     }
     sqlite3 *db = db_open(path);
     assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v59(db);
 
     assert(sqlite3_exec(db,
         "ALTER TABLE entries DROP COLUMN reasoning_meta;"
@@ -702,6 +807,7 @@ static void test_schema_patch_v50(void) {
     test_db_clean(path);
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
+    unshape_v59(db);
 
     assert(sqlite3_exec(db,
         "ALTER TABLE providers DROP COLUMN request_extra;"
@@ -748,6 +854,7 @@ static void test_schema_patch_v51(void) {
     test_db_clean(path);
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
+    unshape_v59(db);
 
     assert(sqlite3_exec(db,
         "ALTER TABLE sessions DROP COLUMN chat_is_admin;"
@@ -755,6 +862,7 @@ static void test_schema_patch_v51(void) {
         "ALTER TABLE agent_models DROP COLUMN reasoning_effort;"
         "ALTER TABLE models DROP COLUMN effort_map;"
         "INSERT INTO agents(name) VALUES('Router');"
+        "INSERT INTO providers(name, base_url) VALUES('p','http://p');"
         "INSERT INTO models(id, provider_name, model)"
         " VALUES('m@p','p','m');"
         "INSERT INTO agent_models(agent_name, model_id, pos)"
@@ -840,6 +948,7 @@ static void test_schema_patch_v57(void) {
     }
     sqlite3 *db = db_open(path);
     assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v59(db);
 
     /* Reverse-shape to v56. Entries are inserted so that id order and pos
      * order DISAGREE for agent A: the patch must follow pos. */
@@ -904,10 +1013,10 @@ static void test_schema_patch_v57(void) {
     assert(db_scalar_i64(db,
         "SELECT group_concat(n.text, ',' ORDER BY n.id) = 'a-first,a-second'"
         " FROM memory_notes n JOIN memory_blocks b ON b.id=n.block_id"
-        " WHERE b.agent_name='A' AND b.label='NOTES';", 0, -1) == 1);
+        " WHERE b.created_by='A' AND b.label='NOTES';", 0, -1) == 1);
     assert(db_scalar_i64(db,
         "SELECT COUNT(*) FROM memory_notes n JOIN memory_blocks b ON b.id=n.block_id"
-        " WHERE b.agent_name='B' AND b.label='NOTES'"
+        " WHERE b.created_by='B' AND b.label='NOTES'"
         "   AND n.text='use memory_note_edit here';", 0, -1) == 1);
     /* Stored prompts follow the rename too. */
     assert(db_scalar_i64(db, "SELECT system_prompt = 'Save it with memory_note_edit. Tools: "
@@ -921,7 +1030,7 @@ static void test_schema_patch_v57(void) {
     /* Every block attached read-write to its owner — and to nobody else. */
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_memory_blocks a"
         " JOIN memory_blocks b ON b.id=a.block_id"
-        " WHERE a.agent_name=b.agent_name AND a.read_only=0;", 0, -1) == 3);
+        " WHERE a.agent_name=b.created_by AND a.read_only=0;", 0, -1) == 3);
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_memory_blocks;", 0, -1) == 3);
     /* The API sees the migrated state. */
     MemoryBlock *mb = memory_block_get(db, "A", "NOTES");
@@ -948,6 +1057,211 @@ static void test_schema_patch_v57(void) {
     printf("  PASS test_schema_patch_v57\n");
 }
 
+/* v58 -> v59 in isolation: a v58-shaped database holding representative rows
+ * and one orphan of every kind the patch has a rule for. Afterwards every
+ * existing routing list is a chat list, memory_blocks says created_by, the
+ * configuration-side links are declared and hold (foreign_key_check is
+ * empty), the dead columns are gone, and each orphan went the way the patch
+ * comment says — deleted when it was only a dangling pointer, NULLed when the
+ * row it sat on is worth keeping. */
+static void test_schema_patch_v59(void) {
+    const char *path = "/tmp/test_cclaw_schema_v59.sqlite";
+    char junk[192];
+    const char *suffixes[] = { "", "-wal", "-shm", ".v58.bak" };
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v59(db);
+    char *err = NULL;
+    int rc = sqlite3_exec(db,
+        "PRAGMA foreign_keys=OFF;"
+        "INSERT INTO agents(name) VALUES('Scout'),('Writer');"
+        "INSERT INTO providers(name, base_url, status) VALUES('local','http://l','healthy');"
+        "INSERT INTO models(id, provider_name, model, capabilities) VALUES"
+        " ('chat@local','local','chat','[]'),"
+        " ('ears@local','local','ears','[\"audio\"]'),"
+        " ('lost@gone','gone','lost','[]');"
+        "INSERT INTO agent_models(agent_name, model_id, pos, reasoning_effort) VALUES"
+        " ('Scout','chat@local',0,'high'),('Scout','lost@gone',1,NULL),"
+        " ('Writer','ears@local',0,NULL);"
+        "INSERT INTO memory_blocks(id, agent_name, label) VALUES"
+        " (5,'Scout','notes'),(6,NULL,'team');"
+        "INSERT INTO agent_memory_blocks(agent_name, block_id, read_only) VALUES"
+        " ('Scout',5,0),('Writer',5,1),('Writer',6,0);"
+        "INSERT INTO extensions(name, path, owner_agent, published) VALUES"
+        " ('builtin','/b','system',1),('mine','/m','Scout',0),('stale','/s','OldName',1);"
+        "INSERT INTO tools(name, extension_name, path) VALUES"
+        " ('builtin_c',NULL,NULL),('blank_ext','',NULL),('mine_t','mine','/m/t'),"
+        " ('ghost_t','ghost','/g/t');"
+        "INSERT INTO hooks(extension_name, event, path) VALUES"
+        " ('mine','preAdvance','/m/h'),('ghost','preAdvance','/g/h');"
+        "INSERT INTO agent_extensions(agent_name, extension_name) VALUES"
+        " ('Scout','mine'),('Writer','ghost');"
+        "INSERT INTO channels(name, extension_name, prev_extension_name, binary_path,"
+        "                     status, default_agent) VALUES"
+        " ('real','mine',NULL,'/m/c','active','Scout'),"
+        " ('blank','',NULL,'','draft',NULL),"
+        " ('dangling','ghost','ghost2','','draft','Nobody');"
+        "INSERT INTO channel_state(channel_name, key, value) VALUES"
+        " ('real','offset','1'),('nochannel','offset','2');"
+        "INSERT INTO secrets(name, value) VALUES('KEPT','enc:00');"
+        "INSERT INTO secret_hosts(secret_name, host) VALUES"
+        " ('KEPT','api.example.com'),('ENV_ONLY','env.example.com');"
+        "INSERT INTO approvals(id, session_id, state) VALUES(7,1,'pending');"
+        "INSERT INTO approval_decisions(approval_id, decision, decided_via) VALUES"
+        " (7,'once','dashboard'),(99,'deny','dashboard');"
+        "INSERT INTO cron_jobs(agent_name, name, cron_expr, kind, session_id, task)"
+        " VALUES('Scout','daily','0 9 * * *','task',1,'hi');"
+        "INSERT INTO llm_jobs(session_id, agent_name, status) VALUES(1,'Scout','pending');"
+        "PRAGMA foreign_keys=ON;", NULL, NULL, &err);
+    if (rc != SQLITE_OK) fprintf(stderr, "v59 seed: %s\n", err ? err : "?");
+    assert(rc == SQLITE_OK);
+    set_user_version(db, 58);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == 59);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_foreign_key_check;", 0, -1) == 0);
+
+    /* Decision 11: every existing list is a chat list; effort survives. */
+    assert(db_scalar_i64(db, "SELECT group_concat(agent_name||'/'||purpose||'/'||pos||'/'"
+        "||model_id||'/'||COALESCE(reasoning_effort,'-'), ' ' ORDER BY agent_name, pos)"
+        " = 'Scout/chat/0/chat@local/high Writer/chat/0/ears@local/-'"
+        " FROM agent_models;", 0, -1) == 1);
+    /* The model on a vanished provider and its routing row are gone. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM models WHERE id='lost@gone';", 0, -1) == 0);
+
+    /* Decision 18: renamed, data and uniqueness intact. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM memory_blocks"
+        " WHERE (id=5 AND created_by='Scout') OR (id=6 AND created_by IS NULL);", 0, -1) == 2);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_memory_blocks;", 0, -1) == 3);
+    assert(sqlite3_exec(db, "INSERT INTO memory_blocks(created_by, label)"
+        " VALUES('Scout','notes');", NULL, NULL, NULL) != SQLITE_OK);
+
+    /* Decision 19, the orphan rules. */
+    assert(db_scalar_i64(db, "SELECT group_concat(name||'='||COALESCE(owner_agent,'NULL'),"
+        " ' ' ORDER BY name) = 'builtin=NULL mine=Scout stale=NULL' FROM extensions;",
+        0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT group_concat(name||'='||COALESCE(extension_name,'NULL'),"
+        " ' ' ORDER BY name) = 'blank_ext=NULL builtin_c=NULL mine_t=mine' FROM tools;",
+        0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT group_concat(extension_name) = 'mine' FROM hooks;",
+        0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT group_concat(agent_name||'>'||extension_name) ="
+        " 'Scout>mine' FROM agent_extensions;", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT group_concat(name||':'||COALESCE(extension_name,'NULL')"
+        "||':'||COALESCE(prev_extension_name,'NULL')||':'||COALESCE(default_agent,'NULL')"
+        "||':'||status, ' ' ORDER BY name) ="
+        " 'blank:NULL:NULL:NULL:draft dangling:NULL:NULL:NULL:draft"
+        " real:mine:NULL:Scout:active' FROM channels;", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT group_concat(channel_name) = 'real'"
+        " FROM channel_state;", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT group_concat(approval_id) = '7'"
+        " FROM approval_decisions;", 0, -1) == 1);
+    /* No FK on secret_hosts: an environment secret's binding has no secrets
+     * row to point at, and must survive. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM secret_hosts;", 0, -1) == 2);
+
+    /* The declared links now refuse a dangling write... */
+    assert(sqlite3_exec(db, "INSERT INTO tools(name, extension_name)"
+        " VALUES('x','nope');", NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "INSERT INTO models(id, provider_name, model)"
+        " VALUES('x@nope','nope','x');", NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "INSERT INTO approval_decisions(approval_id, decision,"
+        " decided_via) VALUES(1234,'deny','t');", NULL, NULL, NULL) != SQLITE_OK);
+    /* ...and an agent rename now reaches extension ownership. */
+    assert(agent_rename(db, "Scout", "Ranger", 0) == 0);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM extensions WHERE owner_agent='Ranger';",
+        0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM memory_blocks WHERE created_by='Ranger';",
+        0, -1) == 1);
+
+    /* Decision 20: the dead columns are gone; models keeps its health. */
+    assert(db_scalar_i64(db,
+        "SELECT (SELECT COUNT(*) FROM pragma_table_info('providers') WHERE name='status')"
+        "     + (SELECT COUNT(*) FROM pragma_table_info('llm_jobs') WHERE name='status')"
+        "     + (SELECT COUNT(*) FROM pragma_table_info('cron_jobs') WHERE name='kind')"
+        "     + (SELECT COUNT(*) FROM pragma_table_info('channels') WHERE name='binary_path')"
+        "     + (SELECT COUNT(*) FROM sqlite_master WHERE name='idx_llm_jobs_pending');",
+        0, -1) == 0);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_table_info('models')"
+        " WHERE name IN ('status','degraded_until');", 0, -1) == 2);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM llm_jobs;", 0, -1) == 1);
+
+    /* Decision 12 holds on the upgraded database too (the trigger came with
+     * the patch, not only with schema.sql). */
+    assert(sqlite3_exec(db, "INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+        " VALUES('Writer','audio','chat@local',0);", NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+        " VALUES('Writer','audio','ears@local',0);", NULL, NULL, NULL) == SQLITE_OK);
+
+    db_close(db);
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    printf("  PASS test_schema_patch_v59\n");
+}
+
+/* Decision 12: a media purpose needs the capability, on every write path —
+ * insert, update of purpose, update of model — while chat rows never ask. */
+static void test_agent_models_capability_gate(void) {
+    const char *path = "/tmp/test_cclaw_db_capgate.sqlite";
+    test_db_clean(path);
+    sqlite3 *db = test_db_open(path);
+    assert(db != NULL);
+    assert(sqlite3_exec(db,
+        "INSERT INTO agents(name) VALUES('A');"
+        "INSERT INTO providers(name, base_url) VALUES('p','http://p');"
+        "INSERT INTO models(id, provider_name, model, capabilities) VALUES"
+        " ('plain@p','p','plain','[]'), ('eyes@p','p','eyes','[\"image\",\"chat\"]'),"
+        " ('ears@p','p','ears','[\"audio\"]'), ('junk@p','p','junk','not json'),"
+        " ('none@p','p','none',NULL);", NULL, NULL, NULL) == SQLITE_OK);
+    const char *ins = "INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+                      " VALUES('A', ?1, ?2, ?3)";
+    struct { const char *purpose, *model; int pos, ok; } cases[] = {
+        { "chat",  "plain@p", 0, 1 },   /* chat never checks capabilities */
+        { "image", "plain@p", 0, 0 },
+        { "image", "junk@p",  0, 0 },   /* malformed JSON is no capability */
+        { "image", "none@p",  0, 0 },
+        { "image", "ears@p",  0, 0 },
+        { "image", "eyes@p",  0, 1 },
+        { "audio", "eyes@p",  0, 0 },
+        { "audio", "ears@p",  0, 1 },
+        { "video", "eyes@p",  1, 0 },   /* not a purpose (CHECK) */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+        sqlite3_stmt *st;
+        assert(sqlite3_prepare_v2(db, ins, -1, &st, NULL) == SQLITE_OK);
+        sqlite3_bind_text(st, 1, cases[i].purpose, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, cases[i].model, -1, SQLITE_STATIC);
+        sqlite3_bind_int(st, 3, cases[i].pos);
+        int r = sqlite3_step(st);
+        if ((r == SQLITE_DONE) != cases[i].ok)
+            fprintf(stderr, "capgate case %zu (%s %s): rc=%d %s\n", i, cases[i].purpose,
+                    cases[i].model, r, sqlite3_errmsg(db));
+        assert((r == SQLITE_DONE) == cases[i].ok);
+        if (!cases[i].ok && r == SQLITE_CONSTRAINT &&
+            strcmp(cases[i].purpose, "video") != 0)
+            assert(strstr(sqlite3_errmsg(db), "capabilities do not include"));
+        sqlite3_finalize(st);
+    }
+    /* Updates cannot sneak around it either. */
+    assert(sqlite3_exec(db, "UPDATE agent_models SET model_id='plain@p'"
+        " WHERE purpose='audio';", NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE agent_models SET purpose='audio'"
+        " WHERE purpose='chat';", NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE agent_models SET pos=3"
+        " WHERE purpose='audio';", NULL, NULL, NULL) == SQLITE_OK);
+    /* One list per purpose: the same pos in two purposes is two rows. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_models WHERE agent_name='A';",
+        0, -1) == 3);
+    db_close(db);
+    test_db_clean(path);
+    printf("  PASS test_agent_models_capability_gate\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_db:\n");
@@ -967,6 +1281,8 @@ int main(void) {
     test_schema_patch_v48();
     test_schema_patch_v50();
     test_schema_patch_v51();
+    test_schema_patch_v59();
+    test_agent_models_capability_gate();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");
     return 0;

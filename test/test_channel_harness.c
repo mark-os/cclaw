@@ -64,13 +64,12 @@ static void setup_db_and_channel(void) {
     sqlite3_stmt *s;
     sqlite3_prepare_v2(db,
         "INSERT INTO extensions(name, path, version, owner_agent, published, enabled)"
-        " VALUES('echo', ?, '0.1.0', 'default', 0, 1);", -1, &s, NULL);
+        " VALUES('echo', ?, '0.1.0', NULL, 0, 1);", -1, &s, NULL);
     sqlite3_bind_text(s, 1, EXT_DIR, -1, SQLITE_STATIC);
     sqlite3_step(s); sqlite3_finalize(s);
     sqlite3_prepare_v2(db,
-        "INSERT INTO channels(name, extension_name, type, binary_path, status)"
-        " VALUES('echo', 'echo', 'echo', ?, 'draft');", -1, &s, NULL);
-    sqlite3_bind_text(s, 1, EXT_DIR "/channel.qjs", -1, SQLITE_STATIC);
+        "INSERT INTO channels(name, extension_name, type, status)"
+        " VALUES('echo', 'echo', 'echo', 'draft');", -1, &s, NULL);
     sqlite3_step(s); sqlite3_finalize(s);
     db_close(db);
 }

@@ -18,12 +18,13 @@ static sqlite3 *setup(void) {
     sqlite3_exec(db, "INSERT INTO agents(name,created_by) VALUES('Child','OldAgent')", NULL, NULL, NULL);
     /* Seed related rows */
     sqlite3_exec(db, "INSERT INTO sessions(name,agent_name,state) VALUES('s1','OldAgent','idle')", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO extensions(name,path,owner_agent) VALUES('telegram','/x','OldAgent')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO agent_extensions(agent_name,extension_name) VALUES('OldAgent','telegram')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO channels(name,default_agent) VALUES('tg','OldAgent')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO cron_jobs(agent_name,name,cron_expr,session_id,task) VALUES('OldAgent','job1','* * * * *',1,'hi')", NULL, NULL, NULL);
-    sqlite3_exec(db, "INSERT INTO memory_blocks(agent_name,label) VALUES('OldAgent','AGENT')", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO memory_blocks(created_by,label) VALUES('OldAgent','AGENT')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO agent_memory_blocks(agent_name,block_id)"
-                     " SELECT agent_name,id FROM memory_blocks WHERE agent_name='OldAgent'", NULL, NULL, NULL);
+                     " SELECT created_by,id FROM memory_blocks WHERE created_by='OldAgent'", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO config(key,value) VALUES('default_agent','OldAgent')", NULL, NULL, NULL);
     return db;
 }
@@ -47,9 +48,11 @@ static void test_successful_rename(void) {
     assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE name='OldAgent'") == 0);
     assert(count_rows(db, "SELECT COUNT(*) FROM sessions WHERE agent_name='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM agent_extensions WHERE agent_name='NewAgent'") == 1);
+    /* extensions.owner_agent is a declared FK since v59: the owner follows. */
+    assert(count_rows(db, "SELECT COUNT(*) FROM extensions WHERE owner_agent='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM channels WHERE default_agent='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM cron_jobs WHERE agent_name='NewAgent'") == 1);
-    assert(count_rows(db, "SELECT COUNT(*) FROM memory_blocks WHERE agent_name='NewAgent'") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM memory_blocks WHERE created_by='NewAgent'") == 1);
     /* the attachment follows the rename, so the block is still the agent's */
     assert(count_rows(db, "SELECT COUNT(*) FROM agent_memory_blocks WHERE agent_name='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM agent_memory_blocks WHERE agent_name='OldAgent'") == 0);
@@ -147,14 +150,77 @@ static void test_fk_shape_audit(void) {
     sqlite3_finalize(s);
     assert(bad == 0);
 
-    /* created_by is the same invariant on agents itself */
+    /* created_by is the same invariant, on agents itself and on every other
+     * table that records which agent made a row (memory_blocks, v59). */
+    assert(sqlite3_prepare_v2(db,
+        "SELECT m.name FROM sqlite_master m"
+        " WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%'"
+        "   AND EXISTS(SELECT 1 FROM pragma_table_info(m.name) WHERE name='created_by')"
+        "   AND NOT EXISTS(SELECT 1 FROM pragma_foreign_key_list(m.name)"
+        "                  WHERE \"from\"='created_by' AND \"table\"='agents'"
+        "                    AND \"to\"='name' AND on_update='CASCADE')",
+        -1, &s, NULL) == SQLITE_OK);
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        printf("  MISSING FK: %s.created_by lacks REFERENCES agents(name)"
+               " ON UPDATE CASCADE\n", (const char *)sqlite3_column_text(s, 0));
+        bad++;
+    }
+    sqlite3_finalize(s);
+    assert(bad == 0);
     assert(count_rows(db,
-        "SELECT COUNT(*) FROM pragma_foreign_key_list('agents')"
-        " WHERE \"from\"='created_by' AND \"table\"='agents'"
-        "   AND \"to\"='name' AND on_update='CASCADE'") == 1);
+        "SELECT COUNT(*) FROM sqlite_master m JOIN pragma_table_info(m.name) c"
+        " WHERE m.type='table' AND c.name='created_by'") >= 2);
 
     db_close(db);
     printf("  PASS: test_fk_shape_audit\n");
+}
+
+/* The configuration-side links declared in v59 (plan/projects/
+ * v0.8-data-and-explorer.md decision 19), each with its exact actions: ON
+ * UPDATE CASCADE everywhere, no ON DELETE. A rebuilt table that loses one
+ * fails here instead of silently accepting dangling rows again. secret_hosts
+ * is deliberately absent: environment secrets have bindings but no row. */
+static void test_config_link_audit(void) {
+    test_db_clean(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+    static const struct { const char *tbl, *from, *parent, *to, *upd, *del; } LINKS[] = {
+        { "models",             "provider_name",       "providers",  "name", "CASCADE",   "NO ACTION" },
+        { "agent_models",       "model_id",            "models",     "id",   "NO ACTION", "NO ACTION" },
+        { "tools",              "extension_name",      "extensions", "name", "CASCADE",   "NO ACTION" },
+        { "hooks",              "extension_name",      "extensions", "name", "CASCADE",   "NO ACTION" },
+        { "channels",           "extension_name",      "extensions", "name", "CASCADE",   "NO ACTION" },
+        { "channels",           "prev_extension_name", "extensions", "name", "CASCADE",   "NO ACTION" },
+        { "agent_extensions",   "extension_name",      "extensions", "name", "CASCADE",   "NO ACTION" },
+        { "extensions",         "owner_agent",         "agents",     "name", "CASCADE",   "NO ACTION" },
+        { "channel_state",      "channel_name",        "channels",   "name", "CASCADE",   "NO ACTION" },
+        { "approval_decisions", "approval_id",         "approvals",  "id",   "CASCADE",   "NO ACTION" },
+    };
+    int bad = 0;
+    for (size_t i = 0; i < sizeof(LINKS) / sizeof(*LINKS); i++) {
+        sqlite3_stmt *s;
+        assert(sqlite3_prepare_v2(db,
+            "SELECT COUNT(*) FROM pragma_foreign_key_list(?1)"
+            " WHERE \"from\"=?2 AND \"table\"=?3 AND \"to\"=?4"
+            "   AND on_update=?5 AND on_delete=?6", -1, &s, NULL) == SQLITE_OK);
+        sqlite3_bind_text(s, 1, LINKS[i].tbl, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, LINKS[i].from, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 3, LINKS[i].parent, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 4, LINKS[i].to, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 5, LINKS[i].upd, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 6, LINKS[i].del, -1, SQLITE_STATIC);
+        assert(sqlite3_step(s) == SQLITE_ROW);
+        if (sqlite3_column_int(s, 0) != 1) {
+            printf("  MISSING LINK: %s.%s -> %s(%s) ON UPDATE %s ON DELETE %s\n",
+                   LINKS[i].tbl, LINKS[i].from, LINKS[i].parent, LINKS[i].to,
+                   LINKS[i].upd, LINKS[i].del);
+            bad++;
+        }
+        sqlite3_finalize(s);
+    }
+    assert(bad == 0);
+    db_close(db);
+    printf("  PASS: test_config_link_audit\n");
 }
 
 /* Behavioral belt-and-braces for the shape audit above: enumerate every
@@ -188,6 +254,12 @@ static void seed_generic_row(sqlite3 *db, const char *table, const char *agent) 
                 "INSERT OR IGNORE INTO models(id,provider_name,model)"
                 " VALUES('p/m','p','m');", NULL, NULL, NULL);
             snprintf(val, sizeof(val), "'p/m'");
+        } else if (strcmp(name, "extension_name") == 0 && notnull) {
+            /* FK into extensions: seed the referenced row once. */
+            sqlite3_exec(db,
+                "INSERT OR IGNORE INTO extensions(name,path) VALUES('genext','/x');",
+                NULL, NULL, NULL);
+            snprintf(val, sizeof(val), "'genext'");
         } else if (strcmp(name, "block_id") == 0) {
             /* FK into memory_blocks: seed the referenced row once. */
             sqlite3_exec(db,
@@ -373,6 +445,7 @@ int main(void) {
     printf("test_agent_rename:\n");
     test_successful_rename();
     test_fk_shape_audit();
+    test_config_link_audit();
     test_rename_no_orphans_self_audit();
     test_busy_rejection();
     test_busy_allows_requesting_session();

@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS providers (
   api_key_env TEXT NOT NULL DEFAULT '',
   default_model TEXT,
   priority INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'healthy',
   -- JSON merged (json_patch, RFC 7386) into every outgoing request body for
   -- this provider as the LAST step of payload assembly, so it can override
   -- anything cclaw built. The escape hatch for provider-specific request
@@ -34,9 +33,11 @@ CREATE TABLE IF NOT EXISTS providers (
 );
 
 -- ═══ Models ═══
+-- A model belongs to one provider: removing a provider that still has models
+-- is refused (delete or move its models first).
 CREATE TABLE IF NOT EXISTS models (
   id TEXT PRIMARY KEY,
-  provider_name TEXT NOT NULL,
+  provider_name TEXT NOT NULL REFERENCES providers(name) ON UPDATE CASCADE,
   model TEXT NOT NULL,
   context_window INTEGER,
   max_output_tokens INTEGER,
@@ -67,8 +68,14 @@ CREATE TABLE IF NOT EXISTS models (
 -- appended after the list. Health reorders it (degraded rows sink), never
 -- empties it. Rows reference the models catalog; deleting a referenced model
 -- is refused (fix lists first; 'disabled' is the soft option).
+-- purpose: one ordered list per job. 'chat' drives the agent's turns;
+-- 'image'/'audio' pick the model that turns inbound media into text for this
+-- agent's sessions. An agent with no rows for a media purpose uses the global
+-- capability pick (llm_proc.c model_pick_for_media). A media row is refused
+-- unless the model's capabilities include that purpose (trigger below).
 CREATE TABLE IF NOT EXISTS agent_models (
   agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,
+  purpose TEXT NOT NULL DEFAULT 'chat' CHECK (purpose IN ('chat','image','audio')),
   model_id TEXT NOT NULL REFERENCES models(id),
   pos INTEGER NOT NULL,
   -- How hard this agent wants this model to think: off|minimal|low|medium|high.
@@ -77,8 +84,28 @@ CREATE TABLE IF NOT EXISTS agent_models (
   -- models.effort_map, clamping to the nearest supported level.
   reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN
     ('off','minimal','low','medium','high')),
-  PRIMARY KEY (agent_name, pos)
+  PRIMARY KEY (agent_name, purpose, pos)
 );
+-- Every write path goes through these, so the rule cannot be skipped by a
+-- caller that forgets to check (dashboard, config doc, clone, sqlite3 --write).
+CREATE TRIGGER IF NOT EXISTS agent_models_capability_bi
+BEFORE INSERT ON agent_models
+WHEN NEW.purpose <> 'chat' AND NOT EXISTS (
+  SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)
+                                         THEN m.capabilities ELSE '[]' END) c
+   WHERE m.id = NEW.model_id AND c.value = NEW.purpose)
+BEGIN
+  SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose');
+END;
+CREATE TRIGGER IF NOT EXISTS agent_models_capability_bu
+BEFORE UPDATE OF purpose, model_id ON agent_models
+WHEN NEW.purpose <> 'chat' AND NOT EXISTS (
+  SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)
+                                         THEN m.capabilities ELSE '[]' END) c
+   WHERE m.id = NEW.model_id AND c.value = NEW.purpose)
+BEGIN
+  SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose');
+END;
 
 -- Availability probe cache: what a provider says it can serve, as opposed to
 -- what `models` registers for routing. Slim on purpose — an aggregator's
@@ -102,17 +129,17 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
   agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,
   recall INTEGER NOT NULL DEFAULT 0,
   job_type INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'pending',
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
-CREATE INDEX IF NOT EXISTS idx_llm_jobs_pending ON llm_jobs(status) WHERE status='pending';
 
 -- ═══ Extensions ═══
 CREATE TABLE IF NOT EXISTS extensions (
   name TEXT PRIMARY KEY,
   path TEXT NOT NULL,                       -- shared store dir: ~/.cclaw/extensions/<name>
   version TEXT DEFAULT '0.0.0',
-  owner_agent TEXT,                         -- who promoted it ('system' for extensions shipped in the binary)
+  owner_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,
+                                            -- the agent that promoted it; NULL for an
+                                            -- extension shipped in the binary
   published INTEGER NOT NULL DEFAULT 0,     -- the single publish flag
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -159,7 +186,7 @@ CREATE TABLE IF NOT EXISTS grants (
 
 CREATE TABLE IF NOT EXISTS agent_extensions (
   agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
-  extension_name TEXT NOT NULL,
+  extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,
   config TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (agent_name, extension_name)
@@ -173,10 +200,11 @@ CREATE TABLE IF NOT EXISTS agent_extensions (
 -- backoff; 'broken' exists only in rows an older build left (--check lifts it).
 CREATE TABLE IF NOT EXISTS channels (
   name TEXT PRIMARY KEY,
-  extension_name TEXT NOT NULL DEFAULT '',
-  prev_extension_name TEXT,                 -- revert target recorded by channel swap
-  type TEXT NOT NULL DEFAULT '',
-  binary_path TEXT NOT NULL DEFAULT '',
+  extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,
+                                            -- the code fronting this channel; NULL = none
+  prev_extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,
+                                            -- revert target recorded by channel swap
+  type TEXT NOT NULL DEFAULT '',            -- manifest $.channel.type (display only)
   status TEXT NOT NULL DEFAULT 'draft',
   pid INTEGER,
   default_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,
@@ -193,7 +221,7 @@ CREATE TABLE IF NOT EXISTS channels (
 );
 
 CREATE TABLE IF NOT EXISTS channel_state (
-  channel_name TEXT NOT NULL,
+  channel_name TEXT NOT NULL REFERENCES channels(name) ON UPDATE CASCADE,
   key TEXT NOT NULL,
   value TEXT,
   PRIMARY KEY (channel_name, key)
@@ -500,7 +528,8 @@ CREATE INDEX IF NOT EXISTS idx_inbox_pending ON inbox(session_id, consumed) WHER
 -- ═══ Tools ═══
 CREATE TABLE IF NOT EXISTS tools (
   name TEXT PRIMARY KEY,
-  extension_name TEXT,                       -- NULL for built-in C tools
+  extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,
+                                             -- NULL for built-in C tools
   description TEXT,
   parameters_json TEXT,
   path TEXT,                                 -- handler file (in the shared store)
@@ -519,7 +548,7 @@ CREATE TABLE IF NOT EXISTS tools (
 -- ═══ Hooks ═══
 -- Same provenance model as tools (replaces the __cclaw_hooks scrape).
 CREATE TABLE IF NOT EXISTS hooks (
-  extension_name TEXT NOT NULL,
+  extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,
   event TEXT NOT NULL,                        -- one of the six hook events
   path TEXT NOT NULL,                         -- handler file (in the shared store)
   enabled INTEGER NOT NULL DEFAULT 1,
@@ -552,13 +581,14 @@ CREATE INDEX IF NOT EXISTS idx_hook_directives_session ON hook_directives(sessio
 -- New blocks default to 'context' — the API default in memory_block_create,
 -- which every insert path goes through; the column DEFAULT below is inert.
 --
--- agent_name is the block's OWNER (the agent that created it; NULL for a
--- block the operator made). Who actually SEES a block is agent_memory_blocks:
--- a block attached to several agents is a shared block. There is no global
--- block — "every agent" is a list of attachments, visible and editable.
+-- created_by is history: the agent that made the block (NULL for a block the
+-- operator made). It grants nothing. Who SEES a block, and who may write it,
+-- is agent_memory_blocks alone: a block attached to several agents is a
+-- shared block. There is no global block — "every agent" is a list of
+-- attachments, visible and editable.
 CREATE TABLE IF NOT EXISTS memory_blocks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
+  created_by TEXT REFERENCES agents(name) ON UPDATE CASCADE,
   label TEXT NOT NULL,
   description TEXT,
   char_limit INTEGER NOT NULL DEFAULT 5000,
@@ -566,11 +596,11 @@ CREATE TABLE IF NOT EXISTS memory_blocks (
   placement TEXT NOT NULL DEFAULT 'system',
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  UNIQUE(agent_name, label)
+  UNIQUE(created_by, label)
 );
 
 -- Which agents have which blocks. read_only here is per attachment: the
--- owner is attached read-write, anyone else read-only unless the operator
+-- creator is attached read-write, anyone else read-only unless the operator
 -- says otherwise (a writable shared block lets one agent write into
 -- another's prompt). An agent addresses a block by label, so no agent may
 -- hold two attachments with the same label — memory_block_attach enforces it.
@@ -608,9 +638,6 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   cron_expr TEXT NOT NULL,
   run_at INTEGER,                            -- one-shot: fire once at this time
   interval_s INTEGER,                        -- fixed period: refire every N seconds
-  kind TEXT NOT NULL DEFAULT 'task',         -- always 'task'; legacy DBs held
-                                             -- 'heartbeat' (folded into a bare
-                                             -- wake job by the v41 patch)
   session_id INTEGER NOT NULL,
   task TEXT NOT NULL,
   script TEXT,                               -- workspace-relative QJS path; runs sandboxed at
@@ -660,7 +687,7 @@ CREATE INDEX IF NOT EXISTS approvals_pending ON approvals(session_id, state) WHE
 -- its decision here and wakes the loop. The first decision for an approval
 -- wins; a row lives for milliseconds.
 CREATE TABLE IF NOT EXISTS approval_decisions (
-  approval_id INTEGER PRIMARY KEY,
+  approval_id INTEGER PRIMARY KEY REFERENCES approvals(id) ON UPDATE CASCADE,
   decision    TEXT NOT NULL CHECK (decision IN ('deny','once','always')),
   decided_via TEXT NOT NULL,
   created_at  INTEGER NOT NULL DEFAULT (unixepoch())

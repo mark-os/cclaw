@@ -592,7 +592,8 @@ int model_context_window(sqlite3 *db, const char *agent_name, int global_default
     const char *sql =
         "SELECT m.context_window FROM agent_models am"
         " JOIN models m ON m.id = am.model_id"
-        " WHERE am.agent_name = ? AND m.status != 'disabled'"
+        " WHERE am.agent_name = ? AND am.purpose = 'chat'"
+        "   AND m.status != 'disabled'"
         " ORDER BY am.pos LIMIT 1;";
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK)

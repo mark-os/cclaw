@@ -17,9 +17,14 @@
 static void cleanup(void) {
     test_db_clean(TEST_DB);
     unlink(TEST_FIFO);
-    /* Re-create schema so channel_ctx_open has tables ready */
+    /* Re-create schema so channel_ctx_open has tables ready, plus the
+     * channel row its channel_state rows hang off (a declared FK). */
     sqlite3 *db = test_db_open(TEST_DB);
-    if (db) db_close(db);
+    if (db) {
+        sqlite3_exec(db, "INSERT INTO channels(name) VALUES('telegram');",
+                     NULL, NULL, NULL);
+        db_close(db);
+    }
 }
 
 static void test_channel_emit(void) {

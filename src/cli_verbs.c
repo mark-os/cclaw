@@ -213,7 +213,7 @@ int channel_cli_main(int argc, char *argv[]) {
     if (!sub || strcmp(sub, "list") == 0) {
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
-                "SELECT name, status, extension_name,"
+                "SELECT name, status, COALESCE(extension_name, '(none)'),"
                 "       COALESCE(prev_extension_name, ''), COALESCE(pid, 0)"
                 " FROM channels ORDER BY name", -1, &st, NULL) == SQLITE_OK) {
             int any = 0;

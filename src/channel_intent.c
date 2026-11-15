@@ -229,7 +229,8 @@ static int intent_exec_status(sqlite3 *db, const char *ch_name, const char *cid)
     if (sqlite3_prepare_v2(db,
             "SELECT s.id, s.agent_name, s.state,"
             "       COALESCE((SELECT model_id FROM agent_models am"
-            "          WHERE am.agent_name=a.name ORDER BY pos LIMIT 1),"
+            "          WHERE am.agent_name=a.name AND am.purpose='chat'"
+            "          ORDER BY pos LIMIT 1),"
             "        '(provider default)'),"
             "       (SELECT COUNT(*) FROM approvals ap"
             "          JOIN sessions s2 ON s2.id = ap.session_id"

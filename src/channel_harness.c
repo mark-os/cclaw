@@ -325,16 +325,15 @@ int channel_harness_run(const char *db_path, const char *channel_name, const cha
         sqlite3_stmt *s;
         sqlite3_prepare_v2(sdb,
             "INSERT INTO extensions(name, path, version, owner_agent, published, enabled)"
-            " VALUES(?,?,'0.0.0','harness',0,1);", -1, &s, NULL);
+            " VALUES(?,?,'0.0.0',NULL,0,1);", -1, &s, NULL);
         sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
         sqlite3_bind_text(s, 2, js_path, -1, SQLITE_STATIC);
         sqlite3_step(s); sqlite3_finalize(s);
         sqlite3_prepare_v2(sdb,
-            "INSERT INTO channels(name, extension_name, type, binary_path, status)"
-            " VALUES(?,?,'harness',?,'validated');", -1, &s, NULL);
+            "INSERT INTO channels(name, extension_name, type, status)"
+            " VALUES(?,?,'harness','validated');", -1, &s, NULL);
         sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
         sqlite3_bind_text(s, 2, channel_name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(s, 3, js_path, -1, SQLITE_STATIC);
         sqlite3_step(s); sqlite3_finalize(s);
 
         /* Egress keys, now that channels/extensions exist (channel_config

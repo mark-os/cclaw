@@ -44,7 +44,8 @@ char *config_probe_snapshot(sqlite3 *db, const char *agent, const char *args_jso
         "SELECT json_object("
         " 'agent', (SELECT json_object('models', COALESCE((SELECT"
         "               json_group_array(model_id) FROM (SELECT model_id"
-        "               FROM agent_models WHERE agent_name=?2 ORDER BY pos)),"
+        "               FROM agent_models WHERE agent_name=?2"
+        "               AND purpose='chat' ORDER BY pos)),"
         "               json_array()))"
         "             FROM agents WHERE name=?2),"
         " 'provider', (SELECT json_object('name', name, 'base_url', base_url,"
@@ -73,10 +74,11 @@ int config_probe_needed(sqlite3 *db, const char *agent, const char *args_json) {
         "   json_extract(?1,'$.changes.agent.models') IS NOT NULL"
         "   OR EXISTS(SELECT 1 FROM json_each(?1,'$.changes.models') j"
         "              WHERE json_extract(j.value,'$.id') IN"
-        "                (SELECT model_id FROM agent_models WHERE agent_name=?2))"
+        "                (SELECT model_id FROM agent_models WHERE agent_name=?2"
+        "                 AND purpose='chat'))"
         "   OR EXISTS(SELECT 1 FROM models m"
         "              WHERE m.id IN (SELECT model_id FROM agent_models"
-        "                             WHERE agent_name=?2)"
+        "                             WHERE agent_name=?2 AND purpose='chat')"
         "                AND m.provider_name ="
         "                    json_extract(?1,'$.changes.provider.provider')))",
         args_json, agent);
@@ -94,7 +96,7 @@ int config_probe_restore(sqlite3 *db, const char *agent, const char *args_json,
     /* Agent routing list: whole-list restore from the snapshot array. */
     if (rc == 0)
         rc = exec2(db,
-            "DELETE FROM agent_models WHERE agent_name=?2"
+            "DELETE FROM agent_models WHERE agent_name=?2 AND purpose='chat'"
             " AND json_type(?1,'$.agent.models')='array'",
             snap_json, agent);
     if (rc == 0)
@@ -110,11 +112,6 @@ int config_probe_restore(sqlite3 *db, const char *agent, const char *args_json,
             " api_key_env = json_extract(?1,'$.provider.api_key_env')"
             " WHERE name = json_extract(?1,'$.provider.name')",
             snap_json, NULL);
-    if (rc == 0)
-        rc = exec2(db,
-            "DELETE FROM providers WHERE name = json_extract(?2,'$.changes.provider.provider')"
-            " AND json_extract(?1,'$.provider.name') IS NULL",
-            snap_json, args_json);
 
     /* Models: same shape — restore what was there, delete what was created.
      * Per-column subselects mirror the apply path's write. */
@@ -136,6 +133,13 @@ int config_probe_restore(sqlite3 *db, const char *agent, const char *args_json,
             "DELETE FROM models WHERE id IN"
             "  (SELECT json_extract(value,'$.id') FROM json_each(?2,'$.changes.models'))"
             " AND id NOT IN (SELECT json_extract(value,'$.id') FROM json_each(?1,'$.models'))",
+            snap_json, args_json);
+    /* A provider the document created goes last: models.provider_name
+     * references it, so the models created on it must be gone first. */
+    if (rc == 0)
+        rc = exec2(db,
+            "DELETE FROM providers WHERE name = json_extract(?2,'$.changes.provider.provider')"
+            " AND json_extract(?1,'$.provider.name') IS NULL",
             snap_json, args_json);
 
     if (rc == 0) sqlite3_exec(db, "RELEASE probe_revert", NULL, NULL, NULL);

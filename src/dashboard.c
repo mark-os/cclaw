@@ -545,7 +545,7 @@ static void render_memory_block(Buf *b, long long id, const char *label,
                                 int used) {
     buf_appendf(b, "<h3>#%lld ", id);
     buf_html(b, label);
-    buf_appendf(b, " <small>owner: ");
+    buf_appendf(b, " <small>created by: ");
     buf_html(b, owner && owner[0] ? owner : "operator");
     buf_appendf(b, " · %d/%d chars</small></h3>", used, limit);
 
@@ -635,10 +635,10 @@ static void render_memory(Buf *b) {
     /* Collect block ids first: the per-block renderer runs its own queries. */
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(s_db,
-            "SELECT b.id, b.label, COALESCE(b.agent_name,''), COALESCE(b.description,''),"
+            "SELECT b.id, b.label, COALESCE(b.created_by,''), COALESCE(b.description,''),"
             " b.char_limit, b.read_only, b.placement,"
             " (SELECT COALESCE(SUM(length(text)),0) FROM memory_notes n WHERE n.block_id=b.id)"
-            " FROM memory_blocks b ORDER BY COALESCE(b.agent_name,''), b.id",
+            " FROM memory_blocks b ORDER BY COALESCE(b.created_by,''), b.id",
             -1, &st, NULL) == SQLITE_OK) {
         while (sqlite3_step(st) == SQLITE_ROW)
             render_memory_block(b, sqlite3_column_int64(st, 0),
@@ -655,7 +655,7 @@ static void render_memory(Buf *b) {
                    "label <input name=label size=16> description"
                    " <input name=description size=50> <select name=placement>"
                    "<option>context</option><option>system</option></select>"
-                   " owner <select name=agent_name><option value=\"\">(operator,"
+                   " created by <select name=agent_name><option value=\"\">(operator,"
                    " attach later)</option>");
     mem_agent_options(b, 0);
     buf_appendf(b, "</select> <button>create</button></form>");

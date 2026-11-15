@@ -506,7 +506,8 @@ void approval_state_restatement(sqlite3 *db, const Approval *a,
             "                 ||COALESCE('('||reasoning_effort||')','') m"
             "               FROM agent_models"
             "                WHERE agent_name=(SELECT agent_name FROM sessions"
-            "                                   WHERE id=?2) ORDER BY pos)),"
+            "                                   WHERE id=?2)"
+            "                  AND purpose='chat' ORDER BY pos)),"
             "        '(none)')",
             -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_text(st, 1, args, -1, SQLITE_STATIC);
@@ -690,7 +691,8 @@ static const char *SQL_CHANGES_AGENT_SETTINGS =
     "       FROM (SELECT model_id"
     "               ||COALESCE('('||reasoning_effort||')','') m"
     "             FROM agent_models"
-    "              WHERE agent_name=" SQL_CUR_AGENT " ORDER BY pos))"
+    "              WHERE agent_name=" SQL_CUR_AGENT " AND purpose='chat'"
+    "              ORDER BY pos))"
     "     WHEN 'max_iterations' THEN (SELECT CAST(max_iterations AS TEXT)"
     "       FROM agents WHERE name=" SQL_CUR_AGENT ")"
     "     WHEN 'shell_timeout' THEN (SELECT CAST(shell_timeout AS TEXT)"
@@ -788,7 +790,7 @@ static const char *SQL_CREATE_AGENT_LINES =
      * a writable share lets it write into every other holder's prompt. */
     " UNION ALL SELECT format('%-7sshares block #%s %s (%s)','memory',"
     "     json_extract(j.value,'$.attach'),"
-    "     COALESCE((SELECT b.label || ' of ' || COALESCE(b.agent_name,'operator')"
+    "     COALESCE((SELECT b.label || ' of ' || COALESCE(b.created_by,'operator')"
     "                 FROM memory_blocks b WHERE b.id=json_extract(j.value,'$.attach')),"
     "              '(no such block)'),"
     "     CASE WHEN COALESCE(json_extract(j.value,'$.read_only'),1) THEN 'read-only'"
@@ -840,6 +842,7 @@ static const char *SQL_CREATE_AGENT_INHERITED_MODELS =
     "SELECT format('model  #%d %s', am.pos+1, am.model_id)"
     " FROM agent_models am"
     " WHERE am.agent_name = (SELECT agent_name FROM sessions WHERE id=?2)"
+    "   AND am.purpose = 'chat'"
     "   AND json_type(?1,'$.models') IS NULL"
     "   AND json_extract(?1,'$.clone_from') IS NULL"
     " ORDER BY am.pos";

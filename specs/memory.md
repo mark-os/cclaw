@@ -26,22 +26,26 @@ names, the rendered prompt, the dashboard, this spec):
 
 ### Who sees a block: attachments
 
-A block is attached to agents through `agent_memory_blocks`. The agent that
-creates a block is its **owner** (`memory_blocks.agent_name`) and is attached
-read-write. A block attached to more than one agent is a **shared** block:
-every holder sees the same notes under the same label.
+A block is attached to agents through `agent_memory_blocks`, and the
+attachments are the only answer to "who has it". The agent that creates a
+block is recorded in `memory_blocks.created_by` (v59; was `agent_name`) and is
+attached read-write. `created_by` is history, not a permission: it grants
+nothing, and detaching the creator leaves it with no access. A block attached
+to more than one agent is a **shared** block: every holder sees the same
+notes under the same label (the rendered block says `| shared` to every
+holder that did not create it).
 
 - There is **no global block**. "Every agent" is a list of attachments —
   visible, editable, and not silently extended to agents created later. (An
   earlier spec said `agent_name IS NULL` meant global; no query ever
   implemented it.)
-- An attachment has its own `read_only` flag. A non-owner is attached
+- An attachment has its own `read_only` flag. Anyone but the creator is attached
   **read-only unless the operator says otherwise**: a writable shared block
   lets one agent write into another agent's prompt, which is a trust decision.
 - Sharing is an operator act — the dashboard, or an agent definition's
   `memory_blocks[]` entry `{"attach": <block id>}`. A creating agent may share
   only a block it holds itself, and the `create_agent` approval names the
-  block, its owner, and whether the new agent may write to it.
+  block, who created it, and whether the new agent may write to it.
 - An agent addresses a block by label, so it can never hold two attachments
   with the same label; `memory_block_attach` refuses the second.
 - `memory_blocks.read_only` is the block-wide flag (no agent may change it);
@@ -79,7 +83,7 @@ A block the agent holds but does not own adds `| shared` to the usage line.
 
 | Tool | Arguments | Notes |
 |------|-----------|-------|
-| `memory_block_create` | `label`, `description`, `placement?` | The caller becomes the owner |
+| `memory_block_create` | `label`, `description`, `placement?` | Recorded as `created_by` the caller, attached to it read-write |
 | `memory_block_update` | `block`, `description?`, `placement?` | |
 | `memory_note_add` | `block`, `text` | Refused if it would exceed `char_limit`; returns the new id |
 | `memory_note_edit` | `block`, `notes: [{id, text}]` | Refused if it would exceed `char_limit`; an edit that does not lengthen the note always fits |
@@ -107,7 +111,7 @@ attach or detach it — those are the operator's, on the dashboard.
 
 ### Dashboard
 
-`/admin` has a **Memory** section: every block with its owner, usage,
+`/admin` has a **Memory** section: every block with its creator, usage,
 description, placement, limit and read-only flag; the agents it is attached to
 (attach, detach, switch read-only/read-write); and its notes, each editable
 and deletable, with a form to add one. The operator's edits are not bound by
@@ -127,9 +131,11 @@ Key insight from Letta: memory management is a **tool-use problem**. The agent d
 
 Three tables; the column reference is [schema.md](schema.md#memory_blocks).
 
-- `memory_blocks` — the container: `agent_name` (owner; NULL for a block the
-  operator made), `label`, `description`, `char_limit`, `read_only`,
-  `placement`. A block has no text column.
+- `memory_blocks` — the container: `created_by` (history: the agent that made
+  it; NULL for a block the operator made), `label`, `description`,
+  `char_limit`, `read_only`, `placement`. A block has no text column.
+  `UNIQUE(created_by, label)` is kept from the old owner column: one agent
+  cannot create two blocks with the same label, even after detaching one.
 - `agent_memory_blocks` — attachments: `(agent_name, block_id)` plus the
   attachment's `read_only`.
 - `memory_notes` — the content: `id`, `block_id`, `text`, `updated_at`. Shown oldest first

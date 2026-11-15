@@ -99,7 +99,8 @@ static int load_candidates(sqlite3 *db, const char *agent_name,
         " FROM agent_models am"
         " JOIN models m ON m.id = am.model_id"
         " JOIN providers p ON p.name = m.provider_name"
-        " WHERE am.agent_name = ?1 AND m.status != 'disabled'"
+        " WHERE am.agent_name = ?1 AND am.purpose = 'chat'"
+        "   AND m.status != 'disabled'"
         " ORDER BY am.pos";
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
@@ -138,6 +139,23 @@ static int load_candidates(sqlite3 *db, const char *agent_name,
 }
 
 
+/* Columns 0..6 of a media candidate row: id, model, base_url, api_key_env,
+ * endpoint_type, context_window, provider name. */
+static void media_candidate_fill(sqlite3_stmt *s, ModelCandidate *c) {
+    memset(c, 0, sizeof(*c));
+    const char *v;
+    v = (const char *)sqlite3_column_text(s, 0); snprintf(c->id, sizeof(c->id), "%s", v ? v : "");
+    v = (const char *)sqlite3_column_text(s, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : "");
+    v = (const char *)sqlite3_column_text(s, 2); snprintf(c->base_url, sizeof(c->base_url), "%s", v ? v : "");
+    v = (const char *)sqlite3_column_text(s, 3); snprintf(c->api_key_env, sizeof(c->api_key_env), "%s", v ? v : "");
+    v = (const char *)sqlite3_column_text(s, 4);
+    c->endpoint_type = endpoint_type_parse(v);
+    c->context_window = sqlite3_column_int(s, 5);
+    if (c->context_window <= 0) c->context_window = 128000;
+    v = (const char *)sqlite3_column_text(s, 6);
+    snprintf(c->provider_name, sizeof(c->provider_name), "%s", v ? v : "");
+}
+
 int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, int max) {
     if (max <= 0) return 0;
     int n = 0;
@@ -153,29 +171,57 @@ int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, 
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_text(s, 1, cap, -1, SQLITE_STATIC);
-    while (n < max && sqlite3_step(s) == SQLITE_ROW) {
-        ModelCandidate *c = &out[n];
-        memset(c, 0, sizeof(*c));
-        const char *v;
-        v = (const char *)sqlite3_column_text(s, 0); snprintf(c->id, sizeof(c->id), "%s", v ? v : "");
-        v = (const char *)sqlite3_column_text(s, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : "");
-        v = (const char *)sqlite3_column_text(s, 2); snprintf(c->base_url, sizeof(c->base_url), "%s", v ? v : "");
-        v = (const char *)sqlite3_column_text(s, 3); snprintf(c->api_key_env, sizeof(c->api_key_env), "%s", v ? v : "");
-        v = (const char *)sqlite3_column_text(s, 4);
-        c->endpoint_type = endpoint_type_parse(v);
-        c->context_window = sqlite3_column_int(s, 5);
-        if (c->context_window <= 0) c->context_window = 128000;
-        v = (const char *)sqlite3_column_text(s, 6);
-        snprintf(c->provider_name, sizeof(c->provider_name), "%s", v ? v : "");
-        /* Deliberately NOT key-filtered like chat routing: this picker's
-         * contract is health (degraded/disabled/capability), and a media job
-         * has its own attempt budget and failure entry. Applying
-         * provider_key_available here would turn a 401 carrying provider
-         * detail into a bare "no capable model" — a separate call to make
-         * alongside the media_jobs failure path, not a side effect of the
-         * chat-routing fix. */
-        n++;
+    /* Deliberately NOT key-filtered like chat routing: this picker's
+     * contract is health (degraded/disabled/capability), and a media job
+     * has its own attempt budget and failure entry. Applying
+     * provider_key_available here would turn a 401 carrying provider
+     * detail into a bare "no capable model" — a separate call to make
+     * alongside the media_jobs failure path, not a side effect of the
+     * chat-routing fix. */
+    while (n < max && sqlite3_step(s) == SQLITE_ROW)
+        media_candidate_fill(s, &out[n++]);
+    sqlite3_finalize(s);
+    return n;
+}
+
+int model_pick_for_media(sqlite3 *db, const char *agent_name, const char *purpose,
+                         ModelCandidate *out, int max) {
+    if (max <= 0) return 0;
+    /* No rows for this purpose = the agent never chose: the global pick. */
+    int chose = 0;
+    sqlite3_stmt *s;
+    if (agent_name && sqlite3_prepare_v2(db,
+            "SELECT 1 FROM agent_models WHERE agent_name=?1 AND purpose=?2 LIMIT 1",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, agent_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, purpose, -1, SQLITE_STATIC);
+        chose = sqlite3_step(s) == SQLITE_ROW;
+        sqlite3_finalize(s);
     }
+    if (!chose)
+        return model_pick_by_capability(db, purpose, out, max);
+
+    /* Rows present = the list IS the policy, exactly like chat routing
+     * (specs/error-handling.md): nothing global is appended, 'disabled' drops
+     * out, and a model in its cooldown sinks below the healthy ones instead
+     * of vanishing — health reorders the list, never empties it. Appending
+     * the global pick would send the media to a model the operator did not
+     * choose for this agent, the silent reroute R1 forbids. */
+    const char *sql =
+        "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type, m.context_window,"
+        "       p.name"
+        " FROM agent_models am"
+        " JOIN models m ON m.id = am.model_id"
+        " JOIN providers p ON p.name = m.provider_name"
+        " WHERE am.agent_name = ?1 AND am.purpose = ?2 AND m.status != 'disabled'"
+        " ORDER BY (m.degraded_until IS NOT NULL AND m.degraded_until >= unixepoch()),"
+        "          am.pos";
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(s, 1, agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, purpose, -1, SQLITE_STATIC);
+    int n = 0;
+    while (n < max && sqlite3_step(s) == SQLITE_ROW)
+        media_candidate_fill(s, &out[n++]);
     sqlite3_finalize(s);
     return n;
 }
@@ -1940,11 +1986,27 @@ int llm_transcribe(sqlite3 *db, CURL *curl, int64_t job_id) {
         sqlite3_step(up); sqlite3_finalize(up);
     }
 
+    /* The session's agent picks first (agent_models.purpose = image|audio);
+     * an agent with no such rows gets the global capability pick. */
+    char agent[128] = "";
+    {
+        sqlite3_stmt *as;
+        if (sqlite3_prepare_v2(db, "SELECT agent_name FROM sessions WHERE id=?1",
+                               -1, &as, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(as, 1, session_id);
+            if (sqlite3_step(as) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(as, 0);
+                if (v) snprintf(agent, sizeof(agent), "%s", v);
+            }
+            sqlite3_finalize(as);
+        }
+    }
     ModelCandidate models[MAX_MODELS];
-    int nmodels = model_pick_by_capability(db, mj.cap, models, MAX_MODELS);
+    int nmodels = model_pick_for_media(db, agent[0] ? agent : NULL, mj.cap,
+                                       models, MAX_MODELS);
     if (nmodels == 0)
-        LOG_WARN_("media: no healthy %s-capable model job=%lld",
-                  mj.cap, (long long)job_id);
+        LOG_WARN_("media: no usable %s model job=%lld agent=%s",
+                  mj.cap, (long long)job_id, agent[0] ? agent : "?");
 
     char *transcript = NULL;
     for (int mi = 0; mi < nmodels && !transcript; mi++) {

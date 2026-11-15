@@ -256,6 +256,57 @@ static void test_transcribe_no_audio_model(void) {
     PASS();
 }
 
+/* agent_models.purpose='audio' (v59): the job's session names an agent, and
+ * that agent's audio list is used instead of the global capability pick —
+ * proved by which model's request counter moved. */
+static void test_transcribe_agent_audio_list(void) {
+    TEST(transcribe_agent_audio_list);
+    const char *db_path = "/tmp/cclaw_transcribe_agent_test.db";
+    test_db_clean(db_path);
+
+    mock_server_reset();
+    mock_server_enqueue(200, GEMINI_TRANSCRIPT_RESPONSE);
+
+    sqlite3 *db = test_db_open(db_path);
+    assert(db);
+    seed_audio_model(db);   /* mockgem/lite: what the global pick would take */
+    exec_sql(db,
+        "INSERT INTO models(id, provider_name, model, capabilities, created_at)"
+        " VALUES('mockgem/mine', 'mockgem', 'gem-mine', '[\"audio\"]', unixepoch()+60);"
+        "INSERT INTO agents(name) VALUES('Ears');"
+        "INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+        " VALUES('Ears', 'audio', 'mockgem/mine', 0);");
+    setenv("MOCKGEM_KEY", "test-key", 1);
+
+    char *spool = write_spool_file("agent");
+    int64_t sid = session_create(db, "telegram", "Ears", -1, 0);
+    int64_t jid = seed_media_job(db, sid, "", spool);
+
+    int rc = llm_transcribe(db, NULL, jid);
+    char *payload = inbox_payload(db, sid);
+    int ok = rc == 0 && payload && strstr(payload, "hello from voice") != NULL;
+    free(payload);
+    int64_t mine = -1, lite = -1;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "SELECT id, total_requests FROM models"
+                               " WHERE id IN ('mockgem/mine','mockgem/lite')",
+                           -1, &s, NULL) == SQLITE_OK) {
+        while (sqlite3_step(s) == SQLITE_ROW) {
+            const char *id = (const char *)sqlite3_column_text(s, 0);
+            if (strcmp(id, "mockgem/mine") == 0) mine = sqlite3_column_int64(s, 1);
+            else lite = sqlite3_column_int64(s, 1);
+        }
+        sqlite3_finalize(s);
+    }
+    db_close(db); test_db_clean(db_path);
+    if (!ok) FAIL("expected a transcript in the inbox");
+    if (mine != 1 || lite != 0) {
+        printf("FAIL: mine=%lld lite=%lld\n", (long long)mine, (long long)lite);
+        return;
+    }
+    PASS();
+}
+
 int main(void) {
     TEST_INIT();
     s_port = mock_server_start();
@@ -269,6 +320,7 @@ int main(void) {
     test_transcribe_caption_prepended();
     test_transcribe_terminal_failure();
     test_transcribe_no_audio_model();
+    test_transcribe_agent_audio_list();
 
     mock_server_stop();
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);

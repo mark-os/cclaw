@@ -73,7 +73,7 @@ static inline void test_agent_add_model(sqlite3 *db, const char *agent,
     if (sqlite3_prepare_v2(db,
             "INSERT OR REPLACE INTO agent_models(agent_name, model_id, pos)"
             " VALUES(?1, ?2, COALESCE((SELECT MAX(pos)+1 FROM agent_models"
-            "                          WHERE agent_name=?1), 0))",
+            "                          WHERE agent_name=?1 AND purpose='chat'), 0))",
             -1, &s, NULL) != SQLITE_OK) return;
     sqlite3_bind_text(s, 1, agent, -1, SQLITE_STATIC);
     sqlite3_bind_text(s, 2, model_id, -1, SQLITE_STATIC);

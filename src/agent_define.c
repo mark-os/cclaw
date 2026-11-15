@@ -239,7 +239,8 @@ static int models_check(sqlite3 *db, const char *json, const char *creator,
             " WHERE type!='text'"
             "    OR NOT EXISTS (SELECT 1 FROM models m WHERE m.id=je.value)"
             "    OR (?2 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM agent_models am"
-            "         WHERE am.agent_name=?2 AND am.model_id=je.value))",
+            "         WHERE am.agent_name=?2 AND am.purpose='chat'"
+            "           AND am.model_id=je.value))",
             -1, &st, NULL) != SQLITE_OK)
         return fail(err, "models query failed");
     sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
@@ -420,7 +421,8 @@ static int apply_fields_and_grants(sqlite3 *db, const char *name,
         }
         if (has_models) {
             if (sqlite3_prepare_v2(db,
-                    "DELETE FROM agent_models WHERE agent_name=?1",
+                    "DELETE FROM agent_models WHERE agent_name=?1"
+                    " AND purpose='chat'",
                     -1, &st, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
                 if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
@@ -494,8 +496,9 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
              " WHERE agent_name=?2"),
             ("INSERT OR IGNORE INTO agent_extensions(agent_name, extension_name, enabled)"
              " SELECT ?1, extension_name, enabled FROM agent_extensions WHERE agent_name=?2"),
-            ("INSERT INTO agent_models(agent_name, model_id, pos)"
-             " SELECT ?1, model_id, pos FROM agent_models WHERE agent_name=?2"),
+            /* Every purpose: a clone is a copy of the whole routing setup. */
+            ("INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+             " SELECT ?1, purpose, model_id, pos FROM agent_models WHERE agent_name=?2"),
         };
         for (size_t i = 0; rc == 0 && i < 4; i++) {
             if (sqlite3_prepare_v2(db, copies[i], -1, &st, NULL) != SQLITE_OK) { rc = -1; break; }
@@ -547,8 +550,9 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
         if (sqlite3_prepare_v2(db,
                 "INSERT INTO agent_models(agent_name, model_id, pos)"
                 " SELECT ?1, model_id, pos FROM agent_models"
-                " WHERE agent_name=?2"
-                " AND NOT EXISTS (SELECT 1 FROM agent_models WHERE agent_name=?1)",
+                " WHERE agent_name=?2 AND purpose='chat'"
+                " AND NOT EXISTS (SELECT 1 FROM agent_models"
+                "                 WHERE agent_name=?1 AND purpose='chat')",
                 -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
             if (creator) sqlite3_bind_text(st, 2, creator, -1, SQLITE_STATIC);
@@ -560,7 +564,8 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
             sqlite3_stmt *ck;
             int have = 0;
             if (sqlite3_prepare_v2(db,
-                    "SELECT 1 FROM agent_models WHERE agent_name=?1 LIMIT 1",
+                    "SELECT 1 FROM agent_models WHERE agent_name=?1"
+                    " AND purpose='chat' LIMIT 1",
                     -1, &ck, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(ck, 1, name, -1, SQLITE_STATIC);
                 have = sqlite3_step(ck) == SQLITE_ROW;

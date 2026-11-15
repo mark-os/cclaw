@@ -512,8 +512,9 @@ static void run_failed_turn(sqlite3 *db, int64_t sid, const char *err) {
 static void test_error_goes_to_operator(void) {
     sqlite3 *db = open_seeded();
     assert(sqlite3_exec(db,
-        "INSERT OR REPLACE INTO channels(name, extension_name, type, binary_path, status)"
-        " VALUES('discord','discord','test','/x','active');",
+        "INSERT OR IGNORE INTO extensions(name, path) VALUES('discord','/x');"
+        "INSERT OR REPLACE INTO channels(name, extension_name, type, status)"
+        " VALUES('discord','discord','test','active');",
         NULL, NULL, NULL) == SQLITE_OK);
     set_cfg(db, "discord.admin_ids", "777");
 

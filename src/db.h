@@ -444,7 +444,8 @@ void db_tool_call_free_pending(PendingToolCall *list, int count);
  * attached to more than one agent is shared. */
 typedef struct {
     int64_t id;
-    char *agent_name; /* owner (creator); "" for an operator-made block */
+    char *created_by; /* the agent that made it (history, not a permission);
+                       * "" for an operator-made block */
     char *label;
     char *description;
     int char_limit;
@@ -454,8 +455,8 @@ typedef struct {
     int64_t updated_at;
 } MemoryBlock;
 
-/* Create a block owned by agent_name and attach it to that agent read-write
- * (agent_name NULL: an unowned, unattached block — the operator's path).
+/* Create a block (created_by = agent_name) and attach it to that agent
+ * read-write (agent_name NULL: an unattached block — the operator's path).
  * Returns row id (>0) or -1: invalid label, or the agent already has a block
  * with that label. placement: NULL/"" defaults to 'context' — new memory
  * rides in the per-turn session context block; pass "system" only for stable
@@ -536,7 +537,7 @@ int memory_note_delete(sqlite3 *db, int64_t block_id, int64_t note_id);
     "  '/' || b.char_limit || ' chars | ' ||" \
     "  CASE WHEN b.read_only OR a.read_only THEN 'read-only' ELSE 'read-write' END ||" \
     "  ' | placement: ' || b.placement ||" \
-    "  CASE WHEN b.agent_name IS NOT a.agent_name THEN ' | shared' ELSE '' END || char(10) ||" \
+    "  CASE WHEN b.created_by IS NOT a.agent_name THEN ' | shared' ELSE '' END || char(10) ||" \
     "COALESCE(" \
     "  (SELECT group_concat('[' || n.id || ' ' || date(n.updated_at,'unixepoch') || '] ' ||" \
     "            n.text, char(10) ORDER BY n.id) || char(10)" \

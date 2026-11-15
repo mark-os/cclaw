@@ -51,6 +51,12 @@ static int64_t scalar(const char *sql) {
 
 static void seed_extension(const char *name, const char *owner, int published) {
     sqlite3_stmt *st;
+    /* owner_agent is a declared FK to agents. */
+    assert(sqlite3_prepare_v2(g_db, "INSERT OR IGNORE INTO agents(name) VALUES(?)",
+                              -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, owner, -1, SQLITE_STATIC);
+    assert(sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_finalize(st);
     assert(sqlite3_prepare_v2(g_db,
         "INSERT INTO extensions(name, path, owner_agent, published)"
         " VALUES(?, '/tmp/x', ?, ?);", -1, &st, NULL) == SQLITE_OK);

@@ -8,6 +8,7 @@
 static sqlite3    *g_db;
 static Config     *g_cfg;
 static int         g_daemon;
+static int         g_web_up;
 static char        g_instance_id[PROC_INSTANCE_ID_MAX];
 static char        g_agent_name[64];
 static int64_t     g_cli_session;
@@ -47,6 +48,9 @@ void proc_set_cfg(Config *cfg) { g_cfg = cfg; }
 
 int proc_is_daemon(void) { return g_daemon; }
 void proc_set_daemon(int on) { g_daemon = on; }
+
+int proc_web_up(void) { return g_web_up; }
+void proc_set_web_up(int on) { g_web_up = on; }
 
 const char *proc_instance_id(void) { return g_instance_id; }
 void proc_set_instance_id(const char *id) {

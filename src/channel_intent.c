@@ -5,6 +5,7 @@
 #include "config_registry.h"
 #include "db.h"
 #include "log.h"
+#include "proc.h"
 #include "resolve.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +59,10 @@ ChannelIntent channel_intent_from_text(const char *text) {
     }
     if (cmd_arg(text, "/status")) {
         it.kind = CHANNEL_INTENT_STATUS;
+        return it;
+    }
+    if (cmd_arg(text, "/dashboard")) {
+        it.kind = CHANNEL_INTENT_DASHBOARD;
         return it;
     }
     return it;
@@ -262,6 +267,50 @@ static int intent_exec_status(sqlite3 *db, const char *ch_name, const char *cid)
     return 1;
 }
 
+/* /dashboard — the operator's sign-in link. The link IS the admin credential,
+ * so it goes only into a direct message: anyone else in a group would hold it
+ * too. A chat whose kind the channel never reported counts as a group. The
+ * reply is a channel reply like every command's: it reaches the outbox, never
+ * the session's conversation. */
+static int intent_exec_dashboard(sqlite3 *db, const char *ch_name, const char *cid) {
+    int dm = 0;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT kind IS 'dm' FROM channel_chats"
+            " WHERE channel_name = ?1 AND chat_id = ?2;", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, ch_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, cid, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) dm = sqlite3_column_int(s, 0);
+        sqlite3_finalize(s);
+    }
+    if (!dm) {
+        reply(db, ch_name, cid, "The dashboard link signs you in as the operator, so I"
+              " only send it in a direct message: ask me there with /dashboard.");
+        return 1;
+    }
+    if (!proc_web_up()) {
+        reply(db, ch_name, cid, "The dashboard is not available: this daemon's web server"
+              " is not running (check web_port, then restart the daemon).");
+        return 1;
+    }
+    char *url = config_admin_url(db, "/dashboard");
+    if (!url) {
+        reply(db, ch_name, cid, "The dashboard is not available yet: there is no admin"
+              " token (the daemon makes one when its web server starts).");
+        return 1;
+    }
+    size_t n = strlen(url) + 96;
+    char *msg = malloc(n);
+    if (msg) {
+        snprintf(msg, n, "Your dashboard (this link signs you in; do not share it):\n%s", url);
+        reply(db, ch_name, cid, msg);
+        LOG_INFO_("channel /dashboard ch=%s chat=%s — link sent", ch_name, cid);
+    }
+    free(msg);
+    free(url);
+    return 1;
+}
+
 /* /new — re-point the chat's pin at a fresh session. Same agent as the
  * current pin; open-door default, then the global default_agent, when the
  * chat has never been routed. The tools stay the chat's own: its tool_filter
@@ -361,6 +410,8 @@ int channel_intent_execute(sqlite3 *db, const char *ch_name, const char *cid,
         return intent_exec_list(db, ch_name, cid);
     case CHANNEL_INTENT_STATUS:
         return intent_exec_status(db, ch_name, cid);
+    case CHANNEL_INTENT_DASHBOARD:
+        return intent_exec_dashboard(db, ch_name, cid);
     case CHANNEL_INTENT_NONE:
         break;
     }

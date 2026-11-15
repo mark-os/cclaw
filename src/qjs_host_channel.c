@@ -10,7 +10,7 @@
 #include "channel_api.h"
 #include "channel_runner.h"
 #include "admin_api.h"
-#include "dashboard.h"
+#include "config_registry.h"
 #include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -363,7 +363,7 @@ static JSValue js_admin_list_pending_approvals(JSContext *ctx, JSValueConst this
 static JSValue js_admin_dashboard_url(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
-    char *url = dashboard_url(g_ctx->db);
+    char *url = config_admin_url(g_ctx->db, "/admin");
     if (!url) return JS_NULL;
     JSValue r = JS_NewString(ctx, url);
     free(url);

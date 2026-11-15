@@ -45,4 +45,8 @@ int explore_hidden(const char *table, const char *column);
  * itself, for the database work only. */
 int explore_handle(struct mg_connection *conn, sqlite3 *db);
 
+/* GET /dashboard: the admin panel page (templates/dashboard.html), a client
+ * of the same /admin/api/ — same token, same cookie, same headers. */
+int explore_dashboard(struct mg_connection *conn, sqlite3 *db);
+
 #endif

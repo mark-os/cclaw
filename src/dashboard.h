@@ -6,10 +6,10 @@
 struct mg_context;
 struct mg_connection;
 
-/* Register the operator's page (/admin, the data explorer — explore.h) on a
+/* Register the operator's pages (/dashboard and /admin — explore.h) on a
  * running civetweb context and ensure the
  * web_admin_token config value exists (generated from util_random() on first
- * start; `cclaw dashboard` prints the tokenized URL). Returns 0 on success. */
+ * start; `cclaw dashboard` prints the tokenized links). Returns 0 on success. */
 int dashboard_register(struct mg_context *ctx, sqlite3 *db);
 
 /* Admin-token check against web_admin_token (constant-time compare).
@@ -17,10 +17,5 @@ int dashboard_register(struct mg_context *ctx, sqlite3 *db);
  * the cookie). Shared with web.c's `/` status endpoint, which serves the
  * full session dump only to token holders. */
 int dashboard_auth_check(struct mg_connection *conn, int allow_query);
-
-/* Malloc'd "<config_web_base_url>/admin?token=…", or
- * NULL before the daemon has minted a token. Shared by `cclaw dashboard`
- * and the Telegram /admin command. */
-char *dashboard_url(sqlite3 *db);
 
 #endif

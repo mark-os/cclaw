@@ -225,11 +225,14 @@ answer to "can I delete this?".
 
 [error-handling.md]: error-handling.md
 
-## The dashboard — `/admin`
+## The dashboard — `/dashboard` and `/admin`
 
-`cclaw dashboard` prints `<base>/admin?token=…` (the Telegram and Discord
-`/admin` commands send the same link). Opening it once puts the token in a
-cookie; after that `/admin` works in that browser. It is the data explorer:
+`cclaw dashboard` prints two links with the token: `<base>/dashboard?token=…`
+(the admin panel: what needs you, what each agent can do, what it did) and
+`<base>/admin?token=…` (the Telegram and Discord `/admin` commands send this
+one). An admin can also send `/dashboard` to an agent in a direct message.
+Opening either link once puts the token in a cookie; after that both pages
+work in that browser. `/admin` is the data explorer:
 every table, what each column means and how rows link, and the operator's
 actions where the thing is shown — grants, copying an agent, model lists,
 sessions on chats, providers and models, memory, chat and channel settings,

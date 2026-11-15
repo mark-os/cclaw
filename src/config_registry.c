@@ -414,3 +414,14 @@ char *config_web_base_url(sqlite3 *db) {
     if (url) snprintf(url, n, "http://%s:%d", host, port);
     return url;
 }
+
+char *config_admin_url(sqlite3 *db, const char *path) {
+    char *tok = config_get(db, "web_admin_token");
+    char *base = (tok && tok[0]) ? config_web_base_url(db) : NULL;
+    size_t n = base ? strlen(base) + strlen(path) + strlen(tok) + 8 : 0;
+    char *url = base ? malloc(n) : NULL;
+    if (url) snprintf(url, n, "%s%s?token=%s", base, path, tok);
+    free(base);
+    free(tok);
+    return url;
+}

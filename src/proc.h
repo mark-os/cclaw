@@ -37,6 +37,11 @@ void     proc_set_cfg(Config *cfg);
 int  proc_is_daemon(void);
 void proc_set_daemon(int on);
 
+/* 1 once this process's web server is listening (web_start succeeded) — what
+ * the chat /dashboard command checks before handing out a link. */
+int  proc_web_up(void);
+void proc_set_web_up(int on);
+
 /* "" until process_register() has succeeded. */
 const char *proc_instance_id(void);
 void        proc_set_instance_id(const char *id);

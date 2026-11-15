@@ -18,6 +18,7 @@
 #include "channel.h"
 #include "approval.h"
 #include "resolve.h"
+#include "proc.h"
 
 #include "db.h"
 #include "test_util.h"
@@ -1031,6 +1032,98 @@ static void test_chat_status_command(void) {
     printf("PASS\n");
 }
 
+/* /dashboard: the tokenized link, to an admin, in a direct message only. The
+ * link is the operator's credential: a group (or a chat whose kind was never
+ * reported) gets a one-line refusal, a non-admin's /dashboard is ordinary
+ * chat like any other admin command, and the reply never enters the session's
+ * conversation (entries) — only the outbox, like /status. */
+static void dash_say(sqlite3 *db, const char *chat, const char *sender,
+                     const char *kind, const char *text) {
+    char payload[256];
+    if (kind)
+        snprintf(payload, sizeof(payload),
+                 "{\"chat_id\":\"%s\",\"sender_id\":\"%s\",\"chat_type\":\"%s\","
+                 "\"text\":\"%s\"}", chat, sender, kind, text);
+    else
+        snprintf(payload, sizeof(payload),
+                 "{\"chat_id\":\"%s\",\"sender_id\":\"%s\",\"text\":\"%s\"}",
+                 chat, sender, text);
+    test_event_insert(db, "dash", "message", payload);
+    channel_consume_events(db);
+}
+
+static void test_chat_dashboard_command(void) {
+    setup();
+    sqlite3 *db = open_seeded(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    test_gate_channel_seed(db, "dash", "9");
+    assert(sqlite3_exec(db,
+        "INSERT INTO config(key, value) VALUES('web_admin_token','d00dfeedd00dfeedd00dfeedd00dfeed')"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
+        "INSERT INTO config(key, value) VALUES('web_public_url','https://box.example/')"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+        NULL, NULL, NULL) == SQLITE_OK);
+    test_binding_set(db, "dash", "dm9", "testagent");
+    test_binding_set(db, "dash", "grp", "testagent");
+    int64_t dm = test_session_find(db, "dash", "dm9", "testagent");
+    int64_t grp = test_session_find(db, "dash", "grp", "testagent");
+    assert(dm > 0 && grp > 0);
+    proc_set_web_up(1);
+
+    /* Admin, direct message: the link, built on web_public_url. */
+    dash_say(db, "dm9", "9", "dm", "/dashboard");
+    assert_reply_has(db, "dash",
+        "https://box.example/dashboard?token=d00dfeedd00dfeedd00dfeedd00dfeed");
+
+    /* Admin in a group: one line, no token. */
+    dash_say(db, "grp", "9", "group", "/dashboard");
+    assert_reply_has(db, "dash", "direct message");
+    {
+        char *t = last_outbox_text(db, "dash");
+        assert(t && !strstr(t, "d00dfeed") && !strchr(t, '\n'));
+        free(t);
+    }
+    /* A chat whose kind was never reported counts as a group (fail closed). */
+    assert(sqlite3_exec(db, "INSERT INTO channel_chats(channel_name, chat_id)"
+                            " VALUES('dash','unk');", NULL, NULL, NULL) == SQLITE_OK);
+    dash_say(db, "unk", "9", NULL, "/dashboard");
+    assert_reply_has(db, "dash", "direct message");
+
+    /* A non-admin's /dashboard is not a command: it reaches the agent as
+     * text, and no link is sent anywhere. */
+    int before = test_scalar_count(db, "SELECT COUNT(*) FROM channel_outbox");
+    dash_say(db, "dm9", "55", "dm", "/dashboard");
+    assert(test_inbox_count(db, dm) == 1);
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_outbox") == before);
+
+    /* No web server, no token: said plainly, no dead link. */
+    proc_set_web_up(0);
+    dash_say(db, "dm9", "9", "dm", "/dashboard");
+    assert_reply_has(db, "dash", "web server is not running");
+    proc_set_web_up(1);
+    assert(sqlite3_exec(db, "UPDATE config SET value='' WHERE key='web_admin_token';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    dash_say(db, "dm9", "9", "dm", "/dashboard");
+    assert_reply_has(db, "dash", "no admin token");
+
+    /* The token never reached a conversation: not in entries, not in the
+     * inbox (the non-admin's text is the only inbox row). */
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM entries"
+                                 " WHERE content LIKE '%d00dfeed%'") == 0);
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM inbox"
+                                 " WHERE payload LIKE '%d00dfeed%'") == 0);
+    assert(test_inbox_count(db, grp) == 0);
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_outbox"
+                                 " WHERE payload LIKE '%d00dfeed%'") == 1);
+
+    proc_set_web_up(0);
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
 /* channel_notify_operator: a system notice goes to the channel's admins as
  * a direct message, never to the session's chat; with no admins configured
  * it falls back to the session's chat; channel-less sessions no-op. */
@@ -1345,6 +1438,9 @@ int main(void) {
 
     printf("  chat_status_command... ");
     test_chat_status_command();
+
+    printf("  chat_dashboard_command... ");
+    test_chat_dashboard_command();
 
     printf("  notify_operator... ");
     test_notify_operator();

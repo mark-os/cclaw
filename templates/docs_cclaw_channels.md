@@ -72,7 +72,10 @@ holds moves it, and leaves that chat on a fresh session for the same agent.
 They can also decide approvals from chat: `/approvals` lists what is parked
 (id, agent, tool, arguments), `/approve <id>` and `/deny <id>` settle one, and
 `/status` shows the chat's session, agent, model, reply setting and pending
-count. An approval can only be decided from the channel it was raised on, and
+count. `/dashboard` sends the admin a link to the web dashboard, in a direct
+message only — the link signs its holder in as the operator, so in a group it
+answers with a one-line pointer instead. An approval can only be decided from
+the channel it was raised on, and
 only while it is still pending; who decided is recorded in
 `approvals.decided_via`.
 

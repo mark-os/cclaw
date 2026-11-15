@@ -1155,13 +1155,18 @@ static const char NOT_SIGNED_IN_HTML[] =
     "padding:0 16px}code{font-size:.9em}"
     "@media (prefers-color-scheme:dark){body{background:#12151b;color:#e6e9ef}}</style>"
     "<h1>Not signed in</h1>"
-    "<p>This page needs the dashboard's admin token. On the machine running cclaw, run"
-    " <code>cclaw dashboard</code>: it prints a link with the token. Open it once in this"
-    " browser, then come back to <code>/admin</code> &mdash; or add"
-    " <code>?token=&hellip;</code> to this address yourself.</p>"
+    "<p>This page needs the dashboard's admin token. Send <code>/dashboard</code> to your"
+    " agent in a direct message, or on the machine running cclaw run"
+    " <code>cclaw dashboard</code>: either gives you a link with the token. Open it once in"
+    " this browser, then this page works &mdash; or add <code>?token=&hellip;</code> to this"
+    " address yourself.</p>"
     "<p>A link that worked before stops working when the token changes.</p>";
 
-static int serve_page(struct mg_connection *conn, sqlite3 *db) {
+/* One of the operator's pages (/dashboard, /admin) at its exact path. The
+ * cookie is Path=/, so signing in on either page signs in the other and the
+ * API. */
+static int serve_page(struct mg_connection *conn, sqlite3 *db, const char *path,
+                      const char *html) {
     web_db_lock();
     int auth = dashboard_auth_check(conn, 1);
     char *tok = auth == 2 ? config_get(db, "web_admin_token") : NULL;
@@ -1171,14 +1176,25 @@ static int serve_page(struct mg_connection *conn, sqlite3 *db) {
     if (auth == 2) {
         /* The token moves into the cookie and leaves the URL (address bar,
          * history, referrers). */
-        mg_printf(conn, "HTTP/1.1 303 See Other\r\nLocation: /admin\r\n"
+        mg_printf(conn, "HTTP/1.1 303 See Other\r\nLocation: %s\r\n"
                         "Cache-Control: no-store\r\n"
                         "Set-Cookie: cclaw_admin=%s; Path=/; HttpOnly; SameSite=Strict\r\n"
-                        "Content-Length: 0\r\n\r\n", tok ? tok : "");
+                        "Content-Length: 0\r\n\r\n", path, tok ? tok : "");
         free(tok);
         return 303;
     }
-    return send_body(conn, 200, "text/html; charset=utf-8", TPL_EXPLORER_HTML);
+    return send_body(conn, 200, "text/html; charset=utf-8", html);
+}
+
+int explore_dashboard(struct mg_connection *conn, sqlite3 *db) {
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    const char *uri = ri->local_uri ? ri->local_uri : "";
+    const char *method = ri->request_method ? ri->request_method : "";
+    if (strcmp(uri, "/dashboard") != 0 && strcmp(uri, "/dashboard/") != 0)
+        return send_body(conn, 404, "application/json", "{\"error\":\"not found\"}");
+    if (strcmp(method, "GET") != 0)
+        return send_body(conn, 405, "application/json", "{\"error\":\"only GET here\"}");
+    return serve_page(conn, db, "/dashboard", TPL_DASHBOARD_HTML);
 }
 
 /* /admin/explore was the page's address while the old dashboard still held
@@ -1334,7 +1350,7 @@ int explore_handle(struct mg_connection *conn, sqlite3 *db) {
         return send_body(conn, 405, "application/json",
                          "{\"error\":\"only GET here; actions are POST /admin/api/act\"}");
     if (strcmp(uri, "/admin") == 0 || strcmp(uri, "/admin/") == 0)
-        return serve_page(conn, db);
+        return serve_page(conn, db, "/admin", TPL_EXPLORER_HTML);
     if (strcmp(uri, "/admin/explore") == 0 || strcmp(uri, "/admin/explore/") == 0)
         return redirect_old(conn);
     if (!is_api)

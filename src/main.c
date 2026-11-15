@@ -392,7 +392,10 @@ static int run_daemon(char *db_path) {
               proc_cfg()->db_path ? proc_cfg()->db_path : "(unset)",
               proc_cfg()->provider.api_key_source ? proc_cfg()->provider.api_key_source
                                              : "(none)");
-    web_start(proc_cfg(), db_path);
+    proc_set_web_up(web_start(proc_cfg(), db_path) == 0);
+    if (!proc_web_up())
+        LOG_ERROR_("daemon: web server did not start on port %d — /dashboard,"
+                   " /admin and webhooks are unavailable", proc_cfg()->web_port);
     /* No heartbeat thread: the pulse is a seeded bare-wake cron row fired by
      * cron_run_due off the db_periodic tick — one scheduler. */
 
@@ -514,6 +517,7 @@ static int run_daemon(char *db_path) {
     tool_thread_stop();  /* drain in-flight tool threads before freeing state */
     channel_shutdown_all();
     web_stop();
+    proc_set_web_up(0);
     child_sigchld_teardown();
     wake_close(); wake_fifo_close(fifo_fd, db_path);
     update_verify_clean_exit(proc_db());

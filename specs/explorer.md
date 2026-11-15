@@ -1,11 +1,12 @@
-# The dashboard — data explorer at `/admin`, API at `/admin/api/`
+# The dashboard — admin panel at `/dashboard`, data explorer at `/admin`, API at `/admin/api/`
 
 Everything in `cclaw.db` for the operator: the tables, what each column means,
 how rows link to each other in both directions — and, where a thing is shown,
 the named actions that change it. It is a JSON API plus one static page that
 draws it; the API is also the first cut of what a mobile app will use. Code:
 `src/explore.c` (reading, HTTP), `src/explore_act.c` (actions),
-`src/dashboard.c` (the token), `templates/explorer.html`; tests in
+`src/dashboard.c` (the token), `templates/explorer.html`, and the admin panel
+`templates/dashboard.html` (below, "The admin panel"); tests in
 `test/test_explore.c`, `test/test_explore_act.c`, `test/test_web.c`.
 
 The server-rendered page that used to live at `/admin` (`dashboard.c`'s HTML
@@ -47,10 +48,13 @@ explorer's address while both existed, redirects to `/admin`.
 
 ## Access
 
-The admin token (`web_admin_token`, printed as a link by `cclaw dashboard`).
-The page accepts `?token=` once and answers with a 303 to `/admin` that moves
-the token into the `cclaw_admin` cookie (HttpOnly, SameSite=Strict). The API
-accepts the cookie only. Without it every path is 403: the page explains how to get in,
+The admin token (`web_admin_token`). `cclaw dashboard` prints two links with
+it, `/dashboard` first and `/admin` second; an admin who sends `/dashboard`
+in a direct message to an agent gets the first one (see
+[channels.md](channels.md)). Either page accepts `?token=` once and answers
+with a 303 to its own clean address that moves the token into the
+`cclaw_admin` cookie (`Path=/`, HttpOnly, SameSite=Strict) — so signing in on
+one page signs in the other and the API. The API accepts the cookie only. Without it every path is 403: the page explains how to get in,
 the API answers `{"error": "not signed in: …"}`.
 
 The page is served with `Content-Security-Policy: default-src 'none';
@@ -320,3 +324,49 @@ fresh gets the natural trail (Home › table › row). Every database value is
 untrusted (agents and chat users write these tables) and reaches the page
 only through `textContent` — the page contains no `innerHTML` (a unit test
 checks the source).
+
+## The admin panel — `/dashboard`
+
+`templates/dashboard.html`: the task-shaped screens for the person running
+the agents, in plain words, with no table or column names. It is a client of
+the same API (`rows`, `row`, `approval`, and `act` for approval decisions
+only); it adds no endpoint and edits nothing else — every section links to
+the agent's row in the explorer ("change", "all data"). Same serving rules as
+`/admin`: GET only, exact path, same token and cookie, same headers; no
+`innerHTML` (the source test covers both pages). Hash routes:
+
+| Route | Screen |
+|---|---|
+| `#/` | **Needs you**, **Agents**, **System** |
+| `#/agent/<name>` | Thinks with, Can use, Can reach, Can see, Talks and runs |
+| `#/session/<id>` | The conversation by turn, newest first, older turns on demand |
+
+What each signal is read from — nothing is shown that the database does not
+record:
+
+- **Needs you** — pending approvals (a sentence built from `tool_name` and
+  `args_json`, the decisions the explorer offers: Once / Always / Deny, or
+  Approve / Deny for an applied request, no Always for a sensitive target;
+  "Details" shows the channel card); a session whose leaf entry is an
+  assistant error (`stop_reason` 4 — what `advance.c` itself tests) from the
+  last three days; `sessions.compaction_fail_count` ≥ 3; an active channel
+  whose `<ext>.enabled` is on (DB value or default) but has no `pid`; an
+  unrouted chat the gate told the operator about (`notified_at`) that spoke in
+  the last seven days; an outbox row `failed…` in the last 24 h; and
+  `update.notified_tag` differing from `update.installed_tag`.
+- **Agents** — "waiting on you" (a pending approval or an
+  `awaiting_approval` session), "working" (any other non-idle session),
+  "waiting to retry" (`rate_limited`), else "idle".
+- **System** — the newest daemon row of `processes` (up since);
+  `update.installed_tag` when set; each active channel: "connected" (running,
+  `last_activity_at` within 300 s), "running" (no watched transport), "no
+  contact" (older mark), "not running", or switched off; the enabled cron job
+  with the smallest `next_run_at`.
+- **Session** — who spoke from `entries.data.source` (`cli`, the chat's channel
+  — "you" when `channel_chats.is_admin` — `cron`, …); a tool call with its
+  result and, matched by `tool_call_id`, its approval's state and
+  `decided_via`; what the turn sent to the session's chat from
+  `channel_outbox` rows created between this turn's first entry and the
+  next's (they are pruned after `outbox_retention_sec`). Long text arrives as
+  a preview and is fetched whole by "show more"; a turn is drawn once all its
+  entries have arrived (keyset pages of 200).

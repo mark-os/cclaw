@@ -9,10 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The operator's page at /admin: its credential and its URL. The page itself
- * and its API are the data explorer (explore.c, specs/explorer.md). Auth is a
- * single generated token — a cookie for the session, ?token= for the first
- * visit (LAN threat model; TLS/tunnelling later). */
+/* The operator's pages: /dashboard (the admin panel) and /admin (the data
+ * explorer), and their credential. Both pages and their API live in explore.c
+ * (specs/explorer.md). Auth is a single generated token — a cookie for the
+ * session, ?token= for the first visit (LAN threat model; TLS/tunnelling
+ * later). The links are config_admin_url(). */
 
 static sqlite3 *s_db;
 
@@ -65,15 +66,9 @@ static int handle_admin(struct mg_connection *conn, void *cbdata) {
     return explore_handle(conn, s_db);
 }
 
-char *dashboard_url(sqlite3 *db) {
-    char *tok = config_get(db, "web_admin_token");
-    char *base = (tok && tok[0]) ? config_web_base_url(db) : NULL;
-    size_t n = base ? strlen(base) + strlen(tok) + 32 : 0;
-    char *url = base ? malloc(n) : NULL;
-    if (url) snprintf(url, n, "%s/admin?token=%s", base, tok);
-    free(base);
-    free(tok);
-    return url;
+static int handle_dashboard(struct mg_connection *conn, void *cbdata) {
+    (void)cbdata;
+    return explore_dashboard(conn, s_db);
 }
 
 int dashboard_register(struct mg_context *ctx, sqlite3 *db) {
@@ -81,5 +76,6 @@ int dashboard_register(struct mg_context *ctx, sqlite3 *db) {
     s_db = db;
     if (ensure_token(db) != 0) return -1;
     mg_set_request_handler(ctx, "/admin", handle_admin, NULL);
+    mg_set_request_handler(ctx, "/dashboard", handle_dashboard, NULL);
     return 0;
 }

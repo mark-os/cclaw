@@ -29,6 +29,7 @@ typedef enum {
     CHANNEL_INTENT_PIN_SESSION,   /* /sessions <id> — attach an existing one */
     CHANNEL_INTENT_LIST_SESSIONS, /* /sessions — this chat's history */
     CHANNEL_INTENT_STATUS,        /* /status — read-only pin/model/spend */
+    CHANNEL_INTENT_DASHBOARD,     /* /dashboard — the operator's sign-in link */
 } ChannelIntentKind;
 
 /* What a DECIDE means, as the surface expressed it. Chat's bare /approve

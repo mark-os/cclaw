@@ -504,14 +504,18 @@ static void test_secret_walk(void) {
 /* ── the page never builds markup from data ────────────────────────────── */
 
 static void test_page_source(void) {
-    const char *p = TPL_EXPLORER_HTML;
-    assert(strstr(p, "<title>"));
+    /* Both of the operator's pages: the explorer and the admin panel. */
+    const char *const PAGES[] = { TPL_EXPLORER_HTML, TPL_DASHBOARD_HTML };
     static const char *const SINKS[] = { "innerHTML", "outerHTML", "insertAdjacentHTML",
                                          "document.write", "eval(", "new Function",
                                          "http://", "https://", "@import", "url(" };
-    for (size_t i = 0; i < sizeof(SINKS) / sizeof(SINKS[0]); i++) {
-        if (strstr(p, SINKS[i])) fprintf(stderr, "page contains %s\n", SINKS[i]);
-        assert(!strstr(p, SINKS[i]));
+    for (size_t pg = 0; pg < sizeof(PAGES) / sizeof(PAGES[0]); pg++) {
+        const char *p = PAGES[pg];
+        assert(strstr(p, "<title>"));
+        for (size_t i = 0; i < sizeof(SINKS) / sizeof(SINKS[0]); i++) {
+            if (strstr(p, SINKS[i])) fprintf(stderr, "page %zu contains %s\n", pg, SINKS[i]);
+            assert(!strstr(p, SINKS[i]));
+        }
     }
     printf("PASS: test_page_source\n");
 }

@@ -74,6 +74,12 @@ static void test_parse_sessions(void) {
     assert(it.kind == CHANNEL_INTENT_STATUS);
     it = channel_intent_from_text("/status of things");
     assert(it.kind == CHANNEL_INTENT_STATUS);
+
+    it = channel_intent_from_text("/dashboard");
+    assert(it.kind == CHANNEL_INTENT_DASHBOARD);
+    it = channel_intent_from_text("/dashboard please");
+    assert(it.kind == CHANNEL_INTENT_DASHBOARD);
+    assert(channel_intent_from_text("/dashboards").kind == CHANNEL_INTENT_NONE);
     printf("PASS\n");
 }
 

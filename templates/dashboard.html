@@ -1,0 +1,854 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>cclaw dashboard</title>
+<style>
+/* The admin panel (specs/explorer.md, "The dashboard"): what needs you, what
+   each agent can do, what it did. A client of /admin/api/ — no external
+   requests, everything drawn with textContent. Detail and editing live in the
+   data explorer at /admin. */
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --fg: #171b24; --muted: #5a6272; --line: #d9dde4;
+  --link: #0a3fc9; --ok: #1f7a45; --ok-bg: #e3f3e9; --warn: #8a5200; --warn-bg: #fbefd6;
+  --bad: #b3261e; --bad-bg: #fbe4e2; --tag-bg: #eceff4;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151b; --surface: #1a1e27; --fg: #e6e9ef; --muted: #9aa3b4; --line: #2e3442;
+    --link: #8fb0ff; --ok: #6fcf97; --ok-bg: #173324; --warn: #e6b455; --warn-bg: #3a2c0f;
+    --bad: #f28b82; --bad-bg: #3d1c1a; --tag-bg: #262b37; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12151b; --surface: #1a1e27; --fg: #e6e9ef; --muted: #9aa3b4; --line: #2e3442;
+  --link: #8fb0ff; --ok: #6fcf97; --ok-bg: #173324; --warn: #e6b455; --warn-bg: #3a2c0f;
+  --bad: #f28b82; --bad-bg: #3d1c1a; --tag-bg: #262b37; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 var(--sans); }
+a { color: var(--link); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 3px; }
+main:focus { outline: none; }
+.top { background: var(--surface); border-bottom: 1px solid var(--line); }
+.top-in, .page { max-width: 720px; margin: 0 auto; padding: 0 16px; }
+.top-in { display: flex; align-items: baseline; gap: 16px; padding-top: 10px; padding-bottom: 10px; }
+.brand { font-weight: 600; color: var(--fg); text-decoration: none; margin-right: auto; }
+.top a.nav { font-size: .9rem; }
+.page { padding-top: 16px; padding-bottom: 64px; }
+.back { font-size: .88rem; margin: 0 0 10px; }
+h1 { font-size: 1.45rem; line-height: 1.2; font-weight: 600; margin: 0 0 2px; overflow-wrap: anywhere; }
+.sub { color: var(--muted); margin: 0 0 16px; overflow-wrap: anywhere; }
+section.card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+               padding: 12px 14px; margin-bottom: 14px; min-width: 0; }
+h2 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: .74rem;
+     font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
+h2 a { font-size: .8rem; letter-spacing: 0; text-transform: none; font-weight: 400; }
+.row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+       padding: 8px 0; border-top: 1px solid var(--line); min-width: 0; }
+.row:first-of-type { border-top: 0; }
+h2 + .row, h3 + .row { border-top: 0; }
+.row > .l { min-width: 0; overflow-wrap: anywhere; }
+.row > .r { color: var(--muted); text-align: right; flex-shrink: 0; max-width: 50%; overflow-wrap: anywhere;
+            font-size: .9rem; }
+h3 { font-size: .82rem; font-weight: 600; color: var(--muted); margin: 10px 0 0; }
+.why { display: block; color: var(--muted); font-size: .84rem; line-height: 1.4; overflow-wrap: anywhere; }
+.mono, code { font-family: var(--mono); font-size: .86em; overflow-wrap: anywhere; }
+.muted { color: var(--muted); }
+.none { color: var(--muted); font-style: italic; padding: 4px 0; }
+.pill { display: inline-block; font-size: .74rem; font-weight: 500; padding: 1px 8px; border-radius: 999px;
+        background: var(--tag-bg); color: var(--muted); white-space: nowrap; }
+.pill.ok { background: var(--ok-bg); color: var(--ok); }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+.pill.bad { background: var(--bad-bg); color: var(--bad); }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+button.act { font: inherit; font-size: .88rem; padding: 5px 14px; border: 1px solid var(--line); border-radius: 6px;
+             background: var(--surface); color: var(--fg); cursor: pointer; min-height: 34px; }
+button.act:hover { border-color: var(--muted); }
+button.act.primary { background: var(--link); border-color: var(--link); color: var(--bg); }
+button.act.danger { color: var(--bad); border-color: var(--bad); }
+button.act:disabled { opacity: .55; cursor: default; }
+.actions a { font-size: .84rem; }
+button.link { font: inherit; font-size: .84rem; color: var(--link); background: none; border: 0; padding: 0;
+              cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.err { color: var(--bad); font-size: .88rem; flex-basis: 100%; }
+.err:empty { display: none; }
+.msg { border: 1px solid var(--line); border-left: 4px solid var(--ok); background: var(--surface); border-radius: 6px;
+       padding: 10px 14px; margin-bottom: 14px; }
+.msg.bad { border-left-color: var(--bad); }
+.confirm { background: var(--warn-bg); border-radius: 6px; padding: 8px 10px; margin-top: 8px; font-size: .9rem; }
+pre.card-text { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: .8rem;
+                background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+                margin: 8px 0 0; max-height: 24em; overflow-y: auto; }
+/* session timeline */
+.turn { border-left: 2px solid var(--line); padding: 0 0 4px 12px; margin: 0 0 18px; }
+.turn.failed { border-left-color: var(--bad); }
+.turn > .th { font-size: .74rem; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
+              color: var(--muted); margin-bottom: 4px; }
+.ev { padding: 6px 0; min-width: 0; }
+.ev .who { font-family: var(--mono); font-size: .76rem; color: var(--muted); }
+.ev .txt { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ev .txt.clamp { max-height: 7.5em; overflow: hidden; }
+.ev.tool .line { font-family: var(--mono); font-size: .84rem; overflow-wrap: anywhere; }
+.ev.error .txt { color: var(--bad); }
+.ev .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.ev pre.out { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: .78rem;
+              background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+              margin: 4px 0 0; max-height: 30em; overflow-y: auto; }
+.more-wrap { text-align: center; margin: 8px 0; }
+@media (min-width: 720px) { h1 { font-size: 1.6rem; } }
+</style>
+</head>
+<body>
+<header class="top"><div class="top-in">
+<a class="brand" href="#/">cclaw</a>
+<a class="nav" href="#/">Home</a>
+<a class="nav" href="/admin">All data</a>
+</div></header>
+<div class="page"><main id="main" tabindex="-1" aria-live="polite"></main></div>
+<script>
+"use strict";
+/* Every database value is untrusted (agents and chat users write it) and
+   reaches the page only as textContent. Reads use the explorer's generic
+   endpoints (/admin/api/rows, row, approval); the one write is the approval
+   decision (/admin/api/act). */
+
+var MAIN = document.getElementById("main");
+var seq = 0, FLASH = null;
+
+/* ── DOM: strings become text nodes, never markup ── */
+function h(tag, attrs) {
+  var el = document.createElement(tag);
+  if (attrs) for (var k in attrs) {
+    var v = attrs[k];
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k.slice(0, 2) === "on") el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (var i = 2; i < arguments.length; i++) add(el, arguments[i]);
+  return el;
+}
+function add(el, c) {
+  if (c === null || c === undefined || c === false) return;
+  if (Array.isArray(c)) { c.forEach(function (x) { add(el, x); }); return; }
+  el.appendChild(typeof c === "object" ? c : document.createTextNode(String(c)));
+}
+function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+function pill(text, kind) { return h("span", { class: "pill" + (kind ? " " + kind : ""), text: text }); }
+function row(l, r) { return h("div", { class: "row" }, h("div", { class: "l" }, l), r === undefined ? null : h("div", { class: "r" }, r)); }
+function none(text) { return h("div", { class: "none", text: text }); }
+function card(title, link) {
+  return h("section", { class: "card" }, h("h2", null, h("span", { text: title }),
+           link ? h("a", { href: link[0], text: link[1] }) : null));
+}
+function code(s) { return h("span", { class: "mono", text: s }); }
+function agentLink(n) { return h("a", { href: "#/agent/" + encodeURIComponent(n), text: n }); }
+function sessionLink(id, text) { return h("a", { href: "#/session/" + id, text: text || "session " + id }); }
+function explorer(table, key) {
+  return "/admin#/r/" + encodeURIComponent(table) + "/" + key.map(function (k) { return encodeURIComponent(String(k)); }).join("/");
+}
+
+/* ── API ── */
+function ApiError(status, message) { this.status = status; this.message = message; }
+function api(what, params) {
+  var qs = new URLSearchParams();
+  for (var k in params || {}) if (params[k] !== undefined && params[k] !== null) qs.set(k, params[k]);
+  return fetch("/admin/api/" + what + "?" + qs.toString(), { credentials: "same-origin", cache: "no-store" })
+    .then(function (r) {
+      return r.text().then(function (t) {
+        var b = null;
+        try { b = JSON.parse(t); } catch (e) { b = null; }
+        if (!r.ok) throw new ApiError(r.status, b && b.error ? b.error : "HTTP " + r.status);
+        if (!b) throw new ApiError(r.status, "the server's answer was not JSON");
+        return b;
+      });
+    }, function () { throw new ApiError(0, "the server could not be reached"); });
+}
+/* One page of a table as plain value objects (filter values are equality,
+   null, or a list). An empty IN list asks nothing. */
+function rows(table, filter, opts) {
+  opts = opts || {};
+  for (var k in filter || {}) if (Array.isArray(filter[k]) && !filter[k].length)
+    return Promise.resolve(opts.page ? { rows: [], next: null } : []);
+  return api("rows", { table: table, filter: filter ? JSON.stringify(filter) : null, limit: opts.limit || 200,
+                       after: opts.after ? JSON.stringify(opts.after) : null, full: opts.full ? 1 : null })
+    .then(function (b) {
+      var vals = b.rows.map(function (x) { return x.values; });
+      return opts.page ? { rows: vals, next: b.next } : vals;
+    });
+}
+function act(action, fields) {
+  var body = { action: action };
+  for (var k in fields) body[k] = fields[k];
+  return fetch("/admin/api/act", { method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "Content-Type": "application/json", "X-Cclaw-Action": "1" }, body: JSON.stringify(body) })
+    .then(function (r) {
+      return r.text().then(function (t) {
+        var b = null;
+        try { b = JSON.parse(t); } catch (e) { b = null; }
+        if (!r.ok || !b || !b.ok) throw new ApiError(r.status, b && b.error ? b.error : "HTTP " + r.status);
+        return b;
+      });
+    }, function () { throw new ApiError(0, "the server could not be reached"); });
+}
+
+/* ── words for people ── */
+function now() { return Date.now() / 1000; }
+function when(ts) {
+  return new Date(ts * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function clock(ts) {
+  var d = new Date(ts * 1000), today = new Date();
+  return d.toDateString() === today.toDateString()
+    ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : when(ts);
+}
+function span(s) {
+  s = Math.abs(Math.round(s));
+  if (s < 60) return s + " s";
+  if (s < 3600) return Math.round(s / 60) + " min";
+  if (s < 86400) { var hh = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return hh + " h" + (m ? " " + m + " min" : ""); }
+  var d = Math.floor(s / 86400), hr = Math.round((s % 86400) / 3600);
+  return d + (d === 1 ? " day" : " days") + (hr && d < 7 ? " " + hr + " h" : "");
+}
+function ago(ts) { var s = now() - ts; return s < 0 ? "in " + span(s) : span(s) + " ago"; }
+function txt(v) { return v === null || v === undefined ? "" : typeof v === "object" ? (v.preview !== undefined ? v.preview + "…" : "") : String(v); }
+/* An outbox row's chat. Its payload is json_object('chat_id', …, 'text', …),
+   so the chat id leads even when a long payload comes back as a preview. */
+function outboxChat(o) {
+  var p = json(o.payload);
+  if (p) return String(p.chat_id);
+  var m = /^\{"chat_id":("(?:[^"\\]|\\.)*"|-?\d+)/.exec(txt(o.payload));
+  return m ? String(JSON.parse(m[1])) : null;
+}
+function json(v) { if (typeof v !== "string") return null; try { return JSON.parse(v); } catch (e) { return null; } }
+function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+function list(a) { return a.length <= 1 ? a.join("") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1]; }
+function firstLine(s, n) { s = String(s || "").split("\n")[0]; return s.length > (n || 90) ? s.slice(0, n || 90) + "…" : s; }
+function hostOf(u) { try { return new URL(u).host; } catch (e) { return String(u); } }
+
+var BUSY = ["llm_running", "tool_running", "compacting", "rate_limited", "awaiting_approval"];
+var STATE_WORD = { idle: ["idle", ""], llm_running: ["thinking", "ok"], tool_running: ["running a tool", "ok"],
+  compacting: ["summarizing", "ok"], rate_limited: ["waiting to retry", "warn"], awaiting_approval: ["waiting on you", "warn"] };
+function stateWord(st) { return STATE_WORD[st] || [st, ""]; }
+
+/* What a parked call asks for, as a sentence after the agent's name. */
+function approvalAsk(a) {
+  var args = json(a.args_json) || {}, t = a.tool_name || "a tool", detail = null, s;
+  if (t === "request_config") {
+    var c = args.changes || {}, g = c.grants || {}, parts = [];
+    if (g.hosts && g.hosts.length) parts.push("reach " + list(g.hosts));
+    if (g.tools && g.tools.length) parts.push("use " + list(g.tools));
+    if (g.secrets && g.secrets.length) parts.push("use the secret " + list(g.secrets));
+    if (g.read_paths && g.read_paths.length) parts.push("read files in " + list(g.read_paths));
+    if (g.write_paths && g.write_paths.length) parts.push("write files in " + list(g.write_paths));
+    if (c.secret_bindings) Object.keys(c.secret_bindings).forEach(function (k) {
+      parts.push("send " + k + " to " + list([].concat(c.secret_bindings[k]))); });
+    if (c.routes && c.routes.length) parts.push("talk in " + plural(c.routes.length, "more chat", "more chats"));
+    if (c.agent && c.agent.models) parts.push("change the models it thinks with");
+    else if (c.agent) parts.push("change its limits");
+    if (c.config) parts.push("change system settings (" + Object.keys(c.config).join(", ") + ")");
+    if (c.provider) parts.push("set up the provider " + (c.provider.provider || ""));
+    if (c.models) parts.push("register " + plural(c.models.length, "model", "models"));
+    s = parts.length ? "wants to " + parts.join("; ") : "asks for a change to its setup";
+    detail = args.reason ? "Reason: " + args.reason : null;
+  } else if (t === "shell_exec") { s = "wants to run a command"; detail = firstLine(args.command || args.cmd, 120); }
+  else if (t === "web_fetch") { s = "wants to fetch from " + hostOf(args.url); detail = args.url; }
+  else if (t === "create_agent") s = "wants to create a new agent, " + (args.name || "?");
+  else if (t === "update_agent") s = "wants to change the agent " + (args.name || "?");
+  else if (t === "cron_set") s = "wants to schedule " + (args.name || "a job") + " to run as another agent";
+  else if (t === "extension_promote") s = "wants to add a new tool, " + (args.name || "?");
+  else if (t === "install_update") s = "wants to install update " + (args.tag || "");
+  else s = "wants to use " + t;
+  if (a.park_reason === "sensitive_target") s += " (a host you marked sensitive)";
+  return { text: s, detail: detail };
+}
+
+/* ── Home ── */
+function home(my) {
+  var Q = {
+    pending: rows("approvals", { state: "pending" }, { full: true }),
+    agents: rows("agents"),
+    top: rows("sessions", { depth: 0 }, { limit: 100 }),
+    busy: rows("sessions", { state: BUSY }),
+    chats: rows("channel_chats"),
+    channels: rows("channels"),
+    marks: rows("channel_state", { key: "last_activity_at" }),
+    daemon: rows("processes", { mode: "daemon" }),
+    cron: rows("cron_jobs", { enabled: 1 }),
+    upd: rows("config", { key: ["update.notified_tag", "update.installed_tag"] }),
+    outbox: rows("channel_outbox", null, { limit: 50 })
+  };
+  var keys = Object.keys(Q);
+  return Promise.all(keys.map(function (k) { return Q[k]; })).then(function (res) {
+    var d = {};
+    keys.forEach(function (k, i) { d[k] = res[i]; });
+    var known = {};
+    d.top.concat(d.busy).forEach(function (s) { known[s.id] = s; });
+    var want = d.pending.map(function (a) { return a.session_id; })
+      .concat(d.chats.map(function (c) { return c.session_id; }))
+      .filter(function (id, i, a) { return id !== null && !known[id] && a.indexOf(id) === i; });
+    var exts = d.channels.filter(function (c) { return c.extension_name; }).map(function (c) { return c.extension_name + ".enabled"; });
+    return Promise.all([rows("sessions", { id: want }), rows("config", { key: exts })]).then(function (r2) {
+      r2[0].forEach(function (s) { known[s.id] = s; });
+      d.sessions = known;
+      d.enabled = {};
+      r2[1].forEach(function (c) { d.enabled[c.key] = c.value !== null ? c.value : c.default_value; });
+      var leaves = Object.keys(known).map(function (id) { return known[id]; })
+        .filter(function (s) { return s.state === "idle" && s.leaf_id > 0; }).map(function (s) { return s.leaf_id; });
+      return rows("entries", { id: leaves }).then(function (L) { d.leaves = L; return d; });
+    });
+  }).then(function (d) {
+    if (my !== seq) return;
+    clear(MAIN);
+    flash();
+    MAIN.appendChild(needsYou(d));
+    MAIN.appendChild(agentsCard(d));
+    MAIN.appendChild(systemCard(d));
+  });
+}
+
+function chatName(c) { return c ? (c.title || c.chat_id) + " on " + c.channel_name : ""; }
+function chatOf(d, ch, id) {
+  for (var i = 0; i < d.chats.length; i++) if (d.chats[i].channel_name === ch && d.chats[i].chat_id === id) return d.chats[i];
+  return null;
+}
+
+function needsYou(d) {
+  var c = card("Needs you"), n = 0;
+  d.pending.slice().sort(function (a, b) { return a.requested_at - b.requested_at; }).forEach(function (a) {
+    n++;
+    c.appendChild(approvalItem(a, d.sessions[a.session_id]));
+  });
+  /* a session whose last turn ended on an error, in the last three days */
+  d.leaves.forEach(function (e) {
+    if (e.role !== 2 || e.stop_reason !== 4 || now() - e.created_at > 3 * 86400) return;
+    var s = d.sessions[e.session_id];
+    n++;
+    c.appendChild(row([s ? agentLink(s.agent_name) : null, s ? "'s " : "", sessionLink(e.session_id, "last turn"), " failed",
+      h("span", { class: "why", text: firstLine(txt(e.content), 140) })], [pill("error", "bad"), " ", ago(e.created_at)]));
+  });
+  Object.keys(d.sessions).forEach(function (id) {
+    var s = d.sessions[id];
+    if (s.compaction_fail_count < 3) return;
+    n++;
+    c.appendChild(row([agentLink(s.agent_name), "'s ", sessionLink(s.id, "conversation"), " is too long and could not be summarized",
+      h("span", { class: "why", text: "Start a fresh session (send /new in its chat)." })], pill("stuck", "bad")));
+  });
+  d.channels.forEach(function (ch) {
+    if (ch.status !== "active" || ch.pid > 0 || !ch.extension_name) return;
+    var on = d.enabled[ch.extension_name + ".enabled"];
+    if (!on || on === "0") return;
+    n++;
+    c.appendChild(row(["The ", h("b", { text: ch.name }), " channel is not running",
+      h("span", { class: "why", text: "It is switched on but its process is not up. If this stays, run cclaw --doctor on the machine to see why." })],
+      pill("down", "bad")));
+  });
+  d.chats.forEach(function (ch) {
+    if (ch.session_id !== null || !ch.notified_at || !ch.last_message_at || now() - ch.last_message_at > 7 * 86400) return;
+    n++;
+    c.appendChild(row(["Someone new wrote in ", h("a", { href: explorer("channel_chats", [ch.channel_name, ch.chat_id]), text: chatName(ch) }),
+      h("span", { class: "why", text: "Nobody answers this chat until you route it to an agent." })], ago(ch.last_message_at)));
+  });
+  d.outbox.forEach(function (o) {
+    if (String(o.status).indexOf("failed") !== 0 || now() - o.created_at > 86400) return;
+    n++;
+    c.appendChild(row(["A message to ", h("b", { text: chatName(chatOf(d, o.channel_name, outboxChat(o))) || o.channel_name }),
+      " could not be delivered", h("span", { class: "why", text: String(o.status).replace(/^failed:\s*/, "") })], ago(o.created_at)));
+  });
+  var tag = {};
+  d.upd.forEach(function (r) { tag[r.key] = r.value || r.default_value || ""; });
+  if (tag["update.notified_tag"] && tag["update.notified_tag"] !== tag["update.installed_tag"]) {
+    n++;
+    c.appendChild(row(["A new release is available: ", code(tag["update.notified_tag"]),
+      h("span", { class: "why", text: "Run cclaw update on the machine, or let an agent with install_update offer it." })], pill("update")));
+  }
+  if (!n) c.appendChild(none("Nothing needs you right now."));
+  return c;
+}
+
+function approvalItem(a, s) {
+  var ask = approvalAsk(a);
+  var box = h("div", { class: "row" });
+  var l = h("div", { class: "l" }, s ? agentLink(s.agent_name) : h("b", { text: "An agent" }), " ", ask.text,
+    ask.detail ? h("span", { class: "why" }, code(ask.detail)) : null);
+  box.appendChild(l);
+  box.appendChild(h("div", { class: "r", text: ago(a.requested_at) }));
+  var bar = h("div", { class: "actions" }), err = h("div", { class: "err", role: "alert" }), slot = h("div");
+  var buttons = [];
+  function decide(dec) {
+    buttons.forEach(function (b) { b.disabled = true; });
+    act("approval_decide", { approval_id: a.id, decision: dec }).then(function (r) { refresh(r.message); },
+      function (e) { err.textContent = e.message; buttons.forEach(function (b) { b.disabled = false; }); });
+  }
+  function btn(label, cls, fn) { var b = h("button", { class: "act " + cls, type: "button", text: label, onclick: fn }); buttons.push(b); return b; }
+  function confirmThen(text, label, dec) {
+    return function () {
+      if (slot.firstChild) return;
+      var cf = h("div", { class: "confirm" }, h("span", { text: text + " " }),
+        h("div", { class: "actions" }, btn(label, "primary", function () { decide(dec); }),
+          h("button", { class: "act", type: "button", text: "Cancel", onclick: function () { cf.remove(); } })));
+      slot.appendChild(cf);
+    };
+  }
+  if (a.resolve === "apply") {
+    bar.appendChild(btn("Approve", "primary", confirmThen("Apply this request. What it grants stays granted.", "Yes, approve", "always")));
+  } else {
+    bar.appendChild(btn("Once", "primary", function () { decide("once"); }));
+    if (a.park_reason !== "sensitive_target")
+      bar.appendChild(btn("Always", "", confirmThen("Allow this now and let it do the same again without asking?", "Yes, always", "always")));
+  }
+  bar.appendChild(btn("Deny", "danger", function () { decide("deny"); }));
+  var more = h("button", { class: "link", type: "button", text: "Details" });
+  more.addEventListener("click", function () {
+    more.disabled = true;
+    api("approval", { id: a.id }).then(function (c) { more.remove(); l.appendChild(h("pre", { class: "card-text",   /* the channel card, without its markdown */
+      text: c.summary.replace(/^```.*\n?/gm, "").replace(/\*\*/g, "") })); },
+      function (e) { err.textContent = e.message; more.disabled = false; });
+  });
+  bar.appendChild(more);
+  if (s) bar.appendChild(sessionLink(s.id, "Conversation"));
+  bar.appendChild(err);
+  l.appendChild(bar);
+  l.appendChild(slot);
+  return box;
+}
+
+function agentStatus(name, d) {
+  var waiting = d.pending.some(function (a) { var s = d.sessions[a.session_id]; return s && s.agent_name === name; });
+  var mine = d.busy.filter(function (s) { return s.agent_name === name; });
+  if (waiting || mine.some(function (s) { return s.state === "awaiting_approval"; })) return ["waiting on you", "warn"];
+  if (mine.some(function (s) { return s.state !== "rate_limited"; })) return ["working", "ok"];
+  if (mine.length) return ["waiting to retry", "warn"];
+  return ["idle", ""];
+}
+
+function agentsCard(d) {
+  var c = card("Agents");
+  if (!d.agents.length) c.appendChild(none("No agents yet."));
+  d.agents.slice().sort(function (a, b) { return a.name.localeCompare(b.name); }).forEach(function (a) {
+    var st = agentStatus(a.name, d);
+    c.appendChild(row([agentLink(a.name), a.description ? h("span", { class: "why", text: firstLine(a.description, 120) }) : null],
+      pill(st[0], st[1])));
+  });
+  return c;
+}
+
+function systemCard(d) {
+  var c = card("System");
+  var dm = d.daemon.slice().sort(function (a, b) { return b.heartbeat_at - a.heartbeat_at; })[0];
+  if (dm) c.appendChild(row("cclaw", "up " + span(now() - dm.started_at)));
+  var inst = d.upd.filter(function (r) { return r.key === "update.installed_tag" && r.value; })[0];
+  if (inst) c.appendChild(row("Release", code(inst.value)));
+  var marks = {};
+  d.marks.forEach(function (m) { marks[m.channel_name] = Number(m.value); });
+  var off = [];
+  d.channels.filter(function (ch) { return ch.status === "active"; }).forEach(function (ch) {
+    var on = ch.extension_name ? d.enabled[ch.extension_name + ".enabled"] : null, st;
+    if (!(ch.pid > 0) && (!on || on === "0")) { off.push(ch.name); return; }
+    if (ch.pid > 0) {
+      var m = marks[ch.name];
+      if (!m) st = pill("running", "ok");
+      else if (now() - m <= 300) st = pill("connected", "ok");
+      else st = [pill("no contact", "warn"), h("span", { class: "why", text: "last heard " + ago(m) })];
+    } else st = pill("not running", "bad");
+    c.appendChild(row([ch.name, " channel"], st));
+  });
+  if (off.length) c.appendChild(row(["Switched off: ", off.join(", ")], null));
+  var next = d.cron.filter(function (j) { return j.next_run_at > 0; }).sort(function (a, b) { return a.next_run_at - b.next_run_at; })[0];
+  if (next) c.appendChild(row(["Next scheduled job", h("span", { class: "why" }, next.name, " for ", agentLink(next.agent_name || "?"))],
+    [clock(next.next_run_at), h("span", { class: "why", text: ago(next.next_run_at) })]));
+  else c.appendChild(row("Next scheduled job", "none"));
+  return c;
+}
+
+/* ── Agent ── */
+var PROFILE = { host: "No sandbox: runs directly on this machine", standard: "Sandboxed; network only through cclaw's proxy",
+  restricted: "Sandboxed; no network at all" };
+
+function agentPage(name, my) {
+  var change = explorer("agents", [name]);
+  return api("row", { table: "agents", key: JSON.stringify([name]) }).then(function (r) {
+    var a = r.row.values;
+    return Promise.all([
+      rows("agent_models", { agent_name: name }), rows("grants", { agent_name: name }),
+      rows("agent_memory_blocks", { agent_name: name }), rows("sessions", { agent_name: name }, { limit: 50 }),
+      rows("cron_jobs", { agent_name: name }), rows("approvals", { state: "pending" })
+    ]).then(function (R) {
+      var grants = R[1].filter(function (g) { return !g.expires_at || g.expires_at > now(); });
+      var secrets = grants.filter(function (g) { return g.kind === "secret"; }).map(function (g) { return g.value; });
+      var blocks = R[2].map(function (b) { return b.block_id; });
+      var sids = R[3].map(function (s) { return s.id; });
+      return Promise.all([rows("secret_hosts", { secret_name: secrets }), rows("memory_blocks", { id: blocks }),
+                          rows("agent_memory_blocks", { block_id: blocks }), rows("channel_chats", { session_id: sids })])
+        .then(function (R2) {
+          if (my !== seq) return;
+          clear(MAIN);
+          var busy = R[3].filter(function (s) { return s.state !== "idle"; });
+          var mineWait = R[5].some(function (p) { return sids.indexOf(p.session_id) >= 0; });
+          var st = mineWait ? ["waiting on you", "warn"] : busy.length ? ["working", "ok"] : ["idle", ""];
+          MAIN.appendChild(h("p", { class: "back" }, h("a", { href: "#/", text: "‹ Home" })));
+          MAIN.appendChild(h("h1", null, a.name, " ", pill(st[0], st[1])));
+          MAIN.appendChild(h("p", { class: "sub" }, a.description ? [txt(a.description), h("br")] : null,
+            PROFILE[a.sandbox_profile] || "Sandbox: " + a.sandbox_profile));
+          MAIN.appendChild(thinksWith(R[0], change));
+          MAIN.appendChild(canUse(grants, change));
+          MAIN.appendChild(canReach(grants, R2[0], a.sandbox_profile, change));
+          MAIN.appendChild(canSee(name, grants, R[2], R2[1], R2[2], change));
+          MAIN.appendChild(talksAndRuns(R[3], R2[3], R[4], change));
+        });
+    });
+  });
+}
+
+var EFFORT = { off: "no extra thinking", minimal: "thinks a little", low: "thinks a little", medium: "thinks some", high: "thinks hard" };
+function thinksWith(models, change) {
+  var c = card("Thinks with", [change, "change"]);
+  var by = { chat: [], image: [], audio: [] };
+  models.forEach(function (m) { (by[m.purpose] || []).push(m); });
+  Object.keys(by).forEach(function (k) { by[k].sort(function (a, b) { return a.pos - b.pos; }); });
+  if (!by.chat.length) c.appendChild(none("No chat model set: this agent cannot answer."));
+  by.chat.forEach(function (m, i) {
+    c.appendChild(row([code(m.model_id), m.reasoning_effort ? h("span", { class: "why", text: EFFORT[m.reasoning_effort] + " (" + m.reasoning_effort + ")" }) : null],
+      i === 0 ? "first choice" : "if that fails"));
+  });
+  [["image", "Looks at pictures with"], ["audio", "Listens to voice notes with"]].forEach(function (p) {
+    if (!by[p[0]].length) return;
+    c.appendChild(h("h3", { text: p[1] }));
+    by[p[0]].forEach(function (m, i) { c.appendChild(row(code(m.model_id), i === 0 ? "first choice" : "if that fails")); });
+  });
+  return c;
+}
+
+function canUse(grants, change) {
+  var c = card("Can use", [change, "change"]);
+  var tools = grants.filter(function (g) { return g.kind === "tool"; });
+  var groups = [["silent", "allowed", "ok"], ["always", "asks each time", "warn"], ["tool_decides", "asks when it matters", "warn"]];
+  var any = false;
+  groups.forEach(function (gr) {
+    var names = tools.filter(function (t) { return t.approval_mode === gr[0]; }).map(function (t) { return t.value; }).sort();
+    if (!names.length) return;
+    any = true;
+    c.appendChild(row(code(names.join(", ")), pill(gr[1], gr[2])));
+  });
+  if (!any) c.appendChild(none("No tools."));
+  return c;
+}
+
+function canReach(grants, binds, profile, change) {
+  var c = card("Can reach", [change, "change"]);
+  if (profile === "restricted") { c.appendChild(none("Nothing: its sandbox has no network.")); return c; }
+  if (profile === "host") c.appendChild(row("Any host: it runs without a sandbox", pill("unfiltered", "warn")));
+  var hosts = grants.filter(function (g) { return g.kind === "host"; }).map(function (g) { return g.value; }).sort();
+  var used = {};
+  hosts.forEach(function (hst) {
+    var s = binds.filter(function (b) { return b.host === hst; }).map(function (b) { used[b.secret_name + " " + b.host] = 1; return b.secret_name; });
+    c.appendChild(row(code(hst.charAt(0) === "." ? "*" + hst : hst), s.length ? code(s.join(", ")) : "no secret"));
+  });
+  var by = {};
+  binds.forEach(function (b) { if (!used[b.secret_name + " " + b.host]) (by[b.secret_name] = by[b.secret_name] || []).push(b.host); });
+  Object.keys(by).sort().forEach(function (s) {
+    c.appendChild(row([code(s), h("span", { class: "why", text: "may be sent to " + list(by[s]) })], "secret"));
+  });
+  var unbound = grants.filter(function (g) { return g.kind === "secret" && !binds.some(function (b) { return b.secret_name === g.value; }); });
+  unbound.forEach(function (g) { c.appendChild(row([code(g.value), h("span", { class: "why", text: "not allowed to any host yet, so it cannot be used" })], "secret")); });
+  if (!hosts.length && !binds.length && !unbound.length && profile !== "host") c.appendChild(none("No hosts allowed yet."));
+  return c;
+}
+
+function canSee(name, grants, att, blocks, allAtt, change) {
+  var c = card("Can see", [change, "change"]);
+  blocks.slice().sort(function (a, b) { return a.label.localeCompare(b.label); }).forEach(function (b) {
+    var mine = att.filter(function (x) { return x.block_id === b.id; })[0] || {};
+    var others = allAtt.filter(function (x) { return x.block_id === b.id && x.agent_name !== name; }).map(function (x) { return x.agent_name; });
+    var ro = mine.read_only || b.read_only;
+    c.appendChild(row([h("a", { href: explorer("memory_blocks", [b.id]), text: "Memory: " + b.label }),
+      others.length ? h("span", { class: "why", text: "shared with " + list(others) }) : null], ro ? "read" : "read, write"));
+  });
+  grants.filter(function (g) { return g.kind === "read_path" || g.kind === "write_path"; })
+    .sort(function (a, b) { return a.value.localeCompare(b.value); }).forEach(function (g) {
+      c.appendChild(row(["Files: ", code(g.value)], g.kind === "read_path" ? "read" : "write"));
+    });
+  c.appendChild(row("Files: its own workspace", "read, write"));
+  return c;
+}
+
+var DOW = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"];
+function schedule(j) {
+  if (j.run_at) return "once, " + when(j.run_at);
+  if (j.interval_s) return "every " + span(j.interval_s);
+  var f = String(j.cron_expr || "").trim().split(/\s+/);
+  if (f.length !== 5) return j.cron_expr;
+  var t = /^\d+$/.test(f[0]) && /^\d+$/.test(f[1]) ? ("0" + f[1]).slice(-2) + ":" + ("0" + f[0]).slice(-2) : null;
+  if (t && f[2] === "*" && f[3] === "*" && f[4] === "*") return "daily " + t;
+  if (t && f[2] === "*" && f[3] === "*" && /^[0-6]$/.test(f[4])) return DOW[+f[4]] + " " + t;
+  if (/^\*\/\d+$/.test(f[0]) && f[1] === "*" && f[2] === "*" && f[3] === "*" && f[4] === "*") return "every " + f[0].slice(2) + " min";
+  if (/^\d+$/.test(f[0]) && f[1] === "*" && f[2] === "*" && f[3] === "*" && f[4] === "*") return "hourly at :" + ("0" + f[0]).slice(-2);
+  return j.cron_expr;
+}
+
+function talksAndRuns(sessions, chats, jobs, change) {
+  var c = card("Talks and runs", [change, "change"]);
+  chats.forEach(function (ch) {
+    c.appendChild(row([h("b", { text: ch.title || ch.chat_id }), " on " + ch.channel_name,
+      h("span", { class: "why", text: ch.delivery_mode === "explicit" ? "answers only when it decides to" : "answers every message" })],
+      sessionLink(ch.session_id)));
+  });
+  if (!chats.length) c.appendChild(none("Not live on any chat."));
+  c.appendChild(h("h3", { text: "Schedules" }));
+  if (!jobs.length) c.appendChild(none("None."));
+  jobs.forEach(function (j) {
+    c.appendChild(row([j.name, h("span", { class: "why", text: j.enabled ? (j.next_run_at ? "next " + clock(j.next_run_at) : "") : "paused" })],
+      schedule(j)));
+  });
+  c.appendChild(h("h3", { text: "Recent conversations" }));
+  var top = sessions.filter(function (s) { return s.depth === 0; }).sort(function (a, b) { return b.updated_at - a.updated_at; }).slice(0, 8);
+  if (!top.length) c.appendChild(none("None yet."));
+  top.forEach(function (s) {
+    var st = stateWord(s.state);
+    c.appendChild(row([sessionLink(s.id, s.name || "session " + s.id), h("span", { class: "why", text: (s.channel_name ? "on " + s.channel_name + " · " : "") + ago(s.updated_at) })],
+      st[1] ? pill(st[0], st[1]) : null));
+  });
+  return c;
+}
+
+/* ── Session ── */
+function sessionPage(id, my) {
+  return api("row", { table: "sessions", key: JSON.stringify([id]) }).then(function (r) {
+    var s = r.row.values;
+    return Promise.all([
+      rows("entries", { session_id: id }, { page: true }), rows("approvals", { session_id: id }),
+      rows("channel_outbox", { session_id: id }),
+      s.channel_name ? rows("channel_chats", { channel_name: s.channel_name, chat_id: s.chat_id }) : Promise.resolve([])
+    ]).then(function (R) {
+      if (my !== seq) return;
+      clear(MAIN);
+      var chat = R[3][0];
+      var turns = R[0].rows.length ? R[0].rows[0].turn_id : 0;
+      var st = stateWord(s.state);
+      MAIN.appendChild(h("p", { class: "back" }, h("a", { href: "#/agent/" + encodeURIComponent(s.agent_name), text: "‹ " + s.agent_name })));
+      MAIN.appendChild(h("h1", null, s.name || "Session " + s.id, " ", st[1] ? pill(st[0], st[1]) : null));
+      MAIN.appendChild(h("p", { class: "sub" }, agentLink(s.agent_name),
+        chat ? ", " + chatName(chat) + (chat.session_id === s.id ? "" : " (the chat has moved on to another session)") : "",
+        turns ? ", " + plural(turns, "turn", "turns") : "", " · ", h("a", { href: explorer("sessions", [s.id]), text: "all data" })));
+      var tl = h("div"), ctx = { s: s, chat: chat, approvals: R[1], outbox: R[2], carry: [], next: R[0].next, tl: tl, my: my };
+      MAIN.appendChild(tl);
+      var more = h("div", { class: "more-wrap" });
+      MAIN.appendChild(more);
+      ctx.more = more;
+      feed(ctx, R[0].rows);
+      if (!R[0].rows.length) tl.appendChild(none("Nothing has been said in this session yet."));
+    });
+  });
+}
+
+/* Entries arrive newest first, a page at a time. A turn is drawn once all of
+   it has arrived: the oldest turn of a page may continue on the next one. */
+function feed(ctx, page) {
+  var all = ctx.carry.concat(page), done = [], cut = all.length;
+  if (ctx.next && all.length) {
+    var last = all[all.length - 1].turn_id;
+    while (cut > 0 && all[cut - 1].turn_id === last) cut--;
+  }
+  done = all.slice(0, cut);
+  ctx.carry = all.slice(cut);
+  var order = [], by = {};
+  done.forEach(function (e) {
+    if (!by[e.turn_id]) { by[e.turn_id] = []; order.push(e.turn_id); }
+    by[e.turn_id].push(e);
+  });
+  order.forEach(function (t, i) {
+    var es = by[t].slice().reverse();
+    var newer = i > 0 ? by[order[i - 1]][by[order[i - 1]].length - 1].created_at : null;
+    ctx.tl.appendChild(turnView(ctx, t, es, newer));
+  });
+  clear(ctx.more);
+  if (ctx.next) {
+    var b = h("button", { class: "act", type: "button", text: "Show older turns" });
+    b.addEventListener("click", function () {
+      b.disabled = true;
+      rows("entries", { session_id: ctx.s.id }, { page: true, after: ctx.next }).then(function (p) {
+        if (ctx.my !== seq) return;
+        ctx.next = p.next;
+        feed(ctx, p.rows);
+      }, function (e) { b.disabled = false; ctx.more.appendChild(h("div", { class: "err", text: e.message })); });
+    });
+    ctx.more.appendChild(b);
+    if (!done.length) b.click();   /* one turn longer than a page */
+  } else if (ctx.tl.firstChild) {
+    ctx.more.appendChild(h("p", { class: "muted", text: "That is the start of this session." }));
+  }
+}
+
+var SOURCE = { cli: "you", cron: "scheduled job", spawn: "the agent that launched it", agent_result: "a sub-agent's answer",
+  job_result: "a background job", system: "cclaw", approval: "approval", update: "update notice", cron_error: "scheduled job failed" };
+function who(e, s, chat) {
+  if (e.role === 1) {
+    var d = json(e.data) || {}, src = d.source || "cli";
+    if (src === "cron") return "scheduled job" + (d.source_ref ? ": " + d.source_ref : "");
+    if (src === s.channel_name) return (chat && chat.is_admin ? "you, on " : "chat on ") + src;
+    return SOURCE[src] || src;
+  }
+  if (e.role === 0) return "cclaw";
+  return s.agent_name;
+}
+function bodyText(e) {
+  var t = txt(e.content), d = json(e.data) || {};
+  if (e.role === 1 && d.source_ref) t = t.replace(/^\[[^\]]*\] /, "");
+  return t;
+}
+
+/* Text with "show more": a long value comes from the API as a preview and is
+   fetched whole on demand; a long string is clamped. */
+function textBlock(e, cls) {
+  var t = bodyText(e), el = h("div", { class: "txt" + (cls ? " " + cls : ""), text: t });
+  var wrap = h("div", null, el);
+  var long = typeof e.content === "object" && e.content !== null && e.content.preview !== undefined;
+  if (long || t.length > 400 || t.split("\n").length > 6) {
+    el.classList.add("clamp");
+    var b = h("button", { class: "link", type: "button", text: "show more" });
+    b.addEventListener("click", function () {
+      if (el.classList.contains("clamp")) {
+        var p = long ? api("row", { table: "entries", key: JSON.stringify([e.id]) }) : Promise.resolve(null);
+        p.then(function (r) {
+          if (r) { var c = r.row.values.content; el.textContent = typeof c === "string" ? c : txt(c); long = false; }
+          el.classList.remove("clamp"); b.textContent = "show less";
+        }, function (er) { b.textContent = er.message; });
+      } else { el.classList.add("clamp"); b.textContent = "show more"; }
+    });
+    wrap.appendChild(b);
+  }
+  return wrap;
+}
+
+function argShort(e) {
+  if (e.tool_name === "request_config" && typeof e.content === "string")
+    return approvalAsk({ tool_name: e.tool_name, args_json: e.content }).text.replace(/^wants to /, "");
+  var a = json(txt(e.content));
+  if (!a || typeof a !== "object") return firstLine(txt(e.content), 100);
+  var keys = ["command", "cmd", "url", "path", "query", "sql", "name", "pattern", "code", "text", "task"];
+  for (var i = 0; i < keys.length; i++) if (typeof a[keys[i]] === "string") return firstLine(a[keys[i]], 100);
+  for (var k in a) if (typeof a[k] === "string") return firstLine(a[k], 100);
+  return firstLine(JSON.stringify(a), 100);
+}
+
+function decidedBy(v) {
+  if (!v) return "";
+  if (v === "dashboard") return "from the dashboard";
+  if (v.indexOf("channel:") === 0) return "from " + v.split(":")[1];
+  if (v.indexOf("auto:") === 0) return "automatically (" + v.slice(5) + ")";
+  if (v === "cli") return "from the command line";
+  if (v === "recovery") return "when the daemon restarted";
+  return "by " + v;
+}
+
+function turnView(ctx, t, es, newerStart) {
+  var failed = es.some(function (e) { return e.role === 2 && e.stop_reason === 4; });
+  var box = h("div", { class: "turn" + (failed ? " failed" : "") },
+    h("div", { class: "th", text: "Turn " + t + " · " + clock(es[0].created_at) }));
+  var results = {};
+  es.forEach(function (e) { if (e.role === 3 && e.tool_call_id) results[e.tool_call_id] = e; });
+  var shownResults = {};
+  es.forEach(function (e) {
+    if (e.type === "reasoning") return;
+    if (e.type === "tool_call") {
+      var r = results[e.tool_call_id], ap = ctx.approvals.filter(function (a) { return a.tool_call_id === e.tool_call_id; })[0];
+      if (r) shownResults[e.tool_call_id] = 1;
+      var tags = h("div", { class: "tags" });
+      if (ap) {
+        var st = ap.state === "pending" ? ["waiting for your approval", "warn"] : ap.state === "denied" ? ["denied", "bad"]
+               : ap.state === "expired" ? ["approval expired", "bad"] : ["approved", "ok"];
+        tags.appendChild(pill(st[0] + (ap.state !== "pending" && ap.decided_via ? ", " + decidedBy(ap.decided_via) : ""), st[1]));
+      }
+      if (r && r.is_error) tags.appendChild(pill("failed", "bad"));
+      if (!r && !ap) tags.appendChild(pill("no result yet"));
+      var ev = h("div", { class: "ev tool" }, h("div", { class: "who", text: "tool" }),
+        h("div", { class: "line" }, h("b", { text: e.tool_name || "?" }), ": " + argShort(e)), tags.firstChild ? tags : null);
+      if (r) {
+        var shown = false, b = h("button", { class: "link", type: "button", text: "result" });
+        b.addEventListener("click", function () {
+          if (shown) { ev.removeChild(ev.lastChild); shown = false; return; }
+          shown = true;
+          var long = typeof r.content === "object" && r.content !== null;
+          var pre = h("pre", { class: "out", text: txt(r.content) });
+          ev.appendChild(pre);
+          if (long) api("row", { table: "entries", key: JSON.stringify([r.id]) }).then(function (x) { pre.textContent = txt(x.row.values.content); });
+        });
+        tags.appendChild(b);
+        if (!tags.parentNode) ev.appendChild(tags);
+      }
+      box.appendChild(ev);
+      return;
+    }
+    if (e.role === 3) {
+      if (shownResults[e.tool_call_id]) return;
+      box.appendChild(h("div", { class: "ev tool" + (e.is_error ? " error" : "") }, h("div", { class: "who", text: "tool result: " + (e.tool_name || "") }), textBlock(e)));
+      return;
+    }
+    if (e.role === 4 || e.type === "compaction") {
+      box.appendChild(h("div", { class: "ev" }, h("div", { class: "who", text: "summary" }),
+        h("details", null, h("summary", { class: "muted", text: "Earlier conversation was summarized" }), textBlock(e))));
+      return;
+    }
+    var t2 = bodyText(e);
+    if (e.role === 2 && !t2.trim()) return;   /* a response that was only tool calls */
+    var err = e.role === 2 && e.stop_reason === 4;
+    var ev2 = h("div", { class: "ev" + (err ? " error" : "") }, h("div", { class: "who", text: err ? "error" : who(e, ctx.s, ctx.chat) }), textBlock(e));
+    if (e.role === 2 && e.stop_reason === 2) ev2.appendChild(h("div", { class: "tags" }, pill("cut off: the reply hit its length limit", "warn")));
+    box.appendChild(ev2);
+  });
+  /* What this turn sent to the chat: outbox rows written between this turn's
+     first entry and the next turn's, to this session's own chat (operator
+     notices about the session go elsewhere). Rows are pruned after a while. */
+  var start = es[0].created_at;
+  var sent = ctx.outbox.filter(function (o) {
+    return outboxChat(o) === String(ctx.s.chat_id) && o.created_at >= start && (newerStart === null || o.created_at < newerStart);
+  });
+  if (sent.length) {
+    var ok = sent.filter(function (o) { return o.status === "delivered"; }).length;
+    var bad = sent.filter(function (o) { return String(o.status).indexOf("failed") === 0; });
+    var tags = h("div", { class: "tags" });
+    if (ok) tags.appendChild(pill((ok === 1 ? "delivered" : ok + " messages delivered") + " to " + (ctx.s.channel_name || "the chat"), "ok"));
+    bad.forEach(function (o) { tags.appendChild(pill("not delivered: " + String(o.status).replace(/^failed:\s*/, ""), "bad")); });
+    if (sent.length - ok - bad.length > 0) tags.appendChild(pill("still sending"));
+    box.appendChild(tags);
+  }
+  return box;
+}
+
+/* ── routing ── */
+function flash() {
+  if (!FLASH) return;
+  MAIN.appendChild(h("div", { class: "msg", role: "status", text: FLASH }));
+  FLASH = null;
+}
+function refresh(msg) { FLASH = msg || null; render(); }
+function render() {
+  var my = ++seq;
+  var segs = location.hash.replace(/^#\/?/, "").split("/").map(function (s) { try { return decodeURIComponent(s); } catch (e) { return s; } });
+  var p;
+  if (segs[0] === "agent" && segs[1]) { document.title = segs[1] + " · cclaw"; p = agentPage(segs[1], my); }
+  else if (segs[0] === "session" && /^\d+$/.test(segs[1] || "")) { document.title = "Session " + segs[1] + " · cclaw"; p = sessionPage(Number(segs[1]), my); }
+  else { document.title = "cclaw dashboard"; p = home(my); }
+  p.catch(function (e) {
+    if (my !== seq) return;
+    clear(MAIN);
+    var m = e && e.status === 404 ? "That does not exist (any more)." : e && e.status === 403
+      ? "You are signed out. Send /dashboard to your agent in a direct message for a new link."
+      : "Something went wrong: " + (e && e.message ? e.message : String(e));
+    MAIN.appendChild(h("div", { class: "msg bad", role: "alert", text: m }));
+    MAIN.appendChild(h("p", null, h("a", { href: "#/", text: "Home" })));
+  });
+}
+window.addEventListener("hashchange", function () { render(); MAIN.focus(); window.scrollTo(0, 0); });
+render();
+</script>
+</body>
+</html>

@@ -132,8 +132,8 @@ sees old behavior only through you.
   always runs under its own grants — the `tools` filter is self-spawn only.
 - `check_session {session_id}` — a delegated session's state, and its final
   text once idle. A live progress peek, not a way to wait.
-- Channel access: the new agent sends only where a `channel_routes` row
-  resolves to it. Routes are requested by the agent itself with a
+- Channel access: the new agent sends only to chats routed to it (a
+  `channel_chats` row pinned to one of its sessions). Routes are requested by the agent itself with a
   `request_config` changes document (`routes: ["telegram:12345"]`), or set
   by the operator.
 - Every agent gets a disabled `heartbeat` cron job (a bare wake every 30

@@ -52,7 +52,7 @@ Sections by scope — the approval prompt groups them the same way:
 |---------|-------|-----------|
 | `grants` | agent | `grants` rows for the caller |
 | `agent` | agent | the caller's own settings — `models` is a whole-list replace of the caller's `agent_models` routing order (first entry = primary); `max_iterations`/`shell_timeout` are columns on its `agents` row |
-| `routes` | agent | session + `channel_routes` pin (`channel:chat_id`, first-come, `delivery_mode='explicit'`; no wildcards — channel defaults are operator config) |
+| `routes` | agent | session + `channel_chats` pin (`channel:chat_id`, first-come, `delivery_mode='explicit'`; no wildcards — channel defaults are operator config) |
 | `config` | **system** | global `config` table |
 | `provider` | **system** | `providers` upsert — transport only (endpoint + credential name) |
 | `models` | **system** | `models` upsert per entry — register, update, or disable by canonical id |
@@ -126,7 +126,7 @@ Sections by scope — the approval prompt groups them the same way:
 ### Scoping model (why `config` is system-wide)
 
 Agent-level state lives on agent-keyed tables (`agents` columns, `grants`,
-`agent_extensions`, `channel_routes`, `memory_blocks`) and is mutated by the
+`agent_extensions`, `channel_chats`, `memory_blocks`) and is mutated by the
 agent-scoped sections above. The `config` registry is deliberately global —
 one home for daemon-wide knobs, not a per-agent namespace. If a knob needs
 per-agent values, it becomes an `agents` column (whitelisted into the `agent`

@@ -5,6 +5,7 @@
 #include "config_registry.h"
 #include "db.h"
 #include "test_util.h"
+#include "channel.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -569,13 +570,10 @@ static void test_block_window_ambient(void) {
     assert(approval_block_seconds(db) == 60);
     assert(approval_block_seconds_for_session(db, plain) == 60);
 
-    /* Two routes; only the second chat id is listed as ambient. */
-    char sql[512];
-    snprintf(sql, sizeof(sql),
-             "INSERT INTO channel_routes(channel_name,chat_id,session_id) "
-             "VALUES('discord','111',%lld),('discord','222',%lld);",
-             (long long)plain, (long long)amb);
-    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+    /* Two routed chats; only the second chat id is listed as ambient. */
+    test_seed_chat(db, "discord", "111");
+    assert(channel_pin_session(db, "discord", "111", plain) == 0);
+    assert(channel_pin_session(db, "discord", "222", amb) == 0);
     /* Seeded directly: `<ext>.<key>` rows are minted by extension_install, so
      * config_set no-ops on a DB with no channel extension installed. Leading
      * space + a decoy entry: membership is exact, not substring. */

@@ -89,6 +89,15 @@ int64_t session_create_filtered(sqlite3 *db, const char *name, const char *agent
  * (including unknown session — fail closed). */
 int session_tool_allowed(sqlite3 *db, int64_t session_id, const char *tool_name);
 
+/* 1 unless the chat pinned to this session has a tool_filter without
+ * tool_name. A session no chat pins answers 1. Read live: an edit to the
+ * chat's filter applies to the next call. */
+int chat_tool_allowed(sqlite3 *db, int64_t session_id, const char *tool_name);
+
+/* sessions.tool_filter ∩ the pinned chat's tool_filter, as a JSON array; NULL
+ * when neither has one. Heap. */
+char *session_effective_tool_filter(sqlite3 *db, int64_t session_id);
+
 /* Get branch from leaf→root for session. Returns entries in root→leaf order.
  * Caller must free returned array and entry string fields. Sets *count.
  * Test-only: the standard read-back assertion helper across the suite —
@@ -248,6 +257,19 @@ int session_subtree_quiescent(sqlite3 *db, int64_t session_id);
 /* 1 iff p is one of the five policies: iteration|digest|turn|quiescent|explicit. */
 int delivery_policy_valid(const char *p);
 
+/* The policy an edge row `e` delivers under, as an SQL expression over a
+ * delivery_edges row aliased `e`. A channel edge has none of its own: it is
+ * the delivery_mode of the chat the session belongs to, read now ('auto' =
+ * quiescent; an unknown value or a missing chat row = quiescent). Every other
+ * edge carries its frozen policy. The one definition every reader uses. */
+#define EDGE_POLICY \
+    "(CASE WHEN e.target_kind <> 'channel' THEN e.policy ELSE COALESCE(" \
+    "  (SELECT CASE WHEN c.delivery_mode IN ('iteration','digest','turn','explicit')" \
+    "               THEN c.delivery_mode ELSE 'quiescent' END" \
+    "     FROM sessions es JOIN channel_chats c" \
+    "       ON c.channel_name = es.channel_name AND c.chat_id = es.chat_id" \
+    "    WHERE es.id = e.session_id), 'quiescent') END)"
+
 /* The policy a new child's standing parent edge inherits: the launcher's own
  * outbound (non-one-shot) edge policy, frozen at launch — tool_filter
  * precedent. 'explicit' does not inherit and roots have no edge; both fall
@@ -256,8 +278,9 @@ int delivery_policy_valid(const char *p);
 char *delivery_policy_resolve(sqlite3 *db, int64_t launcher_session_id);
 
 /* Insert an edge row (INSERT OR IGNORE — idempotent on the per-session
- * (kind, ref) key). Returns 0 on success (including already-present), -1 on
- * error or invalid policy. */
+ * (kind, ref) key). A channel edge takes policy NULL (its chat holds it);
+ * every other kind needs a valid policy. Returns 0 on success (including
+ * already-present), -1 on error or invalid policy. */
 int delivery_edge_create(sqlite3 *db, int64_t session_id, const char *kind,
                          const char *ref, const char *policy, int one_shot);
 
@@ -562,7 +585,8 @@ int memory_note_delete(sqlite3 *db, int64_t block_id, int64_t note_id);
     "     FROM memory_notes n WHERE n.block_id=b.id)," \
     "  '(no notes yet)' || char(10))"
 
-/* Channel→agent binding. Returns heap-allocated agent_name or NULL. */
+/* The agent of the session a chat is pinned to. Heap agent_name, or NULL
+ * when the chat is not routed. */
 char *db_channel_binding_get(sqlite3 *db, const char *channel_name, const char *chat_id);
 
 /* Sum cost_nano for all entries in a session. Returns total nanodollars. */

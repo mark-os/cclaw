@@ -275,7 +275,7 @@ int secret_main(int argc, char *argv[]) {
 }
 
 /* `cclaw route add <channel> <chat_id> <agent> | rm <channel> <chat_id> | list`
- * — operator verb pinning a chat to a session (channel_routes); the session
+ * — operator verb pinning a chat to a session (channel_chats); the session
  * names the agent. add creates the session unless --session pins an existing
  * one. chat_id '*' is sugar for channels.default_agent (open-door policy for
  * unrouted chats), not a route. Deliberately CLI-only: re-pointing a chat is
@@ -343,13 +343,29 @@ int route_main(int argc, char *argv[]) {
     if (sub && strcmp(sub, "list") == 0) {
         sqlite3_stmt *st;
         int any = 0;
+        /* Every chat the database knows, routed first. An unrouted chat is
+         * one whose messages the gate drops (or hands to the channel's
+         * default agent) — listed so the operator sees who has been
+         * knocking. */
         if (sqlite3_prepare_v2(db,
-                "SELECT r.channel_name, r.chat_id, r.session_id, s.agent_name,"
-                "       r.delivery_mode, r.tool_filter, r.system_prompt_suffix"
-                " FROM channel_routes r JOIN sessions s ON s.id = r.session_id"
-                " ORDER BY r.channel_name, r.chat_id",
+                "SELECT c.channel_name, c.chat_id, c.session_id, s.agent_name,"
+                "       c.delivery_mode, c.tool_filter, c.guidance, c.title,"
+                "       date(COALESCE(c.last_message_at, c.first_seen_at),'unixepoch'),"
+                "       c.notified_at IS NOT NULL"
+                " FROM channel_chats c LEFT JOIN sessions s ON s.id = c.session_id"
+                " ORDER BY c.session_id IS NULL, c.channel_name, c.chat_id",
                 -1, &st, NULL) == SQLITE_OK) {
             while (sqlite3_step(st) == SQLITE_ROW) {
+                const char *title = (const char *)sqlite3_column_text(st, 7);
+                if (sqlite3_column_type(st, 2) == SQLITE_NULL) {
+                    printf("%s %s -> not routed (%s%slast seen %s%s)\n",
+                           sqlite3_column_text(st, 0), sqlite3_column_text(st, 1),
+                           title ? title : "", title ? ", " : "",
+                           sqlite3_column_text(st, 8),
+                           sqlite3_column_int(st, 9) ? ", operator told" : "");
+                    any = 1;
+                    continue;
+                }
                 printf("%s %s -> session %lld (%s, mode %s",
                        sqlite3_column_text(st, 0), sqlite3_column_text(st, 1),
                        (long long)sqlite3_column_int64(st, 2),
@@ -358,10 +374,11 @@ int route_main(int argc, char *argv[]) {
                     printf(", tools %s", sqlite3_column_text(st, 5));
                 if (sqlite3_column_type(st, 6) != SQLITE_NULL) {
                     /* Presence + a taste of it: the full text can be a
-                     * paragraph, and `route list` is a one-line-per-route view. */
+                     * paragraph, and `route list` is a one-line-per-chat view. */
                     const char *sp = (const char *)sqlite3_column_text(st, 6);
                     printf(", prompt \"%.40s%s\"", sp, strlen(sp) > 40 ? "…" : "");
                 }
+                if (title) printf(", %s", title);
                 printf(")\n");
                 any = 1;
             }
@@ -413,7 +430,7 @@ int route_main(int argc, char *argv[]) {
             }
         }
         if (bad) { sqlite3_close(db); return 1; }
-        /* --tools name,name,... -> JSON array for channel_routes.tool_filter
+        /* --tools name,name,... -> JSON array for channel_chats.tool_filter
          * (channels.default_tool_filter when chat_id is '*').
          * Built with json_group_array so quoting is SQLite's problem. */
         char *filter_json = NULL;
@@ -442,9 +459,10 @@ int route_main(int argc, char *argv[]) {
         /* '*' = channel-wide default agent (channels.default_agent): open
          * door + who serves new chats. Not a route — routes pin sessions.
          * --tools here is the *unrouted* filter (channels.default_tool_filter):
-         * every gate-created session on this channel freezes it, so a
-         * server-wide bot answers strangers with an attenuated tool set while
-         * an explicitly routed chat keeps its own (or full) authority. */
+         * every chat the gate records on this channel from now on starts with
+         * it, so a server-wide bot answers strangers with an attenuated tool
+         * set while an explicitly routed chat keeps its own (or full)
+         * authority. Chats already recorded keep theirs. */
         if (strcmp(cid, "*") == 0) {
             if (mode || pin_session > 0) {
                 fprintf(stderr, "error: '*' sets channels.default_agent —"
@@ -476,9 +494,26 @@ int route_main(int argc, char *argv[]) {
             sqlite3_close(db);
             return rc;
         }
-        /* Group-shaped ids (negative — Telegram groups) default to explicit:
-         * silent-by-default listen-and-decide until the operator says auto. */
-        if (!mode) mode = (cid[0] == '-') ? "explicit" : "auto";
+        /* Groups default to explicit: silent-by-default listen-and-decide
+         * until the operator says auto. A chat that has spoken says what it
+         * is (its envelope's kind); one that never spoke is judged by its id
+         * (negative — a Telegram group). */
+        char kind[8] = "";
+        if (!mode) {
+            sqlite3_stmt *kq;
+            if (sqlite3_prepare_v2(db, "SELECT kind FROM channel_chats"
+                                       " WHERE channel_name=?1 AND chat_id=?2",
+                                   -1, &kq, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(kq, 1, ch, -1, SQLITE_STATIC);
+                sqlite3_bind_text(kq, 2, cid, -1, SQLITE_STATIC);
+                if (sqlite3_step(kq) == SQLITE_ROW && sqlite3_column_text(kq, 0))
+                    snprintf(kind, sizeof(kind), "%s", sqlite3_column_text(kq, 0));
+                sqlite3_finalize(kq);
+            }
+            mode = strcmp(kind, "group") == 0 ? "explicit"
+                 : strcmp(kind, "dm") == 0    ? "auto"
+                 : chat_default_mode(cid);
+        }
         /* A route creates (or pins) a session bound to the agent, so the
          * agent must exist — sessions.agent_name is a real FK. */
         sqlite3_stmt *ck;
@@ -509,10 +544,8 @@ int route_main(int argc, char *argv[]) {
                 fprintf(stderr, "note: route grants full '%s' authority to this chat;"
                                 " consider --tools to attenuate\n", agent);
         }
-        /* Resolve the session to pin: --session verifies an existing one
-         * (and that it belongs to the named agent — a mismatch is refused,
-         * never silently rebound); otherwise create it here, filter frozen
-         * at creation. */
+        /* --session must name an existing session of the named agent — a
+         * mismatch is refused, never silently rebound. */
         if (pin_session > 0) {
             sqlite3_stmt *sk;
             char *sess_agent = NULL;
@@ -536,65 +569,43 @@ int route_main(int argc, char *argv[]) {
                 return 1;
             }
             free(sess_agent);
-        } else {
-            sqlite3_stmt *sc;
-            if (sqlite3_prepare_v2(db,
-                    "INSERT INTO sessions(name, agent_name, channel_name,"
-                    "                     chat_id, tool_filter)"
-                    " VALUES('route:'||?1||':'||?2, ?3, ?1, ?2, ?4)",
-                    -1, &sc, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(sc, 1, ch, -1, SQLITE_STATIC);
-                sqlite3_bind_text(sc, 2, cid, -1, SQLITE_STATIC);
-                sqlite3_bind_text(sc, 3, agent, -1, SQLITE_STATIC);
-                if (filter_json) sqlite3_bind_text(sc, 4, filter_json, -1, SQLITE_STATIC);
-                if (sqlite3_step(sc) == SQLITE_DONE)
-                    pin_session = sqlite3_last_insert_rowid(db);
-                sqlite3_finalize(sc);
-            }
-            if (pin_session <= 0) {
-                fprintf(stderr, "error: session create failed\n");
-                free(filter_json);
-                sqlite3_close(db);
-                return 1;
+        }
+        /* One transaction: the pin (a fresh session unless --session; a
+         * session another chat held leaves that chat on a fresh one) and the
+         * chat's settings, which every session of the chat reads live. */
+        rc = 1;
+        if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK) {
+            char name[192];
+            snprintf(name, sizeof(name), "route:%s:%s", ch, cid);
+            int ok = pin_session > 0
+                ? channel_pin_session(db, ch, cid, pin_session) == 0
+                : (pin_session = channel_pin_new_session(db, ch, cid, agent, name)) > 0;
+            sqlite3_stmt *st;
+            if (ok && sqlite3_prepare_v2(db,
+                    "UPDATE channel_chats SET delivery_mode=?3, tool_filter=?4,"
+                    /* ?6 = "--prompt was given". Omitting it on a re-add keeps
+                     * the existing guidance (prose an operator tuned is not
+                     * something to lose to a re-pin); `--prompt ""` passes
+                     * NULL and clears. */
+                    "  guidance=CASE WHEN ?6 THEN ?5 ELSE guidance END"
+                    " WHERE channel_name=?1 AND chat_id=?2",
+                    -1, &st, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
+                sqlite3_bind_text(st, 2, cid, -1, SQLITE_STATIC);
+                sqlite3_bind_text(st, 3, mode, -1, SQLITE_STATIC);
+                if (filter_json) sqlite3_bind_text(st, 4, filter_json, -1, SQLITE_STATIC);
+                if (prompt && prompt[0]) sqlite3_bind_text(st, 5, prompt, -1, SQLITE_STATIC);
+                sqlite3_bind_int(st, 6, prompt != NULL);
+                ok = sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(db) == 1;
+                sqlite3_finalize(st);
+            } else ok = 0;
+            rc = (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK) ? 0 : 1;
+            if (rc != 0) {
+                fprintf(stderr, "error: %s\n", sqlite3_errmsg(db));
+                sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             }
         }
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
-                "INSERT INTO channel_routes(channel_name, chat_id, session_id,"
-                "                            delivery_mode, tool_filter,"
-                "                            system_prompt_suffix)"
-                " VALUES(?1,?2,?3,?4,?5,?6)"
-                " ON CONFLICT(channel_name, chat_id) DO UPDATE SET"
-                "  session_id=excluded.session_id,"
-                "  delivery_mode=excluded.delivery_mode, tool_filter=excluded.tool_filter,"
-                /* ?7 = "--prompt was given". Omitting it on a re-add keeps the
-                 * existing suffix (prose an operator tuned is not something to
-                 * lose to a re-pin); `--prompt ""` passes NULL and clears. */
-                "  system_prompt_suffix=CASE WHEN ?7 THEN excluded.system_prompt_suffix"
-                "    ELSE channel_routes.system_prompt_suffix END",
-                -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
-            sqlite3_bind_text(st, 2, cid, -1, SQLITE_STATIC);
-            sqlite3_bind_int64(st, 3, pin_session);
-            sqlite3_bind_text(st, 4, mode, -1, SQLITE_STATIC);
-            if (filter_json) sqlite3_bind_text(st, 5, filter_json, -1, SQLITE_STATIC);
-            if (prompt && prompt[0]) sqlite3_bind_text(st, 6, prompt, -1, SQLITE_STATIC);
-            sqlite3_bind_int(st, 7, prompt != NULL);
-            rc = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
-            sqlite3_finalize(st);
-        } else rc = 1;
         if (rc == 0) {
-            /* Stamp origin on a --session pin too (fresh creates set it). */
-            sqlite3_stmt *us;
-            if (sqlite3_prepare_v2(db,
-                    "UPDATE sessions SET channel_name=?1, chat_id=?2 WHERE id=?3",
-                    -1, &us, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(us, 1, ch, -1, SQLITE_STATIC);
-                sqlite3_bind_text(us, 2, cid, -1, SQLITE_STATIC);
-                sqlite3_bind_int64(us, 3, pin_session);
-                sqlite3_step(us);
-                sqlite3_finalize(us);
-            }
             printf("route set: %s %s -> session %lld (%s, mode %s",
                    ch, cid, (long long)pin_session, agent, mode);
             if (filter_json) printf(", tools %s", filter_json);
@@ -619,7 +630,12 @@ int route_main(int argc, char *argv[]) {
                                    : "no such channel: %s\n", ch);
             } else rc = 1;
         } else if (sqlite3_prepare_v2(db,
-                "DELETE FROM channel_routes WHERE channel_name=? AND chat_id=?",
+                /* The chat's row stays — its sessions and cron jobs still
+                 * belong to it, and its settings return if it is routed again.
+                 * Its next message meets the gate, and the operator is told
+                 * again if that drops it. */
+                "UPDATE channel_chats SET session_id=NULL, notified_at=NULL"
+                " WHERE channel_name=? AND chat_id=? AND session_id IS NOT NULL",
                 -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
             sqlite3_bind_text(st, 2, cid, -1, SQLITE_STATIC);
@@ -640,12 +656,12 @@ int route_main(int argc, char *argv[]) {
                         "  the open-door default for chats with no route\n"
                         "  (without it, unrouted chats drop unless admin)\n"
                         "  --mode default: explicit for group ids (negative), else auto\n"
-                        "  (with '*', --tools sets the default filter every\n"
-                        "   gate-created session on that channel freezes)\n"
-                        "  --tools limits the created session to those tools\n"
-                        "  (frozen at session creation; a route edit needs a new session)\n"
-                        "  --prompt appends <text> to the system prompt on every turn of\n"
-                        "  this route's session (read live; empty string clears it)\n");
+                        "  (with '*', --tools sets the filter every chat the gate records\n"
+                        "   on that channel from now on starts with)\n"
+                        "  --tools limits what this chat's session may use; --mode and\n"
+                        "  --prompt (appended to its system prompt; empty string clears)\n"
+                        "  are the chat's too — all read live, an edit applies next turn\n"
+                        "  list also shows chats nobody routed; rm keeps the chat's row\n");
         rc = 2;
     }
     sqlite3_close(db);

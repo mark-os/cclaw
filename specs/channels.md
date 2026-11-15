@@ -7,7 +7,7 @@ feed). This spec is the contract between the three parties involved:
 > the agent.**
 
 The channel handler (extension JS) reports platform *facts*. The daemon
-enforces *authority* at routing time against `channel_routes` — fail-closed.
+enforces *authority* at routing time against `channel_chats` — fail-closed.
 The agent decides *when to speak* in listen-and-decide chats.
 
 ## Process model
@@ -111,21 +111,60 @@ extracts plain text before the inbox insert: bare `text` for DMs,
 explicit-mode groups). A payload with no `$.text` (custom channel emitting its
 own shape) passes through unchanged.
 
+## Chats (`channel_chats`)
+
+Every chat a channel has seen, or an operator or agent has named, has one
+`channel_chats` row, keyed `(channel_name, chat_id)`; a chat cannot move
+between channels. The row holds:
+
+- **the pin** — `session_id`, the session the chat's messages go to (the
+  session names its agent). NULL = not routed.
+- **the chat's settings**, read live every turn: `delivery_mode` (how replies
+  reach it — below), `tool_filter` (what its session may use — Authority
+  attenuation) and `guidance` (prompt text — Guidance). Nothing is copied onto
+  a session.
+- **what traffic showed**: `title`, `kind` (`dm`/`group`, the envelope's
+  `chat_type`), `is_admin` (a DM whose other party is an admin), `first_seen_at`,
+  `last_message_at`, `error_notice_at`, `notified_at`.
+
+A new row starts from defaults, **copied once**: `tool_filter` from
+`channels.default_tool_filter` when the gate records the chat (none when an
+operator or agent names it first); `delivery_mode` from what the envelope
+says the chat is — a `group` starts `explicit`, a `dm` starts `auto`. A chat
+named before it ever spoke (`cclaw route add`, an agent's `routes` request,
+the dashboard attach) has no envelope yet and is judged by its id: one that
+begins with `-` (a Telegram group) starts `explicit`, any other `auto`; when
+it then speaks, its first message does not overwrite the mode it was given.
+After that only the row is consulted; changing the channel's default
+changes future chats.
+
+A row is never deleted: sessions and cron jobs point at their chat (declared
+foreign keys), and older sessions left behind by `/new` keep naming it.
+
+**`cclaw route rm` is the one way a routed chat becomes unrouted.** It is an
+explicit operator act: the pin is cleared (`session_id` NULL), the row and
+its settings stay, and `notified_at` is cleared so the operator hears once
+more if the gate drops the chat's next message. Nothing else unroutes a chat
+— moving its session elsewhere leaves it on a fresh session (below).
+
 ## Routing gate (C, fail-closed)
 
 For each message event, in order (`channel_consume_events`, src/channel.c):
 
-1. **Routed** — exact `(channel, chat_id)` hit in `channel_routes` → deliver
-   to the pinned session (the session names its agent).
+0. **Recorded** — the chat's row is created on first contact and its observed
+   facts updated (`channel_chat_observe`), whatever happens next. An event
+   for a channel that has no `channels` row is dropped.
+1. **Routed** — the chat's row has a `session_id` → deliver to that session.
 2. **Unrouted, open door** — `channels.default_agent` set → accept: create a
    session for that agent, pin the chat to it.
-3. **Unrouted, admin** — `chat_id ∈ <ext>.admin_ids` → accept via the global
-   `default_agent` config (the operator always gets through), same
+3. **Unrouted, admin** — the sender is in `<ext>.admin_ids` → accept via the
+   global `default_agent` config (the operator always gets through), same
    create-and-pin.
 4. **Unrouted, unknown** → drop + log + a **one-time admin notification**
-   carrying sender id/name and the `cclaw route add` recipe. The dedup set is
-   in-memory per process — ephemeral politeness state, not authority; a
-   re-notify after daemon restart is acceptable.
+   carrying sender id/name and the `cclaw route add` recipe. "Once" is
+   recorded on the chat (`notified_at`), so a daemon restart does not repeat
+   it; `cclaw route rm` clears it with the pin, so a chat the operator
+   unrouted is reported the next time it speaks.
 
 Chat membership is never authority. `admin_ids` is the only admin source.
 `admin_chats` names the chats where operator messages are posted
@@ -135,9 +174,9 @@ nothing.
 Admin chats can issue `/new` (re-point the pin at a fresh session for the
 same agent) and `/sessions [id]` (list this chat's sessions / attach to
 one), plus `/approve <id>` / `/deny <id>` (decide a parked approval) and
-`/status` (what this chat is pinned to). Handled in C before any dispatch —
-authority actions that must work even when the pinned session is wedged. A
-non-admin's `/new` is an ordinary message.
+`/status` (what this chat is pinned to, and its reply setting). Handled in C
+before any dispatch — authority actions that must work even when the pinned
+session is wedged. A non-admin's `/new` is an ordinary message.
 
 Administration is three separated concerns (`src/channel_intent.c`):
 **surface interpretation** turns platform input into a structural
@@ -163,30 +202,44 @@ dashboard/button decision.
 
 ## Session resolution
 
-The pin IS the binding: a route resolves to its `session_id`, and the
-session names its agent (`sessions.agent_name`, immutable after creation).
-First contact through the gate (open door / admin) creates the session and
-writes the pin back, so the invariant "every routed chat has exactly one
-current session" holds from then on. Re-pointing the pin (`/new`,
-`/sessions <id>`, `cclaw route add`) is the one way to move a chat between
-conversations; the FK refuses to delete a session a route still pins.
+The pin IS the binding: a chat resolves to its `session_id`, and the session
+names its agent (`sessions.agent_name`, immutable after creation). First
+contact through the gate (open door / admin) creates the session and pins
+the chat to it, so "every routed chat has exactly one current session" holds
+from then on.
+
+**One chat per session.** A session is pinned by at most one chat (a unique
+index on `channel_chats(session_id)`), and a pinned session names the chat
+that pins it (`sessions.channel_name/chat_id`, a declared link to the chat).
+`channel_pin_session()` is the one function that moves a chat between
+conversations — `/new`, `/sessions <id>`, `cclaw route add`, the dashboard's
+attach, an agent's approved `routes` request and the gate all call it. Pinning
+a session another chat holds **moves** it: that chat is left pinned to a fresh
+session for the same agent (what `/new` would give it), in the same
+transaction — a chat once routed is never silently unrouted. The session the
+chat pinned before keeps naming the chat.
 
 ## Delivery modes
 
-`channel_routes.delivery_mode` is the delivery-policy *template* for the
-pinned session's channel edge. The session freezes it onto its
-`delivery_edges` row at its first delivery boundary; the full policy
-vocabulary (`iteration`, `digest`, `turn`, `quiescent`, `explicit`) is in
+`channel_chats.delivery_mode` is the one value deciding how a session of
+that chat delivers; it is read live at every turn boundary (the session's
+`delivery_edges` row for the channel keeps only its cursor). Flipping it
+between turns changes the very next turn. The full policy vocabulary
+(`iteration`, `digest`, `turn`, `quiescent`, `explicit`) is in
 [delivery.md](delivery.md). `cclaw route add --mode` accepts two values:
 
 - **`auto`** (DM default, alias for `quiescent`): the final assistant message
   of a turn is inserted into `channel_outbox` for the origin chat.
-- **`explicit`** (default for group-shaped ids at `route add`): turn output
-  stays in the session; the agent speaks only via `channel_send`. This is the
-  group listen-and-decide pattern — `mentioned`/`reply_to_me` are the engage
-  signals; silence is the default.
+- **`explicit`** (default for group chats): turn output stays in the
+  session; the agent speaks only via `channel_send`. `channel_send` ships
+  ungranted: an agent without the grant cannot speak in an `explicit` chat at
+  all (its prompt says so) — grant it, or set the chat to `auto`. This is the group
+  listen-and-decide pattern — `mentioned`/`reply_to_me` are the engage
+  signals; silence is the default. A turn that ends in `explicit` is recorded
+  as delivered-nothing, so a later flip to `auto` never posts it.
 
-Gate-created pins start `auto` (the column default).
+The agent is told which applies: the system prompt says how replies work in
+this chat (Guidance, below).
 
 ## Where routes come from
 
@@ -197,47 +250,52 @@ approval-gated like every self-config write). Agent-requested routes are
 **first-come** (a chat already routed to another agent is refused — an agent
 must not capture another agent's chat), land with `delivery_mode='explicit'`
 (the agent asked for send authority, not session mirroring) and no
-`tool_filter`. Note what the approver is granting: a route is send authority
+`tool_filter` of their own (a chat the gate already recorded keeps the one it
+started with). Note what the approver is granting: a route is send authority
 *and* inbound routing — new senders in that chat will reach this agent.
 Wildcard (`'*'`) routes are operator-only.
 
 ## Authority attenuation
 
 Routes control *who gets in*; without attenuation a routed sender wields the
-target agent's full authority. A route may carry a `tool_filter` (JSON array
-of tool names, `--tools` at `route add`; NULL = unrestricted). When a channel
-event **creates** a session for that route, the filter is copied onto
-`sessions.tool_filter` — the same frozen-at-spawn semantics as sub-agent
-filters. Per turn the effective tool set is grants ∩ filter, enforced in
-payload assembly and dispatch; the filter can only shrink authority, never
-widen it.
+target agent's full authority. A chat may carry a `tool_filter` (JSON array
+of tool names, `--tools` at `route add`; NULL = unrestricted). Every turn,
+the tools of the session the chat pins are grants ∩ `sessions.tool_filter`
+(a sub-agent's spawn scope) ∩ the chat's `tool_filter` **as it is now** —
+enforced in payload assembly and again at dispatch. The filter can only
+shrink authority, never widen it. An edit applies to the next request, and
+`/new` cannot launder it away: the fresh session is narrowed by the same
+chat. A session the chat no longer pins (left behind by `/new`) is not
+narrowed by it.
 
-Frozen means frozen: editing the route's filter later does not retro-apply to
-existing sessions — a new session must be created for the change to take
-effect.
-
-Chats the gate accepts **without** a route take the channel's own filter,
+Chats the gate records start from the channel's own filter,
 `channels.default_tool_filter` (`route add <channel> '*' <agent> --tools
-...`; NULL = unrestricted). This is the
-attenuated tool set for a bot that is reachable server-wide — a Discord
-@mention from any public channel — while an explicitly routed chat keeps its
-own filter, or full authority if it has none.
+...`; NULL = unrestricted). This is the attenuated tool set for a bot that is
+reachable server-wide — a Discord @mention from any public channel — while an
+explicitly routed chat keeps its own filter, or full authority if it has
+none.
 
 Admins are **not** exempt: an admin reaching the default agent through an
 unrouted chat is still an unrouted chat, and gets the same default filter.
 Admin authority comes from the explicitly routed admin channel, never
-ambiently from being in `admin_ids`. `/new` in an unrouted chat re-freezes
-the same default filter, so it can't launder the open door into full tools.
+ambiently from being in `admin_ids`.
 
-## Per-route system prompt suffix
+## Guidance (the chat's system prompt text)
 
-`channel_routes.system_prompt_suffix` (`cclaw route add ... --prompt "<text>"`)
-is appended to the system prompt of the route's pinned session on every turn —
-room etiquette, house style, "you are in the #ops channel". It is *prompt
-text, not authority*: it can only change how the agent speaks, never what it
-may do (that stays in `grants` + `tool_filter`), which is why it is read live
-rather than frozen at session creation like the filter. Nothing is appended
-when it is NULL, and the request body is then unchanged.
+A session that belongs to a chat gets three parts appended to its system
+prompt, in order, read every request: where it is chatting (the chat's
+`title`, else its ids), **how replies work there** (built in, from
+`delivery_mode`: "Your final message of the turn is posted to this chat." /
+"Nothing you write is posted to this chat. To say something here, call
+channel_send." — or, for an agent whose tools this turn do not include
+`channel_send`, "Nothing you write is posted to this chat, and you have no
+channel_send tool, so you cannot reply here."), then the chat's `guidance` (`cclaw route add ... --prompt
+"<text>"`) — room etiquette, house style, "you are in the #ops channel". It
+is *prompt text, not authority*: it can only change how the agent speaks,
+never what it may do (that stays in `grants` + `tool_filter`). The text
+changes only when the chat's row does, so the request prefix stays
+byte-stable for prompt caching otherwise. A session with no chat gets
+nothing appended.
 
 ## Ambient debounce (Discord)
 
@@ -257,7 +315,7 @@ Ambience also decides how an approval behaves. A parked approval normally
 freezes the turn for `approval_block_sec` (60s) so a present approver's tap
 resumes the frozen call in place; past that the sweep unparks it with a
 background notice and the late decision arrives as an inbox follow-up. A
-session pinned to a route on an **ambient channel resolves that window to 0** —
+session pinned by a chat on an **ambient channel resolves that window to 0** —
 the notice is written inline at park time and the turn continues immediately,
 because a silent room reads as a hung bot rather than as work in progress. The
 approval card still posts at t=0 either way; only the freeze differs.
@@ -267,14 +325,18 @@ convention carries to any channel extension.
 ## channel_send (outbound tool)
 
 Fixed schema `{channel, chat_id, message, file}` (+ `action: "list"` to
-enumerate reachable targets). **Routes are the allowlist, default-deny**:
-a target needs an exact `(channel, chat_id)` route whose pinned session
-belongs to the sending agent (`send_target_allowed`, `src/tool_channel_send.c`). A `'*'`
-route grants no send authority; reaching a new target is an operator act
-(`cclaw route add`). The tool inserts an outbox row and returns
-`queued, outbox id N` — delivery is asynchronous with the existing
-pending→sending→delivered/failed progression. Sends to the session's own
-origin chat in `auto` mode short-circuit (the reply already delivers there).
+enumerate reachable targets). **Routed chats are the allowlist,
+default-deny**: a target needs an exact `(channel, chat_id)` chat whose
+pinned session belongs to the sending agent (`send_target_allowed`,
+`src/tool_channel_send.c`). `channels.default_agent` grants no send
+authority; reaching a new target is an operator act (`cclaw route add`). The
+tool inserts an outbox row and returns `queued, outbox id N` — delivery is
+asynchronous with the existing pending→sending→delivered/failed progression.
+Text to the session's own chat while that chat posts replies by itself (any
+`delivery_mode` but `explicit`) short-circuits — the reply already delivers
+there. It reads the same live value the turn boundary delivers by, so the two
+can never disagree (review-7: they once read a route template and a frozen
+copy, and a reply could be refused here and never delivered).
 Ships **ungranted**; the operator grants it per agent.
 
 ### Files
@@ -324,6 +386,12 @@ cclaw route rm  <channel> <chat_id>
 cclaw route list
 ```
 
-Group-shaped (negative) chat ids default to `--mode explicit`. Chat id `'*'`
-sets or clears `channels.default_agent` (and, with `--tools`,
+`route add` pins the chat (a fresh session, or `--session`'s, which must
+belong to `<agent>`) and sets the chat's mode and tools; `--prompt` sets its
+guidance (omitted: kept; `""`: cleared). Without `--mode`, a chat that has
+spoken takes the mode its kind implies (group `explicit`, DM `auto`), one
+that never spoke is judged by its id (negative: `explicit`). `route rm` unpins the chat and keeps its row.
+`route list` shows every chat, routed first, then those nobody routed (with
+when they last spoke and whether the operator was told). Chat id `'*'` sets
+or clears `channels.default_agent` (and, with `--tools`,
 `channels.default_tool_filter`) instead of adding a route.

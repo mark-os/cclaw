@@ -585,6 +585,15 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                      tc->name);
             return tool_inline_error(session_id, tc, err, "tool_filter");
         }
+        /* Chat scope: the operator's filter on the chat this session is
+         * pinned to, read now — an edit applies to the very next call. */
+        if (!chat_tool_allowed(proc_db(), session_id, tc->name)) {
+            char err[224];
+            snprintf(err, sizeof(err),
+                     "error: %s is not available in this chat (the operator"
+                     " limits which tools this chat may use)", tc->name);
+            return tool_inline_error(session_id, tc, err, "chat_tool_filter");
+        }
         /* Malformed arguments fail closed at the gate: the model gets an
          * error tool-result and can retry. Nothing downstream (policy, hooks,
          * handlers, the child wire) ever sees invalid JSON, so no code path

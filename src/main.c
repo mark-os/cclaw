@@ -919,7 +919,7 @@ int main(int argc, char *argv[]) {
     if (argc >= 2 && strcmp(argv[1], "secret-bind") == 0) return secret_bind_main(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "secret") == 0) return secret_main(argc, argv);
 
-    /* route: operator verb binding a channel+chat to an agent (channel_routes).
+    /* route: operator verb binding a channel+chat to an agent (channel_chats).
      * CLI-only, same rationale as sensitive/secret-bind — an authority change. */
     if (argc >= 2 && strcmp(argv[1], "route") == 0) return route_main(argc, argv);
 

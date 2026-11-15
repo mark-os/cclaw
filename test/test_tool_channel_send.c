@@ -1,5 +1,7 @@
-/* channel_send: routes are the allowlist (default-deny, exact chat_id only),
- * origin-chat dedup in auto mode, action=list discovery, outbox insert. */
+/* channel_send: routed chats are the allowlist (default-deny, exact chat_id
+ * only), own-chat dedup when the chat posts replies by itself, action=list
+ * discovery, outbox insert — and the dedup reads the same live value the
+ * turn boundary delivers by (review-7). */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +9,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include "tool_channel_send.h"
+#include "advance.h"
 #include "channel_api.h"
 #include "tools.h"
 #include "db.h"
@@ -44,19 +47,20 @@ int main(void) {
     test_seed_agent(db, "Carol");
 
     assert(sqlite3_exec(db,
+        /* open-door default_agent must grant NO send authority */
+        "INSERT INTO channels(name, default_agent) VALUES('telegram','Alice');"
+        /* title: display name the runner observed for chat 42 */
+        "INSERT INTO channel_chats(channel_name, chat_id, delivery_mode, title) VALUES"
+        " ('telegram','42','auto','#general @ My Server'),"
+        " ('telegram','77','explicit',NULL),"
+        " ('telegram','-500','explicit',NULL);"
         "INSERT INTO sessions(id, agent_name, channel_name, chat_id)"
         " VALUES(10,'Alice','telegram','42'),"
         "       (11,'Alice',NULL,NULL),"
-        "       (12,'Bob','telegram','77');"
-        /* chat_title: display name the runner observed for chat 42 */
-        "UPDATE sessions SET chat_title='#general @ My Server' WHERE id=10;"
-        /* open-door default_agent must grant NO send authority */
-        "INSERT INTO channels(name, default_agent) VALUES('telegram','Alice');"
-        "INSERT INTO channel_routes(channel_name, chat_id, session_id, delivery_mode)"
-        " VALUES('telegram','42',10,'auto'),"
-        "       ('telegram','77',12,'explicit'),"
-        /* group chat pinned to Alice's session 11 */
-        "       ('telegram','-500',11,'explicit');",
+        "       (12,'Bob','telegram','77'),"
+        "       (13,'Alice','telegram','-500');"   /* a group chat of Alice's */
+        "UPDATE channel_chats SET session_id=CASE chat_id"
+        " WHEN '42' THEN 10 WHEN '77' THEN 12 WHEN '-500' THEN 13 END;",
         NULL, NULL, NULL) == SQLITE_OK);
 
     ToolRegistry reg;
@@ -68,7 +72,7 @@ int main(void) {
     printf("  deny_unrouted... ");
     char *r = call(&reg, &ctx, "Alice", 11,
         "{\"channel\":\"telegram\",\"chat_id\":\"999\",\"message\":\"hi\"}");
-    assert(r && strstr(r, "error: no route"));
+    assert(r && strstr(r, "not a chat routed to you"));
     free(r);
     printf("PASS\n");
 
@@ -76,7 +80,7 @@ int main(void) {
     printf("  deny_default_agent... ");
     r = call(&reg, &ctx, "Alice", 11,
         "{\"channel\":\"telegram\",\"chat_id\":\"888\",\"message\":\"hi\"}");
-    assert(r && strstr(r, "error: no route"));
+    assert(r && strstr(r, "not a chat routed to you"));
     free(r);
     printf("PASS\n");
 
@@ -84,7 +88,7 @@ int main(void) {
     printf("  deny_other_agent... ");
     r = call(&reg, &ctx, "Alice", 11,
         "{\"channel\":\"telegram\",\"chat_id\":\"77\",\"message\":\"hi\"}");
-    assert(r && strstr(r, "error: no route"));
+    assert(r && strstr(r, "not a chat routed to you"));
     free(r);
     printf("PASS\n");
 
@@ -119,7 +123,7 @@ int main(void) {
     free(r);
     printf("PASS\n");
 
-    /* Route resolving through a pinned session owned by the agent. */
+    /* A chat pinned to another of the agent's sessions. */
     printf("  pinned_session_route... ");
     r = call(&reg, &ctx, "Alice", 11,
         "{\"channel\":\"telegram\",\"chat_id\":\"-500\",\"message\":\"group msg\"}");
@@ -175,6 +179,53 @@ int main(void) {
                     te->user_data, &failed);
     assert(r && strstr(r, "queued") && failed == 0);
     free(r);
+    printf("PASS\n");
+
+    /* review-7 regression: the own-chat dedup and the turn boundary read one
+     * value. It used to read the route's template while delivery ran on a
+     * copy frozen at the session's first boundary: after the route flipped
+     * explicit -> auto, channel_send refused ("your reply already delivers")
+     * and the boundary, still frozen explicit, delivered nothing — the reply
+     * was lost both ways. Now: whichever way the chat is set, exactly one of
+     * the two posts. */
+    printf("  dedup_and_delivery_agree... ");
+    const char *posted = "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='telegram'"
+                         " AND json_extract(payload,'$.chat_id')='-500'"
+                         " AND json_extract(payload,'$.text')='%s'";
+    char q[256];
+    Message am = { .role = ROLE_ASSISTANT, .stop_reason = STOP_REASON_STOP };
+    /* explicit: the session's first boundary creates its channel edge and
+     * posts nothing; channel_send is the way. */
+    am.content = "turn one";
+    entry_append_with_iteration(db, 13, &am, db_next_iteration_id(db, 13));
+    assert(advance_deliver_boundary(db, 13, 0, 1) == 0);
+    snprintf(q, sizeof(q), posted, "turn one");
+    assert(qcount(db, q) == 0);
+    /* flipped to auto: channel_send to the own chat is refused, and the
+     * next boundary posts the final message — once. */
+    assert(sqlite3_exec(db, "UPDATE channel_chats SET delivery_mode='auto'"
+                            " WHERE chat_id='-500';", NULL, NULL, NULL) == SQLITE_OK);
+    r = call(&reg, &ctx, "Alice", 13, "{\"message\":\"turn two\"}");
+    assert(r && strstr(r, "already delivers"));
+    free(r);
+    am.content = "turn two";
+    entry_append_with_iteration(db, 13, &am, db_next_iteration_id(db, 13));
+    assert(advance_deliver_boundary(db, 13, 0, 1) == 1);
+    snprintf(q, sizeof(q), posted, "turn two");
+    assert(qcount(db, q) == 1);
+    assert(advance_sweep_undelivered(db) == 0);
+    assert(qcount(db, q) == 1);
+    /* and back: channel_send sends, the boundary does not. */
+    assert(sqlite3_exec(db, "UPDATE channel_chats SET delivery_mode='explicit'"
+                            " WHERE chat_id='-500';", NULL, NULL, NULL) == SQLITE_OK);
+    r = call(&reg, &ctx, "Alice", 13, "{\"message\":\"turn three\"}");
+    assert(r && strstr(r, "queued, outbox id"));
+    free(r);
+    am.content = "turn three";
+    entry_append_with_iteration(db, 13, &am, db_next_iteration_id(db, 13));
+    assert(advance_deliver_boundary(db, 13, 0, 1) == 0);
+    snprintf(q, sizeof(q), posted, "turn three");
+    assert(qcount(db, q) == 1);                       /* the channel_send row only */
     printf("PASS\n");
 
     /* ── file: a workspace file, copied into the channel's media spool ── */

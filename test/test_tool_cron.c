@@ -4,6 +4,7 @@
 #include "cron.h"
 #include "db.h"
 #include "test_util.h"
+#include "channel.h"
 #include "tool_cron.h"
 #include <assert.h>
 #include <stdio.h>
@@ -416,6 +417,7 @@ static void test_script_paths(void) {
 /* ── targeting ───────────────────────────────────────────────────────── */
 
 static void bind_chat(sqlite3 *db, int64_t sid, const char *chan, const char *chat) {
+    test_seed_chat(db, chan, chat);
     sqlite3_stmt *st;
     assert(sqlite3_prepare_v2(db,
         "UPDATE sessions SET channel_name=?1, chat_id=?2 WHERE id=?3",
@@ -500,13 +502,8 @@ static void test_channel_authority(void) {
 
     /* Route it to A and the same call is accepted. */
     int64_t rsid = session_create(db, "route", "A", -1, 0);
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(db,
-        "INSERT INTO channel_routes(channel_name, chat_id, session_id)"
-        " VALUES('discord','chat-9',?1)", -1, &st, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(st, 1, rsid);
-    assert(sqlite3_step(st) == SQLITE_DONE);
-    sqlite3_finalize(st);
+    test_seed_chat(db, "discord", "chat-9");
+    assert(channel_pin_session(db, "discord", "chat-9", rsid) == 0);
 
     ToolCronCtx ctx = mkctx(db, sid, "A");
     char *r = tool_cron_set_handler(

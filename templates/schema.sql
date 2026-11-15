@@ -235,10 +235,10 @@ CREATE TABLE IF NOT EXISTS channels (
                     -- NULL = fail-closed (unrouted chats drop + admin notify).
                     -- Grants no send authority — channel_send needs a route.
   default_tool_filter TEXT,
-                    -- JSON array of tool names; NULL = unrestricted. Frozen onto
-                    -- every session the routing gate creates for an unrouted chat
-                    -- (open-door and admin-fallback alike — unrouted is unrouted).
-                    -- Routed chats use channel_routes.tool_filter instead.
+                    -- JSON array of tool names; NULL = unrestricted. The starting
+                    -- channel_chats.tool_filter of every chat the gate records
+                    -- (copied once, when the chat's row is created). Editing it
+                    -- changes future chats, never existing ones.
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
@@ -249,58 +249,76 @@ CREATE TABLE IF NOT EXISTS channel_state (
   PRIMARY KEY (channel_name, key)
 );
 
--- A route pins a chat (platform conversation id) to a session; the session
--- names its agent (sessions.agent_name, immutable). Routes never name an
--- agent directly — channel-wide default agent lives on channels.default_agent.
--- chat_id: Telegram chat id, Discord text-channel/thread/DM id, etc.
+-- One row per chat (platform conversation id: Telegram chat id, Discord
+-- text-channel/thread/DM id, ...) a channel has seen or an operator named.
+-- session_id is the pin: the session this chat's messages go to; the session
+-- names its agent (sessions.agent_name, immutable). NULL = not routed — the
+-- gate drops the chat's messages unless channels.default_agent opens the door
+-- (specs/channels.md). A session is pinned by at most one chat.
+-- delivery_mode, tool_filter and guidance are the chat's settings, read live
+-- every turn by the session this chat pins (tool_filter) or by any session
+-- that belongs to the chat (delivery_mode, guidance) — nothing is copied onto
+-- a session. A new row starts from defaults, copied once (see each column).
 -- (FK to sessions is declared here before the sessions CREATE below —
 -- SQLite resolves FK targets at DML time, not CREATE time.)
-CREATE TABLE IF NOT EXISTS channel_routes (
-  channel_name TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS channel_chats (
+  channel_name TEXT NOT NULL REFERENCES channels(name) ON UPDATE CASCADE,
   chat_id TEXT NOT NULL,
-  session_id INTEGER NOT NULL REFERENCES sessions(id),
-  delivery_mode TEXT NOT NULL DEFAULT 'auto',  -- delivery-policy *template* for the pinned
-                                               -- session's channel edge (specs/delivery.md):
-                                               -- 'auto' (= quiescent) | iteration | digest |
-                                               -- turn | quiescent | explicit. Frozen onto the
-                                               -- session's delivery_edges row at its first
-                                               -- delivery boundary — later route edits don't
-                                               -- retro-apply (tool_filter precedent).
+  session_id INTEGER REFERENCES sessions(id),  -- the pin; NULL = not routed (never assigned,
+                                               -- or the operator removed the route)
+  delivery_mode TEXT NOT NULL DEFAULT 'auto'   -- how a turn's output reaches this chat
+    CHECK (delivery_mode IN ('auto','iteration','digest','turn','quiescent','explicit')),
+                                               -- (specs/delivery.md): 'auto' (= quiescent) —
+                                               -- the final message posts; 'explicit' — nothing
+                                               -- posts unless the agent calls channel_send. A new
+                                               -- chat starts from its envelope's chat_type (group
+                                               -- 'explicit', dm 'auto'); one named before it ever
+                                               -- spoke, by its id ('-' prefix: 'explicit'). Set
+                                               -- once: a later message never overwrites it.
   tool_filter TEXT,                            -- JSON array of tool names; NULL = unrestricted.
-                                               -- Copied onto sessions.tool_filter at session
-                                               -- creation only — frozen like sub-agent filters;
-                                               -- later route edits don't retro-apply.
-  system_prompt_suffix TEXT,                   -- appended to the pinned session's system
-                                               -- prompt every turn; NULL = nothing appended.
-                                               -- Read live (unlike tool_filter): editing it
-                                               -- changes the next turn.
+                                               -- Narrows the pinned session's tools every turn
+                                               -- (grants ∩ sessions.tool_filter ∩ this). A chat
+                                               -- the gate records starts from
+                                               -- channels.default_tool_filter.
+  guidance TEXT,                               -- appended to the system prompt of this chat's
+                                               -- sessions every turn; NULL = nothing appended
+  title TEXT,                                  -- observed human-readable name ("#general @ My
+                                               -- Server", "DM with alice"); display only — sends
+                                               -- always address by chat_id
+  is_admin INTEGER,                            -- 1 = the chat's only reader is an operator: a DM
+                                               -- whose other party is one of the channel's
+                                               -- admin_ids. 0 = anyone else. Set from each
+                                               -- message's envelope; NULL until one arrives. A
+                                               -- failed turn tells a non-admin chat only a
+                                               -- generic line (specs/error-handling.md).
+  error_notice_at INTEGER,                     -- when this chat last got that generic line
+  kind TEXT CHECK (kind IN ('dm','group')),    -- the envelope's chat_type; NULL = not reported
+  first_seen_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  last_message_at INTEGER,                     -- the last inbound message, routed or dropped
+  notified_at INTEGER,                         -- when the operator was told this unrouted chat
+                                               -- spoke; the notice is sent once per chat
   PRIMARY KEY (channel_name, chat_id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_chats_session
+  ON channel_chats(session_id) WHERE session_id IS NOT NULL;
 
 -- ═══ Sessions ═══
 CREATE TABLE IF NOT EXISTS sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT,
   agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
-  channel_name TEXT,
-  chat_id TEXT,
-  chat_title TEXT,                          -- observed human-readable name of the bound chat
-                                            -- ("#general @ My Server", "DM with alice"). Display
-                                            -- only: sends always address by chat_id.
-  chat_is_admin INTEGER,                    -- 1 = the chat's only reader is an operator: a DM
-                                            -- whose other party is one of the channel's
-                                            -- admin_ids. 0 = anyone else (a group, a DM with a
-                                            -- non-admin). Set from each message's envelope; NULL
-                                            -- until one arrives. A failed turn tells a non-admin
-                                            -- chat only a generic line (specs/error-handling.md).
-  chat_error_notice_at INTEGER,             -- when this chat last got that generic line; the
-                                            -- limit is per chat (MAX over its sessions).
+  channel_name TEXT,                        -- the chat this session belongs to (both NULL =
+  chat_id TEXT,                             -- none). Older sessions left behind by /new still
+                                            -- point at their chat; channel_chats.session_id
+                                            -- says which session the chat is pinned to now.
   parent_session_id INTEGER DEFAULT -1,
   parent_tool_call_id TEXT,
   depth INTEGER NOT NULL DEFAULT 0,
   tool_filter TEXT,                         -- JSON array of tool names; NULL = unrestricted.
-                                            -- Positive scope frozen at spawn, intersected with
-                                            -- grants per turn — never grants anything itself.
+                                            -- Positive scope frozen at spawn (launch_agent),
+                                            -- intersected with grants per turn — never grants
+                                            -- anything itself. A chat's filter is not copied
+                                            -- here: channel_chats.tool_filter is read live.
   state TEXT NOT NULL DEFAULT 'idle',
   owner_instance TEXT,                      -- live owner (processes.instance_id); NULL ⟺ state='idle'
   turn_iteration INTEGER NOT NULL DEFAULT 0,
@@ -313,16 +331,20 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- zeroed on success. At 3 the operator channel gets
                                             -- one notice (llm_proc.c) — the agent is never told.
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  FOREIGN KEY (channel_name, chat_id) REFERENCES channel_chats(channel_name, chat_id)
+    ON UPDATE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS NOT NULL;
 
 -- ═══ Delivery edges (specs/delivery.md) ═══
 -- Every outbound edge of a session is a row: the standing parent edge every
 -- child gets at creation, the channel edge a chat-bound session gets lazily at
--- its first delivery boundary (frozen from the route template then — the
--- tool_filter precedent), and the one-shot tool_call edge a blocking launch
--- adds on top. policy is one shared vocabulary on every edge:
+-- its first delivery boundary, and the one-shot tool_call edge a blocking
+-- launch adds on top. A channel edge has no policy of its own (NULL): its
+-- policy is the chat's channel_chats.delivery_mode, read live at every
+-- boundary ('auto' = quiescent) — the row keeps only the cursor. policy is
+-- one shared vocabulary on every edge:
 --   'iteration' — every content-bearing assistant message, as it lands
 --   'digest'    — assistant prose since cursor, concatenated, at turn end
 --   'turn'      — final assistant message at turn end (the old standard)
@@ -343,7 +365,8 @@ CREATE TABLE IF NOT EXISTS delivery_edges (
   target_kind TEXT NOT NULL,             -- 'parent' | 'channel' | 'session' | 'tool_call'
   target_ref TEXT NOT NULL,              -- parent: parent session id; channel: channel name
                                          -- (chat_id lives on the session); tool_call: call_id
-  policy TEXT NOT NULL,
+  policy TEXT CHECK ((target_kind = 'channel') = (policy IS NULL)),
+                                         -- NULL exactly on channel edges (read from the chat)
   cursor INTEGER NOT NULL DEFAULT 0,
   one_shot INTEGER NOT NULL DEFAULT 0,   -- blocking reply edge: fires once, then deleted
   UNIQUE(session_id, target_kind, target_ref)
@@ -665,7 +688,8 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   script TEXT,                               -- workspace-relative QJS path; runs sandboxed at
                                              -- fire time. NULL = no script payload
   channel_name TEXT,                         -- chat stamp: the durable identity a fire routes
-  chat_id TEXT,                              -- through (channel_routes), resolved at fire time
+  chat_id TEXT,                              -- through (channel_chats.session_id, resolved at
+                                             -- fire time); both NULL = no chat
   target TEXT,                               -- NULL = follow the conversation (stamped chat,
                                              -- else stamped session_id); 'pin' = explicit
                                              -- session pin; 'new' = fresh session per fire
@@ -674,7 +698,9 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   enabled INTEGER NOT NULL DEFAULT 1,
   next_run_at INTEGER NOT NULL DEFAULT 0,
   last_run_at INTEGER,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  FOREIGN KEY (channel_name, chat_id) REFERENCES channel_chats(channel_name, chat_id)
+    ON UPDATE CASCADE
 );
 -- Job name is the logical identity (cron_set is an upsert by name; ids die
 -- with one-shot auto-removal and delete-recreate cycles).

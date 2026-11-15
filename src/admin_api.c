@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "admin_api.h"
 #include "agent_config.h"
+#include "channel.h"
 #include "db.h"
 #include "tool_args.h"
 #include "tool_request_config.h"
@@ -721,35 +722,7 @@ int admin_attach_session_channel(sqlite3 *db, int64_t session_id,
      * channels.default_agent (admin_set_channel_route), not a route. */
     if (!db || !channel_name || session_id <= 0) return -1;
     if (!chat_id || !chat_id[0]) return -1;
-
-    const char *sql =
-        "INSERT INTO channel_routes(channel_name, chat_id, session_id)"
-        " VALUES(?1, ?2, ?3)"
-        " ON CONFLICT(channel_name, chat_id)"
-        " DO UPDATE SET session_id=excluded.session_id;";
-    sqlite3_stmt *stmt;
-    int rc = -1;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, chat_id, -1, SQLITE_STATIC);
-        sqlite3_bind_int64(stmt, 3, session_id);
-        rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
-        sqlite3_finalize(stmt);
-    }
-
-    /* Also update the session itself */
-    if (rc == 0) {
-        const char *usql =
-            "UPDATE sessions SET channel_name=?1, chat_id=?2 WHERE id=?3;";
-        if (sqlite3_prepare_v2(db, usql, -1, &stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
-            sqlite3_bind_text(stmt, 2, chat_id, -1, SQLITE_STATIC);
-            sqlite3_bind_int64(stmt, 3, session_id);
-            sqlite3_step(stmt);
-            sqlite3_finalize(stmt);
-        }
-    }
-    return rc;
+    return channel_pin_session(db, channel_name, chat_id, session_id);
 }
 
 /* ── Channel listing ───────────────────────────────────────────── */

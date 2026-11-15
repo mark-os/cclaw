@@ -301,7 +301,7 @@ The `request_changes` document batches everything an agent needs into one approv
 | `grants.write_paths` | array of absolute paths | inserts `grants` rows (kind='write_path') |
 | `grants.secrets` | array of secret names | inserts `grants` rows (kind='secret') — the agent may use that secret. A name must be a stored agent-scope secret or an environment secret with a binding; system secrets are refused |
 | `agent` | whitelisted own settings (models — the full replacement routing list — max_iterations, shell_timeout) | updates the caller's routing list / `agents` row |
-| `routes` | array of `channel:chat_id` strings | creates a session bound to the caller + a `channel_routes` pin (`explicit`, first-come; no wildcards — channel defaults are operator config) |
+| `routes` | array of `channel:chat_id` strings | creates a session bound to the caller and pins the chat (`channel_chats`) to it, `delivery_mode` `explicit` (first-come; no wildcards — channel defaults are operator config) |
 | `config` | object of key→value-string | calls `config_set()` per key |
 | `provider` | provider definition (provider, base_url, model, api_key_env) | upserts `providers` row + seeds its default model into `models` |
 

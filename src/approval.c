@@ -75,7 +75,7 @@ int approval_block_seconds(sqlite3 *db) {
     return block;
 }
 
-/* True when the session is pinned to a route on an ambient channel — one the
+/* True when the session is pinned to a chat on an ambient channel — one the
  * agent listens to passively, where a frozen turn reads as a dead bot rather
  * than as work in progress. Ambience is the channel extension's own config
  * (`<channel>.ambient_channels`, comma-separated chat ids — the same key the
@@ -84,7 +84,7 @@ int approval_block_seconds(sqlite3 *db) {
 static int session_is_ambient(sqlite3 *db, int64_t session_id) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "SELECT channel_name, chat_id FROM channel_routes WHERE session_id=?1",
+            "SELECT channel_name, chat_id FROM channel_chats WHERE session_id=?1",
             -1, &st, NULL) != SQLITE_OK)
         return 0;
     sqlite3_bind_int64(st, 1, session_id);

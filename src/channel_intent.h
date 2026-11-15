@@ -12,7 +12,7 @@
  *   3. Execution — channel_intent_execute() validates the object (scope,
  *      state) and performs the read or transition. Transitions go through
  *      the same entry points every approver/binder uses: resolve_approval()
- *      and the channel_routes pin.
+ *      and channel_pin_session().
  *
  * The event consumer (channel.c) wires them: parse → allow → execute.
  * Anything that isn't an allowed intent falls through as ordinary

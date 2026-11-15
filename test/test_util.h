@@ -65,6 +65,29 @@ static inline void test_seed_agent(sqlite3 *db, const char *name) {
     sqlite3_finalize(s);
 }
 
+/* sessions/cron_jobs (channel_name, chat_id) is a declared link to a
+ * channel_chats row, which itself needs its channels row (v61) — a test that
+ * stamps a chat creates both first, the way the gate's first contact does.
+ * Unrouted, with the column defaults. */
+static inline void test_seed_chat(sqlite3 *db, const char *channel, const char *chat_id) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR IGNORE INTO channels(name, status) VALUES(?1, 'active');",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, channel, -1, SQLITE_STATIC);
+        sqlite3_step(s);
+        sqlite3_finalize(s);
+    }
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR IGNORE INTO channel_chats(channel_name, chat_id) VALUES(?1, ?2);",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, channel, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, chat_id, -1, SQLITE_STATIC);
+        sqlite3_step(s);
+        sqlite3_finalize(s);
+    }
+}
+
 /* Append a model at the tail of an agent's routing list (creating the
  * models/providers rows is the caller's business). */
 static inline void test_agent_add_model(sqlite3 *db, const char *agent,

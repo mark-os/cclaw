@@ -16,6 +16,7 @@
 #include "tool_request_config.h"
 #include "agent_config.h"
 #include "approval.h"
+#include "channel.h"
 #include "config_probe.h"
 #include "config_registry.h"
 #include "db.h"
@@ -825,7 +826,7 @@ static int route_owned_elsewhere(sqlite3 *db, const char *json,
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "SELECT atom FROM json_each(?1,?3) j"
-            " WHERE EXISTS(SELECT 1 FROM channel_routes c"
+            " WHERE EXISTS(SELECT 1 FROM channel_chats c"
             "   JOIN sessions s ON s.id = c.session_id"
             "   WHERE c.channel_name = substr(j.atom,1,instr(j.atom,':')-1)"
             "     AND c.chat_id      = substr(j.atom,instr(j.atom,':')+1)"
@@ -1169,7 +1170,7 @@ static char *filter_satisfied(sqlite3 *db, const char *agent,
     char *next = q2_text(db,
         "SELECT json_set(?1,'$.routes',json("
         "  (SELECT json_group_array(atom) FROM json_each(?1,'$.routes') j"
-        "   WHERE NOT EXISTS(SELECT 1 FROM channel_routes c"
+        "   WHERE NOT EXISTS(SELECT 1 FROM channel_chats c"
         "     JOIN sessions s ON s.id=c.session_id"
         "     WHERE c.channel_name=substr(j.atom,1,instr(j.atom,':')-1)"
         "       AND c.chat_id=substr(j.atom,instr(j.atom,':')+1)"
@@ -1472,7 +1473,7 @@ static const char *RECEIPT_SQL =
     /* routes — bound to one of THIS agent's sessions, verified by join. */
     "  UNION ALL"
     "  SELECT 'routes now bound to you: '||COUNT(*)"
-    "    FROM channel_routes c JOIN sessions s ON s.id=c.session_id"
+    "    FROM channel_chats c JOIN sessions s ON s.id=c.session_id"
     "   WHERE s.agent_name=?2 AND c.channel_name||':'||c.chat_id IN"
     "     (SELECT atom FROM json_each(?1,'$.changes.routes'))"
     "   HAVING COUNT(*) > 0"
@@ -1716,51 +1717,61 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
         }
         if (rc == 0) {
             /* Eager session creation: a route always pins a session, and the
-             * session names the agent (route-model unification, v33). Atoms
+             * session names the agent (route-model unification, v33). Chats
              * already routed are skipped — same-agent re-requests are no-ops,
-             * other-agent captures were refused just above. */
+             * other-agent captures were refused just above. A chat the
+             * channel has seen but nobody routed keeps its row (and its
+             * tool_filter); it gains the pin and the 'explicit' mode. */
+            typedef struct { char *ch, *chat; } Atom;
+            Atom *atoms = NULL;
+            size_t na = 0;
             sqlite3_stmt *ra;
             if (sqlite3_prepare_v2(db,
                     "SELECT substr(atom,1,instr(atom,':')-1),"
                     "       substr(atom,instr(atom,':')+1)"
                     " FROM json_each(?1,'$.changes.routes')"
-                    " WHERE NOT EXISTS(SELECT 1 FROM channel_routes c"
+                    " WHERE NOT EXISTS(SELECT 1 FROM channel_chats c"
                     "   WHERE c.channel_name = substr(atom,1,instr(atom,':')-1)"
-                    "     AND c.chat_id      = substr(atom,instr(atom,':')+1))",
+                    "     AND c.chat_id      = substr(atom,instr(atom,':')+1)"
+                    "     AND c.session_id IS NOT NULL)",
                     -1, &ra, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(ra, 1, args_json, -1, SQLITE_STATIC);
-                while (rc == 0 && sqlite3_step(ra) == SQLITE_ROW) {
-                    const char *rch = (const char *)sqlite3_column_text(ra, 0);
-                    const char *rchat = (const char *)sqlite3_column_text(ra, 1);
-                    sqlite3_stmt *si;
-                    if (sqlite3_prepare_v2(db,
-                            "INSERT INTO sessions(name, agent_name,"
-                            "                     channel_name, chat_id)"
-                            " VALUES('route:'||?1||':'||?2, ?3, ?1, ?2)",
-                            -1, &si, NULL) != SQLITE_OK) { rc = -1; break; }
-                    sqlite3_bind_text(si, 1, rch, -1, SQLITE_STATIC);
-                    sqlite3_bind_text(si, 2, rchat, -1, SQLITE_STATIC);
-                    sqlite3_bind_text(si, 3, agent, -1, SQLITE_STATIC);
-                    if (sqlite3_step(si) != SQLITE_DONE) rc = -1;
-                    sqlite3_finalize(si);
-                    if (rc != 0) break;
-                    int64_t rsid = sqlite3_last_insert_rowid(db);
-                    sqlite3_stmt *ri;
-                    if (sqlite3_prepare_v2(db,
-                            "INSERT INTO channel_routes"
-                            " (channel_name, chat_id, session_id, delivery_mode)"
-                            " VALUES(?1, ?2, ?3, 'explicit')",
-                            -1, &ri, NULL) != SQLITE_OK) { rc = -1; break; }
-                    sqlite3_bind_text(ri, 1, rch, -1, SQLITE_STATIC);
-                    sqlite3_bind_text(ri, 2, rchat, -1, SQLITE_STATIC);
-                    sqlite3_bind_int64(ri, 3, rsid);
-                    if (sqlite3_step(ri) != SQLITE_DONE) rc = -1;
-                    sqlite3_finalize(ri);
+                while (sqlite3_step(ra) == SQLITE_ROW) {
+                    Atom *t = realloc(atoms, (na + 1) * sizeof(*atoms));
+                    if (!t) { rc = -1; break; }
+                    atoms = t;
+                    atoms[na].ch = strdup((const char *)sqlite3_column_text(ra, 0));
+                    atoms[na].chat = strdup((const char *)sqlite3_column_text(ra, 1));
+                    na++;
                 }
                 sqlite3_finalize(ra);
             } else {
                 rc = -1;
             }
+            for (size_t i = 0; i < na; i++) {
+                if (rc == 0) {
+                    char name[192];
+                    snprintf(name, sizeof(name), "route:%s:%s", atoms[i].ch, atoms[i].chat);
+                    if (channel_pin_new_session(db, atoms[i].ch, atoms[i].chat,
+                                                agent, name) <= 0)
+                        rc = -1;
+                }
+                sqlite3_stmt *rm;
+                if (rc == 0 && sqlite3_prepare_v2(db,
+                        "UPDATE channel_chats SET delivery_mode='explicit'"
+                        " WHERE channel_name=?1 AND chat_id=?2",
+                        -1, &rm, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(rm, 1, atoms[i].ch, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(rm, 2, atoms[i].chat, -1, SQLITE_STATIC);
+                    if (sqlite3_step(rm) != SQLITE_DONE) rc = -1;
+                    sqlite3_finalize(rm);
+                } else if (rc == 0) {
+                    rc = -1;
+                }
+                free(atoms[i].ch);
+                free(atoms[i].chat);
+            }
+            free(atoms);
         }
         if (rc == 0) {
             sqlite3_exec(db, "RELEASE req_changes", NULL, NULL, NULL);

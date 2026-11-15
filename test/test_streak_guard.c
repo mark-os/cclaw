@@ -221,6 +221,7 @@ static void test_warn_at_eighty_percent(void) {
 static void test_trip_notice_once_per_trip(void) {
     sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "t", "default", -1, 0);
+    test_seed_chat(db, "discord", "42");
     assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
                             " chat_id='42';", NULL, NULL, NULL) == SQLITE_OK);
     set_cap(db, 2);

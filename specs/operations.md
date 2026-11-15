@@ -256,7 +256,8 @@ someone a picture. State is one row in `shares`
 ## Change log — who changed the configuration
 
 Every change to the configuration tables (`agents`, `grants`,
-`agent_models`, `providers`, `models`, `secrets`) is recorded in the
+`agent_models`, `providers`, `models`, `secrets`, `channel_chats`) is
+recorded in the
 `change_log` table by triggers, so no write path — an agent's approved
 request, the dashboard, a CLI verb, `cclaw sqlite3 --write` — can skip it.
 Shape and rules: [schema.md](schema.md#change_log). Rows are kept forever and
@@ -283,7 +284,11 @@ cclaw sqlite3 ~/.cclaw/cclaw.db "SELECT * FROM change_log WHERE context='approva
 - **Only settings are logged.** Counters, timestamps, health cooldowns and
   leases change all the time and are not configuration; which column is
   which is one list in `src/change_log.c`. A model's `status` is a setting,
-  so healthy/degraded/disabled transitions do appear.
+  so healthy/degraded/disabled transitions do appear. For a chat, the pin
+  (`session_id` — a `/new` is a line), `delivery_mode`, `tool_filter` and
+  `guidance` are settings; what traffic shows (title, last message, …) is not,
+  though a chat the gate records for the first time is an `insert` line
+  (actor `daemon`).
 - **Secret values never appear** — not the plaintext, not the ciphertext. A
   `secrets` row records its name, scope and source, and that the value was
   set or changed.

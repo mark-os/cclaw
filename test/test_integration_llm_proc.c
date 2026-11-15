@@ -213,6 +213,7 @@ static void test_dropped_candidate_degrades_and_recovers(void) {
 
     int64_t sid = session_create(db, "a8", "Router", -1, 0);
     /* A channel-bound session is what makes the operator notice observable. */
+    test_seed_chat(db, "testch", "c1");
     assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='testch',"
                             " chat_id='c1' WHERE id=(SELECT MAX(id) FROM sessions)",
                         NULL, NULL, NULL) == SQLITE_OK);

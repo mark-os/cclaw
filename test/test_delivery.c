@@ -2,6 +2,7 @@
  * session-5 regression (one notice per child, the real answer), blocking
  * one-shot + standing-edge interplay, inheritance, and the pause fail-notify. */
 #include "advance.h"
+#include "channel.h"
 #include "db.h"
 #include "test_util.h"
 #include "tool_agent.h"
@@ -64,6 +65,26 @@ static AdvanceResult run_turn(sqlite3 *db, int64_t sid, const char *answer) {
                   .stop_reason = STOP_REASON_STOP };
     entry_append_with_iteration(db, sid, &m, db_next_iteration_id(db, sid));
     return advance_session(db, sid, 25).action;
+}
+
+/* Stamp a session onto discord chat `chat` (creating the chat's row, as the
+ * gate would), recording the chat's admin flag (-1 = not recorded yet). */
+static void bind_chat(sqlite3 *db, int64_t sid, const char *chat, int is_admin) {
+    test_seed_chat(db, "discord", chat);
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+        "UPDATE channel_chats SET is_admin=%s WHERE channel_name='discord'"
+        " AND chat_id='%s';"
+        "UPDATE sessions SET channel_name='discord', chat_id='%s' WHERE id=%lld;",
+        is_admin < 0 ? "NULL" : is_admin ? "1" : "0", chat, chat, (long long)sid);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+}
+
+static void set_mode(sqlite3 *db, const char *chat, const char *mode) {
+    char sql[160];
+    snprintf(sql, sizeof(sql), "UPDATE channel_chats SET delivery_mode='%s'"
+             " WHERE channel_name='discord' AND chat_id='%s';", mode, chat);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
 }
 
 static int64_t notices(sqlite3 *db, int64_t sid) {
@@ -435,18 +456,16 @@ static void test_streak_pause_fail_notify(void) {
     printf("  PASS test_streak_pause_fail_notify\n");
 }
 
-/* ── Channel edge: lazy freeze from the route, coalescing, explicit ────── */
+/* ── Channel edge: lazy, cursor only, policy read live from the chat ─── */
 
 static void test_channel_edge_semantics(void) {
     sqlite3 *db = open_seeded();
 
-    /* Unrouted chat-bound session (cron 'new' shape): freezes quiescent.
-     * A follow-up already queued at turn end coalesces — only the final
-     * answer ships. */
+    /* An unrouted chat-bound session (cron 'new' shape) in an 'auto' chat
+     * delivers quiescent. A follow-up already queued at turn end coalesces —
+     * only the final answer ships. */
     int64_t sid = session_create(db, "chat", "default", -1, 0);
-    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
-                            " chat_id='42' WHERE name='chat';",
-                        NULL, NULL, NULL) == SQLITE_OK);
+    bind_chat(db, sid, "42", -1);
     inbox_insert(db, sid, "discord", NULL, "q1");
     AdvanceOutput out = advance_session(db, sid, 25);
     assert(out.action == ADVANCE_DISPATCH_LLM);
@@ -457,10 +476,13 @@ static void test_channel_edge_semantics(void) {
     assert(advance_session(db, sid, 25).action == ADVANCE_DONE);
     assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
                   sid) == 0);                       /* held: q2 pending */
+    /* The edge row holds no policy; the chat's 'auto' reads as quiescent. */
+    assert(scalar(db, "SELECT policy IS NULL FROM delivery_edges WHERE session_id=?"
+                      " AND target_kind='channel';", sid) == 1);
     char *pol = db_scalar_text(db,
-        "SELECT policy FROM delivery_edges WHERE session_id=?"
-        " AND target_kind='channel';", sid);
-    assert(pol && strcmp(pol, "quiescent") == 0);   /* 'auto' alias, frozen */
+        "SELECT " EDGE_POLICY " FROM delivery_edges e WHERE e.session_id=?"
+        " AND e.target_kind='channel';", sid);
+    assert(pol && strcmp(pol, "quiescent") == 0);
     free(pol);
 
     assert(run_turn(db, sid, "a2 covering both") == ADVANCE_DONE);
@@ -472,25 +494,45 @@ static void test_channel_edge_semantics(void) {
     assert(text && strcmp(text, "a2 covering both") == 0);
     free(text);
 
-    /* An 'explicit' route freezes an edge that never auto-ships. */
+    /* An 'explicit' chat never auto-ships — and its boundary still records
+     * itself as evaluated (cursor at the leaf), so the sweep has nothing. */
     int64_t quiet = session_create(db, "quiet", "default", -1, 0);
-    char rsql[256];
-    snprintf(rsql, sizeof(rsql),
-        "UPDATE sessions SET channel_name='discord', chat_id='43' WHERE id=%lld;"
-        "INSERT INTO channel_routes(channel_name, chat_id, session_id,"
-        " delivery_mode) VALUES('discord','43',%lld,'explicit');",
-        (long long)quiet, (long long)quiet);
-    assert(sqlite3_exec(db, rsql, NULL, NULL, NULL) == SQLITE_OK);
+    test_seed_chat(db, "discord", "43");
+    assert(channel_pin_session(db, "discord", "43", quiet) == 0);
+    set_mode(db, "43", "explicit");
     inbox_insert(db, quiet, "discord", NULL, "psst");
     assert(run_turn(db, quiet, "silent answer") == ADVANCE_DONE);
     assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
                   quiet) == 0);
-    pol = db_scalar_text(db,
-        "SELECT policy FROM delivery_edges WHERE session_id=?"
-        " AND target_kind='channel';", quiet);
-    assert(pol && strcmp(pol, "explicit") == 0);
-    free(pol);
-    assert(advance_sweep_undelivered(db) == 0);     /* sweep skips explicit */
+    assert(scalar(db, "SELECT e.cursor = s.leaf_id FROM delivery_edges e"
+                      " JOIN sessions s ON s.id=e.session_id"
+                      " WHERE e.session_id=? AND e.target_kind='channel';", quiet) == 1);
+    assert(advance_sweep_undelivered(db) == 0);
+
+    /* Decision 5: the mode is read live. Flipped to auto between turns, the
+     * very next turn posts — once — and the sweep does not dig up the
+     * answer the explicit turn kept to itself. */
+    set_mode(db, "43", "auto");
+    assert(advance_sweep_undelivered(db) == 0);
+    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
+                  quiet) == 0);
+    inbox_insert(db, quiet, "discord", NULL, "now talk");
+    assert(run_turn(db, quiet, "loud answer") == ADVANCE_DONE);
+    assert(advance_sweep_undelivered(db) == 0);
+    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
+                  quiet) == 1);
+    text = db_scalar_text(db, "SELECT json_extract(payload,'$.text')"
+                              " FROM channel_outbox WHERE session_id=?;", quiet);
+    assert(text && strcmp(text, "loud answer") == 0);
+    free(text);
+
+    /* ...and back to explicit: the next turn posts nothing. */
+    set_mode(db, "43", "explicit");
+    inbox_insert(db, quiet, "discord", NULL, "hush");
+    assert(run_turn(db, quiet, "kept answer") == ADVANCE_DONE);
+    assert(advance_sweep_undelivered(db) == 0);
+    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
+                  quiet) == 1);
 
     db_close(db);
     printf("  PASS test_channel_edge_semantics\n");
@@ -534,9 +576,7 @@ static void test_error_goes_to_operator(void) {
 
     /* A group: not an admin chat, even when an admin is in it. */
     int64_t g = session_create(db, "grp", "default", -1, 0);
-    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
-                            " chat_id='g1', chat_is_admin=0 WHERE name='grp';",
-                        NULL, NULL, NULL) == SQLITE_OK);
+    bind_chat(db, g, "g1", 0);
     inbox_insert(db, g, "discord", NULL, "alice: hi");
     run_failed_turn(db, g, "error: all models failed [resp #1]");
     assert(scalar(db, to_admin, g) == 1);        /* operator: the real error */
@@ -567,14 +607,12 @@ static void test_error_goes_to_operator(void) {
     /* The limit is per chat: a new session in the same chat is inside it
      * too. A day later the chat hears once more. */
     int64_t g2 = session_create(db, "grp2", "default", -1, 0);
-    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
-                            " chat_id='g1', chat_is_admin=0 WHERE name='grp2';",
-                        NULL, NULL, NULL) == SQLITE_OK);
+    bind_chat(db, g2, "g1", 0);
     inbox_insert(db, g2, "discord", NULL, "carol: anyone?");
     run_failed_turn(db, g2, "error: all models failed [resp #4]");
     assert(scalar(db, to_admin, g2) == 1);
     assert(scalar(db, to_chat, g2) == 0);
-    assert(sqlite3_exec(db, "UPDATE sessions SET chat_error_notice_at ="
+    assert(sqlite3_exec(db, "UPDATE channel_chats SET error_notice_at ="
                             " unixepoch() - 25*3600 WHERE chat_id='g1';",
                         NULL, NULL, NULL) == SQLITE_OK);
     inbox_insert(db, g2, "discord", NULL, "carol: still down?");
@@ -585,14 +623,9 @@ static void test_error_goes_to_operator(void) {
     /* An explicit chat never auto-ships an answer, but a failure still
      * reaches the operator and the chat still gets its line. */
     int64_t x = session_create(db, "xgrp", "default", -1, 0);
-    char rsql[320];
-    snprintf(rsql, sizeof(rsql),
-        "UPDATE sessions SET channel_name='discord', chat_id='g2',"
-        " chat_is_admin=0 WHERE id=%lld;"
-        "INSERT INTO channel_routes(channel_name, chat_id, session_id,"
-        " delivery_mode) VALUES('discord','g2',%lld,'explicit');",
-        (long long)x, (long long)x);
-    assert(sqlite3_exec(db, rsql, NULL, NULL, NULL) == SQLITE_OK);
+    bind_chat(db, x, "g2", 0);
+    assert(channel_pin_session(db, "discord", "g2", x) == 0);
+    set_mode(db, "g2", "explicit");
     inbox_insert(db, x, "discord", NULL, "dave: hi");
     run_failed_turn(db, x, "error: all models failed [resp #6]");
     assert(scalar(db, to_admin, x) == 1);
@@ -601,9 +634,7 @@ static void test_error_goes_to_operator(void) {
 
     /* A DM with someone who is not an admin is treated like the group. */
     int64_t u = session_create(db, "userdm", "default", -1, 0);
-    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
-                            " chat_id='d-user', chat_is_admin=0 WHERE name='userdm';",
-                        NULL, NULL, NULL) == SQLITE_OK);
+    bind_chat(db, u, "d-user", 0);
     inbox_insert(db, u, "discord", NULL, "hi");
     run_failed_turn(db, u, "error: all models failed [resp #7]");
     assert(scalar(db, to_admin, u) == 1);
@@ -612,9 +643,7 @@ static void test_error_goes_to_operator(void) {
 
     /* An admin's own DM: the error as a direct message, no generic line. */
     int64_t d = session_create(db, "admindm", "default", -1, 0);
-    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
-                            " chat_id='d-admin', chat_is_admin=1 WHERE name='admindm';",
-                        NULL, NULL, NULL) == SQLITE_OK);
+    bind_chat(db, d, "d-admin", 1);
     inbox_insert(db, d, "discord", NULL, "hi");
     run_failed_turn(db, d, "error: all models failed [resp #8]");
     assert(scalar(db, to_admin, d) == 1);
@@ -642,10 +671,8 @@ static void test_error_goes_to_operator(void) {
      * id is an admin id is an admin chat; any other is not. */
     int64_t t1 = session_create(db, "tg-admin", "default", -1, 0);
     int64_t t2 = session_create(db, "tg-other", "default", -1, 0);
-    assert(sqlite3_exec(db,
-        "UPDATE sessions SET channel_name='discord', chat_id='777' WHERE name='tg-admin';"
-        "UPDATE sessions SET channel_name='discord', chat_id='555' WHERE name='tg-other';",
-        NULL, NULL, NULL) == SQLITE_OK);
+    bind_chat(db, t1, "777", -1);
+    bind_chat(db, t2, "555", -1);
     inbox_insert(db, t1, "discord", NULL, "hi");
     run_failed_turn(db, t1, "error: all models failed [resp #9]");
     assert(scalar(db,
@@ -661,7 +688,7 @@ static void test_error_goes_to_operator(void) {
      * a failure in the admin chat itself is shown there, with no generic line. */
     set_cfg(db, "discord.admin_chats", "ops");
     sqlite3_exec(db, "DELETE FROM channel_outbox;"
-                     "UPDATE sessions SET chat_error_notice_at=NULL;",
+                     "UPDATE channel_chats SET error_notice_at=NULL;",
                  NULL, NULL, NULL);
     const char *in_ops =
         "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1"
@@ -674,9 +701,7 @@ static void test_error_goes_to_operator(void) {
     assert(scalar(db, to_admin, g) == 0);        /* not the admin's DM */
     assert(scalar(db, to_chat, g) == 1);         /* the group: its line */
     int64_t ops = session_create(db, "ops", "default", -1, 0);
-    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='discord',"
-                            " chat_id='ops', chat_is_admin=0 WHERE name='ops';",
-                        NULL, NULL, NULL) == SQLITE_OK);
+    bind_chat(db, ops, "ops", 0);
     inbox_insert(db, ops, "discord", NULL, "mark: status?");
     run_failed_turn(db, ops, "error: all models failed [resp #12]");
     assert(scalar(db, in_ops, ops) == 1);
@@ -688,7 +713,7 @@ static void test_error_goes_to_operator(void) {
      * still gets its line and never the error text. */
     set_cfg(db, "discord.admin_ids", "");
     sqlite3_exec(db, "DELETE FROM channel_outbox;"
-                     "UPDATE sessions SET chat_error_notice_at=NULL;",
+                     "UPDATE channel_chats SET error_notice_at=NULL;",
                  NULL, NULL, NULL);
     inbox_insert(db, g, "discord", NULL, "alice: again");
     run_failed_turn(db, g, "error: all models failed [resp #13]");

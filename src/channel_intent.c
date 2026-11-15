@@ -237,22 +237,23 @@ static int intent_exec_status(sqlite3 *db, const char *ch_name, const char *cid)
             "         WHERE ap.state='pending' AND s2.channel_name = ?1),"
             "       (SELECT COUNT(*) FROM llm_responses"
             "         WHERE session_id = s.id"
-            "           AND created_at >= unixepoch('now','start of day'))"
-            " FROM channel_routes r JOIN sessions s ON s.id = r.session_id"
+            "           AND created_at >= unixepoch('now','start of day')),"
+            "       c.delivery_mode"
+            " FROM channel_chats c JOIN sessions s ON s.id = c.session_id"
             " LEFT JOIN agents a ON a.name = s.agent_name"
-            " WHERE r.channel_name = ?1 AND r.chat_id = ?2;",
+            " WHERE c.channel_name = ?1 AND c.chat_id = ?2;",
             -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_text(s, 1, ch_name, -1, SQLITE_STATIC);
         sqlite3_bind_text(s, 2, cid, -1, SQLITE_STATIC);
         if (sqlite3_step(s) == SQLITE_ROW) {
             have = 1;
             snprintf(msg, sizeof(msg),
-                     "session #%lld (%s, %s)\nmodel: %s\nLLM calls today: %d\n"
-                     "pending approvals on this channel: %d",
+                     "session #%lld (%s, %s)\nmodel: %s\nreplies: %s\n"
+                     "LLM calls today: %d\npending approvals on this channel: %d",
                      (long long)sqlite3_column_int64(s, 0),
                      sqlite3_column_text(s, 1), sqlite3_column_text(s, 2),
-                     sqlite3_column_text(s, 3), sqlite3_column_int(s, 5),
-                     sqlite3_column_int(s, 4));
+                     sqlite3_column_text(s, 3), sqlite3_column_text(s, 6),
+                     sqlite3_column_int(s, 5), sqlite3_column_int(s, 4));
         }
         sqlite3_finalize(s);
     }
@@ -263,25 +264,21 @@ static int intent_exec_status(sqlite3 *db, const char *ch_name, const char *cid)
 
 /* /new — re-point the chat's pin at a fresh session. Same agent as the
  * current pin; open-door default, then the global default_agent, when the
- * chat has never been routed. An unrouted chat's fresh session is still an
- * unrouted session: it takes the channel's default filter, so /new can't
- * launder the open door into full authority. */
+ * chat has never been routed. The tools stay the chat's own: its tool_filter
+ * is read live by whichever session it pins, so /new cannot launder a
+ * filtered chat (open door or routed) into full authority. */
 static int intent_exec_new(sqlite3 *db, const char *ch_name, const char *cid) {
     char *agent = db_channel_binding_get(db, ch_name, cid);
-    char *gate_filter = NULL;
     if (!agent) {
-        agent = channel_default_agent(db, ch_name, &gate_filter);
+        agent = channel_default_agent(db, ch_name);
         if (!agent) agent = config_get(db, "default_agent");
     }
     if (!agent) {
-        free(gate_filter);
         reply(db, ch_name, cid, "no agent for this chat");
         return 1;
     }
-    int64_t sid = session_create_filtered(db, ch_name, agent, -1, 0, gate_filter);
-    free(gate_filter);
+    int64_t sid = channel_pin_new_session(db, ch_name, cid, agent, NULL);
     if (sid > 0) {
-        channel_pin_session(db, ch_name, cid, sid);
         char msg[96];
         snprintf(msg, sizeof(msg), "new session #%lld (%s)",
                  (long long)sid, agent);
@@ -295,7 +292,8 @@ static int intent_exec_new(sqlite3 *db, const char *ch_name, const char *cid) {
     return 1;
 }
 
-/* /sessions <id> — re-pin the chat to an existing session. */
+/* /sessions <id> — re-pin the chat to an existing session. A session another
+ * chat holds moves here; that chat gets a fresh session (channel_pin_session). */
 static int intent_exec_pin(sqlite3 *db, const char *ch_name, const char *cid,
                            int64_t pick) {
     sqlite3_stmt *chk;
@@ -306,8 +304,11 @@ static int intent_exec_pin(sqlite3 *db, const char *ch_name, const char *cid,
         if (sqlite3_step(chk) == SQLITE_ROW) found = 1;
         sqlite3_finalize(chk);
     }
+    if (found && channel_pin_session(db, ch_name, cid, pick) != 0) {
+        reply(db, ch_name, cid, "attach failed");
+        return 1;
+    }
     if (found) {
-        channel_pin_session(db, ch_name, cid, pick);
         char msg[64];
         snprintf(msg, sizeof(msg), "attached session #%lld", (long long)pick);
         reply(db, ch_name, cid, msg);
@@ -325,7 +326,7 @@ static int intent_exec_list(sqlite3 *db, const char *ch_name, const char *cid) {
     sqlite3_stmt *ls;
     if (sqlite3_prepare_v2(db,
             "SELECT COALESCE(group_concat("
-            "  CASE WHEN s.id = (SELECT session_id FROM channel_routes"
+            "  CASE WHEN s.id = (SELECT session_id FROM channel_chats"
             "                    WHERE channel_name=?1 AND chat_id=?2)"
             "       THEN '* ' ELSE '  ' END"
             "  || '#' || s.id || ' ' || s.agent_name || ' ' || s.state,"

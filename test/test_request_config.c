@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
 #include "test_util.h"
+#include "channel.h"
 #include "tools.h"
 #include "tool_request_config.h"
 #include "agent_config.h"
@@ -809,10 +810,10 @@ static void test_agent_routes_sections(void) {
     assert(sqlite3_exec(db,
         "INSERT INTO extensions(name,path) VALUES('tgext','/x');"
         "INSERT INTO channels(name,extension_name) VALUES('tg','tgext');"
-        "INSERT INTO sessions(name,agent_name,channel_name,chat_id)"
-        " VALUES('o','Other','tg','-500');"
-        "INSERT INTO channel_routes(channel_name,chat_id,session_id)"
-        " VALUES('tg','-500',last_insert_rowid());", NULL, NULL, NULL) == SQLITE_OK);
+        /* a chat the gate saw but nobody routed, starting from a filter */
+        "INSERT INTO channel_chats(channel_name,chat_id,tool_filter,title)"
+        " VALUES('tg','999','[\"web_fetch\"]','Lobby');", NULL, NULL, NULL) == SQLITE_OK);
+    assert(channel_pin_new_session(db, "tg", "-500", "Other", "o") > 0);
 
     RequestConfigCtx ctx = {
         .db = db, .agent_name = "test", .session_id = sid,
@@ -868,7 +869,7 @@ static void test_agent_routes_sections(void) {
         "\"context_window\":1000000}],"
         "\"agent\":{\"models\":[\"gemini-3.5-flash-lite@gemini\"],"
         "\"max_iterations\":40},"
-        "\"routes\":[\"tg:777\"]}}");
+        "\"routes\":[\"tg:777\",\"tg:999\"]}}");
     assert(r == NULL); /* parked */
 
     sqlite3_stmt *s;
@@ -909,7 +910,7 @@ static void test_agent_routes_sections(void) {
      * agent, explicit delivery (send authority only). */
     assert(sqlite3_prepare_v2(db,
         "SELECT se.agent_name, r.delivery_mode, se.channel_name, se.chat_id"
-        " FROM channel_routes r JOIN sessions se ON se.id=r.session_id"
+        " FROM channel_chats r JOIN sessions se ON se.id=r.session_id"
         " WHERE r.channel_name='tg' AND r.chat_id='777'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "test") == 0);
@@ -917,6 +918,13 @@ static void test_agent_routes_sections(void) {
     assert(strcmp((const char *)sqlite3_column_text(s, 2), "tg") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 3), "777") == 0);
     sqlite3_finalize(s);
+    /* The seen-but-unrouted chat is routed in place: pinned, explicit, and
+     * still carrying the filter and title it had. */
+    assert(db_scalar_i64(db, "SELECT s.agent_name='test' AND c.delivery_mode='explicit'"
+        " AND c.tool_filter='[\"web_fetch\"]' AND c.title='Lobby'"
+        " AND s.channel_name='tg' AND s.chat_id='999'"
+        " FROM channel_chats c JOIN sessions s ON s.id=c.session_id"
+        " WHERE c.chat_id='999';", 0, -1) == 1);
 
     /* Route captured by another agent between park and apply → the whole
      * document rolls back (savepoint), including the agent section. */
@@ -924,11 +932,7 @@ static void test_agent_routes_sections(void) {
         "{\"changes\":{"
         "\"agent\":{\"max_iterations\":99},\"routes\":[\"tg:888\"]}}");
     assert(r == NULL);
-    assert(sqlite3_exec(db,
-        "INSERT INTO sessions(name,agent_name,channel_name,chat_id)"
-        " VALUES('o2','Other','tg','888');"
-        "INSERT INTO channel_routes(channel_name,chat_id,session_id)"
-        " VALUES('tg','888',last_insert_rowid());", NULL, NULL, NULL) == SQLITE_OK);
+    assert(channel_pin_new_session(db, "tg", "888", "Other", "o2") > 0);
     assert(sqlite3_prepare_v2(db,
         "SELECT args_json FROM approvals WHERE session_id=?1"
         " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);

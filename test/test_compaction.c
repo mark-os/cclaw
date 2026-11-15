@@ -180,8 +180,9 @@ static void test_compaction_fail_notice(void) {
     sqlite3 *db = setup();
     test_seed_agent(db, "default");
     int64_t sid = session_create(db, "fail_test", "default", -1, 0);
-    sqlite3_exec(db, "UPDATE sessions SET channel_name='opsch', chat_id='7';",
-                 NULL, NULL, NULL);
+    test_seed_chat(db, "opsch", "7");
+    assert(sqlite3_exec(db, "UPDATE sessions SET channel_name='opsch', chat_id='7';",
+                        NULL, NULL, NULL) == SQLITE_OK);
 
     int64_t before = db_scalar_i64(db, "SELECT COUNT(*) FROM entries"
                                        " WHERE session_id=?;", sid, -1);

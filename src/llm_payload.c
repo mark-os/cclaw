@@ -211,9 +211,9 @@ static const char SQL_OPENAI_FULL[] =
     "SELECT json_patch(json_patch(json_patch('{}', json_object("
     "  'model', ?1,"
     "  'messages', (SELECT json_group_array(json(m)) FROM ("
-    /* ?6 = this session's prompt suffix: location line + the pinned route's
-     * system_prompt_suffix (NULL when neither applies) — assembled in SQL by
-     * route_prompt_suffix(), appended here rather than glued together in C. */
+    /* ?6 = this session's chat suffix: location line, reply line and the
+     * chat's guidance (NULL for a session with no chat) — assembled in SQL by
+     * chat_prompt_suffix(), appended here rather than glued together in C. */
     "    SELECT 0 AS ord, 0 AS sub, json_object('role','system','content',"
     "      COALESCE(?2,'') || COALESCE(char(10) || char(10) || ?6, '')) AS m"
     "      WHERE ?2 IS NOT NULL OR ?6 IS NOT NULL"
@@ -612,46 +612,43 @@ char *llm_effort_fragment(sqlite3 *db, const ProviderConfig *prov) {
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
-/* Session's spawn-frozen tool filter, or NULL when unrestricted. */
-static char *session_tool_filter(sqlite3 *db, int64_t session_id) {
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, "SELECT tool_filter FROM sessions WHERE id=?",
-                           -1, &s, NULL) != SQLITE_OK)
-        return NULL;
-    sqlite3_bind_int64(s, 1, session_id);
-    char *r = NULL;
-    if (sqlite3_step(s) == SQLITE_ROW) {
-        const char *t = (const char *)sqlite3_column_text(s, 0);
-        if (t) r = strdup(t);
-    }
-    sqlite3_finalize(s);
-    return r;
-}
-
-/* Everything appended to the system prompt for this session: the built-in
- * location line (where the bot is chatting) followed by the pinned route's
- * system_prompt_suffix, or NULL when neither applies. Assembled in SQL, like
- * the rest of this file. Read every turn (not frozen at session creation like
- * tool_filter): it is prompt text, not authority, so a renamed chat or an
- * edited route shows up on the next turn. The location line needs both
- * channel_name and chat_id — NULL in either propagates through the ||
- * concatenation and COALESCE drops the whole line. */
-static char *route_prompt_suffix(sqlite3 *db, int64_t session_id) {
+/* Everything appended to the system prompt of a session that belongs to a
+ * chat, in three parts: where it is chatting, how its replies reach that chat
+ * (from the chat's delivery_mode — the same value delivery reads, so the
+ * model is told what will actually happen), then the chat's guidance. NULL
+ * for a session with no chat. Assembled in SQL, like the rest of this file,
+ * and read for every request: the text changes only when the chat's row
+ * does (a rename, a mode flip, edited guidance), so it stays byte-stable for
+ * prompt caching otherwise. */
+static char *chat_prompt_suffix(sqlite3 *db, int64_t session_id,
+                                const char *allowed_tools) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
-            "SELECT COALESCE(loc || COALESCE(char(10) || char(10) || rt, ''), rt)"
-            " FROM (SELECT"
-            "   'You are chatting in '"
-            "     || COALESCE(se.chat_title, 'chat ' || se.chat_id)"
-            "     || ' (channel ' || se.channel_name"
-            "     || ', chat id ' || se.chat_id || ').' AS loc,"
-            "   (SELECT r.system_prompt_suffix FROM channel_routes r"
-            "     WHERE r.session_id=se.id AND r.system_prompt_suffix IS NOT NULL"
-            "     LIMIT 1) AS rt"
-            "  FROM sessions se WHERE se.id=?)",
+            "SELECT 'You are chatting in ' || COALESCE(c.title, 'chat ' || c.chat_id)"
+            "     || ' (channel ' || c.channel_name || ', chat id ' || c.chat_id || ').'"
+            "     || char(10) || char(10) || CASE c.delivery_mode"
+            /* ?2 = this request's tool list (NULL = unrestricted): an
+             * agent without channel_send is told it cannot speak here,
+             * rather than led to believe a reply goes somewhere. */
+            "       WHEN 'explicit' THEN CASE WHEN ?2 IS NULL OR EXISTS(SELECT 1"
+            "             FROM json_each(?2) WHERE value='channel_send')"
+            "         THEN 'Nothing you write is posted to this chat. To say something'"
+            "              || ' here, call channel_send.'"
+            "         ELSE 'Nothing you write is posted to this chat, and you have no'"
+            "              || ' channel_send tool, so you cannot reply here.' END"
+            "       WHEN 'iteration' THEN 'Each message you write is posted to this chat'"
+            "                            || ' as you write it.'"
+            "       WHEN 'digest' THEN 'Everything you write during a turn is posted to'"
+            "                            || ' this chat when the turn ends.'"
+            "       ELSE 'Your final message of the turn is posted to this chat.' END"
+            "     || COALESCE(char(10) || char(10) || NULLIF(c.guidance, ''), '')"
+            " FROM sessions s JOIN channel_chats c"
+            "   ON c.channel_name = s.channel_name AND c.chat_id = s.chat_id"
+            " WHERE s.id=?1",
             -1, &s, NULL) != SQLITE_OK)
         return NULL;
     sqlite3_bind_int64(s, 1, session_id);
+    if (allowed_tools) sqlite3_bind_text(s, 2, allowed_tools, -1, SQLITE_STATIC);
     char *r = NULL;
     if (sqlite3_step(s) == SQLITE_ROW) {
         const char *t = (const char *)sqlite3_column_text(s, 0);
@@ -844,14 +841,15 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     int gemini = (cfg->provider.endpoint_type == ENDPOINT_GEMINI);
     if (populate_plan(db, plan) != 0) return -1;
 
-    /* Effective tool scope = grants ∩ session tool_filter. An agent with an
-     * empty grant set keeps "[]" (sees zero tools) — only a NULL agent is
-     * unrestricted. The filter (frozen at spawn for workers) can only narrow;
-     * dispatch_tool re-checks both, so this is advisory for the model. */
+    /* Effective tool scope = grants ∩ session tool_filter ∩ the pinned chat's
+     * tool_filter as it is now. An agent with an empty grant set keeps "[]"
+     * (sees zero tools) — only a NULL agent is unrestricted. The filters (the
+     * session's frozen at spawn for workers, the chat's read live) can only
+     * narrow; dispatch_tool re-checks all three, so this is advisory for the
+     * model. */
     char *agent_name = session_get_agent_name(db, session_id);
     char *allowed_tools = agent_name ? grants_json(db, agent_name, "tool") : NULL;
-    char *tool_filter = session_tool_filter(db, session_id);
-    char *suffix = route_prompt_suffix(db, session_id);
+    char *tool_filter = session_effective_tool_filter(db, session_id);
     char *worker_tools = worker_tools_list(db);
     char *effort = llm_effort_fragment(db, &cfg->provider);
     if (tool_filter) {
@@ -865,6 +863,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         }
         tool_filter = NULL;
     }
+    char *suffix = chat_prompt_suffix(db, session_id, allowed_tools);
 
     /* Reasoning replay matches on the model that produced it. Ingest stamps
      * the routed model's id (`model@provider`), so that is what must be

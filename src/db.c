@@ -977,6 +977,468 @@ static int patch_v60_authority(sqlite3 *db) {
     return rc;
 }
 
+/* v61: channel_chats (plan/projects/v0.8-data-and-explorer.md, decisions
+ * 1–10).
+ *
+ * channel_routes becomes channel_chats: one row per chat, routed or not, and
+ * the chat's settings are read live from it from now on. Every channel+chat
+ * pair any route, session or cron job names gets a row, so the new composite
+ * foreign keys from sessions and cron_jobs hold. Where the values come from:
+ *  - a routed chat keeps its route's delivery_mode, tool_filter and prompt
+ *    suffix (now guidance). A route with no tool_filter whose pinned session
+ *    is a top-level session carrying a frozen filter (a gate-created session's
+ *    copy of channels.default_tool_filter, or a route filter later removed)
+ *    takes that filter: the pinned session's effective tools do not change,
+ *    and a later /new keeps the attenuation the frozen copy gave;
+ *  - a chat with no route starts from the defaults a new chat gets
+ *    (channels.default_tool_filter; 'explicit' if the id is group-shaped);
+ *  - title and admin flag come from the most recently updated session of the
+ *    chat that has one; the error-notice time is the MAX over its sessions
+ *    (the old per-chat rule). kind, last_message_at and notified_at are
+ *    unknown and stay NULL until the next message.
+ * Where a chat's live value now differs from what its pinned session ran on
+ * (a frozen filter or delivery edge from before a route edit), the route's
+ * value wins — it is what the operator last set — and the patch logs it.
+ *
+ * Data the new constraints refuse is resolved, each change logged:
+ *  - a session pinned by several chats keeps the chat it names (its replies
+ *    already go there), else the one it last replied to; every other chat
+ *    gets a fresh session for the same agent, as /new would do. A pinned
+ *    session naming a different chat is re-stamped to its keeper.
+ *  - a stamp on a channel that has no channels row is dropped (no runner can
+ *    ever serve it): sessions lose the stamp and their channel edge, a cron
+ *    job loses it and is disabled, a route is deleted.
+ *  - a row with only one of channel_name/chat_id is logged and left alone
+ *    (a foreign key with a NULL column is not checked).
+ *  - a sessions, cron_jobs or delivery_edges row that already points at a
+ *    missing parent (written with foreign keys off) cannot be copied: the
+ *    patch names it and refuses, and the database stays at v60.
+ *
+ * Channel edges lose their policy (NULL): the chat's delivery_mode is the
+ * only value. Their target_ref is set to the session's channel. They keep
+ * their cursor, except an edge that never posted (frozen 'explicit', or its
+ * chat is 'explicit' now): its cursor moves to the session's leaf, as an
+ * explicit boundary would leave it today, so no flip of the chat to 'auto'
+ * can post an old answer (see the step after the rebuild). sessions, cron_jobs and delivery_edges are rebuilt (SQLite cannot
+ * add a foreign key in place); delivery_edges is held aside while sessions,
+ * its parent, is dropped, and every AUTOINCREMENT sequence is put back so no
+ * id is ever reused. */
+static int v61_note(sqlite3 *db, const char *what, const char *sel) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sel, -1, &st, NULL) != SQLITE_OK) {
+        LOG_ERROR_("schema v61: %s: %s", what, sqlite3_errmsg(db));
+        return -1;
+    }
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *d = (const char *)sqlite3_column_text(st, 0);
+        LOG_WARN_("schema v61: %s: %s", what, d ? d : "?");
+    }
+    sqlite3_finalize(st);
+    return 0;
+}
+
+#define V61_NO_CHANNEL "(channel_name IS NOT NULL AND channel_name NOT IN (SELECT name FROM channels))"
+#define V61_HALF "((channel_name IS NULL) <> (chat_id IS NULL))"
+#define V61_AUTO(p) "(CASE " p " WHEN 'auto' THEN 'quiescent' ELSE " p " END)"
+/* Over a rebuilt channel edge `e` and its session `s`: frozen 'explicit'
+ * under v60 (any channel edge of the session — the held copy), or the chat
+ * is 'explicit' now. */
+#define V61_NEVER_POSTED \
+    "EXISTS(SELECT 1 FROM v61_edges o WHERE o.session_id=e.session_id" \
+    "        AND o.target_kind='channel' AND o.policy='explicit')" \
+    " OR EXISTS(SELECT 1 FROM channel_chats c WHERE c.channel_name=s.channel_name" \
+    "        AND c.chat_id=s.chat_id AND c.delivery_mode='explicit')"
+
+static const char V61_PIN[] =
+    /* Which chat keeps a session that several chats pin: the one the session
+     * names, then the one it last replied to, then the lowest id. */
+    "CREATE TEMP TABLE v61_pin AS"
+    " SELECT r.channel_name, r.chat_id, r.session_id, s.agent_name,"
+    "   ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY"
+    "     (s.channel_name IS r.channel_name AND s.chat_id IS r.chat_id) DESC,"
+    "     (SELECT MAX(o.id) FROM channel_outbox o WHERE o.session_id=r.session_id"
+    "        AND o.channel_name=r.channel_name"
+    "        AND CAST(json_extract(o.payload,'$.chat_id') AS TEXT)=r.chat_id)"
+    "       DESC NULLS LAST,"
+    "     r.channel_name, r.chat_id) AS rk"
+    " FROM channel_routes r JOIN sessions s ON s.id=r.session_id;";
+
+static const char V61_CHATS[] =
+    "CREATE TEMP TABLE v61_chats AS"
+    " WITH pairs AS ("
+    "   SELECT channel_name, chat_id FROM channel_routes"
+    "   UNION SELECT channel_name, chat_id FROM sessions"
+    "     WHERE channel_name IS NOT NULL AND chat_id IS NOT NULL"
+    "   UNION SELECT channel_name, chat_id FROM cron_jobs"
+    "     WHERE channel_name IS NOT NULL AND chat_id IS NOT NULL)"
+    " SELECT p.channel_name, p.chat_id,"
+    "   (SELECT k.session_id FROM v61_pin k WHERE k.channel_name=p.channel_name"
+    "      AND k.chat_id=p.chat_id AND k.rk=1) AS session_id,"
+    "   CASE WHEN r.chat_id IS NULL"
+    "          THEN CASE WHEN substr(p.chat_id,1,1)='-' THEN 'explicit' ELSE 'auto' END"
+    "        WHEN r.delivery_mode IN ('auto','iteration','digest','turn','quiescent','explicit')"
+    "          THEN r.delivery_mode"
+    "        ELSE 'auto' END AS delivery_mode,"
+    "   CASE WHEN r.chat_id IS NULL THEN ch.default_tool_filter"
+    "        ELSE COALESCE(r.tool_filter, (SELECT s.tool_filter FROM sessions s"
+    "               WHERE s.id=r.session_id AND COALESCE(s.parent_session_id,-1) <= 0))"
+    "   END AS tool_filter,"
+    "   r.system_prompt_suffix AS guidance,"
+    "   (SELECT s.chat_title FROM sessions s WHERE s.channel_name=p.channel_name"
+    "      AND s.chat_id=p.chat_id AND s.chat_title IS NOT NULL"
+    "      ORDER BY s.updated_at DESC, s.id DESC LIMIT 1) AS title,"
+    "   (SELECT s.chat_is_admin FROM sessions s WHERE s.channel_name=p.channel_name"
+    "      AND s.chat_id=p.chat_id AND s.chat_is_admin IS NOT NULL"
+    "      ORDER BY s.updated_at DESC, s.id DESC LIMIT 1) AS is_admin,"
+    "   (SELECT MAX(s.chat_error_notice_at) FROM sessions s"
+    "      WHERE s.channel_name=p.channel_name AND s.chat_id=p.chat_id) AS error_notice_at,"
+    "   COALESCE((SELECT MIN(t) FROM ("
+    "      SELECT created_at AS t FROM sessions s"
+    "       WHERE s.channel_name=p.channel_name AND s.chat_id=p.chat_id"
+    "      UNION ALL SELECT created_at FROM cron_jobs j"
+    "       WHERE j.channel_name=p.channel_name AND j.chat_id=p.chat_id)),"
+    "     unixepoch()) AS first_seen_at"
+    " FROM pairs p JOIN channels ch ON ch.name=p.channel_name"
+    " LEFT JOIN channel_routes r ON r.channel_name=p.channel_name AND r.chat_id=p.chat_id;";
+
+/* The rebuild. channel_chats and sessions point at each other, and an insert
+ * into a child fails while its parent table does not exist (even with a NULL
+ * key), so both are created first; then the chats with no pins, the sessions
+ * (whose chats now exist), the pins (whose sessions now exist), and
+ * delivery_edges, a child of sessions, last. */
+static const char V61_REBUILD[] =
+    "CREATE TEMP TABLE v61_seq AS SELECT name, seq FROM sqlite_sequence"
+    "  WHERE name IN ('sessions','delivery_edges','cron_jobs');"
+    "CREATE TEMP TABLE v61_sessions AS SELECT * FROM sessions;"
+    "CREATE TEMP TABLE v61_edges AS SELECT * FROM delivery_edges;"
+    "CREATE TEMP TABLE v61_cron AS SELECT * FROM cron_jobs;"
+    "DROP TABLE delivery_edges;"
+    "DROP TABLE channel_routes;"
+    "DROP TABLE cron_jobs;"
+    "DROP TABLE sessions;"
+
+    "CREATE TABLE channel_chats ("
+    "  channel_name TEXT NOT NULL REFERENCES channels(name) ON UPDATE CASCADE,"
+    "  chat_id TEXT NOT NULL,"
+    "  session_id INTEGER REFERENCES sessions(id),"
+    "  delivery_mode TEXT NOT NULL DEFAULT 'auto'"
+    "    CHECK (delivery_mode IN ('auto','iteration','digest','turn','quiescent','explicit')),"
+    "  tool_filter TEXT,"
+    "  guidance TEXT,"
+    "  title TEXT,"
+    "  is_admin INTEGER,"
+    "  error_notice_at INTEGER,"
+    "  kind TEXT CHECK (kind IN ('dm','group')),"
+    "  first_seen_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "  last_message_at INTEGER,"
+    "  notified_at INTEGER,"
+    "  PRIMARY KEY (channel_name, chat_id));"
+
+    "CREATE TABLE sessions ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  name TEXT,"
+    "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+    "  channel_name TEXT,"
+    "  chat_id TEXT,"
+    "  parent_session_id INTEGER DEFAULT -1,"
+    "  parent_tool_call_id TEXT,"
+    "  depth INTEGER NOT NULL DEFAULT 0,"
+    "  tool_filter TEXT,"
+    "  state TEXT NOT NULL DEFAULT 'idle',"
+    "  owner_instance TEXT,"
+    "  turn_iteration INTEGER NOT NULL DEFAULT 0,"
+    "  turn_context TEXT,"
+    "  leaf_id INTEGER DEFAULT -1,"
+    "  compaction_fail_count INTEGER NOT NULL DEFAULT 0,"
+    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "  FOREIGN KEY (channel_name, chat_id) REFERENCES channel_chats(channel_name, chat_id)"
+    "    ON UPDATE CASCADE);"
+    "INSERT INTO channel_chats(channel_name, chat_id, delivery_mode, tool_filter, guidance,"
+    "                          title, is_admin, error_notice_at, first_seen_at)"
+    "  SELECT channel_name, chat_id, delivery_mode, tool_filter, guidance,"
+    "         title, is_admin, error_notice_at, first_seen_at FROM v61_chats;"
+    /* chat_title, chat_is_admin, chat_error_notice_at are not carried: they
+     * live on the chat now. */
+    "INSERT INTO sessions(id, name, agent_name, channel_name, chat_id, parent_session_id,"
+    "                     parent_tool_call_id, depth, tool_filter, state, owner_instance,"
+    "                     turn_iteration, turn_context, leaf_id, compaction_fail_count,"
+    "                     created_at, updated_at)"
+    "  SELECT id, name, agent_name, channel_name, chat_id, parent_session_id,"
+    "         parent_tool_call_id, depth, tool_filter, state, owner_instance,"
+    "         turn_iteration, turn_context, leaf_id, compaction_fail_count,"
+    "         created_at, updated_at FROM v61_sessions ORDER BY id;"
+    "CREATE INDEX idx_sessions_owner ON sessions(owner_instance)"
+    "  WHERE owner_instance IS NOT NULL;"
+    "UPDATE channel_chats SET session_id=(SELECT c.session_id FROM v61_chats c"
+    "  WHERE c.channel_name=channel_chats.channel_name AND c.chat_id=channel_chats.chat_id);"
+
+    "CREATE TABLE delivery_edges ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+    "  target_kind TEXT NOT NULL,"
+    "  target_ref TEXT NOT NULL,"
+    "  policy TEXT CHECK ((target_kind = 'channel') = (policy IS NULL)),"
+    "  cursor INTEGER NOT NULL DEFAULT 0,"
+    "  one_shot INTEGER NOT NULL DEFAULT 0,"
+    "  UNIQUE(session_id, target_kind, target_ref));"
+    /* A channel edge names the session's channel and carries no policy. A
+     * session that once moved across channels may hold two channel edges;
+     * the one already naming its channel is kept. */
+    "INSERT OR IGNORE INTO delivery_edges(id, session_id, target_kind, target_ref, policy,"
+    "                                     cursor, one_shot)"
+    "  SELECT e.id, e.session_id, e.target_kind,"
+    "         CASE WHEN e.target_kind='channel' THEN s.channel_name ELSE e.target_ref END,"
+    "         CASE WHEN e.target_kind='channel' THEN NULL ELSE e.policy END,"
+    "         e.cursor, e.one_shot"
+    "  FROM v61_edges e JOIN sessions s ON s.id=e.session_id"
+    "  WHERE e.target_kind <> 'channel' OR s.channel_name IS NOT NULL"
+    "  ORDER BY (e.target_kind='channel' AND e.target_ref IS s.channel_name) DESC, e.id;"
+
+    "CREATE TABLE cron_jobs ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+    "  name TEXT NOT NULL,"
+    "  cron_expr TEXT NOT NULL,"
+    "  run_at INTEGER,"
+    "  interval_s INTEGER,"
+    "  session_id INTEGER NOT NULL,"
+    "  task TEXT NOT NULL,"
+    "  script TEXT,"
+    "  channel_name TEXT,"
+    "  chat_id TEXT,"
+    "  target TEXT,"
+    "  target_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+    "  enabled INTEGER NOT NULL DEFAULT 1,"
+    "  next_run_at INTEGER NOT NULL DEFAULT 0,"
+    "  last_run_at INTEGER,"
+    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "  FOREIGN KEY (channel_name, chat_id) REFERENCES channel_chats(channel_name, chat_id)"
+    "    ON UPDATE CASCADE);"
+    "INSERT INTO cron_jobs(id, agent_name, name, cron_expr, run_at, interval_s, session_id,"
+    "                      task, script, channel_name, chat_id, target, target_agent,"
+    "                      enabled, next_run_at, last_run_at, created_at)"
+    "  SELECT id, agent_name, name, cron_expr, run_at, interval_s, session_id,"
+    "         task, script, channel_name, chat_id, target, target_agent,"
+    "         enabled, next_run_at, last_run_at, created_at FROM v61_cron ORDER BY id;"
+    "CREATE UNIQUE INDEX idx_cron_jobs_name ON cron_jobs(agent_name, name);"
+
+    /* DROP TABLE removed each sequence row; the copies re-created them at
+     * MAX(id), which is lower than the old value when the newest rows had
+     * been deleted. Put the old high-water marks back. */
+    "UPDATE sqlite_sequence SET seq=MAX(seq, (SELECT h.seq FROM v61_seq h"
+    "  WHERE h.name=sqlite_sequence.name)) WHERE name IN (SELECT name FROM v61_seq);"
+    "INSERT INTO sqlite_sequence(name, seq) SELECT name, seq FROM v61_seq"
+    "  WHERE name NOT IN (SELECT name FROM sqlite_sequence);";
+
+/* Every chat but the keeper of a session several chats pinned gets a fresh
+ * session for the same agent, named the way /new names one. */
+static int v61_unshare(sqlite3 *db) {
+    typedef struct { char *ch, *chat, *agent; int64_t old; } Loser;
+    Loser *l = NULL;
+    size_t n = 0;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "SELECT channel_name, chat_id, agent_name, session_id"
+                               " FROM v61_pin WHERE rk > 1 ORDER BY session_id, rk",
+                           -1, &st, NULL) != SQLITE_OK) return -1;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        Loser *t = realloc(l, (n + 1) * sizeof(*l));
+        if (!t) break;
+        l = t;
+        const char *a = (const char *)sqlite3_column_text(st, 2);
+        l[n].ch = strdup((const char *)sqlite3_column_text(st, 0));
+        l[n].chat = strdup((const char *)sqlite3_column_text(st, 1));
+        l[n].agent = a ? strdup(a) : NULL;
+        l[n].old = sqlite3_column_int64(st, 3);
+        n++;
+    }
+    sqlite3_finalize(st);
+    int rc = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (rc == 0 && sqlite3_prepare_v2(db,
+                "INSERT INTO sessions(name, agent_name, channel_name, chat_id)"
+                " VALUES(?1, ?2, ?1, ?3)", -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, l[i].ch, -1, SQLITE_STATIC);
+            if (l[i].agent) sqlite3_bind_text(st, 2, l[i].agent, -1, SQLITE_STATIC);
+            sqlite3_bind_text(st, 3, l[i].chat, -1, SQLITE_STATIC);
+            rc = sqlite3_step(st) == SQLITE_DONE ? 0 : -1;
+            sqlite3_finalize(st);
+            int64_t sid = sqlite3_last_insert_rowid(db);
+            if (rc == 0 && sqlite3_prepare_v2(db,
+                    "UPDATE channel_chats SET session_id=?3"
+                    " WHERE channel_name=?1 AND chat_id=?2", -1, &st, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(st, 1, l[i].ch, -1, SQLITE_STATIC);
+                sqlite3_bind_text(st, 2, l[i].chat, -1, SQLITE_STATIC);
+                sqlite3_bind_int64(st, 3, sid);
+                rc = sqlite3_step(st) == SQLITE_DONE ? 0 : -1;
+                sqlite3_finalize(st);
+            } else rc = -1;
+            if (rc == 0)
+                LOG_WARN_("schema v61: chat %s:%s shared session %lld with another chat;"
+                          " it now has its own fresh session %lld (agent %s)",
+                          l[i].ch, l[i].chat, (long long)l[i].old, (long long)sid,
+                          l[i].agent ? l[i].agent : "-");
+        } else if (rc == 0) rc = -1;
+        free(l[i].ch); free(l[i].chat); free(l[i].agent);
+    }
+    free(l);
+    if (rc != 0) LOG_ERROR_("schema v61: unshare: %s", sqlite3_errmsg(db));
+    return rc;
+}
+
+static int patch_v61_chats(sqlite3 *db) {
+    /* The rebuilt tables are copied with foreign keys on. A row that already
+     * points at nothing (written by a handle with them off) would fail the
+     * copy; name it and refuse before anything changes, rather than guess. */
+    int64_t dangling = db_scalar_i64(db,
+        "SELECT COUNT(*) FROM pragma_foreign_key_check c"
+        " WHERE c.\"table\" IN ('sessions','cron_jobs','delivery_edges')", 0, -1);
+    if (dangling != 0) {
+        v61_note(db, "row already points at a missing parent; upgrade refused",
+            "SELECT c.\"table\"||' rowid '||c.rowid||' -> '||c.parent"
+            " FROM pragma_foreign_key_check c"
+            " WHERE c.\"table\" IN ('sessions','cron_jobs','delivery_edges')");
+        LOG_ERROR_("schema v61: %lld row(s) with a dangling reference — fix them"
+                   " (cclaw sqlite3 --write) and restart", (long long)dangling);
+        return -1;
+    }
+    static const struct { const char *what, *sel, *act; } PRE[] = {
+        { "session names a channel that does not exist; stamp dropped",
+          "SELECT 'session '||id||' ('||channel_name||':'||COALESCE(chat_id,'-')||')'"
+          " FROM sessions WHERE " V61_NO_CHANNEL,
+          "DELETE FROM delivery_edges WHERE target_kind='channel' AND session_id IN"
+          "  (SELECT id FROM sessions WHERE " V61_NO_CHANNEL ");"
+          "UPDATE sessions SET channel_name=NULL, chat_id=NULL WHERE " V61_NO_CHANNEL },
+        { "cron job names a channel that does not exist; stamp dropped, job disabled",
+          "SELECT 'job '||id||' '||name||' ('||channel_name||':'||COALESCE(chat_id,'-')||')'"
+          " FROM cron_jobs WHERE " V61_NO_CHANNEL,
+          "UPDATE cron_jobs SET channel_name=NULL, chat_id=NULL, enabled=0"
+          " WHERE " V61_NO_CHANNEL },
+        { "route on a channel that does not exist, or to no session; removed",
+          "SELECT channel_name||':'||chat_id||' -> session '||session_id FROM channel_routes"
+          " WHERE channel_name NOT IN (SELECT name FROM channels)"
+          "    OR session_id NOT IN (SELECT id FROM sessions)",
+          "DELETE FROM channel_routes WHERE channel_name NOT IN (SELECT name FROM channels)"
+          "    OR session_id NOT IN (SELECT id FROM sessions)" },
+        { "session has only one of channel_name/chat_id; left as is",
+          "SELECT 'session '||id FROM sessions WHERE " V61_HALF, NULL },
+        { "cron job has only one of channel_name/chat_id; left as is",
+          "SELECT 'job '||id||' '||name FROM cron_jobs WHERE " V61_HALF, NULL },
+    };
+    for (size_t i = 0; i < sizeof(PRE) / sizeof(*PRE); i++) {
+        if (v61_note(db, PRE[i].what, PRE[i].sel) != 0) return -1;
+        if (PRE[i].act && v59_exec(db, PRE[i].act) != 0) return -1;
+    }
+    if (v59_exec(db, V61_PIN) != 0) return -1;
+
+    /* A pinned session that names another chat is re-stamped to its keeper:
+     * from v61, chat.session_id = S means S names that chat. */
+    if (v61_note(db, "pinned session named another chat; re-stamped to its pin",
+            "SELECT 'session '||s.id||': '||COALESCE(s.channel_name||':'||s.chat_id,'(none)')"
+            "||' -> '||k.channel_name||':'||k.chat_id"
+            " FROM v61_pin k JOIN sessions s ON s.id=k.session_id WHERE k.rk=1"
+            "   AND (s.channel_name IS NOT k.channel_name OR s.chat_id IS NOT k.chat_id)") != 0)
+        return -1;
+    if (v59_exec(db,
+            "UPDATE sessions SET"
+            "  channel_name=(SELECT k.channel_name FROM v61_pin k"
+            "                WHERE k.session_id=sessions.id AND k.rk=1),"
+            "  chat_id=(SELECT k.chat_id FROM v61_pin k"
+            "           WHERE k.session_id=sessions.id AND k.rk=1)"
+            " WHERE id IN (SELECT k.session_id FROM v61_pin k JOIN sessions s"
+            "   ON s.id=k.session_id WHERE k.rk=1"
+            "   AND (s.channel_name IS NOT k.channel_name OR s.chat_id IS NOT k.chat_id))") != 0)
+        return -1;
+
+    /* What changes for a pinned session now that the chat is read live. */
+    static const struct { const char *what, *sel; } LIVE[] = {
+        { "the route's tool filter now applies live to its pinned session",
+          "SELECT r.channel_name||':'||r.chat_id||' session '||s.id||': ran with '"
+          "||COALESCE(s.tool_filter,'no filter')||', now also '||r.tool_filter"
+          " FROM channel_routes r JOIN sessions s ON s.id=r.session_id"
+          " WHERE r.tool_filter IS NOT NULL AND (s.tool_filter IS NULL OR EXISTS("
+          "   SELECT 1 FROM json_each(s.tool_filter) f"
+          "    WHERE f.value NOT IN (SELECT value FROM json_each(r.tool_filter))))" },
+        { "the chat keeps its pinned session's frozen tool filter",
+          "SELECT r.channel_name||':'||r.chat_id||' <- session '||s.id||' '||s.tool_filter"
+          " FROM channel_routes r JOIN sessions s ON s.id=r.session_id"
+          " WHERE r.tool_filter IS NULL AND s.tool_filter IS NOT NULL"
+          "   AND COALESCE(s.parent_session_id,-1) <= 0" },
+        { "the route's delivery mode now applies live to its pinned session",
+          "SELECT r.channel_name||':'||r.chat_id||' session '||s.id||': edge ran '"
+          "||e.policy||', now '||r.delivery_mode"
+          " FROM channel_routes r JOIN sessions s ON s.id=r.session_id"
+          " JOIN delivery_edges e ON e.session_id=s.id AND e.target_kind='channel'"
+          " WHERE e.policy IS NOT " V61_AUTO("r.delivery_mode") },
+        { "route had an unknown delivery mode; the chat is 'auto'",
+          "SELECT channel_name||':'||chat_id||' '||delivery_mode FROM channel_routes"
+          " WHERE delivery_mode NOT IN ('auto','iteration','digest','turn','quiescent','explicit')" },
+    };
+    for (size_t i = 0; i < sizeof(LIVE) / sizeof(*LIVE); i++)
+        if (v61_note(db, LIVE[i].what, LIVE[i].sel) != 0) return -1;
+
+    if (v59_exec(db, V61_CHATS) != 0) return -1;
+    int64_t edges_before = db_scalar_i64(db,
+        "SELECT COUNT(*) FROM delivery_edges e JOIN sessions s ON s.id=e.session_id"
+        " WHERE e.target_kind <> 'channel' OR s.channel_name IS NOT NULL", 0, -1);
+    if (v59_exec(db, V61_REBUILD) != 0) return -1;
+    int64_t edges_after = db_scalar_i64(db, "SELECT COUNT(*) FROM delivery_edges", 0, -1);
+    if (edges_after != edges_before)
+        LOG_WARN_("schema v61: %lld duplicate channel edge(s) of sessions that moved"
+                  " channel dropped", (long long)(edges_before - edges_after));
+    if (v61_unshare(db) != 0) return -1;
+    /* Cursors of edges that never posted. Under v60 an explicit boundary left
+     * the cursor where it was, so an explicit edge sits far behind its leaf.
+     * From v61 the policy is read live and the sweep owes a delivery whenever
+     * cursor < sessions.leaf_id: left alone, such an edge would post an old
+     * answer the moment its chat reads anything but explicit. Rule: a channel
+     * edge whose session's channel edge was frozen 'explicit' under v60
+     * (nothing of it was ever meant to post), or whose chat is 'explicit'
+     * now, gets the cursor an explicit boundary stamps today — the session's
+     * leaf_id (advance_deliver_boundary). An edge that was not explicit and
+     * is not now keeps its cursor: if it is behind, that delivery was owed
+     * under v60 too, and the sweep should still make it. */
+    if (v61_note(db, "channel edge never posted; cursor moved to the session's leaf",
+            "SELECT 'session '||e.session_id||' cursor '||e.cursor||' -> '||s.leaf_id"
+            " FROM delivery_edges e JOIN sessions s ON s.id=e.session_id"
+            " WHERE e.target_kind='channel' AND e.cursor < s.leaf_id AND (" V61_NEVER_POSTED ")") != 0)
+        return -1;
+    if (v59_exec(db,
+            "UPDATE delivery_edges SET cursor=(SELECT s.leaf_id FROM sessions s"
+            "                                  WHERE s.id=delivery_edges.session_id)"
+            " WHERE id IN (SELECT e.id FROM delivery_edges e JOIN sessions s"
+            "   ON s.id=e.session_id WHERE e.target_kind='channel'"
+            "   AND e.cursor < s.leaf_id AND (" V61_NEVER_POSTED "))") != 0)
+        return -1;
+    if (v59_exec(db,
+            "CREATE UNIQUE INDEX idx_channel_chats_session"
+            "  ON channel_chats(session_id) WHERE session_id IS NOT NULL;"
+            "DROP TABLE v61_pin; DROP TABLE v61_chats; DROP TABLE v61_seq;"
+            "DROP TABLE v61_sessions; DROP TABLE v61_edges; DROP TABLE v61_cron;") != 0)
+        return -1;
+    if (change_log_sync(db) != 0) return -1;
+    LOG_INFO_("schema v61: %lld chat(s), %lld routed",
+              (long long)db_scalar_i64(db, "SELECT COUNT(*) FROM channel_chats", 0, -1),
+              (long long)db_scalar_i64(db, "SELECT COUNT(*) FROM channel_chats"
+                                           " WHERE session_id IS NOT NULL", 0, -1));
+
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT c.\"table\", c.rowid, c.parent FROM pragma_foreign_key_check c"
+            " WHERE c.\"table\" IN ('channel_chats','sessions','cron_jobs','delivery_edges')",
+            -1, &st, NULL) != SQLITE_OK) return -1;
+    int bad = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        LOG_ERROR_("schema v61: %s rowid %lld points at a missing %s row",
+                   (const char *)sqlite3_column_text(st, 0),
+                   (long long)sqlite3_column_int64(st, 1),
+                   (const char *)sqlite3_column_text(st, 2));
+        bad++;
+    }
+    sqlite3_finalize(st);
+    return bad ? -1 : 0;
+}
+
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
     /* Frozen at v40 (2026-07-31, D16): entries.turn_id/llm_responses.turn_id
      * were renamed to iteration_id (they always identified one LLM request) and
@@ -1369,6 +1831,11 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
     /* v60: grants.source/approval_id, secret use is a grant, change_log — see
      * patch_v60_authority. */
     { 60, NULL, patch_v60_authority },
+    /* v61: channel_routes -> channel_chats; sessions lose chat_title,
+     * chat_is_admin, chat_error_notice_at; sessions/cron_jobs gain a declared
+     * link to their chat; channel edges lose their policy — see
+     * patch_v61_chats. */
+    { 61, NULL, patch_v61_chats },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
@@ -1663,6 +2130,35 @@ int session_tool_allowed(sqlite3 *db, int64_t session_id, const char *tool_name)
         allowed = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
     return allowed;
+}
+
+int chat_tool_allowed(sqlite3 *db, int64_t session_id, const char *tool_name) {
+    if (!db || !tool_name) return 0;
+    /* A query failure fails closed, like session_tool_allowed. */
+    const char *sql =
+        "SELECT NOT EXISTS(SELECT 1 FROM channel_chats c WHERE c.session_id=?1"
+        "   AND c.tool_filter IS NOT NULL"
+        "   AND NOT EXISTS(SELECT 1 FROM json_each(c.tool_filter) WHERE value=?2));";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 2, tool_name, -1, SQLITE_STATIC);
+    int allowed = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        allowed = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return allowed;
+}
+
+char *session_effective_tool_filter(sqlite3 *db, int64_t session_id) {
+    return db_scalar_text(db,
+        "SELECT CASE WHEN s.tool_filter IS NULL THEN c.tool_filter"
+        "            WHEN c.tool_filter IS NULL THEN s.tool_filter"
+        "            ELSE (SELECT json_group_array(f.value) FROM json_each(s.tool_filter) f"
+        "                   WHERE f.value IN (SELECT value FROM json_each(c.tool_filter)))"
+        "       END"
+        " FROM sessions s LEFT JOIN channel_chats c ON c.session_id = s.id"
+        " WHERE s.id=?1;", session_id);
 }
 
 static int role_to_int(Role r) {
@@ -2050,12 +2546,12 @@ int db_secret_key_loaded(void) {
     return s_secret_key_loaded;
 }
 
-/* Chat→agent binding: the agent of the route's pinned session. Routes never
- * name an agent directly — sessions do (route-model unification, v33). */
+/* Chat→agent binding: the agent of the chat's pinned session. A chat never
+ * names an agent directly — sessions do (route-model unification, v33). */
 char *db_channel_binding_get(sqlite3 *db, const char *channel_name, const char *chat_id) {
-    const char *sql = "SELECT s.agent_name FROM channel_routes r"
-                      " JOIN sessions s ON s.id = r.session_id"
-                      " WHERE r.channel_name=? AND r.chat_id=?;";
+    const char *sql = "SELECT s.agent_name FROM channel_chats c"
+                      " JOIN sessions s ON s.id = c.session_id"
+                      " WHERE c.channel_name=? AND c.chat_id=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
@@ -2423,10 +2919,11 @@ int delivery_policy_valid(const char *p) {
 
 char *delivery_policy_resolve(sqlite3 *db, int64_t launcher_session_id) {
     char *p = db_scalar_text(db,
-        "SELECT policy FROM delivery_edges"
-        " WHERE session_id=?1 AND one_shot=0"
-        "   AND target_kind IN ('parent','channel') AND policy <> 'explicit'"
-        " ORDER BY CASE target_kind WHEN 'parent' THEN 0 ELSE 1 END LIMIT 1;",
+        "SELECT p FROM (SELECT e.target_kind AS k, " EDGE_POLICY " AS p"
+        "   FROM delivery_edges e WHERE e.session_id=?1 AND e.one_shot=0"
+        "     AND e.target_kind IN ('parent','channel'))"
+        " WHERE p <> 'explicit'"
+        " ORDER BY CASE k WHEN 'parent' THEN 0 ELSE 1 END LIMIT 1;",
         launcher_session_id);
     if (p && delivery_policy_valid(p)) return p;
     free(p);
@@ -2438,7 +2935,9 @@ char *delivery_policy_resolve(sqlite3 *db, int64_t launcher_session_id) {
 
 int delivery_edge_create(sqlite3 *db, int64_t session_id, const char *kind,
                          const char *ref, const char *policy, int one_shot) {
-    if (!delivery_policy_valid(policy) || !kind || !ref) return -1;
+    if (!kind || !ref) return -1;
+    if (strcmp(kind, "channel") == 0 ? policy != NULL : !delivery_policy_valid(policy))
+        return -1;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "INSERT OR IGNORE INTO delivery_edges"

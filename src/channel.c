@@ -193,29 +193,62 @@ int channel_id_is_admin(sqlite3 *db, const char *channel_name, const char *id) {
     return channel_list_has(db, channel_name, "admin_ids", id);
 }
 
-/* Channel open-door policy: channels.default_agent (NULL = fail-closed).
- * *filter_out (optional) receives channels.default_tool_filter — the tool
- * scope for chats the gate accepts without a route. It is read independently
- * of default_agent: the admin fallback lands on the global default agent but
- * is still an unrouted chat, so it takes the same filter. */
-char *channel_default_agent(sqlite3 *db, const char *channel_name,
-                            char **filter_out) {
+/* Channel open-door policy: channels.default_agent (NULL = fail-closed). */
+char *channel_default_agent(sqlite3 *db, const char *channel_name) {
     sqlite3_stmt *s;
     char *agent = NULL;
-    if (filter_out) *filter_out = NULL;
-    if (sqlite3_prepare_v2(db, "SELECT default_agent, default_tool_filter"
-                               " FROM channels WHERE name=?;",
+    if (sqlite3_prepare_v2(db, "SELECT default_agent FROM channels WHERE name=?;",
                            -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
         if (sqlite3_step(s) == SQLITE_ROW) {
             const char *v = (const char *)sqlite3_column_text(s, 0);
             if (v && v[0]) agent = strdup(v);
-            const char *f = (const char *)sqlite3_column_text(s, 1);
-            if (filter_out && f && f[0]) *filter_out = strdup(f);
         }
         sqlite3_finalize(s);
     }
     return agent;
+}
+
+const char *chat_default_mode(const char *chat_id) {
+    return (chat_id && chat_id[0] == '-') ? "explicit" : "auto";
+}
+
+int channel_chat_observe(sqlite3 *db, const char *channel_name, const char *chat_id,
+                         const char *payload, int sender_is_admin) {
+    /* is_admin: a DM whose other party is one of the channel's admins. In a
+     * group other people read the chat, so it is never an admin chat,
+     * whoever is speaking. A missing chat_type counts as a DM, as before. */
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO channel_chats(channel_name, chat_id, delivery_mode, tool_filter,"
+            "                          title, is_admin, kind, last_message_at)"
+            " VALUES(?1, ?2,"
+            /* The starting mode follows what the envelope says the chat is;
+             * the id rule only when it does not say. Set once: a chat that
+             * already has a row (an operator's route add) keeps its mode. */
+            "   CASE json_extract(?4,'$.chat_type') WHEN 'group' THEN 'explicit'"
+            "        WHEN 'dm' THEN 'auto' ELSE ?3 END,"
+            "   (SELECT default_tool_filter FROM channels WHERE name=?1),"
+            "   json_extract(?4,'$.chat_title'),"
+            "   (?5 AND COALESCE(json_extract(?4,'$.chat_type'),'dm')='dm'),"
+            "   CASE WHEN json_extract(?4,'$.chat_type') IN ('dm','group')"
+            "        THEN json_extract(?4,'$.chat_type') END,"
+            "   unixepoch())"
+            " ON CONFLICT(channel_name, chat_id) DO UPDATE SET"
+            "   title=COALESCE(excluded.title, title),"
+            "   is_admin=excluded.is_admin,"
+            "   kind=COALESCE(excluded.kind, kind),"
+            "   last_message_at=excluded.last_message_at;",
+            -1, &st, NULL) != SQLITE_OK)
+        return SQLITE_ERROR;
+    sqlite3_bind_text(st, 1, channel_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, chat_default_mode(chat_id), -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, payload, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 5, sender_is_admin ? 1 : 0);
+    int rc = sqlite3_step(st);   /* extended codes: db_open turns them on */
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? SQLITE_OK : rc;
 }
 
 /* Queue a plain-text reply to one chat (command feedback — not agent output,
@@ -235,51 +268,180 @@ void channel_chat_reply(sqlite3 *db, const char *channel_name,
     }
 }
 
-/* Re-point the chat's pin (upsert, preserving delivery_mode/tool_filter on
- * an existing row) and stamp the session's origin. The pin is the binding —
- * this is the one write that moves a chat between conversations. */
-void channel_pin_session(sqlite3 *db, const char *channel_name,
-                         const char *chat_id, int64_t sid) {
+/* One statement with (channel, chat, int64) bound at ?1 ?2 ?3; 0 on success. */
+static int pin_exec(sqlite3 *db, const char *sql, const char *channel_name,
+                    const char *chat_id, int64_t n) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, channel_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 3, n);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+/* BEGIN IMMEDIATE on an idle handle, a savepoint inside a caller's
+ * transaction (request_config's apply, a nested pin) — one atomic write
+ * either way. */
+static int pin_begin(sqlite3 *db, int *own) {
+    *own = sqlite3_get_autocommit(db);
+    return sqlite3_exec(db, *own ? "BEGIN IMMEDIATE" : "SAVEPOINT chat_pin",
+                        NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
+}
+
+static int pin_end(sqlite3 *db, int own, int ok) {
+    if (ok && sqlite3_exec(db, own ? "COMMIT" : "RELEASE chat_pin",
+                           NULL, NULL, NULL) == SQLITE_OK)
+        return 0;
+    if (own) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    else sqlite3_exec(db, "ROLLBACK TO chat_pin; RELEASE chat_pin", NULL, NULL, NULL);
+    return -1;
+}
+
+/* A fresh top-level session for `agent`, belonging to the chat (the chat's
+ * row must exist). Named `name`, or after the channel (as /new always named
+ * them) when NULL. */
+static int64_t fresh_chat_session(sqlite3 *db, const char *channel_name,
+                                  const char *chat_id, const char *agent,
+                                  const char *name) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "INSERT INTO channel_routes(channel_name, chat_id, session_id)"
-            " VALUES(?1,?2,?3)"
-            " ON CONFLICT(channel_name, chat_id)"
-            " DO UPDATE SET session_id=excluded.session_id;",
-            -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(st, 1, channel_name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
-        sqlite3_bind_int64(st, 3, sid);
-        sqlite3_step(st);
-        sqlite3_finalize(st);
-    }
+            "INSERT INTO sessions(name, agent_name, channel_name, chat_id)"
+            " VALUES(COALESCE(?4, ?1), ?3, ?1, ?2);", -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, channel_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
+    if (agent) sqlite3_bind_text(st, 3, agent, -1, SQLITE_STATIC);
+    if (name) sqlite3_bind_text(st, 4, name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? sqlite3_last_insert_rowid(db) : -1;
+}
+
+/* The chat's row, if nobody has seen it yet: an operator or agent naming a
+ * chat starts it from the operator defaults (no filter — the gate's
+ * channel_chat_observe is what copies channels.default_tool_filter). */
+int channel_chat_ensure(sqlite3 *db, const char *channel_name, const char *chat_id) {
+    sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "UPDATE sessions SET channel_name=?1, chat_id=?2 WHERE id=?3;",
-            -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(st, 1, channel_name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
-        sqlite3_bind_int64(st, 3, sid);
-        sqlite3_step(st);
-        sqlite3_finalize(st);
+            "INSERT OR IGNORE INTO channel_chats(channel_name, chat_id, delivery_mode)"
+            " VALUES(?1, ?2, ?3);", -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, channel_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, chat_default_mode(chat_id), -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+/* The pin's body; the caller holds the transaction. */
+static int pin_locked(sqlite3 *db, const char *channel_name, const char *chat_id,
+                      int64_t sid) {
+    if (channel_chat_ensure(db, channel_name, chat_id) != 0) return -1;
+    sqlite3_stmt *st;
+
+    /* One chat per session: a chat that holds sid now gets a fresh session
+     * for the same agent, as /new would give it. Freed before the move so
+     * the unique pin index never sees sid twice. */
+    char *agent = NULL, *other_ch = NULL, *other_chat = NULL;
+    int found = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT s.agent_name, c.channel_name, c.chat_id FROM sessions s"
+            " LEFT JOIN channel_chats c ON c.session_id = s.id"
+            "   AND NOT (c.channel_name = ?1 AND c.chat_id = ?2)"
+            " WHERE s.id = ?3;", -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, channel_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 3, sid);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        found = 1;
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) agent = strdup(v);
+        v = (const char *)sqlite3_column_text(st, 1);
+        if (v) other_ch = strdup(v);
+        v = (const char *)sqlite3_column_text(st, 2);
+        if (v) other_chat = strdup(v);
     }
+    sqlite3_finalize(st);
+    int ok = found;
+    if (ok && other_ch && other_chat) {
+        int64_t fresh = fresh_chat_session(db, other_ch, other_chat, agent, NULL);
+        ok = fresh > 0 && pin_exec(db,
+            "UPDATE channel_chats SET session_id=?3 WHERE channel_name=?1 AND chat_id=?2;",
+            other_ch, other_chat, fresh) == 0;
+        if (ok)
+            LOG_INFO_("channel pin: session %lld moves to %s:%s; %s:%s gets fresh"
+                      " session %lld", (long long)sid, channel_name, chat_id,
+                      other_ch, other_chat, (long long)fresh);
+    }
+    free(agent); free(other_ch); free(other_chat);
+
+    /* Pin, stamp, and point an existing channel edge at the new channel (its
+     * cursor stays: what was delivered elsewhere is not re-sent here). */
+    return ok &&
+        pin_exec(db, "UPDATE channel_chats SET session_id=?3"
+                     " WHERE channel_name=?1 AND chat_id=?2;",
+                 channel_name, chat_id, sid) == 0 &&
+        pin_exec(db, "UPDATE sessions SET channel_name=?1, chat_id=?2 WHERE id=?3;",
+                 channel_name, chat_id, sid) == 0 &&
+        pin_exec(db, "UPDATE delivery_edges SET target_ref=?1"
+                     " WHERE session_id=?3 AND target_kind='channel'"
+                     "   AND target_ref<>?1;",
+                 channel_name, chat_id, sid) == 0 ? 0 : -1;
+}
+
+int channel_pin_session(sqlite3 *db, const char *channel_name,
+                        const char *chat_id, int64_t sid) {
+    if (!db || !channel_name || !chat_id || !chat_id[0] || sid <= 0) return -1;
+    int own;
+    if (pin_begin(db, &own) != 0) return -1;
+    int rc = pin_end(db, own, pin_locked(db, channel_name, chat_id, sid) == 0);
+    if (rc != 0)
+        LOG_WARN_("channel pin %s:%s -> session %lld failed: %s", channel_name,
+                  chat_id, (long long)sid, sqlite3_errmsg(db));
+    return rc;
+}
+
+int64_t channel_pin_new_session(sqlite3 *db, const char *channel_name,
+                                const char *chat_id, const char *agent,
+                                const char *name) {
+    if (!db || !channel_name || !chat_id || !chat_id[0] || !agent) return -1;
+    int own;
+    if (pin_begin(db, &own) != 0) return -1;
+    /* The row first: the new session belongs to the chat (declared link). */
+    int64_t sid = channel_chat_ensure(db, channel_name, chat_id) == 0
+        ? fresh_chat_session(db, channel_name, chat_id, agent, name) : -1;
+    int ok = sid > 0 && pin_locked(db, channel_name, chat_id, sid) == 0;
+    if (pin_end(db, own, ok) != 0) {
+        LOG_WARN_("channel new session for %s:%s (agent %s) failed: %s",
+                  channel_name, chat_id, agent, sqlite3_errmsg(db));
+        return -1;
+    }
+    return sid;
 }
 
 
-/* One-time admin notification for a dropped unrouted sender. The dedup set is
- * in-memory, per-process — ephemeral politeness state, not authority: a
- * re-notify after a daemon restart is acceptable and not worth a table. */
-#define GATE_NOTIFIED_MAX 256
-static char *g_gate_notified[GATE_NOTIFIED_MAX];
-static int g_gate_notified_n;
-
+/* One admin notification for a dropped message from a chat nobody routed,
+ * once per chat: the claim on channel_chats.notified_at is the dedup, so a
+ * daemon restart does not tell the operator again. Removing a route clears
+ * the stamp, so a chat the operator unrouted is reported the next time it
+ * speaks. */
 static void gate_notify_unknown(sqlite3 *db, const char *ch_name,
                                 const char *cid, const char *payload) {
-    char key[192];
-    snprintf(key, sizeof(key), "%s\x1f%s", ch_name, cid);
-    for (int i = 0; i < g_gate_notified_n; i++)
-        if (strcmp(g_gate_notified[i], key) == 0) return;
-    if (g_gate_notified_n < GATE_NOTIFIED_MAX)
-        g_gate_notified[g_gate_notified_n++] = strdup(key);
+    sqlite3_stmt *claim;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE channel_chats SET notified_at=unixepoch()"
+            " WHERE channel_name=?1 AND chat_id=?2 AND notified_at IS NULL;",
+            -1, &claim, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(claim, 1, ch_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(claim, 2, cid, -1, SQLITE_STATIC);
+    int claimed = sqlite3_step(claim) == SQLITE_DONE && sqlite3_changes(db) == 1;
+    sqlite3_finalize(claim);
+    if (!claimed) return;
 
     /* Sender facts for the operator, rendered from the envelope in SQL. */
     char *note = NULL;
@@ -902,7 +1064,7 @@ void channel_consume_events(sqlite3 *db) {
          * (see channel_telegram.qjs processCallback); here it becomes a
          * DECIDE intent like any other and runs the same allow → execute
          * pipeline the chat commands use. The approval carries its own
-         * session_id, so this skips channel_routes/session lookup. */
+         * session_id, so this skips the chat/session lookup. */
         if (strcmp(etype, "approval_decision") == 0) {
             processed++;
             ChannelIntent it;
@@ -963,6 +1125,29 @@ void channel_consume_events(sqlite3 *db) {
                 }
             }
 
+            /* Every message is recorded on its chat's row first — routed or
+             * not, command or conversation: a chat nobody has seen gets one
+             * (decision 2), starting from the channel's defaults, and the
+             * envelope's facts (title, kind, admin DM) are kept current. A
+             * channel with no channels row cannot hold chats (declared link):
+             * that event is dropped. Anything else is left for the next pass,
+             * like a failed inbox insert. */
+            {
+                int orc = channel_chat_observe(db, ch_name, cid, payload,
+                                               channel_id_is_admin(db, ch_name, sender));
+                if (orc == SQLITE_CONSTRAINT_FOREIGNKEY) {
+                    LOG_ERROR_("channel event for unknown channel ch=%s chat=%s — dropped",
+                               ch_name, cid);
+                    goto del;
+                }
+                if (orc != SQLITE_OK) {
+                    LOG_ERROR_("channel chat record failed ch=%s chat=%s eid=%lld rc=%d,"
+                               " will retry", ch_name, cid, (long long)eid, orc);
+                    free(ch_name); free(etype); free(payload);
+                    continue;
+                }
+            }
+
             /* Admin intents are peeled off before any session dispatch, so
              * they work even when the pinned session is wedged. Parse →
              * allow → execute (channel_intent.c); a non-admin's recognized
@@ -990,7 +1175,7 @@ void channel_consume_events(sqlite3 *db) {
                 }
             }
 
-            /* The pin IS the binding: route → session, session → agent
+            /* The pin IS the binding: chat → session, session → agent
              * (route-model unification, v33). No wildcard fallback — channel
              * policy lives on channels.default_agent. */
             int64_t sid = -1;
@@ -998,9 +1183,9 @@ void channel_consume_events(sqlite3 *db) {
             {
                 sqlite3_stmt *ps;
                 if (sqlite3_prepare_v2(db,
-                        "SELECT r.session_id, s.agent_name FROM channel_routes r"
-                        " JOIN sessions s ON s.id = r.session_id"
-                        " WHERE r.channel_name=?1 AND r.chat_id=?2;",
+                        "SELECT c.session_id, s.agent_name FROM channel_chats c"
+                        " JOIN sessions s ON s.id = c.session_id"
+                        " WHERE c.channel_name=?1 AND c.chat_id=?2;",
                         -1, &ps, NULL) == SQLITE_OK) {
                     sqlite3_bind_text(ps, 1, ch_name, -1, SQLITE_STATIC);
                     sqlite3_bind_text(ps, 2, cid, -1, SQLITE_STATIC);
@@ -1019,12 +1204,10 @@ void channel_consume_events(sqlite3 *db) {
                  * default_agent; everyone else drops with a log line + a
                  * one-time admin notification. */
                 int is_admin = channel_id_is_admin(db, ch_name, sender);
-                char *gate_filter = NULL;
-                agent = channel_default_agent(db, ch_name, &gate_filter);
+                agent = channel_default_agent(db, ch_name);
                 if (!agent && is_admin)
                     agent = config_get(db, "default_agent");
                 if (!agent) {
-                    free(gate_filter);
                     if (is_admin) {
                         LOG_WARN_("channel admin chat but no default agent"
                                   " ch=%s chat=%s — dropping", ch_name, cid);
@@ -1035,48 +1218,19 @@ void channel_consume_events(sqlite3 *db) {
                     }
                     goto del;
                 }
-                /* First contact: create the session and write the pin back,
-                 * so the exact-route invariant holds from here on. Sessions
-                 * born from channel policy carry the channel's unrouted
-                 * filter (channels.default_tool_filter), not a route's —
-                 * admins included: ambient reach through the open door is
-                 * still unrouted, real admin power comes from a routed chat. */
-                sid = session_create_filtered(db, ch_name, agent, -1, 0, gate_filter);
-                free(gate_filter);
-                if (sid > 0) {
-                    channel_pin_session(db, ch_name, cid, sid);
+                /* First contact: create the session and pin the chat to it,
+                 * so the routed-chat invariant holds from here on. Its tools
+                 * are the chat's own (channel_chats.tool_filter, which
+                 * started from channels.default_tool_filter when the chat
+                 * was recorded) — admins included: ambient reach through the
+                 * open door is still unrouted, real admin power comes from a
+                 * chat the operator routed. */
+                sid = channel_pin_new_session(db, ch_name, cid, agent, NULL);
+                if (sid > 0)
                     LOG_INFO_("channel new_session ch=%s chat=%s sid=%lld agent=%s",
                               ch_name, cid, (long long)sid, agent);
-                }
             }
             if (sid <= 0) { free(agent); goto del; }
-            /* Display name of the chat, as the runner observed it. Bots
-             * deserve to know where they are chatting — the model reads it in
-             * the system prompt; every send still addresses by chat_id. The
-             * IS NOT guard makes the common case (name unchanged, or absent)
-             * a no-op write. */
-            {
-                sqlite3_stmt *ts;
-                if (sqlite3_prepare_v2(db,
-                        /* chat_is_admin rides along: a DM whose other party
-                         * is one of the channel's admins. In a group other
-                         * people read the chat, so it is never an admin chat,
-                         * whoever is speaking. */
-                        "UPDATE sessions SET"
-                        "  chat_title=COALESCE(json_extract(?2,'$.chat_title'), chat_title),"
-                        "  chat_is_admin=(?3 AND COALESCE(json_extract(?2,'$.chat_type'),'dm')='dm')"
-                        " WHERE id=?1"
-                        "   AND (chat_title IS NOT COALESCE(json_extract(?2,'$.chat_title'), chat_title)"
-                        "     OR chat_is_admin IS NOT"
-                        "        (?3 AND COALESCE(json_extract(?2,'$.chat_type'),'dm')='dm'))",
-                        -1, &ts, NULL) == SQLITE_OK) {
-                    sqlite3_bind_int64(ts, 1, sid);
-                    sqlite3_bind_text(ts, 2, payload, -1, SQLITE_STATIC);
-                    sqlite3_bind_int(ts, 3, channel_id_is_admin(db, ch_name, sender));
-                    sqlite3_step(ts);
-                    sqlite3_finalize(ts);
-                }
-            }
             if (sid > 0) {
                 LOG_INFO_("channel event ch=%s sid=%lld type=%s",
                           ch_name, (long long)sid, etype);

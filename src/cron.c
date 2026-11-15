@@ -666,9 +666,9 @@ static int routed_session(sqlite3 *db, const char *chan, const char *chat,
                           const char *agent, int64_t *out) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "SELECT r.session_id, s.agent_name FROM channel_routes r"
-            " JOIN sessions s ON s.id=r.session_id"
-            " WHERE r.channel_name=?1 AND r.chat_id=?2;",
+            "SELECT c.session_id, s.agent_name FROM channel_chats c"
+            " JOIN sessions s ON s.id=c.session_id"
+            " WHERE c.channel_name=?1 AND c.chat_id=?2;",
             -1, &st, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_text(st, 1, chan, -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 2, chat, -1, SQLITE_STATIC);

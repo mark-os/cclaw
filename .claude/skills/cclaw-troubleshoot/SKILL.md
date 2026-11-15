@@ -184,8 +184,11 @@ Reference: `specs/operations.md` (backup, restore, update, rollback).
   does NOT track `templates/default_system_prompt.md` improvements
   automatically. Diff the stored prompt against the current template before
   trusting that "current guidance" is even present.
-- `channel_routes.system_prompt_suffix` is composed live at request-build
-  time (`llm_payload.c`) — edits take effect on the *next* turn, no restart.
+- A chat's settings (`channel_chats.delivery_mode`, `tool_filter`,
+  `guidance`) are read live (`llm_payload.c`, `advance.c`) — edits take
+  effect on the *next* turn, no restart. A chat whose messages vanish: check
+  its row — `session_id` NULL means the gate drops it (`notified_at` says
+  whether the operator was told).
   Channel *extension* code is loaded once at runner startup — after editing
   it, sync the live copy (`~/.cclaw/extensions/<name>/`) **and** restart the
   channel (`cclaw channel restart <name>`); editing the template alone does

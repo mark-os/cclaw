@@ -4,6 +4,7 @@
 #include "db.h"
 #include "wake.h"
 #include "test_util.h"
+#include "channel.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -554,6 +555,7 @@ typedef struct {
 } JobSpec;
 
 static int64_t insert_job(sqlite3 *db, const JobSpec *j) {
+    if (j->channel && j->chat) test_seed_chat(db, j->channel, j->chat);
     const char *sql =
         "INSERT INTO cron_jobs(agent_name,name,cron_expr,run_at,interval_s,"
         " session_id,task,script,target,target_agent,channel_name,chat_id,"
@@ -579,8 +581,8 @@ static int64_t insert_job(sqlite3 *db, const JobSpec *j) {
 }
 
 static void route_pin(sqlite3 *db, const char *chan, const char *chat, int64_t sid) {
-    exec_ok(db, "INSERT INTO channel_routes(channel_name,chat_id,session_id)"
-                " VALUES('%s','%s',%lld)", chan, chat, (long long)sid);
+    test_seed_chat(db, chan, chat);
+    assert(channel_pin_session(db, chan, chat, sid) == 0);
 }
 
 /* source_ref carries the job NAME, not its id: ids die with one-shot removal

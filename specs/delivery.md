@@ -3,11 +3,15 @@
 Status: milestone 1 shipped 2026-08-04. Milestone 2 (`session_send`/ping,
 reply-edge timeouts) is deferred; `target_kind='session'` is reserved for it.
 
-Every outbound edge of a session is a `delivery_edges` row carrying an
-explicit policy from one shared vocabulary: the **standing parent edge**
-every child gets at creation, the **channel edge** a chat-bound session gets
-lazily at its first delivery boundary, and the **one-shot `tool_call` edge**
-a blocking launch adds on top. `advance_deliver_boundary()` (advance.c)
+Every outbound edge of a session is a `delivery_edges` row with a policy
+from one shared vocabulary: the **standing parent edge** every child gets at
+creation, the **channel edge** a chat-bound session gets lazily at its first
+delivery boundary, and the **one-shot `tool_call` edge** a blocking launch
+adds on top. Parent and tool_call edges carry their policy, frozen. A channel
+edge carries none (`policy` is NULL — a CHECK enforces it): its policy is the
+`delivery_mode` of the chat the session belongs to, read at every boundary
+(`EDGE_POLICY` in db.h, the one definition every reader uses). The row keeps
+only the cursor. `advance_deliver_boundary()` (advance.c)
 evaluates a session's edges at each of its turn boundaries; `'iteration'`
 edges also ship mid-turn via `advance_deliver_iteration()`.
 
@@ -59,10 +63,12 @@ behind an idle session's assistant leaf = delivery owed — the predicate
 `advance_sweep_undelivered()` (daemon tick) re-derives from: lost pushes
 re-deliver, quiescent holds re-check their subtree (this is how a subtree
 that settles *silently* — an `explicit` grandchild finishing — still
-delivers), unfired one-shots fire. The sweep skips `explicit` edges. A
-boundary that ships nothing (empty digest, suppressed channel error) still
+delivers), unfired one-shots fire. The sweep skips `explicit` edges (for a
+channel edge: a chat whose mode is `explicit` now). A boundary that ships
+nothing (empty digest, suppressed channel error, an `explicit` chat) still
 advances the cursor — "evaluated" is recorded, or the sweep would re-pick it
-forever. Pushes are latency, the sweep is the guarantee, recovery
+forever, and a chat flipped from `explicit` to `auto` later would get the
+answer of a turn that was never meant to post. Pushes are latency, the sweep is the guarantee, recovery
 (`db_recover_stale_sessions`) handles the dead. **No delivery-edge timeouts
 in milestone 1** — blocking launches have no clock, exactly the prior
 doctrine.
@@ -91,7 +97,7 @@ failed:`. `source='agent_result'`, `source_ref=<child sid>` as before.
 | Edge | Config surface | Default |
 |------|----------------|---------|
 | parent | `launch_agent` arg `delivery` overrides; otherwise the launcher's own outbound-edge policy, copied at launch and frozen (`tool_filter` precedent, `session_create_filtered`) | registry `agent_delivery_default` (`quiescent`) seeds roots and the children of `explicit` sessions |
-| channel | `channel_routes.delivery_mode` is the *template*; the session's live edge freezes from it at the first delivery boundary (`channel_edge_ensure`) — later route edits don't retro-apply | `auto` = alias for `quiescent`; unrouted chat-bound sessions (cron `target:"new"`) freeze `quiescent` |
+| channel | `channel_chats.delivery_mode` of the session's chat, read live at every boundary — an edit applies to the next turn; `cclaw route add --mode`, `request_config` routes (`explicit`) | a new chat: `explicit` if its id is group-shaped, else `auto` (= `quiescent`); a cron `target:"new"` session reads the mode of the chat it reports to |
 
 ## Edge cases that are rules
 
@@ -123,3 +129,18 @@ current leaf; NULL → 0 (still owed, sweep re-derives). In-flight blocking
 children got their one-shot edges. The column was dropped. Channel edges
 materialize lazily, so routed chats picked up `auto`→`quiescent` on their
 next turn — the one deliberate behavior change.
+
+## Migration (v61) — history
+
+The channel edge stopped carrying a policy: every existing channel edge lost
+its frozen copy, and the chat's `delivery_mode` (the old route template)
+became the live value. Cursors: under v60 an `explicit` boundary never
+advanced the cursor, so an edge that never posted sat far behind its leaf
+and would have posted an old answer on the first flip to `auto`. The patch
+moved the cursor of every channel edge frozen `explicit`, or whose chat is
+`explicit` now, to its session's `leaf_id` — exactly what an explicit
+boundary stamps today. Every other edge kept its cursor: if it was behind,
+that delivery was owed under v60 too, and the sweep makes it. Where a session's frozen copy
+differed from its route — the route was edited after the session's first
+delivery — the route's value now applies; the patch logs each such chat. A
+channel edge's `target_ref` was set to its session's channel.

@@ -15,15 +15,15 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Does the chat's route resolve to this agent? One rule: the pinned
- * session's agent (routes never name an agent — channels.default_agent
+/* Is the chat routed to this agent? One rule: the agent of the session the
+ * chat is pinned to (a chat never names an agent — channels.default_agent
  * routes inbound traffic only, it hands out no send authority). */
 static int send_target_allowed(sqlite3 *db, const char *agent,
                                const char *channel, const char *chat_id) {
     const char *sql =
-        "SELECT 1 FROM channel_routes r"
-        " JOIN sessions s ON s.id = r.session_id"
-        " WHERE r.channel_name=?1 AND r.chat_id=?2 AND s.agent_name=?3;";
+        "SELECT 1 FROM channel_chats c"
+        " JOIN sessions s ON s.id = c.session_id"
+        " WHERE c.channel_name=?1 AND c.chat_id=?2 AND s.agent_name=?3;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_text(st, 1, channel, -1, SQLITE_STATIC);
@@ -34,18 +34,18 @@ static int send_target_allowed(sqlite3 *db, const char *agent,
     return ok;
 }
 
-/* action=list: reachable targets, straight from channel_routes. */
+/* action=list: reachable targets, straight from channel_chats. */
 static char *list_targets(sqlite3 *db, const char *agent, int *is_error) {
     const char *sql =
         "SELECT COALESCE(json_group_array(json_object("
-        "  'channel', r.channel_name, 'chat_id', r.chat_id,"
+        "  'channel', c.channel_name, 'chat_id', c.chat_id,"
         /* 'name' is the chat's observed display title (may be NULL until a
          * runner reports one) — for the model to pick a target by; the send
          * still goes by chat_id. */
-        "  'name', s.chat_title,"
-        "  'delivery_mode', r.delivery_mode)), '[]')"
-        " FROM channel_routes r"
-        " JOIN sessions s ON s.id = r.session_id"
+        "  'name', c.title,"
+        "  'delivery_mode', c.delivery_mode)), '[]')"
+        " FROM channel_chats c"
+        " JOIN sessions s ON s.id = c.session_id"
         " WHERE s.agent_name=?1;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
@@ -195,10 +195,10 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data, i
                       "to one (use action='list' for other targets)");
     }
 
-    /* Routes are the allowlist — default-deny. Reaching a new target is a
-     * privileged act: an operator `cclaw route add`, never implicit. */
+    /* Routed chats are the allowlist — default-deny. Reaching a new target is
+     * a privileged act: an operator `cclaw route add`, never implicit. */
     if (!send_target_allowed(ctx->db, ctx->agent_name, channel, chat_id)) {
-        char *m = tool_fail(is_error, "error: no route for (%s, %s) resolves to you — "
+        char *m = tool_fail(is_error, "error: (%s, %s) is not a chat routed to you — "
                        "channel_send targets need an operator route "
                        "(cclaw route add). Use action='list' to see yours.",
                        channel, chat_id);
@@ -206,16 +206,20 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data, i
         return m;
     }
 
-    /* Dedup with auto mode: targeting the session's own origin chat when the
-     * route already auto-delivers turn output would double-post. A file is
-     * not part of that output — this tool is the only way one is sent — so
-     * the rule is about text alone. */
+    /* Dedup with auto delivery: targeting the session's own chat when that
+     * chat posts turn output by itself would double-post. The chat's
+     * delivery_mode is the one value — the same one the turn boundary reads
+     * (EDGE_POLICY) — so this check and the delivery can never disagree
+     * (review-7: it once read a route template while delivery ran on a frozen
+     * copy, and a reply could be both refused here and never delivered). A
+     * file is not part of that output — this tool is the only way one is
+     * sent — so the rule is about text alone. */
     if (!file) {
         const char *dsql =
-            "SELECT 1 FROM sessions s"
+            "SELECT 1 FROM sessions s JOIN channel_chats c"
+            "   ON c.channel_name = s.channel_name AND c.chat_id = s.chat_id"
             " WHERE s.id=?1 AND s.channel_name=?2 AND s.chat_id=?3"
-            "   AND COALESCE((SELECT r.delivery_mode FROM channel_routes r"
-            "        WHERE r.channel_name=?2 AND r.chat_id=?3), 'auto') = 'auto';";
+            "   AND c.delivery_mode <> 'explicit';";
         sqlite3_stmt *st;
         int dup = 0;
         if (sqlite3_prepare_v2(ctx->db, dsql, -1, &st, NULL) == SQLITE_OK) {
@@ -227,9 +231,9 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data, i
         }
         if (dup) {
             free(channel); free(chat_id); free(message);
-            return strdup("not sent: this chat is your session's origin and the "
-                          "route is in auto mode — your reply already delivers "
-                          "there.");
+            return strdup("not sent: this is your own chat and it posts your "
+                          "replies by itself — your final message already "
+                          "delivers there.");
         }
     }
 
@@ -298,8 +302,9 @@ static const char *CHANNEL_SEND_PARAMS =
 int tool_channel_send_register(ToolRegistry *reg, ToolChannelSendCtx *ctx) {
     int rc = tools_register(reg, "channel_send",
         "Send a message to a chat routed to you (deliberate speech — the only "
-        "outbound path for explicit-mode routes, e.g. group chats). Targets "
-        "are allowlisted by channel_routes; action='list' shows yours. "
+        "way anything reaches a chat whose replies are not posted "
+        "automatically, e.g. group chats). Only chats routed to you are "
+        "targets; action='list' shows yours. "
         "file attaches a file from your workspace, to any routed chat "
         "including your own.",
         CHANNEL_SEND_PARAMS, tool_channel_send_handler, ctx);

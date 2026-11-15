@@ -114,10 +114,10 @@ says so, and the chat still gets the generic line.
 The generic line is `chat_error_text` (default "Sorry, I can't provide a
 response right now."). A chat gets it at most once per
 `chat_error_notice_hours` (default 24; 0 = never). The limit is per chat, not
-per session: `sessions.chat_error_notice_at` holds the time, and the check
-takes the newest value over all sessions of the chat.
+per session: `channel_chats.error_notice_at` holds the time, whichever of the
+chat's sessions failed.
 
-`sessions.chat_is_admin` records whether the chat is an admin's own DM. The
+`channel_chats.is_admin` records whether the chat is an admin's own DM. The
 daemon sets it from each incoming message (`chat_type` is `dm` and `sender_id`
 is an admin). Membership of `admin_chats` is read from config each time.
 Until a message has set it, a chat whose id is itself an admin id counts as an

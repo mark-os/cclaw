@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v60 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v61 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -52,6 +52,12 @@ Agents are the only entity with a rename verb, so as of v31 every
   `test_config_link_audit` (test/test_agent_rename.c).
 - `grants.approval_id` → `approvals(id)` (v60): the approval being applied
   when the grant was written.
+- Chats (v61, decisions 1–10): `channel_chats.channel_name` → `channels`
+  (ON UPDATE CASCADE), `channel_chats.session_id` → `sessions(id)` (the pin),
+  and the composite `sessions(channel_name, chat_id)` and
+  `cron_jobs(channel_name, chat_id)` → `channel_chats` (ON UPDATE CASCADE;
+  both columns NULL = no chat, and a row with only one of them is not
+  checked). A chat row is never deleted.
 - Not declared, on purpose: `secret_hosts.secret_name` and a `secret`
   grant's `value` (a `CCLAW_SECRET_*` environment secret has bindings and
   grants but no `secrets` row — `db_secret_rm` removes all three in code), and the
@@ -437,7 +443,7 @@ Channel processes managed by the daemon. The extension system writes these rows.
 | `status` | TEXT NOT NULL DEFAULT 'draft' | see lifecycle below |
 | `pid` | INTEGER | daemon tracks the running process |
 | `default_agent` | TEXT | FK → `agents(name)`. Open-door policy: non-NULL = unrouted chats are accepted and get a new session for this agent; NULL = fail-closed |
-| `default_tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. Frozen onto every session the gate creates for an *unrouted* chat (open door **and** admin fallback). Set by `route add <ch> '*' <agent> --tools ...` |
+| `default_tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. Copied once onto every chat the gate records (`channel_chats.tool_filter` of a new row) — open door **and** admin fallback alike; an edit changes future chats only. Set by `route add <ch> '*' <agent> --tools ...` |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 Status lifecycle: `draft` → `validated` → `active`.
@@ -461,21 +467,43 @@ Channel-private persistent key-value store (offsets, cursors, tokens).
 
 ---
 
-## channel_routes
+## channel_chats
 
-Pins a chat (platform conversation id) to a session; the session names its
-agent (v33 route-model unification). Routes never name an agent — the
-channel-wide default lives on `channels.default_agent`.
+One row per chat (platform conversation id) a channel has seen or an operator
+or agent has named (v61, replacing `channel_routes`; plan v0.8 decisions
+1–10). The pin (`session_id`) says which session the chat's messages go to;
+the session names its agent. The chat's three settings are read live — by
+the session the chat pins (`tool_filter`) and by every session that belongs
+to the chat (`delivery_mode`, `guidance`); nothing is copied onto a session.
+A new row starts from defaults copied once. Rows are never deleted. Logged in
+`change_log` (settings: the key, `session_id`, `delivery_mode`,
+`tool_filter`, `guidance`; the rest are measurements).
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `channel_name` | TEXT NOT NULL | |
-| `chat_id` | TEXT NOT NULL | Telegram chat id, Discord channel/DM id, … |
-| `session_id` | INTEGER NOT NULL | FK → `sessions(id)`; the pin IS the binding |
-| `delivery_mode` | TEXT NOT NULL DEFAULT 'auto' | delivery-policy template for the pinned session's channel edge: `auto` (= `quiescent`) \| `iteration` \| `digest` \| `turn` \| `quiescent` \| `explicit`. Frozen onto the session's `delivery_edges` row at its first delivery boundary; later route edits do not apply to it. See [delivery.md](delivery.md) |
-| `tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. Frozen onto the pinned session at its creation (`route add --tools`); later route edits don't retro-apply |
-| `system_prompt_suffix` | TEXT | Appended to the pinned session's system prompt every turn (`route add --prompt`); NULL = nothing appended. Read live — unlike `tool_filter`, an edit takes effect on the next turn |
+| `channel_name` | TEXT NOT NULL | FK → `channels(name)` ON UPDATE CASCADE; a chat cannot move between channels |
+| `chat_id` | TEXT NOT NULL | Telegram chat id, Discord channel/thread/DM id, … |
+| `session_id` | INTEGER | FK → `sessions(id)`: the pin. NULL = not routed (never assigned, or removed by `route rm` — the one way a routed chat becomes unrouted) — the gate drops the chat's messages unless the channel's door is open. Unique where not NULL (`idx_channel_chats_session`): one chat per session. A pinned session names its chat |
+| `delivery_mode` | TEXT NOT NULL DEFAULT 'auto' | CHECK `auto` (= `quiescent`) \| `iteration` \| `digest` \| `turn` \| `quiescent` \| `explicit`. The only value consulted for the delivery of the chat's sessions, read at every boundary ([delivery.md](delivery.md)); also shapes the system prompt's reply line. A new row: from the envelope's `chat_type` (group `explicit`, dm `auto`); a chat named before it spoke, by its id (begins with `-`: `explicit`). Never overwritten by a later message |
+| `tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. The pinned session's tools are grants ∩ `sessions.tool_filter` ∩ this, read live. A chat the gate records starts from `channels.default_tool_filter` |
+| `guidance` | TEXT | Appended to the system prompt of the chat's sessions every request (`route add --prompt`), after the location and reply lines; NULL = nothing |
+| `title` | TEXT | display name as observed by the channel runner (`#general @ My Server`); shown in the system prompt. NULL until a runner reports one |
+| `is_admin` | INTEGER | 1 = the chat's only reader is an operator (a DM whose other party is one of the channel's `admin_ids`); 0 = any other chat. Set from each incoming message; NULL until one arrives. Decides whether a failed turn sends the chat the generic line ([error-handling.md](error-handling.md#a-turn-that-ends-in-an-error)) |
+| `error_notice_at` | INTEGER | Unix time the chat last got the generic "can't respond" line; the once-per-`chat_error_notice_hours` limit |
+| `kind` | TEXT | CHECK `dm` \| `group` — the envelope's `chat_type`; NULL = not reported (every chat migrated in v61 until it speaks again) |
+| `first_seen_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | v61 migration: the oldest session or cron job naming the chat |
+| `last_message_at` | INTEGER | the last inbound message, routed or dropped |
+| `notified_at` | INTEGER | when the operator was told this unrouted chat spoke (once per chat; survives restarts; `route rm` clears it) |
 | PRIMARY KEY | (channel_name, chat_id) | |
+
+The v61 migration moved the cursor of every channel edge that never posted —
+frozen `explicit` under v60, or whose chat is `explicit` now — to its
+session's `leaf_id` (what an explicit boundary stamps today), so no later
+flip to `auto` posts an old answer; other edges kept their cursor (behind =
+owed under v60 too). It made one row per pair any route, session or cron job named;
+where the values came from, and how it resolved what the new constraints
+refuse (two chats pinning one session, stamps on a channel with no row), is
+in the comment on `patch_v61_chats()` (`src/db.c`).
 
 ---
 
@@ -486,11 +514,8 @@ channel-wide default lives on `channels.default_agent`.
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `name` | TEXT | human label |
 | `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; scopes session to agent |
-| `channel_name` | TEXT | originating channel |
-| `chat_id` | TEXT | originating chat id |
-| `chat_title` | TEXT | display name of the bound chat as observed by the channel runner (`#general @ My Server`, `DM with alice`); injected into the system prompt so the bot knows where it is chatting. Display only — sends always address by `chat_id`. NULL until a runner reports a name |
-| `chat_is_admin` | INTEGER | 1 = the chat's only reader is an operator (a DM whose other party is one of the channel's `admin_ids`); 0 = any other chat. Set from each incoming message (v55); NULL until one arrives. Decides whether a failed turn sends the chat the generic line ([error-handling.md](error-handling.md#a-turn-that-ends-in-an-error)) |
-| `chat_error_notice_at` | INTEGER | Unix time this session last sent its chat the generic "can't respond" line (v55). The once-per-`chat_error_notice_hours` limit reads the newest value over all sessions of the chat |
+| `channel_name` | TEXT | with `chat_id`: the chat this session belongs to — FK (composite) → `channel_chats` ON UPDATE CASCADE (v61); both NULL = none. Older sessions left behind by `/new` still name their chat; `channel_chats.session_id` says which one is pinned now |
+| `chat_id` | TEXT | see `channel_name` |
 | `parent_session_id` | INTEGER DEFAULT -1 | sub-agent parent (-1 = top-level) |
 | `parent_tool_call_id` | TEXT | the tool_call that spawned this sub-session |
 | `depth` | INTEGER NOT NULL DEFAULT 0 | sub-agent nesting depth |
@@ -505,14 +530,17 @@ channel-wide default lives on `channels.default_agent`.
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 Index: `idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS NOT NULL`.
+The chat columns that lived here until v61 (`chat_title`, `chat_is_admin`,
+`chat_error_notice_at`) are `channel_chats.title`, `is_admin`,
+`error_notice_at`.
 
 ### delivery_edges
 
 The delivery contract lives in [delivery.md](delivery.md); this is the shape.
 One row per outbound edge of a session: the standing parent edge every child
 gets at creation (v42 replaced `sessions.parent_notified_at` with this
-table), the channel edge a chat-bound session freezes from its route template
-at its first delivery boundary, and the one-shot `tool_call` edge a blocking
+table), the channel edge a chat-bound session gets at its first delivery
+boundary (no policy of its own — its chat's `delivery_mode` is read live), and the one-shot `tool_call` edge a blocking
 launch adds (deleted when it fires). `target_kind='session'` + one-shot reply
 edges are reserved for milestone 2's `session_send`.
 
@@ -522,7 +550,7 @@ edges are reserved for milestone 2's `session_send`.
 | `session_id` | INTEGER NOT NULL | FK → `sessions(id)`; the session whose output this edge carries |
 | `target_kind` | TEXT NOT NULL | `'parent'` \| `'channel'` \| `'session'` \| `'tool_call'` |
 | `target_ref` | TEXT NOT NULL | parent: parent session id; channel: channel name (chat_id lives on the session); tool_call: call_id |
-| `policy` | TEXT NOT NULL | `iteration` \| `digest` \| `turn` \| `quiescent` \| `explicit` |
+| `policy` | TEXT | `iteration` \| `digest` \| `turn` \| `quiescent` \| `explicit`, frozen; NULL exactly on channel edges (CHECK, v61) — read through `EDGE_POLICY` (db.h) |
 | `cursor` | INTEGER NOT NULL DEFAULT 0 | last entry id this edge delivered; stamped inside the delivery transaction. Cursor behind an idle session's assistant leaf = delivery owed — `advance_sweep_undelivered()`'s re-derivation predicate (the convergence sweep, `db_periodic`) |
 | `one_shot` | INTEGER NOT NULL DEFAULT 0 | blocking reply edge: fires once, then the row is deleted |
 
@@ -559,7 +587,7 @@ resource frees rather than until a human replies.
 
 ### sessions.tool_filter
 
-A JSON array of tool names frozen at sub-agent spawn time (`src/main.c`). Acts as a **positive scope** intersected with grants per turn — it can never widen authority, only shrink it. NULL means unrestricted (uses grants alone).
+A JSON array of tool names frozen at sub-agent spawn time (`launch_agent`). Acts as a **positive scope** intersected with grants per turn — it can never widen authority, only shrink it. NULL means unrestricted (uses grants alone). A chat's filter is not copied here (v61): the session a chat pins is also intersected with `channel_chats.tool_filter`, read live. Sessions created before v61 from a filtered route still carry their copy; intersecting it again changes nothing.
 
 ---
 
@@ -936,7 +964,7 @@ seconds) — the unused fields are `''` / NULL / NULL respectively
 | `session_id` | INTEGER NOT NULL | meaning follows `target`: the pinned session (`'pin'`), else the fire anchor — the session that set the job, and for `'new'` the most recently fired one. `0` = resolve to the agent's most recently active session at fire time (its state is not a filter: a fire into a busy session queues and lands at the next turn boundary) |
 | `task` | TEXT NOT NULL | injected message — the model-facing name is `prompt`; `''` = no prompt payload (with no `script` either, the fire is a bare wake) |
 | `script` | TEXT | QJS path run sandboxed at fire time under the target agent's profile+grants; composes with `task` (script first). NULL = no script payload. Workspace-relative when an agent set the job (existence checked at set time, so a typo fails then rather than unattended hours later); absolute-inside-the-shared-extension-store when `extension_promote` seeded it from a manifest `scripts[]` entry. Both shapes are re-validated at fire time, and nothing else is accepted |
-| `channel_name` | TEXT | chat stamp — the durable route identity a fire resolves through `channel_routes` at fire time, rather than binding a session id at set time. In the default target mode it is copied from the setting session's own binding (NULL for CLI/sub-agent callers); under `'new'` it is the explicit delivery target |
+| `channel_name` | TEXT | chat stamp — the durable route identity a fire resolves through `channel_chats.session_id` at fire time, rather than binding a session id at set time. With `chat_id`, a composite FK → `channel_chats` (v61); both NULL = no chat. In the default target mode it is copied from the setting session's own binding (NULL for CLI/sub-agent callers); under `'new'` it is the explicit delivery target |
 | `chat_id` | TEXT | with `channel_name`, the stamped chat |
 | `target` | TEXT | target-mode discriminator: NULL = follow the conversation (stamped chat, else the stamped `session_id`); `'pin'` = explicit session pin; `'new'` = a fresh session per fire |
 | `target_agent` | TEXT | FK → `agents(name)` ON UPDATE CASCADE (v47); agent that a `'new'`-mode fire runs under; NULL = `agent_name`. A value naming another agent is set only through an approval (see below) |
@@ -976,8 +1004,8 @@ payload.
 **Target** (by `target`):
 
 - NULL — *follow the conversation*. With a chat stamp, the fire goes to
-  whatever session `channel_routes` sends that chat to **right now**; with no
-  route for the chat, to the stamped `session_id`; with `session_id=0` (a CLI
+  whatever session the chat is pinned to **right now**; with no pin for the
+  chat, to the stamped `session_id`; with `session_id=0` (a CLI
   or manifest caller that never stamped one), to the agent's most recently
   active session, re-resolved every fire.
 - `'pin'` — `session_id` directly. Stale-by-choice; if the session is gone the
@@ -1061,7 +1089,7 @@ that agent's grants and model. `cron_set` parks **one** approval at set time
 the job is written by `apply_grant()` only after a yes — a standing job, not
 a per-fire prompt. Same-agent targeting, including the caller's own
 sub-agent sessions, parks nothing. An explicit `channel_name`/`chat_id` is
-checked against `channel_routes` at set time (and again at fire).
+checked against the chat's pin at set time (and again at fire).
 
 Every agent gets a seeded, **disabled** pulse job at creation — `name='heartbeat'`,
 `cron_expr='*/30 * * * *'`, no payload, `session_id=0` — written by
@@ -1095,9 +1123,10 @@ One row per changed row of a configuration table (v60, plan v0.8 decisions
 skip it. Logged tables and the setting/measurement class of every column are
 one list, `CHANGE_LOG_COLUMNS` in `src/change_log.c`; `change_log_sync()`
 generates three triggers per table (`log_<table>_ins/_upd/_del`) from it and
-is run by the v60 patch and on every start (`db_ensure_schema`), so a fresh
-and an upgraded database carry identical triggers. Logged now: `agents`,
-`grants`, `agent_models`, `providers`, `models`, `secrets`.
+is run by the v60 and v61 patches and on every start (`db_ensure_schema`), so
+a fresh and an upgraded database carry identical triggers. Logged now:
+`agents`, `grants`, `agent_models`, `providers`, `models`, `secrets`,
+`channel_chats` (v61).
 
 | Column | Type | Notes |
 |--------|------|-------|

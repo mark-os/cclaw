@@ -470,7 +470,7 @@ single scheduled script.
 The extension tables are `extensions`, `agent_extensions`, `tools` and `hooks`;
 the column reference is [schema.md](schema.md#extensions) and the source of
 truth is `templates/schema.sql`. The channel tables (`channels`,
-`channel_events`, `channel_outbox`, `channel_state`, `channel_routes`) are in
+`channel_events`, `channel_outbox`, `channel_state`, `channel_chats`) are in
 the same files. The `tools` table is the authoritative tool registry:
 `extension_name` and `path` carry provenance, promote writes it, and loading
 reads it.

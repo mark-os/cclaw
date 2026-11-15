@@ -117,7 +117,9 @@ static const char SQL_CONFIG_DOC[] =
     "       AND (expires_at IS NULL OR expires_at>unixepoch())))),"
     " 'session', json_object('id', ?2,"
     "   'tool_filter', json((SELECT COALESCE(tool_filter,'null') FROM sessions"
-    "                        WHERE id=?2))),"
+    "                        WHERE id=?2)),"
+    "   'chat_tool_filter', json(COALESCE((SELECT tool_filter FROM channel_chats"
+    "                        WHERE session_id=?2),'null'))),"
     " 'sensitive_hosts', json((SELECT json_group_array(value)"
     "   FROM sensitive_targets WHERE kind='host')),"
     /* Bindings of the secrets this agent may use — only those: a secret
@@ -305,6 +307,25 @@ static char *render_text(SearchConfigCtx *ctx, const char *query,
                 "session tool filter: %s (THIS session only — your effective"
                 " tools are the grants above intersected with this list;"
                 " whoever spawned this session chose it)\n",
+                (v && v[0]) ? v : "(empty — no tools callable)");
+        }
+        sqlite3_finalize(st);
+    }
+
+    /* The chat's filter: set by the operator on the chat this session is
+     * pinned to, read live — it narrows the grants the same way. */
+    rc = sqlite3_prepare_v2(ctx->db,
+        "SELECT (SELECT group_concat(value, ', ') FROM json_each(c.tool_filter))"
+        " FROM channel_chats c WHERE c.session_id=?1 AND c.tool_filter IS NOT NULL",
+        -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, ctx->session_id);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(st, 0);
+            buf_appendf(&out,
+                "chat tool filter: %s (the operator's limit for the chat this"
+                " session answers — your effective tools are also intersected"
+                " with this list)\n",
                 (v && v[0]) ? v : "(empty — no tools callable)");
         }
         sqlite3_finalize(st);

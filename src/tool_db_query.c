@@ -131,7 +131,9 @@ int tool_db_query_register(ToolRegistry *reg, sqlite3 *db) {
                           "Execute read-only SQL (SELECT only) against cclaw.db. "
                           "Tables you may find useful: approvals (your parked/decided "
                           "requests), inbox (queued events), tool_calls (per-call "
-                          "status), cron_jobs, entries (session transcript).",
+                          "status), cron_jobs, entries (session transcript), "
+                          "channel_chats (the chats you are reachable in and "
+                          "their settings).",
                           DB_QUERY_PARAMS_JSON, tool_db_query_handler, db);
     if (rc == 0)
         tools_set_recipe(reg, "db_query",

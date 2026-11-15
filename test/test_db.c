@@ -5,6 +5,7 @@
 #include "config_registry.h"
 #include "util.h"
 #include "test_util.h"
+#include "advance.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -244,10 +245,77 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
+/* Turn a fresh (current) database back into the v60 shape: channel_routes
+ * instead of channel_chats, the chat columns back on sessions, no declared
+ * chat links on sessions/cron_jobs, a NOT NULL policy on every delivery edge.
+ * unshape_v60 starts here, so every older patch test replays v61 over a real
+ * v60 shape. Rows are carried (a routed chat becomes a route). */
+static void unshape_v61(sqlite3 *db) {
+    char *err = NULL;
+    /* legacy_alter_table: the entries triggers name sessions, and a rename
+     * onto a just-dropped name would otherwise re-check them mid-swap. */
+    int rc = sqlite3_exec(db,
+        "PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;"
+        "CREATE TABLE channel_routes ("
+        "  channel_name TEXT NOT NULL, chat_id TEXT NOT NULL,"
+        "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+        "  delivery_mode TEXT NOT NULL DEFAULT 'auto', tool_filter TEXT,"
+        "  system_prompt_suffix TEXT, PRIMARY KEY (channel_name, chat_id));"
+        "INSERT INTO channel_routes SELECT channel_name, chat_id, session_id,"
+        "  delivery_mode, tool_filter, guidance FROM channel_chats"
+        "  WHERE session_id IS NOT NULL;"
+        "CREATE TABLE v60_s ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT,"
+        "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+        "  channel_name TEXT, chat_id TEXT, chat_title TEXT, chat_is_admin INTEGER,"
+        "  chat_error_notice_at INTEGER, parent_session_id INTEGER DEFAULT -1,"
+        "  parent_tool_call_id TEXT, depth INTEGER NOT NULL DEFAULT 0, tool_filter TEXT,"
+        "  state TEXT NOT NULL DEFAULT 'idle', owner_instance TEXT,"
+        "  turn_iteration INTEGER NOT NULL DEFAULT 0, turn_context TEXT,"
+        "  leaf_id INTEGER DEFAULT -1, compaction_fail_count INTEGER NOT NULL DEFAULT 0,"
+        "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+        "  updated_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+        "INSERT INTO v60_s(id, name, agent_name, channel_name, chat_id, parent_session_id,"
+        "  parent_tool_call_id, depth, tool_filter, state, owner_instance, turn_iteration,"
+        "  turn_context, leaf_id, compaction_fail_count, created_at, updated_at)"
+        "  SELECT id, name, agent_name, channel_name, chat_id, parent_session_id,"
+        "  parent_tool_call_id, depth, tool_filter, state, owner_instance, turn_iteration,"
+        "  turn_context, leaf_id, compaction_fail_count, created_at, updated_at FROM sessions;"
+        "DROP TABLE sessions; ALTER TABLE v60_s RENAME TO sessions;"
+        "CREATE INDEX idx_sessions_owner ON sessions(owner_instance)"
+        "  WHERE owner_instance IS NOT NULL;"
+        "DROP TABLE channel_chats;"
+        "CREATE TABLE v60_e ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+        "  target_kind TEXT NOT NULL, target_ref TEXT NOT NULL, policy TEXT NOT NULL,"
+        "  cursor INTEGER NOT NULL DEFAULT 0, one_shot INTEGER NOT NULL DEFAULT 0,"
+        "  UNIQUE(session_id, target_kind, target_ref));"
+        "INSERT INTO v60_e SELECT id, session_id, target_kind, target_ref,"
+        "  COALESCE(policy,'quiescent'), cursor, one_shot FROM delivery_edges;"
+        "DROP TABLE delivery_edges; ALTER TABLE v60_e RENAME TO delivery_edges;"
+        "CREATE TABLE v60_c ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+        "  name TEXT NOT NULL, cron_expr TEXT NOT NULL, run_at INTEGER, interval_s INTEGER,"
+        "  session_id INTEGER NOT NULL, task TEXT NOT NULL, script TEXT,"
+        "  channel_name TEXT, chat_id TEXT, target TEXT,"
+        "  target_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
+        "  enabled INTEGER NOT NULL DEFAULT 1, next_run_at INTEGER NOT NULL DEFAULT 0,"
+        "  last_run_at INTEGER, created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+        "INSERT INTO v60_c SELECT * FROM cron_jobs;"
+        "DROP TABLE cron_jobs; ALTER TABLE v60_c RENAME TO cron_jobs;"
+        "CREATE UNIQUE INDEX idx_cron_jobs_name ON cron_jobs(agent_name, name);"
+        "PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;", NULL, NULL, &err);
+    if (rc != SQLITE_OK) fprintf(stderr, "unshape_v61: %s\n", err ? err : "?");
+    assert(rc == SQLITE_OK);
+}
+
 /* Turn a fresh (current) database back into the v59 shape: no change_log, no
  * generated triggers, grants without source/approval_id. unshape_v59 starts
  * here, so every patch test below v60 replays v60 over a real v59 shape. */
 static void unshape_v60(sqlite3 *db) {
+    unshape_v61(db);
     char *err = NULL;
     sqlite3_stmt *st;
     assert(sqlite3_prepare_v2(db, "SELECT group_concat('DROP TRIGGER \"' || name || '\";', '')"
@@ -493,7 +561,14 @@ static char *schema_shape(sqlite3 *db) {
         "  UNION ALL"
         "  SELECT m.type || ' ' || m.name || ' on ' || m.tbl_name FROM sqlite_master m"
         "  WHERE m.name NOT LIKE 'sqlite_%' AND m.type IN ('table','index','trigger')"
-        "    AND m.name NOT LIKE 'entries_fts_%')",
+        "    AND m.name NOT LIKE 'entries_fts_%'"
+        /* Index and trigger bodies, whitespace-folded: a partial index's WHERE
+         * or a trigger's logic is not visible in the lines above. */
+        "  UNION ALL"
+        "  SELECT 'sql ' || m.name || ': ' || lower(replace(replace(replace(replace("
+        "         replace(replace(m.sql, char(10), ' '), char(9), ' '), '    ', ' '),"
+        "         '  ', ' '), '  ', ' '), ' if not exists', ''))"
+        "  FROM sqlite_master m WHERE m.type IN ('index','trigger') AND m.sql IS NOT NULL)",
         -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     char *shape = strdup((const char *)sqlite3_column_text(s, 0));
@@ -1291,7 +1366,7 @@ static void test_schema_patch_v60(void) {
     unsetenv("CCLAW_SECRET_ENV_UNBOUND");
     unsetenv("CCLAW_SECRET_PROVIDER_KEY");
     int uv = 0;
-    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == 60);
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
 
     /* Existing rows: untouched apart from provenance, which is unknown. */
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM grants WHERE kind!='secret'", 0, -1) == 4);
@@ -1330,6 +1405,252 @@ static void test_schema_patch_v60(void) {
         snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
     }
     printf("  PASS test_schema_patch_v60\n");
+}
+
+/* v60 -> v61 in isolation (plan v0.8 decisions 1–10): every channel+chat any
+ * route, session or cron job names becomes a channel_chats row with its
+ * values from the right place; a session two chats pinned keeps the chat it
+ * names and the other gets a fresh session for the same agent; stamps on a
+ * channel with no row are dropped (the cron job disabled); channel edges keep
+ * their cursor and lose their policy; no id is reused; and the new links
+ * hold and refuse a dangling write. */
+static void test_schema_patch_v61(void) {
+    const char *path = "/tmp/test_cclaw_schema_v61.sqlite";
+    char junk[192];
+    const char *suffixes[] = { "", "-wal", "-shm", ".v60.bak" };
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v61(db);
+    char *err = NULL;
+    int rc = sqlite3_exec(db,
+        "INSERT INTO agents(name) VALUES('Main'),('Helper');"
+        "INSERT INTO channels(name, status, default_agent, default_tool_filter) VALUES"
+        " ('tg','active',NULL,NULL),('dc','active','Helper','[\"web_fetch\"]');"
+        "INSERT INTO sessions(id, name, agent_name, channel_name, chat_id, chat_title,"
+        "  chat_is_admin, chat_error_notice_at, parent_session_id, tool_filter,"
+        "  created_at, updated_at) VALUES"
+        " (1,'tg','Main','tg','111','DM with alice',1,NULL,-1,NULL,1000,9000),"
+        " (3,'tg','Main','tg','-100','Old title',0,7000,-1,NULL,1100,2000),"
+        " (2,'tg','Main','tg','-100','Ops',0,5000,-1,'[\"a\",\"b\"]',2100,8000),"
+        " (4,'dc','Helper','dc','555','#general',0,NULL,-1,'[\"web_fetch\"]',1200,7000),"
+        " (5,'cron','Helper','dc','555',NULL,NULL,NULL,-1,NULL,1300,6000),"
+        " (6,'agent','Main',NULL,NULL,NULL,NULL,NULL,1,'[\"file_read\"]',1400,5000),"
+        " (8,'dc','Helper','dc','888','#eight',NULL,NULL,-1,NULL,1600,3500),"
+        " (10,'tg','Main','tg','333','Gone',0,1234,-1,NULL,1800,2500),"
+        " (12,'gone','Main','gone','x1',NULL,NULL,NULL,-1,NULL,1950,2300),"
+        " (13,'tg','Main','tg','445',NULL,NULL,NULL,-1,NULL,1960,2200);"
+        "INSERT INTO channel_routes VALUES"
+        " ('tg','111',1,'auto',NULL,NULL),"
+        " ('tg','-100',2,'explicit','[\"a\",\"b\"]','be brief'),"
+        " ('dc','555',4,'auto',NULL,NULL),"
+        " ('dc','888',8,'auto',NULL,NULL),"
+        " ('dc','999',8,'explicit','[\"web_fetch\"]',NULL),"
+        " ('tg','444',13,'auto',NULL,NULL),"
+        " ('gone','x2',6,'auto',NULL,NULL);"
+        "INSERT INTO delivery_edges(session_id, target_kind, target_ref, policy, cursor)"
+        " VALUES (1,'channel','tg','quiescent',10),(4,'channel','dc','turn',20),"
+        "        (6,'parent','1','digest',3),(12,'channel','gone','turn',0);"
+        "INSERT INTO cron_jobs(id, agent_name, name, cron_expr, session_id, task,"
+        "  channel_name, chat_id, target) VALUES"
+        " (5,'Main','follow','0 8 * * *',1,'ping','tg','111',NULL),"
+        " (6,'Helper','report','0 7 * * *',5,'r','dc','555','new'),"
+        " (7,'Main','orphan','0 6 * * *',0,'x','tg','446',NULL),"
+        " (8,'Main','lost','0 6 * * *',0,'x','gone','x3',NULL);"
+        "INSERT INTO sessions(id, name, agent_name) VALUES(40,'tmp','Main');"
+        "DELETE FROM sessions WHERE id=40;",
+        NULL, NULL, &err);
+    if (rc != SQLITE_OK) fprintf(stderr, "v61 seed: %s\n", err ? err : "?");
+    assert(rc == SQLITE_OK);
+    set_user_version(db, 60);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_foreign_key_check;", 0, -1) == 0);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sqlite_master"
+        " WHERE name='channel_routes';", 0, -1) == 0);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_table_info('sessions')"
+        " WHERE name IN ('chat_title','chat_is_admin','chat_error_notice_at');", 0, -1) == 0);
+
+    /* One row per chat anything named: routes (minus the dead channel's),
+     * the chat a session alone names (333), the one a cron job alone names
+     * (446). 445 is gone: its only session was re-stamped to its pin. */
+    assert(db_scalar_i64(db, "SELECT group_concat(channel_name||':'||chat_id, ' ')"
+        " = 'dc:555 dc:888 dc:999 tg:-100 tg:111 tg:333 tg:444 tg:446'"
+        " FROM (SELECT * FROM channel_chats ORDER BY channel_name, chat_id);", 0, -1) == 1);
+    /* Values: route settings; title/admin from the newest session with one;
+     * error notice = MAX over the chat's sessions. */
+    assert(db_scalar_i64(db, "SELECT session_id=2 AND delivery_mode='explicit'"
+        " AND tool_filter='[\"a\",\"b\"]' AND guidance='be brief' AND title='Ops'"
+        " AND is_admin=0 AND error_notice_at=7000 AND kind IS NULL"
+        " AND first_seen_at=1100 AND last_message_at IS NULL AND notified_at IS NULL"
+        " FROM channel_chats WHERE chat_id='-100';", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT session_id=1 AND delivery_mode='auto'"
+        " AND tool_filter IS NULL AND title='DM with alice' AND is_admin=1"
+        " FROM channel_chats WHERE chat_id='111';", 0, -1) == 1);
+    /* A route with no filter whose session froze one keeps it on the chat. */
+    assert(db_scalar_i64(db, "SELECT session_id=4 AND tool_filter='[\"web_fetch\"]'"
+        " FROM channel_chats WHERE chat_id='555';", 0, -1) == 1);
+    /* Unrouted: defaults (tg has no default filter), traffic facts kept. */
+    assert(db_scalar_i64(db, "SELECT session_id IS NULL AND delivery_mode='auto'"
+        " AND tool_filter IS NULL AND title='Gone' AND error_notice_at=1234"
+        " FROM channel_chats WHERE chat_id='333';", 0, -1) == 1);
+    /* Two chats, one session: 888 (the chat session 8 names) keeps it; 999
+     * gets a fresh Helper session above the old high-water mark. */
+    assert(db_scalar_i64(db, "SELECT session_id FROM channel_chats WHERE chat_id='888';",
+        0, -1) == 8);
+    assert(db_scalar_i64(db, "SELECT c.session_id=41 AND s.agent_name='Helper'"
+        " AND s.channel_name='dc' AND s.chat_id='999' AND c.delivery_mode='explicit'"
+        " FROM channel_chats c JOIN sessions s ON s.id=c.session_id"
+        " WHERE c.chat_id='999';", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT seq FROM sqlite_sequence WHERE name='sessions';",
+        0, -1) == 41);
+    /* Re-stamp; dropped stamps; the disabled job; the old session still
+     * names its chat. */
+    assert(db_scalar_i64(db, "SELECT chat_id='444' FROM sessions WHERE id=13;", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT channel_name IS NULL AND chat_id IS NULL"
+        " FROM sessions WHERE id=12;", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT channel_name IS NULL AND enabled=0"
+        " FROM cron_jobs WHERE id=8;", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT channel_name='tg' AND chat_id='-100'"
+        " FROM sessions WHERE id=3;", 0, -1) == 1);
+    /* Channel edges: cursor kept, policy gone; the dead channel's edge gone;
+     * the parent edge untouched. */
+    assert(db_scalar_i64(db, "SELECT group_concat(session_id||':'||target_kind||':'"
+        "||COALESCE(policy,'-')||':'||cursor, ' ')"
+        " = '1:channel:-:10 4:channel:-:20 6:parent:digest:3'"
+        " FROM (SELECT * FROM delivery_edges ORDER BY session_id);", 0, -1) == 1);
+
+    /* The links refuse: a session or job naming no chat row, a second pin of
+     * one session, a channel edge with a policy. */
+    assert(sqlite3_exec(db, "INSERT INTO sessions(agent_name, channel_name, chat_id)"
+        " VALUES('Main','tg','nope');", NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "INSERT INTO cron_jobs(agent_name, name, cron_expr,"
+        " session_id, task, channel_name, chat_id) VALUES('Main','n','',0,'',"
+        "'tg','nope');", NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE channel_chats SET session_id=1"
+        " WHERE chat_id='333';", NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "INSERT INTO delivery_edges(session_id, target_kind,"
+        " target_ref, policy) VALUES(2,'channel','tg','turn');", NULL, NULL, NULL)
+        != SQLITE_OK);
+    assert(sqlite3_exec(db, "INSERT INTO channel_chats(channel_name, chat_id)"
+        " VALUES('nochannel','1');", NULL, NULL, NULL) != SQLITE_OK);
+
+    db_close(db);
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    printf("  PASS test_schema_patch_v61\n");
+}
+
+/* v61 cursors: an edge that never posted must not post an old answer after
+ * the upgrade, whichever way its chat reads now. Rule: a channel edge frozen
+ * 'explicit' under v60, or whose chat is 'explicit' now, gets the cursor an
+ * explicit boundary stamps today (sessions.leaf_id); any other edge keeps its
+ * cursor (behind = owed under v60 too). Cases, each with an assistant leaf:
+ *   1 routed explicit chat, edge frozen explicit, cursor 0     -> leaf
+ *   2 routed auto chat,     edge frozen explicit, cursor 0     -> leaf (mirror)
+ *   3 unrouted group-shaped chat (patch makes it explicit), edge 'turn', 0 -> leaf
+ *   4 unrouted chat (patch makes it auto), edge frozen explicit, 0 -> leaf
+ *   5 older non-pinned session of chat 1, edge frozen explicit -> leaf
+ *   6 older non-pinned session of chat 2, edge 'turn', delivered -> unchanged
+ *   7 routed auto chat, edge quiescent, cursor behind (owed)   -> unchanged
+ * Then the sweep posts only 7's owed answer, and flipping chat 1 to auto
+ * posts nothing old. */
+static void test_schema_patch_v61_cursors(void) {
+    const char *path = "/tmp/test_cclaw_schema_v61_cursors.sqlite";
+    char junk[192];
+    const char *suffixes[] = { "", "-wal", "-shm", ".v60.bak" };
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v61(db);
+    char *err = NULL;
+    int rc = sqlite3_exec(db,
+        "INSERT INTO agents(name) VALUES('Main');"
+        "INSERT INTO channels(name, status) VALUES('tg','draft');"
+        "INSERT INTO sessions(id, name, agent_name, channel_name, chat_id) VALUES"
+        " (1,'a','Main','tg','-100'),(2,'b','Main','tg','200'),(3,'c','Main','tg','-300'),"
+        " (4,'d','Main','tg','400'),(5,'e','Main','tg','-100'),(6,'f','Main','tg','200'),"
+        " (7,'g','Main','tg','700');"
+        "INSERT INTO entries(id, session_id, role, content) VALUES"
+        " (10,1,1,'q'),(11,1,2,'a1 kept'),(20,2,1,'q'),(21,2,2,'a2 kept'),"
+        " (30,3,2,'a3 kept'),(40,4,2,'a4 kept'),(50,5,2,'a5 kept'),"
+        " (60,6,2,'a6 sent'),(70,7,1,'q'),(71,7,2,'a7 owed');"
+        "INSERT INTO channel_routes VALUES"
+        " ('tg','-100',1,'explicit',NULL,NULL),('tg','200',2,'auto',NULL,NULL),"
+        " ('tg','700',7,'auto',NULL,NULL);"
+        "INSERT INTO delivery_edges(session_id, target_kind, target_ref, policy, cursor) VALUES"
+        " (1,'channel','tg','explicit',0),(2,'channel','tg','explicit',0),"
+        " (3,'channel','tg','turn',0),(4,'channel','tg','explicit',0),"
+        " (5,'channel','tg','explicit',0),(6,'channel','tg','turn',60),"
+        " (7,'channel','tg','quiescent',70);",
+        NULL, NULL, &err);
+    if (rc != SQLITE_OK) fprintf(stderr, "v61 cursors seed: %s\n", err ? err : "?");
+    assert(rc == SQLITE_OK);
+    set_user_version(db, 60);
+    assert(db_schema_compat(db) == 1);
+
+    assert(db_scalar_i64(db, "SELECT group_concat(session_id||':'||cursor, ' ')"
+        " = '1:11 2:21 3:30 4:40 5:50 6:60 7:70'"
+        " FROM (SELECT * FROM delivery_edges ORDER BY session_id);", 0, -1) == 1);
+    /* The mode each chat reads now: as the comment says. */
+    assert(db_scalar_i64(db, "SELECT group_concat(chat_id||'='||delivery_mode, ' ')"
+        " = '-100=explicit -300=explicit 200=auto 400=auto 700=auto'"
+        " FROM (SELECT * FROM channel_chats ORDER BY chat_id);", 0, -1) == 1);
+
+    /* The first sweep after the upgrade: only the delivery v60 already owed. */
+    assert(advance_sweep_undelivered(db) == 1);
+    assert(db_scalar_i64(db, "SELECT group_concat(json_extract(payload,'$.text'))"
+        " = 'a7 owed' FROM channel_outbox;", 0, -1) == 1);
+    /* Flip the explicit chats to auto: nothing old posts. */
+    assert(sqlite3_exec(db, "UPDATE channel_chats SET delivery_mode='auto';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(advance_sweep_undelivered(db) == 0);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM channel_outbox;", 0, -1) == 1);
+
+    db_close(db);
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    printf("  PASS test_schema_patch_v61_cursors\n");
+}
+
+/* A v60 database holding a row that already dangles (a session of an agent
+ * that does not exist, written with foreign keys off) is refused by v61 and
+ * left exactly as it was — failure degrades to nothing happened. */
+static void test_schema_patch_v61_refuses_dangling(void) {
+    const char *path = "/tmp/test_cclaw_schema_v61_dangling.sqlite";
+    char junk[192];
+    const char *suffixes[] = { "", "-wal", "-shm", ".v60.bak" };
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v61(db);
+    assert(sqlite3_exec(db, "PRAGMA foreign_keys=OFF;"
+        "INSERT INTO sessions(id, name, agent_name) VALUES(5,'x','Ghost');"
+        "PRAGMA foreign_keys=ON;", NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 60);
+    assert(db_schema_compat(db) == 0);
+    int uv = 0;
+    db_schema_state(db, &uv);
+    assert(uv == 60);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sqlite_master"
+        " WHERE name IN ('channel_routes')", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sqlite_master"
+        " WHERE name IN ('channel_chats')", 0, -1) == 0);
+    db_close(db);
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
+    }
+    printf("  PASS test_schema_patch_v61_refuses_dangling\n");
 }
 
 static void test_agent_models_capability_gate(void) {
@@ -1409,6 +1730,9 @@ int main(void) {
     test_schema_patch_v51();
     test_schema_patch_v59();
     test_schema_patch_v60();
+    test_schema_patch_v61();
+    test_schema_patch_v61_refuses_dangling();
+    test_schema_patch_v61_cursors();
     test_agent_models_capability_gate();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");

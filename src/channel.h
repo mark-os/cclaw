@@ -98,17 +98,46 @@ int channel_id_is_admin(sqlite3 *db, const char *channel_name, const char *id);
 void channel_chat_reply(sqlite3 *db, const char *channel_name,
                         const char *chat_id, const char *text);
 
-/* Re-point the chat's pin (upsert, preserving delivery_mode/tool_filter on
- * an existing row) and stamp the session's origin. The pin is the binding —
- * this is the one write that moves a chat between conversations. */
-void channel_pin_session(sqlite3 *db, const char *channel_name,
-                         const char *chat_id, int64_t sid);
+/* The delivery_mode a chat starts with when nobody chose one and no envelope
+ * has said what it is: 'explicit' for a group-shaped id (it begins with '-':
+ * a Telegram group), else 'auto'. `route add` for a chat that never spoke,
+ * request_config, the dashboard attach; the gate uses the envelope first. */
+const char *chat_default_mode(const char *chat_id);
+
+/* Record an inbound message on its chat's channel_chats row: created on first
+ * contact with the defaults copied once (channels.default_tool_filter; the
+ * mode from the envelope's chat_type — group 'explicit', dm 'auto' — or
+ * chat_default_mode when it has none), then the envelope's observations kept
+ * current — title, kind, is_admin, last_message_at. An existing row's
+ * settings are never touched. Returns SQLITE_OK or the extended error
+ * code (SQLITE_CONSTRAINT_FOREIGNKEY: the channel has no channels row). */
+int channel_chat_observe(sqlite3 *db, const char *channel_name, const char *chat_id,
+                         const char *payload, int sender_is_admin);
+
+/* Create the chat's row if it has none, with the operator defaults
+ * (chat_default_mode, no tool filter). 0 on success. */
+int channel_chat_ensure(sqlite3 *db, const char *channel_name, const char *chat_id);
+
+/* Pin a chat to session sid — the one write that moves a chat between
+ * conversations (/new, /sessions <id>, `route add`, the dashboard attach,
+ * request_config routes, the gate). Creates the chat's row if missing.
+ * A session is pinned by at most one chat: if another chat holds sid, that
+ * chat is re-pinned to a fresh session for sid's agent (what /new does).
+ * Afterwards sid names this chat; the chat's previous session keeps naming it
+ * too. One transaction (a savepoint inside a caller's). 0 on success. */
+int channel_pin_session(sqlite3 *db, const char *channel_name,
+                        const char *chat_id, int64_t sid);
+
+/* A fresh session for `agent` named `name` (NULL: after the channel, as /new
+ * names them), with the chat pinned to it, in one transaction. Session id or
+ * -1. */
+int64_t channel_pin_new_session(sqlite3 *db, const char *channel_name,
+                                const char *chat_id, const char *agent,
+                                const char *name);
 
 /* Channel open-door policy: channels.default_agent (NULL = fail-closed).
- * *filter_out (optional) receives channels.default_tool_filter — the tool
- * scope for chats the gate accepts without a route. Caller frees both. */
-char *channel_default_agent(sqlite3 *db, const char *channel_name,
-                            char **filter_out);
+ * Caller frees. */
+char *channel_default_agent(sqlite3 *db, const char *channel_name);
 
 
 /* Resolve a channel's registry config key <extension>.<key> through the

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L   /* setenv/unsetenv/tzset under -std=c11 */
 #include "db.h"
 #include "test_util.h"
+#include "channel.h"
 #include "hook_dispatch.h"
 #include "llm_payload.h"
 #include "db_response.h"
@@ -990,89 +991,46 @@ static void test_launch_agent_description_embeds_roster_and_worker_tools(void) {
     printf("  PASS test_launch_agent_description_embeds_roster_and_worker_tools\n");
 }
 
-/* A route-pinned session gets its route's system_prompt_suffix appended to
- * the system prompt, on both endpoint shapes; an unpinned session (positive
- * control) sees the prompt unchanged. */
-static void test_route_prompt_suffix(void) {
-    sqlite3 *db = open_seeded();
-
-    int64_t sid, plain;
-    setup_session(db, &sid);
-    setup_session(db, &plain);
-
-    sqlite3_stmt *ins;
-    assert(sqlite3_prepare_v2(db,
-        "INSERT INTO channel_routes(channel_name, chat_id, session_id,"
-        "                           system_prompt_suffix)"
-        " VALUES('discord','chan1',?1,'House rules: keep it short.');",
-        -1, &ins, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(ins, 1, sid);
-    assert(sqlite3_step(ins) == SQLITE_DONE);
-    sqlite3_finalize(ins);
-
-    Config cfg = {0};
-    cfg.provider.model = "test-model";
-    cfg.provider.max_tokens = 1024;
-    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
-    cfg.context_window = 128000;
-
+/* System prompt text of one build for session sid ("$.messages[0].content",
+ * or Gemini's systemInstruction). Heap. */
+static char *built_system(sqlite3 *db, int64_t sid, Config *cfg) {
     ContextPlan plan = {0};
     LlmPayload payload;
     sqlite3_stmt *s;
-
-    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
-    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
-    json_get_str(db, payload.body, "$.messages[0].content", &s);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                  "You are helpful.\n\nHouse rules: keep it short.") == 0);
+    assert(context_plan(db, sid, cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    json_get_str(db, payload.body, cfg->provider.endpoint_type == ENDPOINT_GEMINI
+                     ? "$.systemInstruction.parts[0].text" : "$.messages[0].content", &s);
+    char *r = test_strdup_((const char *)sqlite3_column_text(s, 0));
     sqlite3_finalize(s);
     llm_payload_release(&payload);
     context_plan_free(&plan);
-
-    /* Positive control: no route, no suffix, byte-identical prompt. */
-    assert(context_plan(db, plain, &cfg, 0, &plan) == 0);
-    assert(llm_build_payload(db, plain, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
-    json_get_str(db, payload.body, "$.messages[0].content", &s);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "You are helpful.") == 0);
-    sqlite3_finalize(s);
-    llm_payload_release(&payload);
-    context_plan_free(&plan);
-
-    /* Gemini carries the system prompt in systemInstruction. */
-    cfg.provider.endpoint_type = ENDPOINT_GEMINI;
-    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
-    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
-    json_get_str(db, payload.body, "$.systemInstruction.parts[0].text", &s);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                  "You are helpful.\n\nHouse rules: keep it short.") == 0);
-    sqlite3_finalize(s);
-    llm_payload_release(&payload);
-    context_plan_free(&plan);
-
-    db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_route_prompt_suffix\n");
+    return r;
 }
 
-/* A channel-bound session is told where it is chatting: chat_title when the
- * runner reported one, channel+chat_id otherwise. The route suffix, if any,
- * follows the location line. */
-static void test_chat_location_line(void) {
+/* Decision 6: a chat-bound session's system prompt gets three parts in order
+ * — where it is chatting (the chat's title, else its ids), how replies work
+ * there (from the chat's delivery_mode, read live), then the chat's guidance.
+ * A session with no chat (positive control) sees the prompt unchanged, and
+ * nothing changes between builds when the chat row does not. */
+static void test_chat_prompt_suffix(void) {
     sqlite3 *db = open_seeded();
 
-    int64_t named, unnamed;
+    int64_t named, unnamed, plain;
     setup_session(db, &named);
     setup_session(db, &unnamed);
-
-    char sql[512];
-    snprintf(sql, sizeof(sql),
-        "UPDATE sessions SET channel_name='discord', chat_id='chan1',"
-        " chat_title='#general @ My Server' WHERE id=%lld;"
-        "UPDATE sessions SET channel_name='discord', chat_id='chan2'"
-        " WHERE id=%lld;"
-        "INSERT INTO channel_routes(channel_name, chat_id, session_id,"
-        "                           system_prompt_suffix)"
-        " VALUES('discord','chan1',%lld,'House rules: keep it short.');",
-        (long long)named, (long long)unnamed, (long long)named);
+    setup_session(db, &plain);
+    test_seed_chat(db, "discord", "chan1");
+    test_seed_chat(db, "discord", "chan2");
+    assert(channel_pin_session(db, "discord", "chan1", named) == 0);
+    assert(sqlite3_exec(db,
+        "UPDATE channel_chats SET title='#general @ My Server',"
+        "  guidance='House rules: keep it short.' WHERE chat_id='chan1';"
+        "UPDATE channel_chats SET delivery_mode='explicit' WHERE chat_id='chan2';",
+        NULL, NULL, NULL) == SQLITE_OK);
+    char sql[128];
+    snprintf(sql, sizeof(sql), "UPDATE sessions SET channel_name='discord',"
+             " chat_id='chan2' WHERE id=%lld;", (long long)unnamed);
     assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
 
     Config cfg = {0};
@@ -1081,34 +1039,145 @@ static void test_chat_location_line(void) {
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
     cfg.context_window = 128000;
 
-    ContextPlan plan = {0};
-    LlmPayload payload;
-    sqlite3_stmt *s;
+    const char *want_named =
+        "You are helpful.\n\nYou are chatting in #general @ My Server"
+        " (channel discord, chat id chan1).\n\n"
+        "Your final message of the turn is posted to this chat.\n\n"
+        "House rules: keep it short.";
+    char *got = built_system(db, named, &cfg);
+    assert(strcmp(got, want_named) == 0);
+    free(got);
+    got = built_system(db, named, &cfg);             /* byte-stable */
+    assert(strcmp(got, want_named) == 0);
+    free(got);
 
-    assert(context_plan(db, named, &cfg, 0, &plan) == 0);
-    assert(llm_build_payload(db, named, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
-    json_get_str(db, payload.body, "$.messages[0].content", &s);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                  "You are helpful.\n\nYou are chatting in #general @ My Server"
-                  " (channel discord, chat id chan1).\n\n"
-                  "House rules: keep it short.") == 0);
-    sqlite3_finalize(s);
-    llm_payload_release(&payload);
-    context_plan_free(&plan);
+    /* No observed name, no guidance, an explicit chat (not pinned: a session
+     * that belongs to the chat reads it all the same). The agent holds no
+     * channel_send grant, so it is told it cannot speak here at all... */
+    got = built_system(db, unnamed, &cfg);
+    assert(strcmp(got, "You are helpful.\n\nYou are chatting in chat chan2"
+                       " (channel discord, chat id chan2).\n\n"
+                       "Nothing you write is posted to this chat, and you have no"
+                       " channel_send tool, so you cannot reply here.") == 0);
+    free(got);
+    /* ...and once granted, it is told the one way to speak. */
+    assert(sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value,source)"
+                            " VALUES('default','tool','channel_send','operator');",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    got = built_system(db, unnamed, &cfg);
+    assert(strcmp(got, "You are helpful.\n\nYou are chatting in chat chan2"
+                       " (channel discord, chat id chan2).\n\n"
+                       "Nothing you write is posted to this chat. To say something"
+                       " here, call channel_send.") == 0);
+    free(got);
 
-    /* No observed name yet — the ids still say where we are. */
-    assert(context_plan(db, unnamed, &cfg, 0, &plan) == 0);
-    assert(llm_build_payload(db, unnamed, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
-    json_get_str(db, payload.body, "$.messages[0].content", &s);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                  "You are helpful.\n\nYou are chatting in chat chan2"
-                  " (channel discord, chat id chan2).") == 0);
-    sqlite3_finalize(s);
-    llm_payload_release(&payload);
-    context_plan_free(&plan);
+    /* Positive control: no chat, byte-identical prompt. */
+    got = built_system(db, plain, &cfg);
+    assert(strcmp(got, "You are helpful.") == 0);
+    free(got);
+
+    /* Read live: flipping the chat's mode changes the reply line on the next
+     * build; the other parts stay. */
+    assert(sqlite3_exec(db, "UPDATE channel_chats SET delivery_mode='explicit'"
+                            " WHERE chat_id='chan1';", NULL, NULL, NULL) == SQLITE_OK);
+    got = built_system(db, named, &cfg);
+    assert(strstr(got, "(channel discord, chat id chan1).\n\nNothing you write is posted"
+                       " to this chat. To say something here, call channel_send.\n\n"
+                       "House rules: keep it short."));
+    free(got);
+
+    /* Gemini carries the same text in systemInstruction. */
+    assert(sqlite3_exec(db, "UPDATE channel_chats SET delivery_mode='auto'"
+                            " WHERE chat_id='chan1';", NULL, NULL, NULL) == SQLITE_OK);
+    cfg.provider.endpoint_type = ENDPOINT_GEMINI;
+    got = built_system(db, named, &cfg);
+    assert(strcmp(got, want_named) == 0);
+    free(got);
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_chat_location_line\n");
+    printf("  PASS test_chat_prompt_suffix\n");
+}
+
+/* Names in one build's tools array, comma-joined in order. Heap. */
+static char *built_tools(sqlite3 *db, int64_t sid, Config *cfg) {
+    ContextPlan plan = {0};
+    LlmPayload payload;
+    assert(context_plan(db, sid, cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, cfg, &plan, NULL, "sys", &payload) == 0);
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COALESCE(group_concat(json_extract(value,'$.function.name'), ','), '')"
+        " FROM json_each(json_extract(?1,'$.tools'))", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    char *r = test_strdup_((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+    return r;
+}
+
+/* Decision 7: tools each request = grants ∩ sessions.tool_filter ∩ the
+ * pinned chat's tool_filter as it is now. Narrowing the chat's filter removes
+ * a tool from the very next request; a session the chat no longer pins (left
+ * behind by /new) is not narrowed by it; the session's own spawn filter still
+ * intersects. */
+static void test_chat_tool_filter_live(void) {
+    sqlite3 *db = open_seeded();
+    assert(sqlite3_exec(db,
+        "INSERT INTO tools(name, description, parameters_json, enabled) VALUES"
+        " ('file_read','r','{\"type\":\"object\"}',1),"
+        " ('web_fetch','w','{\"type\":\"object\"}',1),"
+        " ('js_eval','j','{\"type\":\"object\"}',1);"
+        "INSERT INTO grants(agent_name,kind,value,source) VALUES"
+        " ('default','tool','file_read','operator'),('default','tool','web_fetch','operator'),"
+        " ('default','tool','js_eval','operator');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    int64_t old, cur;
+    setup_session(db, &old);
+    setup_session(db, &cur);
+    test_seed_chat(db, "discord", "c1");
+    assert(channel_pin_session(db, "discord", "c1", old) == 0);
+    assert(channel_pin_session(db, "discord", "c1", cur) == 0);   /* what /new does */
+    assert(db_scalar_i64(db, "SELECT session_id FROM channel_chats WHERE chat_id='c1'",
+                         0, -1) == cur);
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.context_window = 128000;
+
+    char *t = built_tools(db, cur, &cfg);
+    assert(strstr(t, "file_read") && strstr(t, "web_fetch") && strstr(t, "js_eval"));
+    free(t);
+    assert(sqlite3_exec(db, "UPDATE channel_chats SET tool_filter='[\"web_fetch\",\"js_eval\"]'"
+                            " WHERE chat_id='c1';", NULL, NULL, NULL) == SQLITE_OK);
+    t = built_tools(db, cur, &cfg);
+    assert(!strstr(t, "file_read") && strstr(t, "web_fetch") && strstr(t, "js_eval"));
+    free(t);
+    assert(chat_tool_allowed(db, cur, "file_read") == 0);
+    assert(chat_tool_allowed(db, cur, "web_fetch") == 1);
+    /* The old session still belongs to the chat but is not pinned by it. */
+    t = built_tools(db, old, &cfg);
+    assert(strstr(t, "file_read"));
+    free(t);
+    assert(chat_tool_allowed(db, old, "file_read") == 1);
+    /* Narrower still, live; and a spawn filter on the session intersects. */
+    assert(sqlite3_exec(db, "UPDATE channel_chats SET tool_filter='[\"js_eval\"]'"
+                            " WHERE chat_id='c1';", NULL, NULL, NULL) == SQLITE_OK);
+    t = built_tools(db, cur, &cfg);
+    assert(strcmp(t, "js_eval") == 0);
+    free(t);
+    char sql[128];
+    snprintf(sql, sizeof(sql), "UPDATE sessions SET tool_filter='[\"web_fetch\"]'"
+             " WHERE id=%lld;", (long long)cur);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+    t = built_tools(db, cur, &cfg);
+    assert(strcmp(t, "") == 0);                       /* {web_fetch} ∩ {js_eval} */
+    free(t);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_chat_tool_filter_live\n");
 }
 
 /* ── Reasoning replay (provider-wire-format M2) ─────────────────── */
@@ -1907,8 +1976,8 @@ int main(void) {
     test_hook_inject_directive();
     test_extension_tool_grant_filtering();
     test_launch_agent_description_embeds_roster_and_worker_tools();
-    test_route_prompt_suffix();
-    test_chat_location_line();
+    test_chat_prompt_suffix();
+    test_chat_tool_filter_live();
     test_reasoning_details_replay();
     test_reasoning_content_replay();
     test_gemini_thought_signature_replay();

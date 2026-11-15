@@ -126,12 +126,15 @@ typedef struct {
 
 #define EDGE_MAX 8
 
+/* A channel edge's policy is its chat's delivery_mode as it is now
+ * (EDGE_POLICY): flipping the chat between turns changes the next boundary. */
 static int edges_load(sqlite3 *db, int64_t session_id, DeliveryEdge *out) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "SELECT id, cursor, one_shot, target_kind, policy, target_ref"
-            " FROM delivery_edges WHERE session_id=?"
-            " ORDER BY one_shot DESC, id;", -1, &st, NULL) != SQLITE_OK)
+            "SELECT e.id, e.cursor, e.one_shot, e.target_kind, " EDGE_POLICY ","
+            "       e.target_ref"
+            " FROM delivery_edges e WHERE e.session_id=?"
+            " ORDER BY e.one_shot DESC, e.id;", -1, &st, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_int64(st, 1, session_id);
     int n = 0;
@@ -287,8 +290,8 @@ static int error_is_repeat(sqlite3 *db, const char *channel, int64_t session_id,
 }
 
 /* The generic line a non-admin chat gets when a turn fails: at most once per
- * chat_error_notice_hours for the chat — counted per chat, across its
- * sessions, and kept on the session row because outbox rows are pruned. */
+ * chat_error_notice_hours for the chat, whichever of its sessions failed —
+ * kept on the chat's row because outbox rows are pruned. */
 static void chat_error_line(sqlite3 *db, const char *channel, int64_t session_id,
                             const char *chat_id) {
     int hours = config_get_int(db, "chat_error_notice_hours");
@@ -296,8 +299,8 @@ static void chat_error_line(sqlite3 *db, const char *channel, int64_t session_id
     sqlite3_stmt *st;
     int due = 0;
     if (sqlite3_prepare_v2(db,
-            "SELECT COALESCE(MAX(chat_error_notice_at), 0) <= unixepoch() - ?3 * 3600"
-            " FROM sessions WHERE channel_name=?1 AND chat_id=?2;",
+            "SELECT COALESCE(MAX(error_notice_at), 0) <= unixepoch() - ?3 * 3600"
+            " FROM channel_chats WHERE channel_name=?1 AND chat_id=?2;",
             -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_text(st, 1, channel, -1, SQLITE_STATIC);
         sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
@@ -310,9 +313,11 @@ static void chat_error_line(sqlite3 *db, const char *channel, int64_t session_id
     if (line && line[0]) {
         outbox_to_chat(db, channel, session_id, chat_id, line);
         if (sqlite3_prepare_v2(db,
-                "UPDATE sessions SET chat_error_notice_at=unixepoch() WHERE id=?1;",
+                "UPDATE channel_chats SET error_notice_at=unixepoch()"
+                " WHERE channel_name=?1 AND chat_id=?2;",
                 -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(st, 1, session_id);
+            sqlite3_bind_text(st, 1, channel, -1, SQLITE_STATIC);
+            sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
             sqlite3_step(st);
             sqlite3_finalize(st);
         }
@@ -327,7 +332,7 @@ static void chat_error_line(sqlite3 *db, const char *channel, int64_t session_id
  *   - Any chat that is not an admin chat — a group, a DM with a non-admin —
  *     gets the generic line, rate-limited, and never the error text.
  * An admin chat is one listed in admin_chats, or an admin's own DM
- * (sessions.chat_is_admin, recorded from the last message). Before a message
+ * (channel_chats.is_admin, recorded from the last message). Before a message
  * has recorded that, a chat whose id is itself an admin id (a Telegram DM)
  * counts; anything else does not. */
 static void error_notify(sqlite3 *db, const char *channel, int64_t session_id,
@@ -335,7 +340,9 @@ static void error_notify(sqlite3 *db, const char *channel, int64_t session_id,
     if (error_is_repeat(db, channel, session_id, text)) return;
 
     int64_t flag = db_scalar_i64(db,
-        "SELECT COALESCE(chat_is_admin, -1) FROM sessions WHERE id=?1;", session_id, -1);
+        "SELECT COALESCE(c.is_admin, -1) FROM sessions s JOIN channel_chats c"
+        "  ON c.channel_name = s.channel_name AND c.chat_id = s.chat_id"
+        " WHERE s.id=?1;", session_id, -1);
     int admin_chat = channel_chat_is_admin_chat(db, channel, chat_id) ||
                      (flag >= 0 ? flag == 1
                                 : channel_id_is_admin(db, channel, chat_id));
@@ -507,30 +514,13 @@ static int edge_session_row(sqlite3 *db, int64_t sid, EdgeSessionRow *out) {
     return ok;
 }
 
-/* Lazily materialize the channel edge for a chat-bound session, frozen from
- * the route template at this first boundary ('auto' = quiescent; no route =
- * quiescent). tool_filter precedent: later route edits don't retro-apply.
- * INSERT OR IGNORE, so a present row always wins. */
+/* Lazily materialize the channel edge for a chat-bound session at its first
+ * boundary. The row holds only the cursor: its policy is the chat's
+ * delivery_mode, read at every boundary (EDGE_POLICY). INSERT OR IGNORE, so
+ * a present row (and its cursor) always wins. */
 static void channel_edge_ensure(sqlite3 *db, int64_t sid, const EdgeSessionRow *sr) {
     if (!sr->channel[0]) return;
-    char *tmpl = NULL;
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db,
-            "SELECT delivery_mode FROM channel_routes"
-            " WHERE channel_name=?1 AND chat_id=?2;", -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(st, 1, sr->channel, -1, SQLITE_STATIC);
-        sqlite3_bind_text(st, 2, sr->chat_id[0] ? sr->chat_id : "0", -1,
-                          SQLITE_STATIC);
-        if (sqlite3_step(st) == SQLITE_ROW) {
-            const char *m = (const char *)sqlite3_column_text(st, 0);
-            if (m) tmpl = strdup(m);
-        }
-        sqlite3_finalize(st);
-    }
-    const char *policy = "quiescent";
-    if (tmpl && delivery_policy_valid(tmpl)) policy = tmpl;
-    delivery_edge_create(db, sid, "channel", sr->channel, policy, 0);
-    free(tmpl);
+    delivery_edge_create(db, sid, "channel", sr->channel, NULL, 0);
 }
 
 /* Did this session's final assistant entry stop at the model's output cap?
@@ -640,8 +630,15 @@ int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
     for (int i = 0; i < n; i++) {
         DeliveryEdge *e = &edges[i];
         if (strcmp(e->policy, "explicit") == 0) {
-            if (is_error && strcmp(e->kind, "channel") == 0)
-                quiet_boundary_error(db, e->ref, session_id, sr.chat_id);
+            if (strcmp(e->kind, "channel") == 0) {
+                if (is_error)
+                    quiet_boundary_error(db, e->ref, session_id, sr.chat_id);
+                /* Evaluated is recorded: the chat's mode is read live, and a
+                 * cursor left behind here would let a later flip to 'auto'
+                 * post this turn's answer — one the agent chose not to post
+                 * (or already sent with channel_send). */
+                if (e->cursor < sr.leaf_id) edge_cursor_set(db, e->id, sr.leaf_id);
+            }
             continue;
         }
 
@@ -767,8 +764,8 @@ void advance_deliver_iteration(sqlite3 *db, int64_t session_id) {
     /* Almost every session has no iteration edge — don't open a write
      * transaction per LLM completion for them. */
     if (!db_scalar_i64(db,
-            "SELECT EXISTS(SELECT 1 FROM delivery_edges WHERE session_id=?"
-            " AND policy='iteration' AND one_shot=0);", session_id, 0))
+            "SELECT EXISTS(SELECT 1 FROM delivery_edges e WHERE e.session_id=?"
+            " AND e.one_shot=0 AND " EDGE_POLICY "='iteration');", session_id, 0))
         return;
 
     EdgeSessionRow sr;
@@ -813,7 +810,7 @@ int advance_sweep_undelivered(sqlite3 *db) {
     const char *sql =
         "SELECT DISTINCT s.id FROM sessions s"
         " JOIN delivery_edges e ON e.session_id = s.id"
-        " WHERE s.state='idle' AND e.policy <> 'explicit'"
+        " WHERE s.state='idle' AND " EDGE_POLICY " <> 'explicit'"
         "   AND e.cursor < s.leaf_id"
         "   AND EXISTS (SELECT 1 FROM entries en"
         "               WHERE en.id=s.leaf_id AND en.session_id=s.id"

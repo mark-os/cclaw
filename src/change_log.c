@@ -90,6 +90,26 @@ const ChangeLogColumn CHANGE_LOG_COLUMNS[] = {
     { "secrets", "source",           COL_SETTING },
     { "secrets", "scope",            COL_SETTING },
     { "secrets", "created_at",       COL_MEASUREMENT },
+
+    /* channel_chats: the pin and the chat's three settings are set by the
+     * operator (route verbs, dashboard), an approval (request_config routes)
+     * or an admin's /new and /sessions — session_id moving on /new is a
+     * setting change worth a line. Everything else is observed from traffic:
+     * is_admin is recomputed from each message's envelope, title and kind come
+     * from it, and the timestamps record what happened. */
+    { "channel_chats", "channel_name",    COL_SETTING },
+    { "channel_chats", "chat_id",         COL_SETTING },
+    { "channel_chats", "session_id",      COL_SETTING },
+    { "channel_chats", "delivery_mode",   COL_SETTING },
+    { "channel_chats", "tool_filter",     COL_SETTING },
+    { "channel_chats", "guidance",        COL_SETTING },
+    { "channel_chats", "title",           COL_MEASUREMENT },
+    { "channel_chats", "is_admin",        COL_MEASUREMENT },
+    { "channel_chats", "error_notice_at", COL_MEASUREMENT },
+    { "channel_chats", "kind",            COL_MEASUREMENT },
+    { "channel_chats", "first_seen_at",   COL_MEASUREMENT },
+    { "channel_chats", "last_message_at", COL_MEASUREMENT },
+    { "channel_chats", "notified_at",     COL_MEASUREMENT },
 };
 const size_t CHANGE_LOG_COLUMN_COUNT =
     sizeof(CHANGE_LOG_COLUMNS) / sizeof(CHANGE_LOG_COLUMNS[0]);

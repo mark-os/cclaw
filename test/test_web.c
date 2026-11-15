@@ -280,6 +280,7 @@ static void test_admin_dashboard(void) {
         "INSERT OR REPLACE INTO models(id, provider_name, model) VALUES"
         "  ('m1','openrouter','vendor/one'), ('m2','openrouter','vendor/two');"
         "INSERT OR IGNORE INTO agents(name) VALUES('Assistant'), ('ev<il&name');"
+        "INSERT INTO channels(name, status) VALUES('telegram','active');"
         "INSERT INTO sessions(name, agent_name, channel_name)"
         "  VALUES('s','Assistant','telegram');"
         "INSERT INTO approvals(session_id, tool_name, park_reason, args_json, state)"
@@ -327,7 +328,7 @@ static void test_admin_dashboard(void) {
                      "&channel_name=telegram&chat_id=4242",
                      page, sizeof(page)) == 303);
     char *pinned = query_text(db,
-        "SELECT session_id FROM channel_routes"
+        "SELECT session_id FROM channel_chats"
         " WHERE channel_name='telegram' AND chat_id='4242'");
     assert(pinned && strcmp(pinned, "1") == 0);
     free(pinned);

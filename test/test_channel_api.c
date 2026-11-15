@@ -208,6 +208,7 @@ static void test_outbox_fail_notifies_session(void) {
     ChannelCtx *ctx = channel_ctx_open(TEST_DB, "telegram");
     assert(ctx);
 
+    test_seed_chat(ctx->db, "telegram", "555");
     assert(sqlite3_exec(ctx->db,
         "INSERT INTO sessions(id, channel_name, chat_id) VALUES(7,'telegram','555');"
         "INSERT INTO channel_outbox(id, channel_name, session_id, payload)"

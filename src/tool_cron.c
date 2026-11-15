@@ -201,15 +201,17 @@ static char *check_script(const ToolCronCtx *ctx, const CronDoc *d) {
 
 /* An explicit chat target must already route to the agent that will run the
  * fire; the fire re-checks, but a job that can never deliver is set-time
- * garbage. Mirrors channel_send's allowlist (routes are the authority). */
+ * garbage. Mirrors channel_send's allowlist (the chat's pin is the
+ * authority). It also guarantees the chat's row exists, which the job's
+ * stamp points at. */
 static char *check_channel(const ToolCronCtx *ctx, const CronDoc *d) {
     if (!d->has_channel || !d->channel_name || !d->chat_id) return NULL;
     const char *target = (d->has_agent && d->agent && d->agent[0])
                        ? d->agent : ctx->agent_name;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(ctx->db,
-            "SELECT 1 FROM channel_routes r JOIN sessions s ON s.id=r.session_id"
-            " WHERE r.channel_name=?1 AND r.chat_id=?2 AND s.agent_name=?3",
+            "SELECT 1 FROM channel_chats c JOIN sessions s ON s.id=c.session_id"
+            " WHERE c.channel_name=?1 AND c.chat_id=?2 AND s.agent_name=?3",
             -1, &st, NULL) != SQLITE_OK)
         return errf("error: could not check channel routes");
     sqlite3_bind_text(st, 1, d->channel_name, -1, SQLITE_STATIC);

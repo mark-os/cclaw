@@ -1179,7 +1179,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     g_qrt = qjs_runtime_create(CR_HEAP_SIZE);
     if (!g_qrt) { free(js_src); channel_ctx_free(g_ctx); return 1; }
     qjs_set_interrupt_limit(g_qrt, CR_MAX_INSTRUCTIONS);
-    JSContext *ctx = qjs_context_create(g_qrt, QJS_PROFILE_CHANNEL);
+    JSContext *ctx = qjs_context_create(g_qrt);
     if (!ctx) { qjs_runtime_destroy(g_qrt); free(js_src); channel_ctx_free(g_ctx); return 1; }
 
     /* Register channel host functions (cclaw.*, admin.*) */
@@ -1543,7 +1543,7 @@ int channel_runner_check(const char *db_path, const char *channel_name, char **e
         return -1;
     }
     qjs_set_interrupt_limit(g_qrt, CR_MAX_INSTRUCTIONS);
-    JSContext *ctx = qjs_context_create(g_qrt, QJS_PROFILE_CHANNEL);
+    JSContext *ctx = qjs_context_create(g_qrt);
     if (!ctx) {
         free(js_src);
         qjs_runtime_destroy(g_qrt); g_qrt = NULL;

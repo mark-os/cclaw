@@ -607,29 +607,15 @@ CREATE TABLE IF NOT EXISTS tools (
 );
 
 -- ═══ Hooks ═══
--- Same provenance model as tools (replaces the __cclaw_hooks scrape).
+-- Same provenance model as tools. No hook event exists in this build (the
+-- manifest validator refuses every hooks[] entry), so the table is empty.
 CREATE TABLE IF NOT EXISTS hooks (
   extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,
-  event TEXT NOT NULL,                        -- one of the six hook events
+  event TEXT NOT NULL,                        -- event name
   path TEXT NOT NULL,                         -- handler file (in the shared store)
   enabled INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (extension_name, event, path)
 );
-
--- Per-request hook directives: preAdvance commands that must cross the
--- main-thread → worker-thread boundary as DB state. 'inject' (ephemeral) and
--- 'suppress' rows live for exactly one LLM request — written at dispatch on
--- the poll thread, read by the worker's payload build, deleted at llm_req exit.
-CREATE TABLE IF NOT EXISTS hook_directives (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER NOT NULL,
-  kind TEXT NOT NULL,              -- 'inject' | 'suppress'
-  role TEXT,                       -- inject: 'system' | 'user'
-  content TEXT,                    -- inject payload
-  entry_id INTEGER,                -- suppress target
-  created_at INTEGER NOT NULL DEFAULT (unixepoch())
-);
-CREATE INDEX IF NOT EXISTS idx_hook_directives_session ON hook_directives(session_id);
 
 -- ═══ Memory ═══
 -- Two words, used everywhere: a BLOCK is a named container (description,

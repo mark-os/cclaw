@@ -15,10 +15,6 @@
 #include <time.h>
 #include <unistd.h>
 
-/* 1MB heap cap, 10M instruction limit */
-#define JS_HEAP_SIZE (1024 * 1024)
-#define JS_MAX_INSTRUCTIONS 10000000
-
 static const char *JSEVAL_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"code\":{\"type\":\"string\",\"description\":\"JavaScript code to execute (inline)\"},"
@@ -174,27 +170,6 @@ int js_tool_resolve_request(const ToolEntry *te, JsEvalCtx **out_ctx,
     *out_ctx = td->ectx;
     *out_path = td->path;
     return 0;
-}
-
-/* --- Session runtime (used by extensions for hooks context) --- */
-
-JsSessionRuntime *js_runtime_create(void) {
-    JsSessionRuntime *rt = calloc(1, sizeof(JsSessionRuntime));
-    if (!rt) return NULL;
-    rt->heap = qjs_runtime_create(JS_HEAP_SIZE);
-    if (!rt->heap) { free(rt); return NULL; }
-    QjsRuntime *qrt = (QjsRuntime *)rt->heap;
-    qjs_set_interrupt_limit(qrt, JS_MAX_INSTRUCTIONS);
-    rt->ctx = qjs_context_create(qrt, QJS_PROFILE_HOOKS);
-    if (!rt->ctx) { qjs_runtime_destroy(qrt); free(rt); return NULL; }
-    return rt;
-}
-
-void js_runtime_destroy(JsSessionRuntime *rt) {
-    if (!rt) return;
-    if (rt->ctx) JS_FreeContext((JSContext *)rt->ctx);
-    if (rt->heap) qjs_runtime_destroy((QjsRuntime *)rt->heap);
-    free(rt);
 }
 
 char *tool_js_tier_run(const RunToolParsed *q, int *is_error) {

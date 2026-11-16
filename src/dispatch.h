@@ -6,7 +6,7 @@
  * call, from the gate that decides whether it may run at all through the
  * completion that turns a finished child's bytes back into a tool result.
  *
- * The gate (grants → session filter → policy → hooks → sensitivity/secret
+ * The gate (grants → session filter → policy → sensitivity/secret
  * bind → approval) and the per-call egress computation are why this module
  * exists as one place: they are the single choke point where the trusted
  * parent decides what a sandboxed child is allowed to do and reach. child.c

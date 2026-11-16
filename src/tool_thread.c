@@ -54,10 +54,7 @@ int tool_thread_read(int64_t *session_id) {
 /* Owns `job` (heap copy) and job->args; frees both before exit. Opens its OWN
  * sqlite3* (the registry handler's captured db belongs to the poll thread —
  * SQLite handles are not shared across threads) and writes the result through
- * it. The AFTER_TOOL_CALL observer hook is deliberately NOT run here: it evals
- * JS on the shared extension runtime, which is unsafe off the poll thread, and
- * it targets the agent's externally-visible tools (file/shell/web/js) — those
- * run on the sandbox path and keep the hook in reap_children. */
+ * it. */
 static void *tool_thread_fn(void *arg) {
     ToolThreadJob *job = (ToolThreadJob *)arg;
     sqlite3 *db = db_open(g_db_path);

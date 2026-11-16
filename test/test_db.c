@@ -245,12 +245,27 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
+/* Turn a fresh (current) database back into the v61 shape: hook_directives
+ * exists. unshape_v61 starts here, so every older patch test replays v62
+ * over a real v61 shape. */
+static void unshape_v62(sqlite3 *db) {
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE hook_directives ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL,"
+        "  kind TEXT NOT NULL, role TEXT, content TEXT, entry_id INTEGER,"
+        "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+        "CREATE INDEX idx_hook_directives_session ON hook_directives(session_id);",
+        NULL, NULL, NULL);
+    assert(rc == SQLITE_OK);
+}
+
 /* Turn a fresh (current) database back into the v60 shape: channel_routes
  * instead of channel_chats, the chat columns back on sessions, no declared
  * chat links on sessions/cron_jobs, a NOT NULL policy on every delivery edge.
  * unshape_v60 starts here, so every older patch test replays v61 over a real
  * v60 shape. Rows are carried (a routed chat becomes a route). */
 static void unshape_v61(sqlite3 *db) {
+    unshape_v62(db);
     char *err = NULL;
     /* legacy_alter_table: the entries triggers name sessions, and a rename
      * onto a just-dropped name would otherwise re-check them mid-swap. */
@@ -1268,8 +1283,9 @@ static void test_schema_patch_v59(void) {
     assert(db_scalar_i64(db, "SELECT group_concat(name||'='||COALESCE(extension_name,'NULL'),"
         " ' ' ORDER BY name) = 'blank_ext=NULL builtin_c=NULL mine_t=mine' FROM tools;",
         0, -1) == 1);
-    assert(db_scalar_i64(db, "SELECT group_concat(extension_name) = 'mine' FROM hooks;",
-        0, -1) == 1);
+    /* v59 kept 'mine' and dropped 'ghost'; v62, replayed after it, empties
+     * the table (those events no longer exist). */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM hooks;", 0, -1) == 0);
     assert(db_scalar_i64(db, "SELECT group_concat(agent_name||'>'||extension_name) ="
         " 'Scout>mine' FROM agent_extensions;", 0, -1) == 1);
     assert(db_scalar_i64(db, "SELECT group_concat(name||':'||COALESCE(extension_name,'NULL')"
@@ -1653,6 +1669,45 @@ static void test_schema_patch_v61_refuses_dangling(void) {
     printf("  PASS test_schema_patch_v61_refuses_dangling\n");
 }
 
+/* v62: in-process hooks are gone — hook_directives is dropped (with its
+ * index) and every hooks row is deleted; the hooks table and the extension
+ * the rows belonged to stay. */
+static void test_schema_patch_v62(void) {
+    const char *path = "/tmp/test_cclaw_schema_v62.sqlite";
+    test_db_clean(path);
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v62(db);
+    assert(sqlite3_exec(db,
+        "INSERT INTO extensions(name, path, published) VALUES('ext','/e',1);"
+        "INSERT INTO hooks(extension_name, event, path) VALUES"
+        " ('ext','preAdvance','/e/a.qjs'),('ext','beforeToolCall','/e/g.qjs');"
+        "INSERT INTO hook_directives(session_id, kind, role, content)"
+        " VALUES(1,'inject','system','stale');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 61);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sqlite_master"
+        " WHERE name IN ('hook_directives','idx_hook_directives_session');", 0, -1) == 0);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sqlite_master"
+        " WHERE type='table' AND name='hooks';", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM hooks;", 0, -1) == 0);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM extensions WHERE name='ext';",
+        0, -1) == 1);
+
+    /* A v61 database that already lacks the table still upgrades. */
+    set_user_version(db, 61);
+    assert(db_schema_compat(db) == 1);
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
+
+    db_close(db);
+    test_db_clean(path);
+    printf("  PASS test_schema_patch_v62\n");
+}
+
 static void test_agent_models_capability_gate(void) {
     const char *path = "/tmp/test_cclaw_db_capgate.sqlite";
     test_db_clean(path);
@@ -1733,6 +1788,7 @@ int main(void) {
     test_schema_patch_v61();
     test_schema_patch_v61_refuses_dangling();
     test_schema_patch_v61_cursors();
+    test_schema_patch_v62();
     test_agent_models_capability_gate();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");

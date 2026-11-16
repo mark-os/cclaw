@@ -8,31 +8,20 @@
 static int failures = 0;
 #define ASSERT(cond, msg) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); failures++; } } while(0)
 
-static void test_context_profiles(void) {
+static void test_context_intrinsics(void) {
     QjsRuntime *qrt = qjs_runtime_create(2 * 1024 * 1024);
 
-    /* Hooks profile — minimal intrinsics */
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_HOOKS);
-    ASSERT(ctx != NULL, "hooks context create");
-    /* JSON should work */
+    /* One context shape for every JS host: the full intrinsic set. */
+    JSContext *ctx = qjs_context_create(qrt);
+    ASSERT(ctx != NULL, "context create");
     char *r = qjs_eval_to_string(ctx, "JSON.stringify({a:1})", NULL);
-    ASSERT(r && strcmp(r, "{\"a\":1}") == 0, "hooks profile has JSON");
+    ASSERT(r && strcmp(r, "{\"a\":1}") == 0, "context has JSON");
     free(r);
-    JS_FreeContext(ctx);
-
-    /* Eval profile — full intrinsics */
-    ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
-    ASSERT(ctx != NULL, "eval context create");
     r = qjs_eval_to_string(ctx, "new Date(0).toISOString()", NULL);
-    ASSERT(r && strcmp(r, "1970-01-01T00:00:00.000Z") == 0, "eval profile has Date");
+    ASSERT(r && strcmp(r, "1970-01-01T00:00:00.000Z") == 0, "context has Date");
     free(r);
-    JS_FreeContext(ctx);
-
-    /* Channel profile — full + Promise */
-    ctx = qjs_context_create(qrt, QJS_PROFILE_CHANNEL);
-    ASSERT(ctx != NULL, "channel context create");
     r = qjs_eval_to_string(ctx, "typeof Promise", NULL);
-    ASSERT(r && strcmp(r, "function") == 0, "channel profile has Promise");
+    ASSERT(r && strcmp(r, "function") == 0, "context has Promise");
     free(r);
     JS_FreeContext(ctx);
 
@@ -41,7 +30,7 @@ static void test_context_profiles(void) {
 
 static void test_eval_to_string(void) {
     QjsRuntime *qrt = qjs_runtime_create(1024 * 1024);
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
+    JSContext *ctx = qjs_context_create(qrt);
 
     char *r = qjs_eval_to_string(ctx, "2 + 2", NULL);
     ASSERT(r && strcmp(r, "4") == 0, "eval 2+2");
@@ -60,37 +49,9 @@ static void test_eval_to_string(void) {
     qjs_runtime_destroy(qrt);
 }
 
-static void test_global_json(void) {
-    QjsRuntime *qrt = qjs_runtime_create(1024 * 1024);
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
-
-    /* Set JSON as global */
-    int rc = qjs_set_global_json(ctx, "data", "{\"x\":42,\"arr\":[1,2,3]}");
-    ASSERT(rc == 0, "set_global_json returns 0");
-
-    /* Read it back via eval */
-    char *r = qjs_eval_to_string(ctx, "String(data.x)", NULL);
-    ASSERT(r && strcmp(r, "42") == 0, "global json property access");
-    free(r);
-
-    /* Get it back as JSON */
-    char *json = qjs_get_global_json(ctx, "data");
-    ASSERT(json != NULL, "get_global_json not null");
-    ASSERT(strstr(json, "\"x\":42"), "get_global_json contains x:42");
-    free(json);
-
-    /* Non-existent returns NULL */
-    json = qjs_get_global_json(ctx, "nonexistent");
-    ASSERT(json == NULL, "get_global_json nonexistent is NULL");
-
-    JS_FreeContext(ctx);
-    qjs_runtime_destroy(qrt);
-}
-
-
 static void test_console_log_circular(void) {
     QjsRuntime *qrt = qjs_runtime_create(2 * 1024 * 1024);
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
+    JSContext *ctx = qjs_context_create(qrt);
     qjs_register_eval_host_functions(ctx, NULL);
 
     /* Prelude: create __console_buf */
@@ -112,7 +73,7 @@ static void test_console_log_circular(void) {
 
 static void test_promise_resolve(void) {
     QjsRuntime *qrt = qjs_runtime_create(2 * 1024 * 1024);
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
+    JSContext *ctx = qjs_context_create(qrt);
 
     /* async fn result is unwrapped, not "[object Promise]" */
     char *r = qjs_eval_to_string(ctx, "(async function(){ return 1 + 2; })()", NULL);
@@ -157,7 +118,7 @@ static void test_promise_resolve(void) {
 static void test_interrupt_limit(void) {
     QjsRuntime *qrt = qjs_runtime_create(1024 * 1024);
     qjs_set_interrupt_limit(qrt, 100);
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
+    JSContext *ctx = qjs_context_create(qrt);
 
     /* Infinite loop should be interrupted */
     char *r = qjs_eval_to_string(ctx, "while(true){}", NULL);
@@ -172,7 +133,7 @@ static void test_interrupt_limit(void) {
 /* An exception is reported as what was thrown — a null stays "null". */
 static void test_throw_null(void) {
     QjsRuntime *qrt = qjs_runtime_create(1024 * 1024);
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
+    JSContext *ctx = qjs_context_create(qrt);
 
     char *r = qjs_eval_to_string(ctx, "throw null", NULL);
     ASSERT(r && strcmp(r, "null") == 0, "thrown null reads null");
@@ -189,7 +150,7 @@ static void test_throw_null(void) {
  * armv5te link. Shared memory itself stays. */
 static void test_no_atomics(void) {
     QjsRuntime *qrt = qjs_runtime_create(1024 * 1024);
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
+    JSContext *ctx = qjs_context_create(qrt);
 
     char *r = qjs_eval_to_string(ctx,
         "var a = new BigInt64Array(new SharedArrayBuffer(16));"
@@ -204,9 +165,8 @@ static void test_no_atomics(void) {
 
 int main(void) {
     TEST_INIT();
-    test_context_profiles();
+    test_context_intrinsics();
     test_eval_to_string();
-    test_global_json();
     test_console_log_circular();
     test_promise_resolve();
     test_interrupt_limit();

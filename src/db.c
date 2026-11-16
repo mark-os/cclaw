@@ -1836,6 +1836,13 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
      * link to their chat; channel edges lose their policy — see
      * patch_v61_chats. */
     { 61, NULL, patch_v61_chats },
+    /* v62: in-process extension hooks are gone. hook_directives carried their
+     * per-request inject/suppress commands; the rows in hooks name events
+     * that no longer exist. The hooks table itself stays. */
+    { 62,
+      "DROP TABLE IF EXISTS hook_directives;"
+      "DELETE FROM hooks;",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {

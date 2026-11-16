@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 #include "agent_setup.h"
-#include "extension.h"
 #include "tool_shell.h"
 #include "tool_web_fetch.h"
 #include "tool_db_query.h"
@@ -110,15 +109,6 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->mem_ctx.db = db;
     setup->mem_ctx.agent_name = (char *)agent_name;
     tool_memory_register(&setup->reg, &setup->mem_ctx);
-
-    /* JS persistent runtime */
-    setup->js_rt = js_runtime_create();
-
-    /* Extension hook context + DB-driven hook load. Extension *tools* load from
-     * the DB after tools_sync_to_db (below) so the builtin sync never clobbers
-     * extension rows. No JS is evaluated at load time. */
-    extension_ctx_init(&setup->ext_ctx, setup->js_rt);
-    extension_load_hooks(&setup->ext_ctx, db, agent_name);
 
     /* request_config — CLI inline tool/host/rename */
     setup->req_cfg_ctx.db = db;
@@ -350,8 +340,6 @@ void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent)
 }
 
 void agent_setup_destroy(AgentSetup *setup) {
-    extension_ctx_destroy(&setup->ext_ctx);
-    js_runtime_destroy(setup->js_rt);
     shell_secrets_free(setup->secrets, setup->secret_count);
     agent_caps_free(&setup->caps);
     tools_free(&setup->reg);

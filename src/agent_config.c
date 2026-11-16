@@ -319,7 +319,7 @@ int agent_config_set_tool_mode(sqlite3 *db, const char *agent,
         strcmp(mode, "tool_decides") != 0)
         return -1;
     /* Upsert: "stop asking" must persist even when no grant row exists yet
-     * (e.g. a tool raised to ASK by a policy/hook rather than a standing
+     * (e.g. a tool raised to ASK by a policy rather than a standing
      * grant). A bare UPDATE would silently no-op and drop the user's intent.
      * An existing row keeps its origin: only its mode changes. */
     const char *sql =

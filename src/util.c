@@ -20,8 +20,8 @@ char *util_read_file(const char *path, size_t *out_len) {
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
-    /* Cap bounds daemon OOM from an oversized workspace file (manifest, hook,
-     * skill, channel JS) or media spool entry — the largest legitimate load
+    /* Cap bounds daemon OOM from an oversized workspace file (manifest, skill,
+     * channel JS) or media spool entry — the largest legitimate load
      * is a media file, well under this. */
     if (len <= 0 || len > UTIL_READ_FILE_MAX) { fclose(f); return NULL; }
     fseek(f, 0, SEEK_SET);

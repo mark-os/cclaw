@@ -216,11 +216,10 @@ When a tool call arrives from the model, `dispatch_tool()` (`src/dispatch.c`) ev
 2. **Session tool_filter** — `session_tool_allowed()`. Grants ∩ filter (positive list frozen at session spawn); blocks filtered tools.
 3. **approval_mode** — `agent_tool_mode()` reads `grants.approval_mode` for this tool. `'silent'` → ALLOW, `'always'`/`'tool_decides'` → ASK.
 4. **tools.policy** — `policy_eval(args, policy_json)`. Per-argument restrict rules on the tool definition; DENY or ASK.
-5. **Hooks** — `hook_dispatch_gate_tool_call()`. Extension hooks run (veto-only: can escalate to ASK or DENY, never relax).
-6. **Sensitivity scan** — `host_in_text()` over the raw args against `sensitive_targets` (registered-domain+subdomain, lookalike-robust). Match → ASK, approval tagged `action='sensitive'`.
-6a. **Secret grant check** — a `{{SECRET:X}}` placeholder (and, on the shell tier, a `$CCLAW_SECRET_X` reference) naming a secret this agent holds no live `kind='secret'` grant for → inline DENY naming the secret and the agent, pointing at `request_config` `grants.secrets`. Before anything can park. Only the granted subset of the per-call snapshot is used past this point (interpolation, env delivery, egress narrowing, the js child's blob); see [Using a secret is a grant](#using-a-secret-is-a-grant).
-7. **Credential-binding check** — `used_secret_names()` over the args. Any used secret with zero `secret_hosts` bindings, or (web tier) a url host not covered by every used secret's bindings → inline DENY naming the secret and host, pointing at `request_config` `secret_bindings`. No park, no approval class (D17) — the agent requests the binding like it requests a host grant.
-8. **Approval park** — if gate == ASK: look up existing approval; if none or pending, park session (`awaiting_approval`). Resume on approve/deny.
+5. **Sensitivity scan** — `host_in_text()` over the raw args against `sensitive_targets` (registered-domain+subdomain, lookalike-robust). Match → ASK, approval tagged `action='sensitive'`.
+5a. **Secret grant check** — a `{{SECRET:X}}` placeholder (and, on the shell tier, a `$CCLAW_SECRET_X` reference) naming a secret this agent holds no live `kind='secret'` grant for → inline DENY naming the secret and the agent, pointing at `request_config` `grants.secrets`. Before anything can park. Only the granted subset of the per-call snapshot is used past this point (interpolation, env delivery, egress narrowing, the js child's blob); see [Using a secret is a grant](#using-a-secret-is-a-grant).
+6. **Credential-binding check** — `used_secret_names()` over the args. Any used secret with zero `secret_hosts` bindings, or (web tier) a url host not covered by every used secret's bindings → inline DENY naming the secret and host, pointing at `request_config` `secret_bindings`. No park, no approval class (D17) — the agent requests the binding like it requests a host grant.
+7. **Approval park** — if gate == ASK: look up existing approval; if none or pending, park session (`awaiting_approval`). Resume on approve/deny.
 
 ### The two sensitivity-axis rules (specs/trust.md)
 
@@ -257,7 +256,7 @@ Each grant row carries an `approval_mode` column (`'silent'` | `'always'` | `'to
 |------|----------|
 | `silent` | Tool runs without prompting (default for new grants) |
 | `always` | Every call parks for approval |
-| `tool_decides` | Tool's own policy/hooks determine whether to ask |
+| `tool_decides` | Tool's own policy determines whether to ask |
 
 Set via `agent_config_set_tool_mode()` or the `--auto-approve` path.
 
@@ -451,7 +450,7 @@ never enter the snapshot and no grant can name one.
   egress to bound hosts, and is shipped (with its bound hosts) to the js child
   for fetch-boundary resolution. Cron scripts get the subset for the job's
   agent. A call that names an ungranted secret is refused at the gate, before
-  anything can park (gate step 6a above), with the way to ask. **Masking is
+  anything can park (gate step 5a above), with the way to ask. **Masking is
   not gated**: results are masked with every known value, so a secret an
   agent may not use is still never shown to it.
 - **Two gates, independent.** The grant says *who* may use a secret; its
@@ -622,7 +621,6 @@ All three credential tools run via the `--run-tool` broker (re-exec'd child, nam
 | Tool result (forked shell) | — | — | yes | yes |
 | JS eval output | — | — | yes | yes |
 | inbox message (channel inbound) | — | — | yes | yes |
-| Hook inject (persistent + ephemeral) | — | — | yes | yes |
 | JS http_request (url/headers/body, child-side) | yes | yes | — | — |
 
 The rule: **anything heading into entries goes through both mask passes (`tool_result_postprocess`, `src/secret_interp.c`); anything heading into a tool exec goes through inject.** Sanitize-on-write is the invariant — the LLM payload is assembled straight from `entries` with no outbound scan, so every write path into entries must either run the mask passes or be derived from content that already did (model output, compaction summaries, sub-agent results are clean by induction).

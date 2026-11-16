@@ -216,7 +216,7 @@ cacheWrite = prompt_tokens_details.cache_write_tokens
 Only the **leading** system prompt wears the system role — `messages[0]` on
 OpenAI-compat, `systemInstruction` on Gemini. Every other piece of
 system-originated content (mid-turn `type='system'` entries such as approval
-and model-change notices, compaction summaries, ephemeral hook injects) is
+and model-change notices, compaction summaries) is
 rendered as a **user** message prefixed `'[system] '`, on every provider.
 This is universal in `src/llm_payload.c` — both builders, no per-provider
 asymmetry — and it is why Gemini no longer silently drops system entries.

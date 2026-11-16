@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v61 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v62 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -620,7 +620,7 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `token_estimate` | INTEGER | chars/3 + 4 heuristic (`TOKEN_ESTIMATE`, errs high; v52 rescaled old rows from `content_bytes`) |
 | `content_bytes` | INTEGER | byte length of content + tool_calls |
 | `tool_call_count` | INTEGER NOT NULL DEFAULT 0 | denormalized for plan pass |
-| `data` | TEXT | JSON side-channel, merged not overwritten (`json_patch`), nullable. `$.pin` — a hook's durable context pin; `$.source` / `$.source_ref` — provenance stamped by the inbox drain (the cron auto-pause streak reads it); `$.job` on a `cron_result` — the job that produced it; plus whatever an `annotate` hook merges in |
+| `data` | TEXT | JSON side-channel, merged not overwritten (`json_patch`), nullable. `$.source` / `$.source_ref` — provenance stamped by the inbox drain (the cron auto-pause streak reads it); `$.job` on a `cron_result` — the job that produced it |
 | `network_hosts` | TEXT | JSON array of hosts the tool run contacted (proxy-observed) |
 | `fence_id` | TEXT | Random id minted when `network_hosts` is set; see below |
 | `reasoning_meta` | TEXT | `type='reasoning'` rows only — replay tag+blob, see below |
@@ -767,33 +767,15 @@ Tool registry. Built-in C tools have NULL `extension_name`/`path`; JS tools poin
 
 ## hooks
 
-Extension-provided hooks. Same provenance model as tools — the DB holds config + a path, never code.
+Extension-provided hooks. Same provenance model as tools — the DB holds config + a path, never code. No hook event exists in this build ([hooks.md](hooks.md)): the manifest validator rejects every `hooks[]` entry and the v62 patch deleted the rows of the removed in-process events, so the table is empty.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `extension_name` | TEXT NOT NULL | FK → `extensions(name)` ON UPDATE CASCADE (v59) |
-| `event` | TEXT NOT NULL | one of the six hook lifecycle events |
+| `event` | TEXT NOT NULL | event name |
 | `path` | TEXT NOT NULL | handler file in extension store |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | PRIMARY KEY | (extension_name, event, path) | |
-
----
-
-## hook_directives
-
-Per-request ephemeral directives that cross the main-thread → worker-thread boundary as DB state. Written at dispatch on the poll thread, read by the worker's payload build, deleted at LLM request exit.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `session_id` | INTEGER NOT NULL | |
-| `kind` | TEXT NOT NULL | `inject` or `suppress` |
-| `role` | TEXT | inject: `system` or `user` |
-| `content` | TEXT | inject payload |
-| `entry_id` | INTEGER | suppress target entry |
-| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
-
-Index: `idx_hook_directives_session ON hook_directives(session_id)`.
 
 ---
 

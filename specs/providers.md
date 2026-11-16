@@ -88,7 +88,7 @@ reaches CClaw through OpenRouter's normalization.
 carries the system role (`messages[0]` / `systemInstruction` / top-level
 `system`). All other
 system-originated content — mid-turn `type='system'` entries, compaction
-summaries, hook injects — is emitted as a `'[system] '`-prefixed **user**
+summaries — is emitted as a `'[system] '`-prefixed **user**
 message on every provider. No builder ever emits a non-leading `role: system`.
 
 Key: OpenAI is the odd one out — `arguments` is a string. Everyone else uses objects.
@@ -126,9 +126,8 @@ What the builder does that the other two don't, and why:
   falls back to rebuilding the message from entries, without thinking.
 - **`thinking.block_binding.prefix_mismatch_behavior: "drop_block"`.** On
   accounts where the binding check is enforced, replaying a block after its
-  prefix changed is a 400. The scoping above should prevent that, but an
-  ephemeral hook inject or a mid-turn context cut can still edit the prefix,
-  and losing one block's reasoning beats losing the turn. Every drop is
+  prefix changed is a 400. The scoping above should prevent that, but a
+  mid-turn context cut can still edit the prefix, and losing one block's reasoning beats losing the turn. Every drop is
   reported in the response's `input_transformations`, archived with the body:
 
   ```sql

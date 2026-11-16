@@ -95,8 +95,6 @@ static const char HAND_LINKS_JSON[] =
     "[\"channel_outbox\",[\"session_id\"],\"sessions\",[\"id\"],null,null],"
     "[\"channel_outbox\",[\"channel_name\"],\"channels\",[\"name\"],null,null],"
     "[\"channel_events\",[\"channel_name\"],\"channels\",[\"name\"],null,null],"
-    "[\"hook_directives\",[\"session_id\"],\"sessions\",[\"id\"],null,null],"
-    "[\"hook_directives\",[\"entry_id\"],\"entries\",[\"id\"],null,null],"
     "[\"media_jobs\",[\"session_id\"],\"sessions\",[\"id\"],null,null],"
     "[\"llm_jobs\",[\"session_id\"],\"sessions\",[\"id\"],null,null],"
     "[\"cron_jobs\",[\"session_id\"],\"sessions\",[\"id\"],null,null],"

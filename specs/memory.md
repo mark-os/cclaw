@@ -176,13 +176,6 @@ Not yet implemented:
 - Compaction: summarize old entries, reparent tree. Its keep boundary
   (`context_compaction_keep_from`) snaps the same way, so a summary never lands
   inside a turn; a branch that is one giant turn compacts to nothing.
-- **Pin asymmetry**: a pinned entry (`entries.data $.pin=1`, hook `pin`) is
-  re-included past the *read-time cut* — it is invisible for one request, not
-  gone. Compaction's `keep_from` walk ignores pin entirely: a pinned entry old
-  enough to be compacted is summarized like any other, and only the summary
-  survives. Pin protects the cut, not the tree. Known and accepted (a pin that
-  vetoed compaction would let one entry pin an unbounded branch); the durable
-  way to carry something past compaction is the mechanical state coda below.
 - **Mechanical state coda** (E2): the compaction entry is the model's prose
   plus a `--- carried state ---` section built parent-side *after* the
   compaction call returns (`compaction_state_coda`, `llm_proc.c`) — open

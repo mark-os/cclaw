@@ -734,7 +734,7 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
     if (!qrt) return tool_fail_js(is_error, "error: out of memory");
     qjs_set_interrupt_limit(qrt, QJS_EVAL_MAX_INSTRUCTIONS);
 
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
+    JSContext *ctx = qjs_context_create(qrt);
     if (!ctx) { qjs_runtime_destroy(qrt); return tool_fail_js(is_error, "error: JS context creation failed"); }
 
     JsHostCtx hctx = { .instruction_count = 0,

@@ -115,7 +115,7 @@ instead of being attached block by block.
 
 ## JS Extension System
 
-**Largely built** — see [extensions.md](extensions.md) (manifest-declared tools/hooks/channel/scripts/skills/config, draft → promote → publish → attach lifecycle) and [skills.md](skills.md). Still future:
+**Largely built** — see [extensions.md](extensions.md) (manifest-declared tools/channel/scripts/skills/config, draft → promote → publish → attach lifecycle) and [skills.md](skills.md). Still future:
 
 - Tool composition: JS tools calling other tools via `callTool(name, args)`
 - Workspace script auto-discovery (`workspace/tools/*.sh`)
@@ -374,7 +374,7 @@ The long game: CClaw doesn't have to get every skill, tool, or prompt right
 the first time — the platform wins if *other people* can improve it over time.
 OpenClaw and Hermes are great in large part because of their communities
 building skills and tools. The extension manifest already bundles the right
-unit — tools + hooks + channel + scripts + skills + config + an agent to run
+unit — tools + channel + scripts + skills + config + an agent to run
 them all — so the missing piece is **distribution**, not a new format.
 
 - **Package = extension bundle.** One directory + `extension.json`, exactly

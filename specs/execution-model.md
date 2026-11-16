@@ -97,9 +97,9 @@ backgrounding happens only when the call actually dispatches.
 
 Every completed tool result takes the same tail into the session —
 `tool_result_commit` (dispatch.c): CLI arrow, UTF-8 sanitize,
-truncate/spill, entry write (+ network-hosts tag), call completion, hook
-patch. The security half (secret capture → deinterpolate → scan/redact →
-hooks) runs before it, per origin. External-origin results — a sub-agent's
+truncate/spill, entry write (+ network-hosts tag), call completion. The
+security half (secret capture → deinterpolate → scan/redact) runs before it,
+per origin. External-origin results — a sub-agent's
 final text entering its parent, a job's log tail — pass
 `tool_result_scrub` (secret_store.c) and the same truncate/spill policy, so
 there is no second, weaker writer of results.

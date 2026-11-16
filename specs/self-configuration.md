@@ -18,7 +18,7 @@ Companion specs: [trust.md](trust.md) (axis model), [config.md](config.md)
 |---------|-----------|-----------|------|
 | **Read** | agent → config | `search_config` (curated view), `db_query` (arbitrary SELECT) | tool grant |
 | **Write (single)** | agent → config | `request_config` — one JSON changes document batching grants, config values, and/or a provider definition ([config-doc.md](config-doc.md)) | human approval (park → apply, all-or-nothing) |
-| **Write (bulk/structured)** | agent → system | extension manifests via `extension_promote` — tools, hooks, channels, scripts, skills, config keys, **agents** | human approval with enumerated contents |
+| **Write (bulk/structured)** | agent → system | extension manifests via `extension_promote` — tools, channels, scripts, skills, config keys, **agents** | human approval with enumerated contents |
 | **Docs** | system → agent | builtin `cclaw-docs` skills extension (progressive disclosure via the skills index) | none (read-only knowledge) |
 
 Design invariants:
@@ -275,7 +275,7 @@ same bundle idempotent (its own agents exist by then).
 `extension_promote` parks (it is already in `agent_approval_tools`); the
 approval prompt now enumerates the validated manifest's declared contents:
 
-> promote 'nws': adds 2 tools, 1 hook, 1 skill, 3 config keys, 1 agent
+> promote 'nws': adds 2 tools, 0 hooks, 0 scripts, 1 skills, 3 config keys, 1 agents
 > (Watcher, standard)
 
 so the approver sees what the bundle will do to the system before code is

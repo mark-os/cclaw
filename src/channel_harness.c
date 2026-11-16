@@ -371,7 +371,7 @@ int channel_harness_run(const char *db_path, const char *channel_name, const cha
         return 1;
     }
     qjs_set_interrupt_limit(qrt, HARNESS_MAX_INSTRUCTIONS);
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_CHANNEL);
+    JSContext *ctx = qjs_context_create(qrt);
     if (!ctx) {
         fprintf(stderr, "harness: qjs context init failed\n");
         free(js_src); scenario_free(&sc);

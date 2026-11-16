@@ -413,7 +413,7 @@ int tool_extension_register(ToolRegistry *reg, ToolExtensionCtx *ctx) {
     rc |= tools_register(reg, "extension_promote",
         "Promote a draft extension from your workspace (workspace/extensions/<name>) "
         "into the shared store (requires human approval — the approver sees the "
-        "bundle's enumerated contents). On approval the manifest's tools/hooks/"
+        "bundle's enumerated contents). On approval the manifest's tools/"
         "skills/config/agents register as a real extension owned by you.",
         NAME_PARAMS, tool_extension_promote_handler, ctx);
     rc |= tools_register(reg, "extension_publish",

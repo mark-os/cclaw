@@ -24,9 +24,11 @@ explorer's address while both existed, redirects to `/admin`.
 - **Writing is specific.** There is no "edit any cell": each edit is a named
   action (below) that runs the same checks as the CLI verb or agent path it
   stands beside, and anything the event loop must carry out goes through a
-  queue row and `wake_session(0)` (approval decisions). Conversation history
-  — sessions, entries, tool calls, LLM responses, inbox, outbox, change_log —
-  is never editable, and there is no delete for agents or sessions.
+  queue row and `wake_session(0)` (approval decisions). This first explorer
+  has no actions on conversation history — sessions, entries, tool calls, LLM
+  responses, inbox, outbox, change_log — and no delete for agents or
+  sessions. That is its scope, not a rule: session manipulation will arrive
+  as named actions like any other write.
 - **SQL is the serializer.** Every response is the single text column of one
   statement built with JSON1 (`json_object`, `json_group_array`, …); C only
   chooses which schema names appear in that statement.
@@ -107,10 +109,10 @@ Everything needed to draw any table:
 - Links: every `pragma_foreign_key_list` entry (`declared: true`), plus a
   hand list (`declared: false`) of links the schema leaves undeclared
   (plan v0.8 decision 19): the conversation tables (`entries`, `tool_calls`,
-  `llm_responses`, `inbox`, `approvals`, `channel_outbox`, `hook_directives`,
+  `llm_responses`, `inbox`, `approvals`, `channel_outbox`,
   `media_jobs`, `llm_jobs`, `cron_jobs`) → `sessions`; `entries.parent_id`
   and `original_parent_id` → `entries`; `tool_calls.entry_id` /
-  `result_entry_id` and `hook_directives.entry_id` → `entries`;
+  `result_entry_id` → `entries`;
   `sessions.parent_session_id` → `sessions`; `sessions.owner_instance` →
   `processes`; `channel_outbox` / `channel_events.channel_name` → `channels`;
   `secret_hosts.secret_name`, `providers.api_key_env` → `secrets`;

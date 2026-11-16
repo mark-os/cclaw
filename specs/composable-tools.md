@@ -33,8 +33,8 @@ shell_exec({"command": "gh pr merge 123 --auto"})
 ```
 
 The only gating is the sandbox profile and the agent's host grants.
-There's no way to say "allow pr list but deny pr merge" without regexing the
-command string at a hook level.
+There's no way to say "allow pr list but deny pr merge" short of regexing the
+command string.
 
 With a composable JS tool:
 ```
@@ -216,16 +216,16 @@ must audit and JS carries the part that's safe not to:
   `transfer → ask` floor means no JS return, however buggy or compromised, can ever
   produce a silent transfer.
 
-**Where the JS runs.** Same machinery as the existing gating hooks
-(`hook_dispatch_gate_tool_call`): in the parent, **pre-fork**, so a `deny` costs no
+**Where the JS runs.** In the parent, **pre-fork**, so a `deny` costs no
 process and an `ask` lands directly in the parent's approval path (no IPC). The
 `manifest.json` declares its extent — pure function of `args`, no network/fs — and
 the install audit holds it to that envelope; the parent caps it with an
-instruction/time budget (the bound the gating hooks already need) so it can't hang
-the daemon.
+instruction/time budget so it can't hang the daemon. (This is a design sketch:
+no extension JavaScript runs in the daemon today — the in-process hook runtime
+it once pointed at is removed, see [hooks.md](hooks.md).)
 
-Above the tool, the per-agent grant restriction and gating hooks compose the same
-way (`max`, restrict-only) — every layer may add friction, none may remove it.
+Above the tool, the per-agent grant restriction composes the same way (`max`,
+restrict-only) — every layer may add friction, none may remove it.
 
 Static-floor schema:
 ```json

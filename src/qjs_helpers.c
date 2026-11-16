@@ -41,24 +41,11 @@ void qjs_set_interrupt_limit(QjsRuntime *qrt, int max_instructions) {
     qrt->instruction_count = 0;
 }
 
-JSContext *qjs_context_create(QjsRuntime *qrt, QjsProfile profile) {
+JSContext *qjs_context_create(QjsRuntime *qrt) {
     if (!qrt) return NULL;
 
-    JSContext *ctx;
-    if (profile == QJS_PROFILE_HOOKS) {
-        /* Minimal: base objects + eval + JSON + RegExp */
-        ctx = JS_NewContextRaw(qrt->rt);
-        if (!ctx) return NULL;
-        JS_AddIntrinsicBaseObjects(ctx);
-        JS_AddIntrinsicEval(ctx);
-        JS_AddIntrinsicJSON(ctx);
-        JS_AddIntrinsicRegExp(ctx);
-        JS_AddIntrinsicRegExpCompiler(ctx);
-    } else {
-        /* Full context for eval and channel profiles */
-        ctx = JS_NewContext(qrt->rt);
-        if (!ctx) return NULL;
-    }
+    JSContext *ctx = JS_NewContext(qrt->rt);
+    if (!ctx) return NULL;
     /* Reset instruction counter for this context's use */
     qrt->instruction_count = 0;
     return ctx;
@@ -81,47 +68,6 @@ char *qjs_eval_to_string(JSContext *ctx, const char *code, const char *filename)
     return result;
 }
 
-int qjs_set_global_json(JSContext *ctx, const char *name, const char *json) {
-    if (!ctx || !name || !json) return -1;
-    JSValue parsed = JS_ParseJSON(ctx, json, strlen(json), "<json>");
-    if (JS_IsException(parsed)) {
-        JS_FreeValue(ctx, JS_GetException(ctx));
-        return -1;
-    }
-    JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, name, parsed);
-    JS_FreeValue(ctx, global);
-    return 0;
-}
-
-char *qjs_get_global_json(JSContext *ctx, const char *name) {
-    if (!ctx || !name) return NULL;
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue val = JS_GetPropertyStr(ctx, global, name);
-    JS_FreeValue(ctx, global);
-
-    if (JS_IsException(val) || JS_IsUndefined(val)) {
-        JS_FreeValue(ctx, val);
-        return NULL;
-    }
-
-    JSValue json = JS_JSONStringify(ctx, val, JS_UNDEFINED, JS_UNDEFINED);
-    JS_FreeValue(ctx, val);
-    if (JS_IsException(json)) {
-        JS_FreeValue(ctx, JS_GetException(ctx));
-        return NULL;
-    }
-
-    const char *str = JS_ToCString(ctx, json);
-    JS_FreeValue(ctx, json);
-    if (!str) return NULL;
-    char *result = strdup(str);
-    JS_FreeCString(ctx, str);
-    return result;
-}
-
-/* The pending exception as text, whatever it is: a thrown null reads "null".
- * NULL only when it will not convert to a string at all. */
 char *qjs_get_exception_string(JSContext *ctx) {
     if (!ctx) return NULL;
     JSValue exc = JS_GetException(ctx);

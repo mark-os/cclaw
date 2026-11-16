@@ -28,7 +28,6 @@
 #include "db.h"
 #include "db_response.h"
 #include "extension_manifest.h"
-#include "hook_dispatch.h"
 #include "llm_bridge.h"
 #include "llm_proc.h"
 #include "llm_worker.h"
@@ -221,19 +220,6 @@ int dispatch_llm_req(int64_t session_id, const char *agent_name, int iteration) 
         }
     }
 
-    /* preAdvance hooks: run main-thread after the max-iter and rate-limit
-     * gates (never fire for an unsent request); their commands cross to the
-     * worker's payload build as DB state (hook_directives / entries.data). A
-     * worker-submit failure below leaves directives behind for the retried
-     * request — acceptable, llm_req clears them on every exit. */
-    if (proc_tool_setup()) {
-        char *cmds = hook_dispatch_pre_advance(&proc_tool_setup()->ext_ctx, proc_db(), session_id);
-        if (cmds) {
-            hook_apply_pre_advance(proc_db(), session_id, cmds);
-            free(cmds);
-        }
-    }
-
     session_set_state(proc_db(), session_id, "llm_running");
     int rc = llm_worker_submit(proc_db(), session_id, agent_name, iteration == 0 ? 1 : 0);
     if (rc < 0) {
@@ -272,15 +258,14 @@ static int tool_call_timeout(const char *args, int def) {
 /* Shared result-ingestion tail — the one path every completed tool result
  * takes into a session (blocking-vs-background step 3): CLI progress arrow,
  * UTF-8 sanitize, truncate/spill, entry write (+ optional network-hosts tag),
- * call completion, hook annotation patch. The security half of the chain
- * (secret capture, deinterpolate + scan/redact, hooks) runs in the caller
- * first — it differs per origin (inline vs reaped child). Consumes `result`
- * and `hook_annotate`. Returns the result entry id (or -1). */
+ * call completion. The security half of the chain (secret capture,
+ * deinterpolate + scan/redact) runs in the caller first — it differs per
+ * origin (inline vs reaped child). Consumes `result`. Returns the result
+ * entry id (or -1). */
 static int64_t tool_result_commit(int64_t session_id, const char *call_id,
                                   int64_t entry_id, int64_t iteration_id,
                                   const char *msg_tool_name, char *result,
-                                  int is_err, const char *hosts,
-                                  char *hook_annotate) {
+                                  int is_err, const char *hosts) {
     if (!proc_is_daemon()) {
         size_t rlen = strlen(result);
         if (rlen <= 80)
@@ -303,10 +288,6 @@ static int64_t tool_result_commit(int64_t session_id, const char *call_id,
     if (hosts && rid > 0)
         db_entry_set_network_hosts(proc_db(), rid, hosts);
     db_tool_call_complete_with_result(proc_db(), entry_id, call_id, rid);
-    if (hook_annotate) {
-        if (rid > 0) hook_entry_data_patch(proc_db(), rid, hook_annotate);
-        free(hook_annotate);
-    }
     free(stored);
     free(result);
     return rid;
@@ -530,7 +511,7 @@ static void call_egress_free(CallEgress *ce) {
 }
 
 /* §4+§8 dispatch gate, split from dispatch_tool_inner (2026-07-19).
- * Capability ceiling → policy → gating hook → sensitivity scan →
+ * Capability ceiling → policy → sensitivity scan →
  * unbound-secret deny → approval gate, in fixed restrict-only order. Returns
  * 0 = proceed (an approved once-only sensitivity park is reported via
  * *sens_once and sens_host for the per-call egress exception), 1 = handled
@@ -544,9 +525,9 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
     int sens_hit = 0;
     *sens_once = 0;
     sens_host[0] = '\0';
-    /* §4+§8 dispatch gate (fixed order: capability ceiling → gating hook →
-     * approval gate). The gating hook may only *raise* restriction
-     * (silent→ask, ask→deny) — a hook can veto, only a grant authorizes.
+    /* §4+§8 dispatch gate (fixed order: capability ceiling → policy →
+     * sensitivity → approval gate). Each step may only *raise* restriction
+     * (silent→ask, ask→deny) — only a grant authorizes.
      * Re-entrant (§7a): the approval is matched by (session_id, tool_call_id),
      * so a denial answers this call and an approval re-runs the same frozen
      * tool_call once (the approval is consumed on use). */
@@ -595,7 +576,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
             return tool_inline_error(session_id, tc, err, "chat_tool_filter");
         }
         /* Malformed arguments fail closed at the gate: the model gets an
-         * error tool-result and can retry. Nothing downstream (policy, hooks,
+         * error tool-result and can retry. Nothing downstream (policy,
          * handlers, the child wire) ever sees invalid JSON, so no code path
          * can substitute an empty param set for unparseable args. */
         if (!tool_args_valid_object(proc_db(), tc->arguments)) {
@@ -606,9 +587,9 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
             return tool_inline_error(session_id, tc, err, "bad_args");
         }
         ToolApprovalMode mode = agent_tool_mode(proc_db(), agent_name, tc->name);
-        HookGate gate = (mode == TOOL_MODE_SILENT) ? HOOK_GATE_ALLOW : HOOK_GATE_ASK;
+        int ask = (mode != TOOL_MODE_SILENT);
 
-        /* Per-argument policy pre-filter (restrict-only, before hooks) */
+        /* Per-argument policy pre-filter (restrict-only) */
         if (te->policy_json) {
             PolicyEffect pe = policy_eval(proc_db(), tc->arguments, te->policy_json);
             if (pe == POLICY_ERROR) {
@@ -632,30 +613,10 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 db_tool_call_set_status(proc_db(), session_id, tc->call_id, "done", "policy:deny");
                 return 1;
             }
-            if (pe == POLICY_ASK && gate < HOOK_GATE_ASK)
-                gate = HOOK_GATE_ASK;
+            if (pe == POLICY_ASK) ask = 1;
         }
 
-        if (proc_tool_setup()) {
-            char *reason = NULL;
-            HookGate h = hook_dispatch_gate_tool_call(&proc_tool_setup()->ext_ctx, proc_db(),
-                                                      tc->name, tc->arguments, &reason);
-            if (h > gate) gate = h;  /* restrict-only: most restrictive wins */
-            if (gate == HOOK_GATE_DENY) {
-                char err[256];
-                snprintf(err, sizeof(err), "error: %s blocked by hook%s%s", tc->name,
-                         reason ? ": " : "", reason ? reason : "");
-                ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
-                Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
-                               .tool_name = tc->name, .is_error = 1};
-                entry_append_with_iteration(proc_db(), session_id, &msg, tc->iteration_id);
-                db_tool_call_set_status(proc_db(), session_id, tc->call_id, "done", "hook:deny");
-                free(reason);
-                return 1;
-            }
-            free(reason);
-        }
-        /* Sensitivity scan (restrict-only, after hooks): any labeled host in
+        /* Sensitivity scan (restrict-only): any labeled host in
          * the raw args forces ASK. The label list is read fresh per call —
          * SQLite is the single home for it, no cached copy to drift. */
         {
@@ -681,7 +642,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 for (int i = 0; i < sn; i++) free(sens[i]);
                 free(sens);
             }
-            if (sens_hit && gate < HOOK_GATE_ASK) gate = HOOK_GATE_ASK;
+            if (sens_hit) ask = 1;
         }
         /* Using a secret is a grant (specs/security.md): a call that names a
          * secret this agent does not hold is refused here, before anything
@@ -753,7 +714,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                     return tool_inline_error(session_id, tc, err, "secret:unbound");
             }
         }
-        if (gate == HOOK_GATE_ASK) {
+        if (ask) {
             /* WHY this call parks — the tool name is already tc->name.
              * The two reasons partition the dedup/ticket space: a
              * sensitivity park must never match (or transfer to) an
@@ -981,20 +942,10 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
     { char *pp = tool_result_postprocess(result, all, all_n);
       if (pp) { free(result); result = pp; } }
 
-    /* afterToolCall hooks: chained result replacement, after the secret
-     * scanner (security boundary stays first), before the entry write so
-     * the replacement is what the context sees. */
-    char *hook_annotate = NULL;
-    if (proc_tool_setup()) {
-        char *rep = hook_dispatch_observe_tool_call(&proc_tool_setup()->ext_ctx,
-                        proc_db(), tc->name, tc->arguments, result, &hook_annotate);
-        if (rep) { free(result); result = rep; }
-    }
-
     if (!proc_is_daemon())
         cli_print_tool_call(tc->name, tc->arguments);
     tool_result_commit(session_id, tc->call_id, tc->entry_id, tc->iteration_id,
-                       tc->name, result, is_err, NULL, hook_annotate);
+                       tc->name, result, is_err, NULL);
     LOG_INFO_("tool done tool=%s inline=1", tc->name);
     return 1; /* Handled inline */
 }
@@ -1301,7 +1252,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         return 1; /* Signal: handled inline, check for more */
     }
 
-    /* Dispatch gate (capability → policy → hooks → sensitivity/secret →
+    /* Dispatch gate (capability → policy → sensitivity/secret →
      * approval). sens_host survives the gate: an approved once-only
      * sensitivity park grants that host to THIS call via a per-call
      * exception in the network-tier sections below. */
@@ -2188,22 +2139,11 @@ void reap_children(void) {
             char *output = child_output_finalize(c, status, &hosts, &is_err);
             size_t out_len = strlen(output);
 
-            /* afterToolCall hooks: chained result replacement, post-scanner,
-             * pre-write (same contract as the inline dispatch path). */
-            char *hook_annotate = NULL;
-            if (proc_tool_setup()) {
-                char *rep = hook_dispatch_observe_tool_call(&proc_tool_setup()->ext_ctx,
-                                proc_db(), c->tool_name, c->tool_args, output,
-                                &hook_annotate);
-                if (rep) { free(output); output = rep; out_len = strlen(output); }
-            }
-
             LOG_INFO_("tool done tool=%s is_err=%d", c->tool_name, is_err);
             LOG_TRACE_("tool result tool=%s len=%zu content=%s",
                        c->tool_name, out_len, output);
             tool_result_commit(session_id, c->tool_call_id, c->entry_id,
-                               c->iteration_id, c->tool_name, output, is_err, hosts,
-                               hook_annotate);
+                               c->iteration_id, c->tool_name, output, is_err, hosts);
             child_remove(c);
             run_advance(session_id);
         }

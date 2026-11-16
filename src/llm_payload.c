@@ -28,8 +28,7 @@ static int populate_plan(sqlite3 *db, const ContextPlan *plan) {
                            -1, &ins, NULL) != SQLITE_OK)
         return -1;
     int pos = 0;
-    for (int i = 0; i < plan->count; i++) {
-        if (!plan->entries[i].include) continue;  /* cut-excluded, not pinned */
+    for (int i = plan->cut; i < plan->count; i++) {
         sqlite3_bind_int(ins, 1, pos++);
         sqlite3_bind_int64(ins, 2, plan->entries[i].id);
         sqlite3_step(ins);
@@ -100,8 +99,7 @@ static const char SQL_OPENAI_MESSAGES[] =
      * per-upstream, Anthropic/Gemini structurally can't carry them), and a
      * tail-append is cache-safe whatever role it wears. Mid-turn system
      * entries therefore ride as '[system] '-prefixed user messages on every
-     * path — same convention as the hook_directives injects below and the
-     * Gemini builder. Only the leading system prompt (SQL_OPENAI_FULL) keeps
+     * path — same convention as the Gemini builder. Only the leading system prompt (SQL_OPENAI_FULL) keeps
      * the system role. */
     "      WHEN 'system' THEN"
     "        json_object('role','user','content','[system] ' || COALESCE(e.content,''))"
@@ -153,17 +151,6 @@ static const char SQL_OPENAI_MESSAGES[] =
     "      (SELECT MIN(pp.pos) FROM _plan pp)) - 0.5 AS pos,"
     "    json_object('role','user','content',?2) AS msg"
     "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
-    /* Ephemeral hook injects ride at the absolute tail, after even the
-     * newest entry — orthogonal to session context, unaffected by it. */
-    "  UNION ALL"
-    "  SELECT 1000000+hd.id AS pos,"
-    /* A 'system' inject converts to a '[system] '-prefixed user message —
-     * same universal convention as the Gemini builder and mid-turn system
-     * entries; only the leading prompt wears the system role. */
-    "    json_object('role', CASE WHEN hd.role='system' THEN 'user' ELSE hd.role END,"
-    "                'content', CASE WHEN hd.role='system'"
-    "                  THEN '[system] ' || hd.content ELSE hd.content END) AS msg"
-    "  FROM hook_directives hd WHERE hd.session_id = ?1 AND hd.kind = 'inject'"
     ") sub WHERE msg IS NOT NULL;";
 
 /* launch_agent's description carries a live roster of delegable agents and the
@@ -314,15 +301,6 @@ static const char SQL_GEMINI_CONTENTS[] =
     "    json_object('role','user','parts',"
     "      json_array(json_object('text',?2))) AS content_obj"
     "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
-    /* Ephemeral hook injects: Gemini has no system role mid-contents, so a
-     * system inject becomes a '[system] '-prefixed user part at absolute
-     * tail, after even the newest entry. */
-    "  UNION ALL"
-    "  SELECT 1000000+hd.id AS min_pos,"
-    "    json_object('role','user','parts',json_array(json_object('text',"
-    "      CASE WHEN hd.role='system' THEN '[system] ' || hd.content"
-    "           ELSE hd.content END))) AS content_obj"
-    "  FROM hook_directives hd WHERE hd.session_id = ?1 AND hd.kind = 'inject'"
     ") sub WHERE content_obj IS NOT NULL;";
 
 static const char SQL_GEMINI_TOOLS[] =
@@ -451,14 +429,6 @@ static const char SQL_ANTHROPIC_MESSAGES[] =
     "      (SELECT MIN(pp.pos) FROM _plan pp)) - 0.5, "
            SQL_ANTHROPIC_TEXT("user", "?2")
     "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
-    /* Ephemeral hook injects at the absolute tail, always as user: a trailing
-     * assistant message is a prefill, which current models reject. */
-    "  UNION ALL"
-    "  SELECT 1000000+hd.id, "
-           SQL_ANTHROPIC_TEXT("user",
-               "CASE WHEN hd.role='system' THEN '[system] ' || hd.content"
-               "     ELSE COALESCE(NULLIF(hd.content,''),'(empty message)') END")
-    "  FROM hook_directives hd WHERE hd.session_id = ?1 AND hd.kind = 'inject'"
     "), live AS (SELECT pos, msg FROM seq WHERE msg IS NOT NULL),"
     /* Prompt-cache breakpoints. Anthropic caching is opt-in and keyed on the
      * exact prefix up to a marked block, and the context block's move at each
@@ -497,8 +467,8 @@ static const char SQL_ANTHROPIC_TOOLS[] =
  *
  * thinking.block_binding: a thinking block replayed after its prefix changed
  * is a 400 on accounts where the check is enforced. Replay is scoped so that
- * should not happen (see SQL_ANTHROPIC_MESSAGES), but an ephemeral hook inject
- * or a mid-turn context cut can still edit the prefix, and losing one block's
+ * should not happen (see SQL_ANTHROPIC_MESSAGES), but a mid-turn context cut
+ * can still edit the prefix, and losing one block's
  * reasoning beats losing the turn. Every drop is reported in the response's
  * input_transformations, archived in llm_responses. A model that predates
  * adaptive thinking needs request_extra {"thinking":null}. */

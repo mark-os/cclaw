@@ -24,7 +24,6 @@
 #include "tool_share.h"
 #include "tool_session_condense.h"
 #include "proxy.h"
-#include "extension.h"
 #include "config.h"
 #include "agent_config.h"
 #include "db.h"
@@ -34,7 +33,6 @@
  * to outlive the setup call (caller owns lifetime). */
 typedef struct {
     ToolRegistry reg;
-    JsSessionRuntime *js_rt;
     /* Live-refreshable capability arrays from grants table */
     AgentCaps caps;
     /* Per-dispatch containment snapshot from the agents table. Setup-owned
@@ -73,8 +71,6 @@ typedef struct {
     /* secrets for shell injection + masking */
     ShellSecret *secrets;
     size_t secret_count;
-    /* extension hooks context */
-    ExtensionCtx ext_ctx;
 } AgentSetup;
 
 /* Initialize the tool registry for an agent. Every tool is registered the

@@ -85,9 +85,6 @@ static const char *MANIFEST =
     "      \"parameters\": {\"type\":\"object\",\"properties\":{\"lat\":{\"type\":\"number\"},\"lon\":{\"type\":\"number\"}},\"required\":[\"lat\",\"lon\"]},\n"
     "      \"handler\": \"forecast.qjs\" }\n"
     "  ],\n"
-    "  \"hooks\": [\n"
-    "    { \"event\": \"beforeToolCall\", \"handler\": \"guard.qjs\" }\n"
-    "  ],\n"
     "  \"scripts\": [\n"
     "    { \"name\": \"morning_report\", \"handler\": \"report.qjs\", \"schedule\": \"0 7 * * *\" }\n"
     "  ],\n"
@@ -130,7 +127,6 @@ static void setup_bundle(void) {
     mkdir(BUNDLE, 0755);
     write_file(BUNDLE "/extension.json", MANIFEST);
     write_file(BUNDLE "/forecast.qjs", "http_request('https://api.weather.gov/').body");
-    write_file(BUNDLE "/guard.qjs", "(function(c){ return c.name==='shell_exec' ? {block:true} : undefined; })");
     write_file(BUNDLE "/report.qjs", "'report'");
     mkdir(BUNDLE "/skills", 0755);
     mkdir(BUNDLE "/skills/forecast-style", 0755);
@@ -169,11 +165,6 @@ static void test_install_ingests_rows(void) {
     char *params = q1(db, "SELECT parameters_json FROM tools WHERE name='get_forecast'");
     assert(params && strstr(params, "\"lat\"")); free(params);
 
-    /* hooks row */
-    assert(qint(db, "SELECT count(*) FROM hooks WHERE extension_name='nws' AND event='beforeToolCall'") == 1);
-    char *hpath = q1(db, "SELECT path FROM hooks WHERE extension_name='nws'");
-    assert(hpath && strstr(hpath, "/extensions/nws/guard.qjs")); free(hpath);
-
     /* agent_extensions row */
     assert(qint(db, "SELECT count(*) FROM agent_extensions WHERE agent_name='default' AND extension_name='nws'") == 1);
 
@@ -197,7 +188,6 @@ static void test_install_ingests_rows(void) {
     /* shared-store copy exists */
     struct stat sb;
     assert(stat(STORE "/forecast.qjs", &sb) == 0 && S_ISREG(sb.st_mode));
-    assert(stat(STORE "/guard.qjs", &sb) == 0);
     /* skills: copied into the store, no DB state */
     assert(stat(STORE "/skills/forecast-style/SKILL.md", &sb) == 0);
     assert(stat(STORE "/notes.md", &sb) == 0);
@@ -288,22 +278,24 @@ static void test_validate_rejects_bad_sections(void) {
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
     free(err); err = NULL;
 
-    /* undispatched hook events (F13): turnStart/turnEnd are spec'd but never
-     * fire — registering them would be a silent no-op */
+    /* No hook event exists in this build: every hooks[] entry is refused,
+     * whatever it names — a registered hook that never fires is a silent
+     * no-op. An empty section is fine. */
     write_file("/tmp/test_ext_badsec/h.qjs", "({})");
-    write_file("/tmp/test_ext_badsec/extension.json",
-        "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnStart\",\"handler\":\"h.qjs\"}]}");
-    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
-    assert(err && strstr(err, "not dispatched"));
-    free(err); err = NULL;
-    write_file("/tmp/test_ext_badsec/extension.json",
-        "{\"name\":\"b\",\"hooks\":[{\"event\":\"bogusEvent\",\"handler\":\"h.qjs\"}]}");
-    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
-    assert(err && strstr(err, "not dispatched"));
-    free(err); err = NULL;
-    /* a dispatched event passes */
-    write_file("/tmp/test_ext_badsec/extension.json",
-        "{\"name\":\"b\",\"hooks\":[{\"event\":\"afterToolCall\",\"handler\":\"h.qjs\"}]}");
+    static const char *const hook_events[] = {
+        "preAdvance", "postAdvance", "beforeToolCall", "afterToolCall",
+        "turnStart", "bogusEvent" };
+    for (size_t i = 0; i < sizeof(hook_events) / sizeof(hook_events[0]); i++) {
+        char mf[160];
+        snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"%s\","
+                 "\"handler\":\"h.qjs\"}]}", hook_events[i]);
+        write_file("/tmp/test_ext_badsec/extension.json", mf);
+        assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+        assert(err && strstr(err, "not available in this build"));
+        assert(strstr(err, hook_events[i]));
+        free(err); err = NULL;
+    }
+    write_file("/tmp/test_ext_badsec/extension.json", "{\"name\":\"b\",\"hooks\":[]}");
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == 0);
     free(err); err = NULL;
 

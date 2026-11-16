@@ -2,7 +2,6 @@
 #include "db.h"
 #include "test_util.h"
 #include "channel.h"
-#include "hook_dispatch.h"
 #include "llm_payload.h"
 #include "db_response.h"
 #include "config.h"
@@ -741,79 +740,6 @@ static void test_network_hosts_query_time_wrap(void) {
     free(fence);
     db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_network_hosts_query_time_wrap\n");
-}
-
-/* Ephemeral hook injects ride at the tail of history on both endpoints and
- * vanish once hook_directives_clear runs (llm_req exit semantics). */
-static void test_hook_inject_directive(void) {
-    sqlite3 *db = open_seeded();
-
-    int64_t sid;
-    setup_session(db, &sid);
-
-    sqlite3_stmt *ins;
-    assert(sqlite3_prepare_v2(db,
-        "INSERT INTO hook_directives(session_id, kind, role, content)"
-        " VALUES(?1,'inject','system','User timezone: America/Chicago');",
-        -1, &ins, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(ins, 1, sid);
-    assert(sqlite3_step(ins) == SQLITE_DONE);
-    sqlite3_finalize(ins);
-
-    Config cfg = {0};
-    cfg.provider.model = "test-model";
-    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
-    cfg.context_window = 128000;
-
-    ContextPlan plan = {0};
-    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
-
-    /* OpenAI: inject is the LAST message (after all history entries), and a
-     * system inject converts to a '[system] '-prefixed user message */
-    LlmPayload payload;
-    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
-    sqlite3_stmt *s;
-    sqlite3_prepare_v2(db,
-        "SELECT json_extract(?1,'$.messages[#-1].role'),"
-        " json_extract(?1,'$.messages[#-1].content')", -1, &s, NULL);
-    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "user") == 0);
-    assert(strncmp((const char *)sqlite3_column_text(s, 1), "[system] ", 9) == 0);
-    assert(strstr((const char *)sqlite3_column_text(s, 1), "America/Chicago"));
-    sqlite3_finalize(s);
-    llm_payload_release(&payload);
-
-    /* Gemini: system inject becomes a '[system] '-prefixed user part at tail */
-    cfg.provider.endpoint_type = ENDPOINT_GEMINI;
-    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
-    sqlite3_prepare_v2(db,
-        "SELECT json_extract(?1,'$.contents[#-1].role'),"
-        " json_extract(?1,'$.contents[#-1].parts[0].text')", -1, &s, NULL);
-    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "user") == 0);
-    assert(strncmp((const char *)sqlite3_column_text(s, 1), "[system] ", 9) == 0);
-    assert(strstr((const char *)sqlite3_column_text(s, 1), "America/Chicago"));
-    sqlite3_finalize(s);
-    llm_payload_release(&payload);
-
-    /* Cleared directives (llm_req exit) leave the next payload inject-free */
-    hook_directives_clear(db, sid);
-    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
-    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
-    sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.messages'))"
-        " WHERE json_extract(value,'$.content') LIKE '%America/Chicago%'", -1, &s, NULL);
-    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(sqlite3_column_int(s, 0) == 0);
-    sqlite3_finalize(s);
-    llm_payload_release(&payload);
-
-    context_plan_free(&plan);
-    db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_hook_inject_directive\n");
 }
 
 /* An extension tool attached via agent_extensions but NOT present in the
@@ -1973,7 +1899,6 @@ int main(void) {
     test_anthropic_thinking_replay();
     test_cron_result_in_payload();
     test_network_hosts_query_time_wrap();
-    test_hook_inject_directive();
     test_extension_tool_grant_filtering();
     test_launch_agent_description_embeds_roster_and_worker_tools();
     test_chat_prompt_suffix();

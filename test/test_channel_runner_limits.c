@@ -47,7 +47,7 @@ static void test_cap_fits_heap(void) {
 static void test_set_global_reports_oom(void) {
     QjsRuntime *qrt = qjs_runtime_create(CR_HEAP_SIZE);
     assert(qrt);
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_CHANNEL);
+    JSContext *ctx = qjs_context_create(qrt);
     assert(ctx);
 
     /* Normal binding works and is readable back. */
@@ -100,7 +100,7 @@ static void test_set_global_reports_oom(void) {
 static void test_cap_sized_message_binds(void) {
     QjsRuntime *qrt = qjs_runtime_create(CR_HEAP_SIZE);
     assert(qrt);
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_CHANNEL);
+    JSContext *ctx = qjs_context_create(qrt);
     assert(ctx);
 
     size_t n = (size_t)CR_CONN_MSG_MAX;

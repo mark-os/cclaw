@@ -41,8 +41,8 @@ typedef struct {
     int iteration;
     /* TOOL_EXEC fields */
     char tool_call_id[64];
-    char tool_name[64];     /* for the §8 observer hook */
-    char *tool_args;        /* strdup'd args for the observer; freed on cleanup */
+    char tool_name[64];     /* for logs and the result entry */
+    char *tool_args;        /* strdup'd args for secret capture; freed on cleanup */
     int64_t iteration_id;
     int64_t entry_id;       /* tool_call entry id */
     int result_pipe;        /* read end of pipe for tool output */

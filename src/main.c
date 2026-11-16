@@ -27,7 +27,6 @@
 #include "agent_define.h"
 #include "skills.h"
 #include "agent_setup.h"
-#include "hook_dispatch.h"
 #include "approval.h"
 #include "buf.h"
 #include "llm_proc.h"
@@ -211,45 +210,11 @@ static int compute_timeout_ms(void) {
 
 /* ── event_step: shared event handling for both daemon and CLI loops ── */
 
-/* postAdvance hooks: fire on the worker-completion wake, before run_advance
- * consumes the llm_running state. The state guard filters compaction
- * completions riding the same pipe; error entries are skipped (nothing for a
- * redact/annotate hook to act on, and error filtering drops them from context anyway). */
-static void maybe_dispatch_post_advance(int64_t session_id) {
-    if (!proc_tool_setup() ||
-        proc_tool_setup()->ext_ctx.hooks[HOOK_POST_ADVANCE].count == 0)
-        return;
-
-    int64_t entry_id = -1;
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(proc_db(),
-            "SELECT e.id FROM entries e"
-            " WHERE e.id = (SELECT MAX(id) FROM entries"
-            "                WHERE session_id=?1 AND type='assistant_message')"
-            "   AND e.stop_reason != 4"  /* STOP_REASON_ERROR */
-            "   AND (SELECT state FROM sessions WHERE id=?1) = 'llm_running';",
-            -1, &s, NULL) != SQLITE_OK)
-        return;
-    sqlite3_bind_int64(s, 1, session_id);
-    if (sqlite3_step(s) == SQLITE_ROW)
-        entry_id = sqlite3_column_int64(s, 0);
-    sqlite3_finalize(s);
-    if (entry_id < 0) return;
-
-    char *cmds = hook_dispatch_post_advance(&proc_tool_setup()->ext_ctx, proc_db(),
-                                            session_id, entry_id);
-    if (cmds) {
-        hook_apply_post_advance(proc_db(), session_id, entry_id, cmds);
-        free(cmds);
-    }
-}
-
 static void event_step_worker(int worker_fd) {
     (void)worker_fd;
     int64_t completed_sid;
     while (llm_worker_read(&completed_sid) == 0) {
         if (completed_sid == -1) continue;
-        maybe_dispatch_post_advance(completed_sid);
         run_advance(completed_sid);
     }
     /* The job row this completion deleted was a concurrency-gate resource —

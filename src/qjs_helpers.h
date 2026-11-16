@@ -14,13 +14,6 @@
 
 #include <stddef.h>
 
-/* Execution profiles — determines which intrinsics are loaded */
-typedef enum {
-    QJS_PROFILE_HOOKS,    /* in-process hooks: Base + JSON + RegExp only */
-    QJS_PROFILE_EVAL,     /* fork+exec js_eval: full (includes Proxy, Promise) */
-    QJS_PROFILE_CHANNEL,  /* cclaw --channel runner: full + Promise */
-} QjsProfile;
-
 /* Wrapper around JSRuntime with interrupt-based instruction limiting */
 typedef struct {
     JSRuntime *rt;
@@ -37,21 +30,16 @@ void qjs_runtime_destroy(QjsRuntime *qrt);
 /* Set instruction limit (interrupt handler fires after N ops). 0 = disable. */
 void qjs_set_interrupt_limit(QjsRuntime *qrt, int max_instructions);
 
-/* Create a context with profile-appropriate intrinsics. */
-JSContext *qjs_context_create(QjsRuntime *qrt, QjsProfile profile);
+/* Create a context with the full intrinsic set (js_eval, extension tools and
+ * the channel runner all use it; what differs between them is the host
+ * functions each registers afterwards). */
+JSContext *qjs_context_create(QjsRuntime *qrt);
 
 /* Eval code and return result as a heap-allocated string. NULL on error.
  * Caller frees. Test-only harness for qjs_resolve/qjs_get_exception_string
  * (test_quickjs) — production eval paths need the raw JSValue and inline
  * their own JS_Eval. */
 char *qjs_eval_to_string(JSContext *ctx, const char *code, const char *filename);
-
-/* Parse JSON string and set as a named global property. Returns 0 on success. */
-int qjs_set_global_json(JSContext *ctx, const char *name, const char *json);
-
-/* Stringify a named global property to JSON. Returns heap string or NULL.
- * Caller frees. */
-char *qjs_get_global_json(JSContext *ctx, const char *name);
 
 /* Extract exception message as heap string. Clears the exception. Caller frees. */
 char *qjs_get_exception_string(JSContext *ctx);

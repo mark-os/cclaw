@@ -5,22 +5,14 @@
  * argument up to TOOL_TIMEOUT_MAX_SEC. */
 #define JSEVAL_DEFAULT_TIMEOUT 120
 
-/* The js_eval tool and the per-session persistent JS runtime — one-off JS
- * evaluation in the sandboxed engine (SBX_JS tier), sharing a context
- * across extension loads.
- */
+/* The js_eval tool and extension tools — JS evaluation in the sandboxed
+ * engine (SBX_JS tier). */
 
 #include "tools.h"
 #include "sandbox.h"
 #include "run_tool.h"
 #include <sqlite3.h>
 #include <stdint.h>
-
-/* Persistent JS runtime for a session — shared context across extension loads */
-typedef struct {
-    void *heap;  /* QjsRuntime* */
-    void *ctx;   /* JSContext* */
-} JsSessionRuntime;
 
 /* Host context passed via env to forked QuickJS child. */
 typedef struct {
@@ -51,12 +43,6 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx);
 /* Handler: parse JSON args, eval in sandboxed QuickJS (fork+exec).
  * Returns heap-allocated result string. */
 char *tool_js_eval_handler(const char *arguments, void *user_data, int *is_error);
-
-/* Create a persistent JS runtime for extension loading. */
-JsSessionRuntime *js_runtime_create(void);
-
-/* Destroy a session runtime. */
-void js_runtime_destroy(JsSessionRuntime *rt);
 
 /* Register an extension tool. `path` is the absolute handler .qjs file in the
  * shared store; the SBX_JS broker evals it (filename mode) with the call args in

@@ -491,9 +491,9 @@ static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_di
     return rc;
 }
 
-/* Verify every $.hooks[] entry's event is one the daemon actually dispatches
- * — accepting turnStart/turnEnd (declared in specs/hooks.md, never wired)
- * would register a hook that silently never fires (review-1 F13). */
+/* No hook event exists in this build, so every $.hooks[] entry is refused:
+ * a registered hook that never fires is a silent lie. The section and its
+ * ingest stay for the events that will be added. */
 static int check_hook_events(sqlite3 *db, const char *manifest, char **err_out) {
     if (check_array_shape(db, manifest, "'$.hooks'",
                           "manifest '$.hooks' must be an array", err_out) != 0)
@@ -503,8 +503,6 @@ static int check_hook_events(sqlite3 *db, const char *manifest, char **err_out) 
     if (sqlite3_prepare_v2(db,
             "SELECT json_extract(value,'$.event')"
             " FROM json_each(COALESCE(json_extract(?1,'$.hooks'),'[]'))"
-            " WHERE COALESCE(json_extract(value,'$.event'),'') NOT IN"
-            "   ('preAdvance','postAdvance','beforeToolCall','afterToolCall')"
             " LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
@@ -518,9 +516,9 @@ static int check_hook_events(sqlite3 *db, const char *manifest, char **err_out) 
         size_t n = strlen(bad) + 128;
         char *m = malloc(n);
         if (m) {
-            snprintf(m, n, "hook event '%s' is not dispatched — use "
-                     "preAdvance, postAdvance, beforeToolCall, or "
-                     "afterToolCall", bad);
+            snprintf(m, n, "hook event '%s' rejected — hook events are not "
+                     "available in this build; remove the manifest's 'hooks' "
+                     "section", bad);
             *err_out = m;
         }
     }

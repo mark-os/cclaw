@@ -423,8 +423,6 @@ the hook.
   - **Compaction.** Old turns are replaced by a compaction entry.
   - **The read-time window.** When compaction fails, `plan_find_cut` drops old
     turns from the request without deleting them.
-  - **Hook directives.** A hook can `suppress` an entry or inject text for one
-    request only.
   - **The entry tree.** A session is a tree with a `leaf_id`; the visible
     history is the branch from the leaf to the root. Anything that moves the
     leaf to another branch replaces the history.
@@ -442,10 +440,6 @@ the hook.
 
   Turn Claude Code's own compaction off, so that cclaw's is the only one.
 
-  Per-request hook directives do not fit this model: a `suppress` or an
-  inject that is different on each request would restart the Claude session
-  on each request. They would have to be unsupported on this provider, or
-  limited to the turn boundary.
 - **Parallel tool calls** are lost. Calls arrive one at a time.
 - **Tool names and descriptions.** A name is at most 64 characters including
   `mcp__cclaw__` (12), so 52 are left; a description is cut at 2048

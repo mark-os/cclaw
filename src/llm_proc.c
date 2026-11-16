@@ -9,7 +9,6 @@
 #include "db.h"
 #include "db_response.h"
 
-#include "hook_dispatch.h"
 #include "http.h"
 #include "llm.h"
 #include "llm_payload.h"
@@ -1074,7 +1073,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             entry_append_with_iteration(db, session_id, &err_msg, 0);
         }
         free(context_text); free(system_prompt); context_plan_free(&plan);
-        hook_directives_clear(db, session_id);  /* "this request only" */
         config_free(cfg); free(agent_name_alloc);
         return (st == LLM_RESP_OK) ? 0 : -1;
     }
@@ -1423,7 +1421,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         goto err;
     }
 
-    hook_directives_clear(db, session_id);  /* injects/suppress were this call's */
     config_free(cfg);
     free(agent_name_alloc);
     return 0;
@@ -1432,7 +1429,6 @@ err:
     free(context_text);
     free(system_prompt);
     context_plan_free(&plan);
-    hook_directives_clear(db, session_id);
     config_free(cfg);
     free(agent_name_alloc);
     return -1;

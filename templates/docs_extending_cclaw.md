@@ -1,11 +1,11 @@
 ---
 name: extending-cclaw
-description: How to author CClaw extensions — manifest format, tool/hook/skill/channel components, the draft → promote → publish → attach lifecycle, and QuickJS handler contracts.
+description: How to author CClaw extensions — manifest format, tool/skill/channel components, the draft → promote → publish → attach lifecycle, and QuickJS handler contracts.
 ---
 
 # Extending CClaw
 
-You can add new tools, hooks, skills, channels, and even agents to CClaw by
+You can add new tools, skills, channels, and even agents to CClaw by
 authoring an **extension**: a directory bundle in your workspace containing an
 `extension.json` manifest plus handler files. Code lives in files; the database
 stores only definitions and paths.
@@ -39,7 +39,6 @@ stores only definitions and paths.
       "parameters": { "type": "object", "properties": { "city": {"type": "string"} } },
       "handler": "tools/weather.qjs" }
   ],
-  "hooks":   [ { "event": "preAdvance", "handler": "hooks/context.qjs" } ],
   "skills":  [ "skills/my-skill" ],
   "scripts": [ { "name": "cleanup", "handler": "scripts/cleanup.qjs" } ],
   "config":  [ { "key": "api_base", "default": "https://…", "description": "…",
@@ -49,10 +48,7 @@ stores only definitions and paths.
 }
 ```
 
-All handler paths are bundle-relative; no `..`, no absolute paths. Hook events
-must be one of `preAdvance`, `postAdvance`, `beforeToolCall`, `afterToolCall` —
-the manifest validator rejects anything else (there is no `session_start` or
-`turnStart` event). `config[]`
+All handler paths are bundle-relative; no `..`, no absolute paths. `config[]`
 keys register as `<name>.<key>` in the config registry. `agents[]` entries use
 the agent-definition schema (see the creating-agents skill); an entry whose name
 already exists is skipped, never overwritten.

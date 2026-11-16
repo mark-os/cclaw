@@ -9,7 +9,7 @@ of each:
 | Component | Runs in | Lifecycle |
 |-----------|---------|-----------|
 | Tools | forked child of the agent process (one fork+exec per call) | per-call, isolated |
-| Hooks | agent process, fresh QuickJS context per dispatch | per turn-event |
+| Hooks | not available in this build — see [hooks.md](hooks.md) | — |
 | Channel | separate `cclaw --channel` process (daemon-managed) | long-lived, restarted on crash |
 | Scripts | forked child, on a cron schedule | per-run, isolated |
 | Skills | prompt index entry; body `file_read` on demand ([skills.md](skills.md)) | indexed at prompt build |
@@ -47,10 +47,6 @@ directory.
     }
   ],
 
-  "hooks": [
-    { "event": "beforeToolCall", "handler": "guard.qjs" }
-  ],
-
   "channel": { "type": "telegram", "handler": "channel.qjs" },
 
   "scripts": [
@@ -71,7 +67,7 @@ directory.
 | `name` | Extension identity. Primary key in `extensions`. |
 | `version` | Free-form version string (display / update tracking). |
 | `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), hosts?, policy?}`. `hosts?` is the tool's declared egress — see [Declared reach](#declared-reach-hosts). |
-| `hooks[]` | Each: `{event, handler (file)}`. `event` must be a *dispatched* hook event (`preAdvance`, `postAdvance`, `beforeToolCall`, `afterToolCall`) — validate rejects others, incl. the not-yet-wired `turnStart`/`turnEnd`. |
+| `hooks[]` | Each: `{event, handler (file)}`. No hook event exists in this build, so validate rejects any non-empty `hooks[]` — see [hooks.md](hooks.md). |
 | `channel` | At most one: `{type, handler (file), transports?}`. Runs as a separate process. `transports?` is an optional advisory array (`poll`/`webhook`/`persistent`) validated at `--check` — see [channel-transports.md](channel-transports.md). |
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
 | `skills[]` | Bundle-relative paths, each a directory containing `SKILL.md` or a bare `.md` file ([skills.md](skills.md) format). Validated at promote: path must be bundle-relative and its frontmatter must parse with a `description`. |
@@ -219,7 +215,7 @@ individual tool, hook, or skill beyond agent level except through
 to system-level registration. This is deliberate, not incidental: it gives
 promote a single choke point for static analysis (validate every declaration
 before anything registers), makes the promoted set enumerable ("this bundle
-adds 2 tools, 1 hook, 3 skills, 2 config keys"), and means the unit an agent
+adds 2 tools, 3 skills, 2 config keys"), and means the unit an agent
 promotes for itself is already the unit it can publish to other agents — and
 that a user can share with other cclaw installs. Agent-level remains
 free-form: drafts, personal skills (`agents/<name>/skills/`), and ad-hoc
@@ -283,10 +279,9 @@ SELECT t.name, t.description, t.parameters_json, t.path, t.policy
    AND (e.published = 1 OR e.owner_agent = ?1);
 ```
 
-Built-in C tools register in C; extension tools come from this join. Hooks load
-the same way from the `hooks` table. **No JS is evaluated at load time** — loading
-is parsing JSON-derived rows, not running extension code. The only JS execution is
-when a tool *runs* (fork child) or a hook *fires* (fresh context).
+Built-in C tools register in C; extension tools come from this join. **No JS
+is evaluated at load time** — loading is parsing JSON-derived rows, not running
+extension code. The only JS execution is when a tool *runs* (fork child).
 
 Because the registry is derived from the DB, a tool promoted **mid-session** becomes
 callable the same session: on a registry lookup miss, dispatch re-runs this query
@@ -329,8 +324,7 @@ and **no top-level `await`** (async functions and `.then` chains work — the
 host drains the microtask queue and unwraps a returned promise), and **no
 `Atomics`** (compiled out — a runtime never has a second thread). Failed
 evals return targeted hints for these gaps (`qjs_syntax_hint`,
-src/qjs_host_eval.c). The in-process hooks profile is a reduced-intrinsics
-context (no `Promise`). Globals available to tool handlers (the
+src/qjs_host_eval.c). Globals available to tool handlers (the
 `qjs_register_eval_host_functions` environment):
 
 | Global | Description |
@@ -348,31 +342,11 @@ the `http_request()` boundary in the child, with the secret's host binding
 enforced there (see specs/security.md, JS-Tier Secret Resolution). Either
 way the value is never visible to the model or written to disk.
 
-## Hook Handler Contract
+## Hooks
 
-A hook handler is a JS file run **in the agent process** in a fresh QuickJS context
-per dispatch (isolation between extensions; no cross-call leakage). The handler
-receives a small structured `input` object (never the full messages array) and
-returns a JSON object of **commands** that C validates and applies — see
-[specs/hooks.md](hooks.md) for the full command contracts.
-
-| Event | Signature | Commands honored | Notes |
-|-------|-----------|-----------------|-------|
-| `preAdvance` | `fn(input) → cmds\|void` | `inject` (system/user, ephemeral or persistent, capped), `suppress` (this request only; never the latest user entry), `pin` (survives the context cut), `set_data` (json_patch onto `entries.data`) | Chained in load order; commands accumulate. Pin wins over suppress. |
-| `postAdvance` | `fn(input) → cmds\|void` | `transform_content` (rewrites the assistant entry; first original kept in `data.original_content`), `annotate` (merges into `data`) | Chained; later hooks see the transformed `input.content`. Last transform wins, annotate merges. |
-| `beforeToolCall` | `fn({name, args}) → {deny\|ask, reason}\|void` | restrict-only gate | Most-restrictive across hooks wins; a hook can veto, never authorize. |
-| `afterToolCall` | `fn({name, args, result}) → {result, annotate}\|void` | result replacement + `annotate` | Chained; each sees the previous result. Runs after the secret scanner, before the entry write. |
-| `turnStart` / `turnEnd` | `fn()` | — | Design headroom only — not dispatched, and the manifest validator **rejects** manifests declaring them (`check_hook_events`, src/extension_manifest.c). |
-
-Deferred for now: `inject_next` and `notify` (postAdvance commands), and the
-`db.query`/`kv`/`console.log` hook globals — hooks act on their `input` JSON only.
-
-A hook that throws during dispatch is skipped; one broken hook must not
-kill the turn.
-
-Caveat: `suppress` is not sequence-checked — hiding an individual `tool_result`
-entry while its `tool_call` stays in context can produce a provider-invalid
-message sequence. Suppress whole turns, not single tool results.
+Not available in this build. In-process hooks were removed and will return as
+sandboxed scripts bound to events; until then the manifest validator rejects
+every `hooks[]` entry. See [hooks.md](hooks.md).
 
 ## Channel Component
 
@@ -567,22 +541,19 @@ Channels have unbounded lifetimes and external network dependencies. A misbehavi
 gateway reconnect loop must not affect agent turns or the daemon loop. Crash
 isolation is the primary motivation.
 
-### Why fresh context per hook, forked child per tool
+### Why a forked child per tool
 
-Hooks run in-process for low latency but in a fresh QuickJS context each dispatch,
-so one extension's hook cannot pollute another's (QuickJS has no safe context-reset
-primitive; a fresh context *is* the reset). Tools fork+exec for full sandbox
-isolation and to bound a misbehaving handler. Both keep the long-lived runtime's GC
-heap shared and reused — one runtime, many short-lived contexts.
+Tools fork+exec for full sandbox isolation and to bound a misbehaving handler.
+Extension JavaScript never runs inside the daemon.
 
 ## Implementation Status
 
 This spec's declarative model is implemented: the manifest loader
 (`src/extension_manifest.c`), the shared store + promote copy, the
 `tools`/`hooks`/`extensions` schema, the read-only mount, and the
-promote/publish/attach operations. Hook dispatch loads from the manifest via
-`extension_load_hooks` (`src/extension.c`) — there is no `registerTool`/
-`registerHook` runtime scrape. The **channel component contract is also
+promote/publish/attach operations. There is no `registerTool`/`registerHook`
+runtime scrape, and no hook dispatch at all in this build
+([hooks.md](hooks.md)). The **channel component contract is also
 implemented** (`cclaw --channel`, the `channels`/`channel_*` tables, the
 `channel.*` channel API). The `skills[]` and `config[]` manifest sections are
 implemented (validation + ingest in `src/extension_manifest.c`; extension

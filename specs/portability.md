@@ -28,7 +28,7 @@ Two ways to get a binary, both supported on purpose:
 
 | # | Layer | What it is | Needs from the host |
 |---|---|---|---|
-| 1 | **Core** | Agent loop, SQLite, config and self-reconfiguration, LLM requests, hooks | Kernel, filesystem, a CA bundle for HTTPS |
+| 1 | **Core** | Agent loop, SQLite, config and self-reconfiguration, LLM requests | Kernel, filesystem, a CA bundle for HTTPS |
 | 2 | **Mediated tools** | File tools, `web_fetch`, JavaScript (`js_eval`, extension tools) | Nothing: cclaw's own code is the only thing acting, so cclaw's own code can enforce the policy |
 | 3 | **Containment** | A boundary imposed from outside on code cclaw cannot inspect | A backend: Linux namespaces today; a platform sandbox (Android app sandbox) or none elsewhere |
 | 4 | **Shell** | Arbitrary programs (`shell_exec`) | Layer 3, or the operator's explicit `host` opt-out |

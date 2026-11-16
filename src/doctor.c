@@ -525,7 +525,7 @@ static void check_channels(sqlite3 *db) {
  * are counted from approvals.state='denied' instead — a decided approval
  * stores only its decided_via (cli/telegram/...) in resolved_by, same value
  * for approve and deny. */
-#define DENIAL_SET "('not_granted','policy:deny','hook:deny','denied','block_window')"
+#define DENIAL_SET "('not_granted','policy:deny','denied','block_window')"
 
 static void check_denials(sqlite3 *db) {
     printf("\n[audit]\n");

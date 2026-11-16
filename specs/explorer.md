@@ -289,16 +289,23 @@ Letting an agent use a secret is `grant_add` with kind `secret`.
 | `#/r/<table>/<key parts…>` | Row: fields grouped "What you configured" / "What cclaw observed" where the column class is known (else one group), each with its explanation; links from this row; rows that point here, with counts, opening the filtered list |
 | `#/add-provider` | New provider: name, endpoint, wire format, key |
 
-Agents, providers, channels, models, memory blocks, chats, approvals and
-secrets add sections (and their actions) above the fields: an agent's
-model lists by purpose in order, grants by kind with their source, sessions
-with their chat and whether that chat still sends to them, memory, extensions
-and schedules; a provider's key (stored secret or environment), registered
+Agents, providers, channels, models, memory blocks, chats, approvals,
+secrets and entries add sections (and their actions) above the fields: an
+agent's model lists by purpose in order, grants by kind with their source,
+sessions with their chat and whether that chat still sends to them, memory,
+extensions (an attached one that ships a [hook](hooks.md) says it runs after
+each turn, and whether its script keeps failing) and schedules; a provider's key (stored secret or environment), registered
 models and how many models the provider offers; a channel's routed and
 unrouted chats with their reply mode and its defaults; a model's edit and
 remove; a block's attachments and notes; a chat's route and settings; an
 approval's card and decision; a secret's allowed hosts and the agents that may
-use it. The providers, memory blocks and secrets lists offer adding one; the
+use it; an entry's part in a [turn edit](turn-edit.md) — on the turn's answer,
+the record (`$.turn_edits` of its `data`) as links: who edited, the entries
+that left the branch, each replaced result beside its replacement, the notes,
+the size before and after; on an entry the edit took out, put in or added,
+one line saying so with a link to the record. The section reads the turn's
+assistant entries (`rows`, filtered by session, turn and type, whole values);
+an unedited turn shows nothing. The providers, memory blocks and secrets lists offer adding one; the
 approvals list shows the pending ones as cards. Anything else uses the generic
 pages.
 
@@ -371,4 +378,17 @@ record:
   `channel_outbox` rows created between this turn's first entry and the
   next's (they are pruned after `outbox_retention_sec`). Long text arrives as
   a preview and is fetched whole by "show more"; a turn is drawn once all its
-  entries have arrived (keyset pages of 200).
+  entries have arrived (keyset pages of 200). A session held by a turnSettled
+  hook (`settling`) reads "tidying up" and counts as working.
+- **An edited turn** ([turn-edit.md](turn-edit.md)) — the session's entries
+  include the ones an edit took off the branch, so the turn is drawn from the
+  records on its assistant entries (`data.turn_edits`; a long `data` arrives
+  as a preview, so those rows are fetched whole first). The turn is marked
+  "edited" and shows what the agent now sees, in branch order (each entry
+  after its `parent_id` — a replaced result and a note have newer ids than
+  the answer): a replaced result says who replaced it, a hook's note
+  (`data.source` = `hook:<ext>`) is "note from <ext>", not "cclaw". Below the
+  answer one line per record says who edited, what it did and the turn's size
+  before and after, with a link to the record's row; "What was taken out"
+  opens the dropped calls with their results and the original text of each
+  replaced result, each linked to its stored row in the explorer.

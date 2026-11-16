@@ -101,8 +101,12 @@ static void test_promote_parks_apply_approval(void) {
         "\"tools\":[{\"name\":\"tx\",\"description\":\"d\","
         "\"parameters\":{\"type\":\"object\",\"properties\":"
         "{\"channel\":{\"type\":\"string\"}}},"
-        "\"hosts\":[\"api.good.test\"],\"handler\":\"tx.qjs\"}]}");
+        "\"hosts\":[\"api.good.test\"],\"droppable\":true,\"handler\":\"tx.qjs\"}],"
+        "\"hooks\":[{\"event\":\"turnSettled\",\"handler\":\"rev.qjs\"},"
+        "{\"event\":\"turnSettled\",\"handler\":\"log.qjs\",\"wait\":false}]}");
     write_file(WS "/extensions/goodx/tx.qjs", "'ok'");
+    write_file(WS "/extensions/goodx/rev.qjs", "return '{}'");
+    write_file(WS "/extensions/goodx/log.qjs", "return '{}'");
 
     /* The dispatcher has the session in tool_running before dispatching a
      * call; the promote park's awaiting_approval transition is CAS-guarded
@@ -132,6 +136,12 @@ static void test_promote_parks_apply_approval(void) {
      * credential passthrough like slack_api(method,params)). */
     assert(strstr(args, "hosts=[api.good.test]"));
     assert(strstr(args, "params=") && strstr(args, "channel"));
+    /* ...and what the extension does unasked: a hook runs on every turn and
+     * an awaited one may edit it; a droppable tool's calls are what it may
+     * take out. A count ("1 hooks") would say none of that. */
+    assert(strstr(args, "hosts=[api.good.test] droppable params="));
+    assert(strstr(args, "- hook turnSettled rev.qjs: runs after every turn, reads it, and may drop"));
+    assert(strstr(args, "- hook turnSettled log.qjs: runs after every turn and reads it; not waited for"));
     sqlite3_finalize(st);
     /* ...and the session is parked awaiting it. */
     assert(sqlite3_prepare_v2(g_db,

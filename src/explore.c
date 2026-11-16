@@ -73,7 +73,7 @@ static const char CODES_JSON[] =
 static const char BOOLS_JSON[] =
     "[\"config.secret\",\"config.required\",\"extensions.published\","
     "\"extensions.enabled\",\"agent_extensions.enabled\",\"tools.enabled\","
-    "\"hooks.enabled\",\"memory_blocks.read_only\",\"agent_memory_blocks.read_only\","
+    "\"hooks.enabled\",\"hooks.wait\",\"tools.droppable\",\"memory_blocks.read_only\",\"agent_memory_blocks.read_only\","
     "\"inbox.consumed\",\"entries.is_error\",\"channel_chats.is_admin\","
     "\"delivery_edges.one_shot\",\"llm_jobs.recall\",\"cron_jobs.enabled\"]";
 

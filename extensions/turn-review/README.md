@@ -50,7 +50,9 @@ cp -r extensions/turn-review ~/.cclaw/agents/<Agent>/workspace/extensions/
 ```
 
 then tell the agent: *promote the extension draft turn-review*. The approval
-reads `promote 'turn-review': adds 0 tools, 1 hooks, … 2 config keys`. From
+reads `promote 'turn-review': adds 0 tools, 1 hooks, … 2 config keys`, then
+`- hook turnSettled review.qjs: runs after every turn, reads it, and may drop
+tool calls, replace results and add notes; the session waits for it`. From
 the agent's next turn the hook runs; no restart. For a second agent, have the
 owner `extension_publish` it and the other agent `extension_attach` it.
 
@@ -85,6 +87,9 @@ promote again.
 
 ## See what it did
 
+- **The dashboard**: a session's page marks the turn "edited", shows it as the
+  agent now sees it, and under "What was taken out" the dropped calls and the
+  original text of each shortened result.
 - **The log**, one line per turn: `hook turnSettled ext=turn-review
   outcome=applied` (or `nothing`, `rejected`, `failed`, with a reason).
 - **The record** on the turn's final assistant entry — what left, what

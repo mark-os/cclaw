@@ -75,9 +75,27 @@ static char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
         "      ' hosts=' || COALESCE((SELECT '[' || group_concat(h.value,',') || ']'"
         "                             FROM json_each(COALESCE(json_extract(tj.value,'$.hosts'),'[]')) h),"
         "                            '(none — runs under your host grants)') ||"
+        /* Droppable is what a turnSettled hook may take out of a session's
+         * history; a tool that acts must not carry it. */
+        "      CASE WHEN json_extract(tj.value,'$.droppable') THEN ' droppable' ELSE '' END ||"
         "      ' params=' || substr(COALESCE(json_extract(tj.value,'$.parameters'),'{}'),1,400),"
         "      char(10))"
-        "    FROM json_each(COALESCE(json_extract(?1,'$.tools'),'[]')) tj), ''))"
+        "    FROM json_each(COALESCE(json_extract(?1,'$.tools'),'[]')) tj), '')"
+        /* Per hook: a count says nothing. A hook is a script that runs,
+         * unasked, on every turn of an agent with this extension, sees the
+         * whole turn, and — when the session waits for it — may edit it
+         * (specs/hooks.md). Promotion is the only approval it ever gets. */
+        " || COALESCE((SELECT char(10) || group_concat("
+        "      '  - hook ' || COALESCE(json_extract(hj.value,'$.event'),'?') || ' ' ||"
+        "      COALESCE(json_extract(hj.value,'$.handler'),'?') ||"
+        "      CASE WHEN json_extract(hj.value,'$.event') IS NOT 'turnSettled' THEN ''"
+        "           WHEN COALESCE(json_extract(hj.value,'$.wait'),1)"
+        "           THEN ': runs after every turn, reads it, and may drop tool calls,'"
+        "                || ' replace results and add notes; the session waits for it'"
+        "           ELSE ': runs after every turn and reads it; not waited for,'"
+        "                || ' cannot change it' END,"
+        "      char(10))"
+        "    FROM json_each(COALESCE(json_extract(?1,'$.hooks'),'[]')) hj), ''))"
         "SELECT CASE WHEN length(t) > 4000"
         "            THEN substr(t,1,4000) || char(10) || '… (summary clipped)'"
         "            ELSE t END FROM s",

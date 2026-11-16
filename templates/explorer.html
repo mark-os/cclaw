@@ -878,7 +878,8 @@ var SHAPED = {
       });
       return [list, memActs];
     });
-    sub(el, "Extensions", seq, Promise.all([rowsFull("agent_extensions", by, 200), rowsFull("extensions", { owner_agent: name }, 200)]), function (r) {
+    sub(el, "Extensions", seq, Promise.all([rowsFull("agent_extensions", by, 200), rowsFull("extensions", { owner_agent: name }, 200),
+                                            rowsFull("hooks", { enabled: 1 }, 200)]), function (r) {
       var list = h("div", { class: "rows" }), lines = {}, order = [];
       function line(n) {
         if (!lines[n]) { lines[n] = h("span", { class: "pills" }); order.push(n); }
@@ -892,6 +893,13 @@ var SHAPED = {
         var p = line(x.values.extension_name);
         p.appendChild(pill("attached"));
         p.appendChild(x.values.enabled ? pill("enabled", "ok") : pill("disabled"));
+        /* A hook is a script the extension runs on this agent's turns. */
+        if (x.values.enabled) r[2].rows.forEach(function (k) {
+          if (k.values.extension_name !== x.values.extension_name) return;
+          p.appendChild(pill(k.values.event === "turnSettled"
+            ? (k.values.wait ? "runs after each turn, and may edit it" : "runs after each turn") : "runs on " + k.values.event));
+          if (k.values.fail_count >= 3) p.appendChild(pill("its script keeps failing", "warn"));
+        });
       });
       order.forEach(function (n) { list.appendChild(rowLine(link(rowHash("extensions", [n]), n), lines[n])); });
       return list.childNodes.length ? list : emptyLine("No extensions.");
@@ -1845,6 +1853,45 @@ SHAPED.channel_chats = function (res, el, seq) {
     list.appendChild(rowLine("Guidance", v.guidance ? h("span", { class: "note-text", text: v.guidance }) : h("span", { class: "none", text: "none" })));
     return [list, opener("Change settings", "Settings for " + label, function () { return chatSettingsPanel(v, tools); })];
   });
+};
+
+/* An entry of a turn that a turnSettled script edited (specs/turn-edit.md).
+   The record is on the turn's answer; the entries it took off the branch, put
+   in their place or added are found through it. */
+SHAPED.entries = function (res, el, seq) {
+  var v = res.row.values, id = res.row.key[0];
+  if (v.turn_id === null || v.turn_id === undefined) return;
+  function e(n) { return link(rowHash("entries", [n]), "#" + n); }
+  function many(a) { return a.map(function (n, i) { return [i ? ", " : "", e(n)]; }); }
+  rowsFull("entries", { session_id: v.session_id, turn_id: v.turn_id, type: "assistant_message" }, 200).then(function (r) {
+    if (!page(seq)) return;
+    var list = h("div", { class: "rows" });
+    r.rows.forEach(function (x) {
+      var d = looksJson(x.values.data), on = x.key[0];
+      (d && Array.isArray(d.turn_edits) ? d.turn_edits : []).forEach(function (t) {
+        if (!isObj(t)) return;
+        var by = String(t.by || "?"), ext = by.indexOf("hook:") === 0 ? by.slice(5) : null;
+        var who = ext ? ["the extension ", link(rowHash("extensions", [ext]), ext)] : by;
+        var left = [].concat(t.left_branch || []), repl = [].concat(t.replaced || []).filter(isObj), notes = [].concat(t.notes || []);
+        if (on === id) {
+          list.appendChild(rowLine(h("span", null, "This turn was edited after it ended, by ", who,
+            h("span", { class: "why", text: "The entries it took out are still stored; they are not on the session's branch, so the model no longer sees them." })),
+            typeof t.at === "number" ? when(t.at) : ""));
+          if (left.length) list.appendChild(rowLine("Left the branch", many(left)));
+          repl.forEach(function (p) { list.appendChild(rowLine("Result replaced", [e(p.original), " → ", e(p.replacement)])); });
+          if (notes.length) list.appendChild(rowLine("Notes added", many(notes)));
+          if (isObj(t.tokens)) list.appendChild(rowLine("Size of the turn, estimated tokens", fmtNum(t.tokens.before) + " → " + fmtNum(t.tokens.after)));
+          return;
+        }
+        var was = repl.filter(function (p) { return p.original === id; })[0], now = repl.filter(function (p) { return p.replacement === id; })[0];
+        var what = left.indexOf(id) >= 0 ? ["Not on the session's branch: taken out by ", who, was ? [", which put ", e(was.replacement), " in its place"] : ""]
+                 : now ? ["Written by ", who, " in place of ", e(now.original)]
+                 : notes.indexOf(id) >= 0 ? ["A note left on the turn by ", who] : null;
+        if (what) list.appendChild(rowLine(h("span", null, what), ["record on ", e(on)]));
+      });
+    });
+    if (list.firstChild) el.appendChild(section("Turn edit", list));
+  }, function () {});
 };
 
 SHAPED.approvals = function (res, el, seq) {

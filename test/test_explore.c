@@ -205,7 +205,8 @@ static void test_meta_complete(void) {
     assert(qi("SELECT count(*) FROM json_each(?1, '$.tables') j, json_each(j.value, '$.columns') k"
               " WHERE (j.value->>'name', k.value->>'name', k.value->>'display') IN (VALUES"
               " ('entries','role','code'), ('entries','created_at','time'),"
-              " ('models','degraded_until','time'), ('tools','enabled','bool'))", m) == 4);
+              " ('models','degraded_until','time'), ('tools','enabled','bool'),"
+              " ('tools','droppable','bool'), ('hooks','wait','bool'))", m) == 6);
     assert(qi("SELECT ?1 ->> '$.codes.\"entries.role\".\"2\"' = 'assistant'", m) == 1);
     assert(qi("SELECT ?1 ->> '$.home[0].tables[0]' = 'agents'"
               " AND ?1 ->> '$.home[8].tables[0]' = 'approvals'", m) == 1);
@@ -364,6 +365,56 @@ static void test_row_keys(void) {
     assert(qi("SELECT length(?1 ->> '$.row.values.content')", out) == 5000);
     free(out);
     printf("PASS: test_row_keys\n");
+}
+
+/* ── an edited turn (specs/turn-edit.md), as the pages find it ─────────── */
+
+/* A turnSettled script's edit leaves a record on the turn's answer and the
+ * originals in the table, off the branch. Both pages read that with the
+ * generic calls: the turn's assistant entries (session, turn, type) with
+ * whole values, or the answer's own row — a record is longer than a list
+ * preview, so a plain list page cannot carry it. */
+static void test_edited_turn(void) {
+    exec("INSERT INTO sessions(id, name, agent_name) VALUES (3,'edited','alpha');"
+         "INSERT INTO entries(id, session_id, parent_id, turn_id, type, role, content, tool_call_id) VALUES"
+         " (901, 3,  -1, 1, 'user_message', 1, 'go', NULL),"
+         " (902, 3, 901, 1, 'tool_call', 2, '{}', 'c1'),"
+         " (903, 3, 902, 1, 'tool_result', 3, 'three hundred lines', 'c1'),"
+         " (905, 3, 902, 1, 'tool_result', 3, 'five lines', 'c1');"
+         "INSERT INTO entries(id, session_id, parent_id, turn_id, type, role, content, data) VALUES"
+         " (906, 3, 905, 1, 'system', 0, 'a note', '{\"source\":\"hook:rev\"}'),"
+         " (904, 3, 906, 1, 'assistant_message', 2, 'done', json_object('turn_edits', json_array("
+         "   json_object('by','hook:rev','at',1763300000,'left_branch',json_array(903),"
+         "     'replaced',json_array(json_object('original',903,'replacement',905)),"
+         "     'notes',json_array(906),'tokens',json_object('before',9120,'after',3100),"
+         "     'record',json_object('why', printf('%.300c','y'))))));");
+    char *out = NULL;
+    const char *turn = "{\"session_id\":3,\"turn_id\":1,\"type\":\"assistant_message\"}";
+    assert(rows_call("entries", turn, NULL, 0, &out) == 200);
+    assert(qi("SELECT json_array_length(?1, '$.rows') = 1 AND ?1 ->> '$.rows[0].key[0]' = 904"
+              " AND ?1 ->> '$.rows[0].values.data.length' > 200", out) == 1);
+    free(out);
+    ExploreQuery q = { .table = "entries", .filter = turn, .full = 1 };
+    assert(explore_rows(g_db, &q, &out) == 200);
+    assert(qi("SELECT json_extract(?1 ->> '$.rows[0].values.data', '$.turn_edits[0].replaced[0].replacement') = 905"
+              " AND json_extract(?1 ->> '$.rows[0].values.data', '$.turn_edits[0].left_branch[0]') = 903", out) == 1);
+    free(out);
+    assert(row_call("entries", "[904]", &out) == 200);
+    assert(qi("SELECT json_extract(?1 ->> '$.row.values.data', '$.turn_edits[0].by') = 'hook:rev'", out) == 1);
+    free(out);
+    /* The original is still a row, reachable by its id, with the parent it
+     * was written under; the whole turn comes with the session's entries. */
+    assert(row_call("entries", "[903]", &out) == 200);
+    assert(qi("SELECT ?1 ->> '$.row.values.content' = 'three hundred lines'"
+              " AND ?1 ->> '$.row.values.parent_id' = 902", out) == 1);
+    free(out);
+    assert(rows_call("entries", "{\"session_id\":3}", NULL, 0, &out) == 200);
+    assert(qi("SELECT json_array_length(?1, '$.rows')", out) == 6);
+    char *src = q1("SELECT json_extract(j.value ->> '$.values.data', '$.source') FROM json_each(?1, '$.rows') j"
+                   " WHERE j.value ->> '$.key[0]' = 906", out);
+    assert(src && strcmp(src, "hook:rev") == 0);
+    free(src); free(out);
+    printf("PASS: test_edited_turn\n");
 }
 
 /* ── identifiers and values from the request never become SQL ──────────── */
@@ -640,6 +691,7 @@ int main(void) {
     test_rows_paging();
     test_row_keys();
     test_injection();
+    test_edited_turn();
     test_page_source();
     test_secret_walk();
     test_http();

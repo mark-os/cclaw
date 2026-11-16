@@ -264,7 +264,7 @@ function approvalAsk(a) {
   else if (t === "create_agent") s = "wants to create a new agent, " + (args.name || "?");
   else if (t === "update_agent") s = "wants to change the agent " + (args.name || "?");
   else if (t === "cron_set") s = "wants to schedule " + (args.name || "a job") + " to run as another agent";
-  else if (t === "extension_promote") s = "wants to add a new tool, " + (args.name || "?");
+  else if (t === "extension_promote") s = "wants to install the extension " + (args.name || "?");
   else if (t === "install_update") s = "wants to install update " + (args.tag || "");
   else s = "wants to use " + t;
   if (a.park_reason === "sensitive_target") s += " (a host you marked sensitive)";
@@ -665,11 +665,23 @@ function feed(ctx, page) {
     if (!by[e.turn_id]) { by[e.turn_id] = []; order.push(e.turn_id); }
     by[e.turn_id].push(e);
   });
-  order.forEach(function (t, i) {
-    var es = by[t].slice().reverse();
-    var newer = i > 0 ? by[order[i - 1]][by[order[i - 1]].length - 1].created_at : null;
-    ctx.tl.appendChild(turnView(ctx, t, es, newer));
+  /* A turn's edit record is in its answer's data, which arrives as a preview
+     when it is long: those are fetched whole before the turn is drawn. */
+  var long = done.filter(function (e) { return e.role === 2 && e.data !== null && typeof e.data === "object"; });
+  Promise.all(long.map(function (e) {
+    return api("row", { table: "entries", key: JSON.stringify([e.id]) })
+      .then(function (r) { e.data = r.row.values.data; }, function () {});
+  })).then(function () {
+    if (ctx.my !== seq) return;
+    order.forEach(function (t, i) {
+      var es = by[t].slice().reverse();
+      var newer = i > 0 ? by[order[i - 1]][by[order[i - 1]].length - 1].created_at : null;
+      ctx.tl.appendChild(turnView(ctx, t, es, newer));
+    });
+    feedMore(ctx, done.length);
   });
+}
+function feedMore(ctx, drawn) {
   clear(ctx.more);
   if (ctx.next) {
     var b = h("button", { class: "act", type: "button", text: "Show older turns" });
@@ -682,7 +694,7 @@ function feed(ctx, page) {
       }, function (e) { b.disabled = false; ctx.more.appendChild(h("div", { class: "err", text: e.message })); });
     });
     ctx.more.appendChild(b);
-    if (!done.length) b.click();   /* one turn longer than a page */
+    if (!drawn) b.click();   /* one turn longer than a page */
   } else if (ctx.tl.firstChild) {
     ctx.more.appendChild(h("p", { class: "muted", text: "That is the start of this session." }));
   }
@@ -697,7 +709,10 @@ function who(e, s, chat) {
     if (src === s.channel_name) return (chat && chat.is_admin ? "you, on " : "chat on ") + src;
     return SOURCE[src] || src;
   }
-  if (e.role === 0) return "cclaw";
+  if (e.role === 0) {
+    var from = String((json(e.data) || {}).source || "");
+    return from.indexOf("hook:") === 0 ? "note from " + from.slice(5) : "cclaw";
+  }
   return s.agent_name;
 }
 function bodyText(e) {
@@ -750,10 +765,35 @@ function decidedBy(v) {
   return "by " + v;
 }
 
-function turnView(ctx, t, es, newerStart) {
-  var failed = es.some(function (e) { return e.role === 2 && e.stop_reason === 4; });
-  var box = h("div", { class: "turn" + (failed ? " failed" : "") },
-    h("div", { class: "th", text: "Turn " + t + " · " + clock(es[0].created_at) }));
+/* What a script did to a turn after it ended (specs/turn-edit.md): the records
+   on the turn's assistant entries, each {by, at, left_branch, replaced, notes,
+   tokens}. The entries it took out are still stored, off the conversation. */
+function turnEdits(es) {
+  var out = [];
+  es.forEach(function (e) {
+    var d = e.role === 2 ? json(e.data) : null;
+    if (d && Array.isArray(d.turn_edits)) d.turn_edits.forEach(function (x) {
+      if (x && typeof x === "object") out.push({ on: e.id, name: String(x.by || "").replace(/^hook:/, "") || "an extension",
+        at: x.at, left: [].concat(x.left_branch || []), replaced: [].concat(x.replaced || []),
+        notes: [].concat(x.notes || []), tokens: x.tokens || {} });
+    });
+  });
+  return out;
+}
+/* Entries in the order the conversation has them: each after the one it hangs
+   off. An edit puts new entries (a replaced result, a note) before older ones.
+   Anything that is not one line stays in the order it was written. */
+function chain(es) {
+  var ids = {}, next = {}, heads = [], out = [];
+  es.forEach(function (e) { ids[e.id] = 1; });
+  es.forEach(function (e) { if (ids[e.parent_id]) next[e.parent_id] = e; else heads.push(e); });
+  for (var e = heads.length === 1 ? heads[0] : null; e && out.length < es.length; e = next[e.id]) out.push(e);
+  return out.length === es.length ? out : es;
+}
+
+/* The events of a list of entries, appended to box. `was` names who replaced a
+   result (by the new result's id); `gone` is set for entries taken out. */
+function events(ctx, es, box, was, gone) {
   var results = {};
   es.forEach(function (e) { if (e.role === 3 && e.tool_call_id) results[e.tool_call_id] = e; });
   var shownResults = {};
@@ -769,7 +809,8 @@ function turnView(ctx, t, es, newerStart) {
         tags.appendChild(pill(st[0] + (ap.state !== "pending" && ap.decided_via ? ", " + decidedBy(ap.decided_via) : ""), st[1]));
       }
       if (r && r.is_error) tags.appendChild(pill("failed", "bad"));
-      if (!r && !ap) tags.appendChild(pill("no result yet"));
+      if (r && was[r.id]) tags.appendChild(pill("result replaced by " + was[r.id]));
+      if (!r && !ap && !gone) tags.appendChild(pill("no result yet"));
       var ev = h("div", { class: "ev tool" }, h("div", { class: "who", text: "tool" }),
         h("div", { class: "line" }, h("b", { text: e.tool_name || "?" }), ": " + argShort(e)), tags.firstChild ? tags : null);
       if (r) {
@@ -790,7 +831,8 @@ function turnView(ctx, t, es, newerStart) {
     }
     if (e.role === 3) {
       if (shownResults[e.tool_call_id]) return;
-      box.appendChild(h("div", { class: "ev tool" + (e.is_error ? " error" : "") }, h("div", { class: "who", text: "tool result: " + (e.tool_name || "") }), textBlock(e)));
+      box.appendChild(h("div", { class: "ev tool" + (e.is_error ? " error" : "") },
+        h("div", { class: "who", text: (gone ? "original result: " : "tool result: ") + (e.tool_name || "") }), textBlock(e)));
       return;
     }
     if (e.role === 4 || e.type === "compaction") {
@@ -805,6 +847,44 @@ function turnView(ctx, t, es, newerStart) {
     if (e.role === 2 && e.stop_reason === 2) ev2.appendChild(h("div", { class: "tags" }, pill("cut off: the reply hit its length limit", "warn")));
     box.appendChild(ev2);
   });
+}
+
+/* One line per edit, then what was taken out, each with its stored row. */
+function editView(ctx, edits, out) {
+  var ev = h("div", { class: "ev" });
+  edits.forEach(function (x) {
+    var calls = out.filter(function (e) { return e.type === "tool_call" && x.left.indexOf(e.id) >= 0; }).length, did = [];
+    if (calls) did.push("took " + plural(calls, "tool call", "tool calls") + " out of the conversation");
+    if (x.replaced.length) did.push("replaced " + plural(x.replaced.length, "result", "results"));
+    if (x.notes.length) did.push("left " + plural(x.notes.length, "note", "notes"));
+    var size = typeof x.tokens.before === "number" && typeof x.tokens.after === "number"
+      ? " The turn went from about " + x.tokens.before.toLocaleString() + " tokens to " + x.tokens.after.toLocaleString() + "." : "";
+    ev.appendChild(h("div", { class: "who", text: "edited by " + x.name + (x.at ? " · " + clock(x.at) : "") }));
+    ev.appendChild(h("div", null, "After the reply, " + x.name + " " + (did.length ? list(did) : "edited this turn") + "." + size + " ",
+      h("a", { href: explorer("entries", [x.on]), text: "record" })));
+  });
+  if (out.length) {
+    var d = h("details", null, h("summary", { class: "muted", text: "What was taken out (the agent no longer sees it)" }));
+    events(ctx, out, d, {}, true);
+    d.appendChild(h("div", { class: "why" }, "Stored as: ", out.map(function (e, i) {
+      return [i ? ", " : "", h("a", { href: explorer("entries", [e.id]), text: "#" + e.id })]; })));
+    ev.appendChild(d);
+  }
+  return ev;
+}
+
+function turnView(ctx, t, es, newerStart) {
+  var failed = es.some(function (e) { return e.role === 2 && e.stop_reason === 4; });
+  var edits = turnEdits(es), off = {}, was = {};
+  edits.forEach(function (x) {
+    x.left.forEach(function (id) { off[id] = 1; });
+    x.replaced.forEach(function (p) { if (p) was[p.replacement] = x.name; });
+  });
+  var out = es.filter(function (e) { return off[e.id]; });
+  var box = h("div", { class: "turn" + (failed ? " failed" : "") },
+    h("div", { class: "th" }, "Turn " + t + " · " + clock(es[0].created_at), edits.length ? [" ", pill("edited")] : null));
+  events(ctx, chain(es.filter(function (e) { return !off[e.id]; })), box, was, false);
+  if (edits.length) box.appendChild(editView(ctx, edits, out));
   /* What this turn sent to the chat: outbox rows written between this turn's
      first entry and the next turn's, to this session's own chat (operator
      notices about the session go elsewhere). Rows are pruned after a while. */

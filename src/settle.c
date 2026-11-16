@@ -13,7 +13,7 @@
 #include "log.h"
 #include "loop.h"
 #include "proc.h"
-#include "turn_review.h"
+#include "turn_edit.h"
 
 #define EVENT HOOK_EVENT_TURN_SETTLED
 
@@ -21,7 +21,7 @@
  * that cannot be started is one log line and nothing else: no state has
  * changed, and it is not counted as a failure of the script. */
 static int settle_spawn(int64_t session_id, const char *agent, const HookRef *h) {
-    char *input = turn_review_input(proc_db(), session_id);
+    char *input = turn_edit_input(proc_db(), session_id);
     if (!input) {
         LOG_WARN_("hook " EVENT " ext=%s outcome=not_started reason=no finished turn",
                   h->extension);
@@ -128,10 +128,10 @@ void turn_settle_child_done(const SettleChild *sc) {
     } else if (!failed) {
         char label[160];
         snprintf(label, sizeof(label), "hook:%s", sc->hook.extension);
-        switch (turn_review_apply(db, sid, sc->reply ? sc->reply : "", label, &err)) {
-        case TURN_REVIEW_APPLIED:  outcome = "applied";  reason = ""; break;
-        case TURN_REVIEW_NOTHING:  outcome = "nothing";  reason = ""; break;
-        case TURN_REVIEW_REJECTED: outcome = "rejected"; failed = 1;
+        switch (turn_edit_apply(db, sid, sc->reply ? sc->reply : "", label, &err)) {
+        case TURN_EDIT_APPLIED:  outcome = "applied";  reason = ""; break;
+        case TURN_EDIT_NOTHING:  outcome = "nothing";  reason = ""; break;
+        case TURN_EDIT_REJECTED: outcome = "rejected"; failed = 1;
                                    reason = err ? err : "reply refused"; break;
         default:                   outcome = "error";    failed = 1;
                                    reason = err ? err : "apply failed"; break;

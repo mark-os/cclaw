@@ -1723,6 +1723,57 @@ static void test_midturn_system_entry_converts_to_user(void) {
     llm_payload_release(&payload);
     context_plan_free(&plan);
 
+    /* Who wrote it decides the label: a hook's note (data.source 'hook:<ext>')
+     * is named as the extension's, never '[system] '; any other source, and
+     * data that is not JSON at all, keeps '[system] ' — and the latter must
+     * not fail the messages query. */
+    static const struct { const char *data, *text, *want; } notes[] = {
+        { "{\"source\":\"hook:rev\"}", "trimmed",   "[note from extension rev] trimmed" },
+        { "{\"source\":\"advance\"}",  "streak",    "[system] streak" },
+        { "{\"source\":\"hooky\"}",    "near miss", "[system] near miss" },
+        { "not json {",                "bad data",  "[system] bad data" },
+    };
+    for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
+        Message n = {.role = ROLE_SYSTEM, .content = (char *)notes[i].text};
+        int64_t id = entry_append_with_iteration(db, sid, &n, 2);
+        assert(id > 0);
+        sqlite3_prepare_v2(db, "UPDATE entries SET data=?1 WHERE id=?2", -1, &s, NULL);
+        sqlite3_bind_text(s, 1, notes[i].data, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(s, 2, id);
+        assert(sqlite3_step(s) == SQLITE_DONE);
+        sqlite3_finalize(s);
+    }
+    static const EndpointType eps[] = { ENDPOINT_OPENAI, ENDPOINT_GEMINI, ENDPOINT_ANTHROPIC };
+    static const char *const text_sql[] = {
+        "SELECT group_concat(json_extract(value,'$.content'), '|')"
+        " FROM json_each(json_extract(?1,'$.messages')) WHERE json_extract(value,'$.role')='user'",
+        "SELECT group_concat(json_extract(value,'$.parts[0].text'), '|')"
+        " FROM json_each(json_extract(?1,'$.contents')) WHERE json_extract(value,'$.role')='user'",
+        "SELECT group_concat(COALESCE(json_extract(value,'$.content[0].text'),"
+        "   json_extract(value,'$.content')), '|')"
+        " FROM json_each(json_extract(?1,'$.messages')) WHERE json_extract(value,'$.role')='user'",
+    };
+    for (int e = 0; e < 3; e++) {
+        cfg.provider.endpoint_type = eps[e];
+        assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+        assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+        sqlite3_prepare_v2(db, text_sql[e], -1, &s, NULL);
+        sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+        assert(sqlite3_step(s) == SQLITE_ROW);
+        const char *got = (const char *)sqlite3_column_text(s, 0);
+        for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
+            if (!got || !strstr(got, notes[i].want)) {
+                fprintf(stderr, "FAIL endpoint %d: \"%s\" not in %s\n", (int)eps[e],
+                        notes[i].want, got ? got : "(null)");
+                abort();
+            }
+        }
+        assert(!strstr(got, "[system] trimmed") && !strstr(got, "[system] [note"));
+        sqlite3_finalize(s);
+        llm_payload_release(&payload);
+        context_plan_free(&plan);
+    }
+
     db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_midturn_system_entry_converts_to_user\n");
 }

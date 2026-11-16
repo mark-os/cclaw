@@ -5,7 +5,6 @@
 #include "context.h"
 #include "config.h"
 #include "db.h"
-#include "turn_review.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -108,6 +107,19 @@ static const char SQL_TRANSCRIPT_CREATE[] =
     " CASE WHEN e.is_error THEN ' failed]' ELSE ' output]' END ||" \
     " char(10) || COALESCE(e.content,'')"
 
+/* How a mid-conversation system entry is introduced. A note a hook script
+ * left (turn_edit.c, data.source 'hook:<extension>') is named as the
+ * extension's: its text is typically written by a model that has just read
+ * untrusted tool output, and '[system] ' would lend it the runtime's own
+ * authority. data is free-form: a value that is not JSON must read as an
+ * ordinary system entry, not fail the whole messages query — so json_valid
+ * is its own arm, evaluated before any json_extract. */
+#define SQL_SYSTEM_NOTE_PREFIX \
+    "CASE WHEN NOT COALESCE(json_valid(e.data),0) THEN '[system] '" \
+    " WHEN substr(json_extract(e.data,'$.source'),1,5) = 'hook:'" \
+    " THEN '[note from extension ' || substr(json_extract(e.data,'$.source'),6) || '] '" \
+    " ELSE '[system] ' END"
+
 /* ?1 = session id. Entry types not named in the WHERE are not sent. */
 static const char SQL_TRANSCRIPT_PARTS[] =
     "INSERT INTO _transcript"
@@ -127,13 +139,9 @@ static const char SQL_TRANSCRIPT_PARTS[] =
      * cache-safe whatever role it wears. Mid-conversation system entries
      * therefore ride as '[system] '-prefixed user text everywhere; only the
      * leading system prompt (SQL_*_FULL) keeps the system role. */
-    "    WHEN 'system' THEN '[system] ' || COALESCE(e.content,'')"
+    "    WHEN 'system' THEN " SQL_SYSTEM_NOTE_PREFIX " || COALESCE(e.content,'')"
     "    WHEN 'compaction' THEN"
     "      '[Summary of earlier conversation]' || char(10) || COALESCE(e.content,'')"
-    /* A turn review's note to the model about what it took out of the turn
-     * (turn_review.c). The entry is a record first: with no note it says
-     * nothing and is not sent — see the WHERE. */
-    "    WHEN 'turn_review' THEN '" TURN_REVIEW_NOTE_PREFIX "' || e.content"
     "    WHEN 'user_message' THEN COALESCE(e.content,'')"
     "    WHEN 'assistant_message' THEN e.content"
     "    WHEN 'cron_result' THEN " SQL_CRON_RESULT_TEXT
@@ -150,8 +158,7 @@ static const char SQL_TRANSCRIPT_PARTS[] =
     "      LIMIT 1) END"
     " FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
     " WHERE e.type IN ('system','compaction','user_message','assistant_message',"
-    "                  'cron_result','tool_call','tool_result')"
-    "    OR (e.type = 'turn_review' AND COALESCE(e.content,'') <> '');";
+    "                  'cron_result','tool_call','tool_result');";
 
 /* The user context block (clock, recall, live state) rides at the turn
  * boundary: right before the first entry of the newest turn on the plan. A

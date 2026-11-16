@@ -392,7 +392,7 @@ CREATE TABLE IF NOT EXISTS entries (
   session_id INTEGER NOT NULL,                -- the session this entry belongs to
   parent_id INTEGER NOT NULL DEFAULT -1,      -- the entry before this one on its branch; -1 = first
   original_parent_id INTEGER,                 -- the parent this entry was written under, set the
-                                              -- first time compaction or a turn review re-points it
+                                              -- first time compaction or a turn edit re-points it
   turn_id INTEGER,          -- the turn this entry belongs to. Minted when a user entry
                             -- follows a non-user entry (the inbox drain's first message,
                             -- or a directly appended user entry); every entry after it
@@ -402,7 +402,7 @@ CREATE TABLE IF NOT EXISTS entries (
                             -- by db_next_iteration_id, shared by the assistant message,
                             -- its tool_call parts and their tool results.
   type TEXT NOT NULL DEFAULT 'user_message',  -- user_message | assistant_message | tool_call | tool_result |
-                                              -- reasoning | compaction | cron_result | turn_review | ...
+                                              -- reasoning | compaction | cron_result | system | ...
   part_index INTEGER NOT NULL DEFAULT 0,
   role INTEGER NOT NULL DEFAULT 1,            -- who speaks: 0 system, 1 user, 2 assistant, 3 tool, 4
                                               -- compaction
@@ -462,7 +462,7 @@ CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
 END;
 
 -- Leaf advance is atomic with insert; compaction excluded (entry_compact inserts mid-branch).
--- A turn review also inserts mid-branch (turn_review.c) and puts the leaf back itself.
+-- A turn edit also inserts mid-branch (turn_edit.c) and puts the leaf back itself.
 CREATE TRIGGER IF NOT EXISTS entries_leaf_ai AFTER INSERT ON entries
 WHEN NEW.type != 'compaction'
 BEGIN
@@ -607,7 +607,7 @@ CREATE TABLE IF NOT EXISTS tools (
                                              -- calls of this tool (Q1); NULL = the tool
                                              -- runs under the agent's grants. Only a
                                              -- promoted extension tool can carry one.
-  droppable INTEGER NOT NULL DEFAULT 0        -- 1 = a turn review may take a call of this
+  droppable INTEGER NOT NULL DEFAULT 0        -- 1 = a turnSettled hook may take a call of this
                                              -- tool out of context. 0 = the call exists for
                                              -- its effect and always stays (it can still be
                                              -- trimmed). Built-in: the C recipe's flag.

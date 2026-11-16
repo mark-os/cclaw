@@ -56,8 +56,23 @@ already exists is skipped, never overwritten. A `hooks[]` entry runs its handler
 after every normally finished top-level turn of an agent the extension is
 attached to (`turnSettled`, the only event); it gets the finished turn as
 `args`, and with `wait: true` the session waits for it (at most
-`turn_settled_timeout` seconds) and its JSON reply may edit that turn. Return
-`"{}"` to leave a turn alone.
+`turn_settled_timeout` seconds) and its JSON reply may edit that turn:
+
+```json
+{"edits":[{"op":"drop","call_id":"c4"},
+          {"op":"replace","call_id":"c1","text":"the 5 lines that mattered"},
+          {"op":"note","text":"dropped the empty search"}],
+ "record":{"any":"bookkeeping of yours"}}
+```
+
+`args` lists the turn's iterations with each call's `call_id`, `tool`, `args`,
+`protected` flag and verbatim `result.text`. A `protected` call (one made for
+its effect, `check_session`, or one that saved a secret) cannot be dropped;
+its result text can be replaced. A note may name `before` — the `entry_id` of
+an iteration in `args` — and otherwise lands before the answer; the model sees
+it as `[note from extension <name>] …`. Text containing a secret refuses the
+whole reply; any refusal leaves the turn untouched. Return `"{}"` to leave a
+turn alone.
 
 ## Handler contract (QuickJS)
 

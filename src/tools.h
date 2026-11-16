@@ -74,10 +74,10 @@ typedef struct {
     unsigned parallel_safe : 1;  /* sibling calls in one batch may run concurrently */
     unsigned needs_interp  : 1;  /* {{SECRET:X}} resolved to real values at exec time */
     unsigned backgroundable: 1;  /* accepts background:true → job delivery */
-    /* A turn review may take this tool's calls out of context (turn_review.c).
+    /* A turnSettled hook may take this tool's calls out of context (turn_edit.c).
      * Set it only on a tool whose purpose is to look something up: a call
      * that exists for its effect is the record that the effect happened, and
-     * stays. Synced to tools.droppable, which is what the review reads. */
+     * stays. Synced to tools.droppable, which is what the edit check reads. */
     unsigned droppable     : 1;
     ToolNullKind null_kind;      /* EXEC_INLINE NULL-return protocol */
 } ToolRecipe;

@@ -601,12 +601,12 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `session_id` | INTEGER NOT NULL | |
 | `parent_id` | INTEGER NOT NULL DEFAULT -1 | tree structure (Pi model); -1 = root |
-| `original_parent_id` | INTEGER | the parent the entry was written under, set when compaction or a [turn review](turn-review.md) re-points it. A turn review keeps the first value (`COALESCE`); rows it takes off the branch are not touched and still point at their own parent, so the turn as written can be walked back |
+| `original_parent_id` | INTEGER | the parent the entry was written under, set when compaction or a [turn edit](turn-edit.md) re-points it. A turn edit keeps the first value (`COALESCE`); rows it takes off the branch are not touched and still point at their own parent, so the turn as written can be walked back |
 | `turn_id` | INTEGER | the turn this entry belongs to — minted when a user entry follows a non-user one, inherited from the parent thereafter (trigger `entries_turn_ai`). The context cut and compaction snap to it so neither splits a turn. |
 | `iteration_id` | INTEGER | one LLM request/response *inside* a turn (`db_next_iteration_id`); shared by the assistant message, its tool_call parts and their tool results |
 | `type` | TEXT NOT NULL DEFAULT 'user_message' | entry type discriminator |
 | `part_index` | INTEGER NOT NULL DEFAULT 0 | ordering within multi-part entries |
-| `role` | INTEGER NOT NULL DEFAULT 1 | 0=system, 1=user, 2=assistant, 3=tool, 4=compaction. A `turn_review` entry is role 0 |
+| `role` | INTEGER NOT NULL DEFAULT 1 | 0=system, 1=user, 2=assistant, 3=tool, 4=compaction |
 | `content` | TEXT | see below |
 | `tool_calls` | TEXT | JSON array, NULL if none (legacy) |
 | `tool_call_id` | TEXT | for type=tool_call and tool_result |
@@ -621,7 +621,7 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `token_estimate` | INTEGER | chars/3 + 4 heuristic (`TOKEN_ESTIMATE`, errs high; v52 rescaled old rows from `content_bytes`) |
 | `content_bytes` | INTEGER | byte length of content + tool_calls |
 | `tool_call_count` | INTEGER NOT NULL DEFAULT 0 | denormalized for plan pass |
-| `data` | TEXT | JSON side-channel, merged not overwritten (`json_patch`), nullable. `$.source` / `$.source_ref` — provenance stamped by the inbox drain (the cron auto-pause streak reads it); `$.job` on a `cron_result` — the job that produced it |
+| `data` | TEXT | JSON side-channel, merged not overwritten (`json_patch`), nullable. `$.source` / `$.source_ref` — provenance stamped by the inbox drain (the cron auto-pause streak reads it), and on a `system` entry who wrote it (`hook:<extension>` for a hook's note); `$.job` on a `cron_result` — the job that produced it; `$.turn_edits` on a turn's final `assistant_message` — see [below](#entriesdata-turn_edits) |
 | `network_hosts` | TEXT | JSON array of hosts the tool run contacted (proxy-observed) |
 | `fence_id` | TEXT | Random id minted when `network_hosts` is set; see below |
 | `reasoning_meta` | TEXT | `type='reasoning'` rows only — replay tag+blob, see below |
@@ -631,37 +631,31 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 
 | type | content holds |
 |------|---------------|
-| `system` | System prompt text |
+| `system` | System prompt text, or a mid-conversation note (`role=0`, `iteration_id=0`). Sent as user text `[system] <text>`, except a note whose `data.source` is `hook:<ext>` — left by a [turnSettled hook](turn-edit.md) — which is sent as `[note from extension <ext>] <text>` |
 | `user_message` | User's message text |
 | `assistant_message` | Assistant's text response (may be NULL if tool_calls only) |
 | `tool_call` | **Validated JSON arguments** (normalized via `json()` at ingest; single source of truth for tool call args) |
 | `tool_result` | Tool execution output (text) |
 | `reasoning` | Model reasoning/thinking text |
 | `compaction` | Compressed summary text |
-| `turn_review` | The note a [turn review](turn-review.md) left for the model (at most 600 characters), or NULL. One per reviewed turn, on the branch right before the turn's last iteration, carrying that turn's `turn_id`; `role=0`, `iteration_id=0`. Sent as user text `[Turn review] <note>` only when the note is non-empty. `data` is the record — see [below](#entriesdata-on-a-turn_review-entry) |
 | `cron_result` | A scheduled script's output, posted with no LLM call behind it. `role=2` so ordinary delivery finds it and `iteration_id=0` because it spent no iteration; `data.job` names the job and `is_error` records how the run went. The payload serializer labels it (`[scheduled script <job> output]`) rather than passing it through bare — the model must not read a machine's stdout back as its own words |
 
-### entries.data on a turn_review entry
+### entries.data `$.turn_edits`
 
-What the review did to the turn, written in the same transaction as the edit:
+On a turn's final assistant entry: one element per applied [turn edit](turn-edit.md#the-record), appended in the edit's transaction; other keys on the entry are kept. Never sent to the model.
 
 ```json
-{"dropped": [412, 415, 416],
- "trimmed": [{"original": 204, "replacement": 431, "lines_kept": 53, "lines_total": 312}],
- "reviewer_model": "…",
- "tokens_before": 9120, "tokens_after": 3310}
+{"turn_edits": [{"by": "hook:review", "at": 1763300000,
+                 "left_branch": [412, 415, 416],
+                 "replaced": [{"original": 204, "replacement": 431}],
+                 "notes": [432],
+                 "tokens": {"before": 9120, "after": 3310},
+                 "record": {"…": "the script's own, when it sent one"}}]}
 ```
 
-- `dropped` — ids of the entries taken off the branch, in branch order: each dropped `tool_call` and its `tool_result`, the `reasoning` entry of every iteration that lost a call, and the `assistant_message` of an iteration left with no call. The rows stay in the table.
-- `trimmed` — per replaced result: the original `tool_result` (off the branch, unchanged) and the new one that took its place. The replacement copies `iteration_id`, `turn_id`, `tool_call_id`, `tool_name`, `is_error`, `network_hosts` and `fence_id`; its content is the kept lines with each omitted run replaced by one line of the fixed form
-
-  ```
-  [… 119 lines omitted; full output is entry 204 …]
-  ```
-
-  (`TURN_REVIEW_OMIT_FMT` in `src/turn_review.h` — the count, then the original's entry id, which `db_query` can read back).
-- `reviewer_model` — as passed by the caller; JSON null when not given.
-- `tokens_before` / `tokens_after` — the sum of `token_estimate` over the turn's entries on the branch, before and after (the review entry itself counts in `after`).
+- `left_branch` — every entry taken off the branch, in chain order (replaced originals included). The rows stay in the table.
+- `replaced` — per replaced result, the original `tool_result` and the new one in its place; `notes` — the `system` entries the edit inserted. Both in edit order.
+- `tokens` — sum of `token_estimate` over the turn's entries on the branch, before and after.
 
 ### entries.reasoning_meta
 
@@ -786,7 +780,7 @@ Tool registry. Built-in C tools have NULL `extension_name`/`path`; JS tools poin
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `policy` | TEXT | JSON restrict-only argument policy |
 | `egress_hosts` | TEXT | comma-separated hosts declared by the manifest; non-NULL **replaces** the agent's host grants for calls of this tool. Only a promoted extension tool can carry one — see [extensions.md](extensions.md#declared-reach-hosts) |
-| `droppable` | INTEGER NOT NULL DEFAULT 0 | v63. 1 = a [turn review](turn-review.md#protected-calls) may take a call of this tool out of context; 0 = protected (the call can still be trimmed). Built-in tools: the recipe's `droppable` flag, written by `tools_sync_to_db`. Extension tools: `$.tools[].droppable` in the manifest, 0 when unstated |
+| `droppable` | INTEGER NOT NULL DEFAULT 0 | v63. 1 = a [turnSettled hook](turn-edit.md#protected-calls) may take a call of this tool out of context; 0 = protected (its result's text can still be replaced). Built-in tools: the recipe's `droppable` flag, written by `tools_sync_to_db`. Extension tools: `$.tools[].droppable` in the manifest, 0 when unstated |
 
 ---
 

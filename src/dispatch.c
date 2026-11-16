@@ -1994,7 +1994,7 @@ int hook_script_spawn(const HookRef *h, const char *agent_name,
 
 /* A hook child is gone (reaped, or just killed at its deadline): describe it
  * for settle.c. The script's bytes are handed over exactly as written — they
- * are a reply for turn_review_apply to judge, which does its own secret
+ * are a reply for turn_edit_apply to judge, which does its own secret
  * check and must see what the script said, not a masked copy. A failure's
  * text is only ever logged, so that goes through the scrub. */
 static void hook_child_report(ChildProc *c, int status, int timed_out,

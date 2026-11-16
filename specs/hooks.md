@@ -7,12 +7,11 @@ script: no extension JavaScript runs inside the daemon. One event exists —
 
 Code: `src/hook.c` (which hooks, when, the failure count), `src/settle.c`
 (the event and the hold), `src/dispatch.c` (`hook_script_spawn`, the fork and
-the bytes). What a `turnSettled` script is given and what it may return —
-the input and reply contract — is defined in [turn-review.md](turn-review.md),
-and is being revised into a generic list of turn edits; this document covers
-only the mechanism, which does not depend on that contract beyond two calls
-(`turn_review_input` to build `args`, `turn_review_apply` to apply the reply,
-both in `src/settle.c`).
+the bytes). What a `turnSettled` script is given and what it may return is
+summarised [below](#input-and-reply) and defined in full in
+[turn-edit.md](turn-edit.md); the mechanism here depends on it only through
+two calls in `src/settle.c` — `turn_edit_input` to build `args`,
+`turn_edit_apply` to apply the reply.
 
 ## Registering one
 
@@ -57,7 +56,7 @@ final assistant message → session idle, delivery edges evaluated
 | Condition | Otherwise |
 |---|---|
 | the session's agent has an enabled `turnSettled` hook | nothing happens; one indexed lookup per turn |
-| the session is top-level (no parent) | a sub-agent's turn is never reviewed |
+| the session is top-level (no parent) | a sub-agent's turn never gets hooks |
 | the turn ended with an assistant message that is not an error stop | a provider failure, the iteration cutoff and the context cutoff are not "settled" |
 
 Nothing about the turn's size or content is judged in C. Whether a turn is
@@ -74,8 +73,8 @@ are re-read, the path must be inside the extension store, only the secrets
 the agent is granted ride along, and it runs under the agent's sandbox
 profile.
 
-- **`args`** — the finished turn, the JSON `turn_review_input()` builds
-  ([turn-review.md](turn-review.md#the-reviewers-input)). It can be far
+- **`args`** — the finished turn, the JSON `turn_edit_input()` builds
+  ([Input and reply](#input-and-reply)). It can be far
   larger than a tool call's arguments, so it does not travel in the request
   blob: the parent writes it to an unnamed file and passes the descriptor to
   the child on the request socket (`TOOL_ARG_JSON_FD`, `run_tool.h`). The
@@ -94,8 +93,43 @@ profile.
   make the reply unparsable, which is a refusal.
 
 The reply is untrusted input. It reaches the database only through
-`turn_review_apply`, which validates all of it and applies all or nothing;
+`turn_edit_apply`, which validates all of it and applies all or nothing;
 the bytes the script wrote are handed to it unmodified.
+
+### Input and reply
+
+`args` is the turn as plain data ([turn-edit.md](turn-edit.md#input)):
+
+```json
+{"event":"turnSettled","session_id":12,"agent":"alavanca","turn_id":37,
+ "tokens":{"turn":9120,"tools":7400},
+ "user_messages":[{"entry_id":900,"text":"…"}],
+ "notes":[{"entry_id":930,"text":"…","before_iteration":412}],
+ "iterations":[{"iteration_id":411,"entry_id":901,"text":"…",
+   "calls":[{"call_id":"c1","entry_id":903,"tool":"shell_exec","args":{},
+             "protected":false,"is_error":false,
+             "result":{"entry_id":905,"text":"…","tokens":2900}}]}],
+ "final":{"entry_id":960,"iteration_id":413,"text":"…"}}
+```
+
+Result text is verbatim. `protected` calls cannot be dropped (effect tools,
+`check_session`, a `save_secret` call, an unfinished call).
+
+The reply is a list of edits and an optional opaque record
+([turn-edit.md](turn-edit.md#reply)):
+
+```json
+{"edits":[{"op":"drop","call_id":"c4"},
+          {"op":"replace","call_id":"c1","text":"…"},
+          {"op":"note","text":"…","before":901}],
+ "record":{"…":"…"}}
+```
+
+`{}` changes nothing. A note is stored as a `system` entry with
+`data.source = "hook:<extension>"` and reaches the model as
+`[note from extension <extension>] …`, not `[system] …`. The runtime's record
+of what changed, with the script's `record` inside, is appended to
+`$.turn_edits` on the turn's final assistant entry.
 
 ### The hold
 
@@ -118,14 +152,15 @@ While held:
 
 When the script's child is reaped (`turn_settle_child_done`):
 
-1. A clean exit hands its output to `turn_review_apply`.
+1. A clean exit hands its output to `turn_edit_apply`.
 2. One log line says what happened and why:
    `hook turnSettled ext=<name> outcome=<applied|nothing|rejected|error|failed> reason=…`.
 3. The outcome is counted ([Failures](#failures)).
 4. The agent's next awaited hook is started, if it has one. Several run one
    at a time in `(extension, path)` order, each given the turn as the one
-   before left it. A turn can be reviewed once: a second hook that asks for a
-   change is `rejected`, logged and counted, and the chain goes on.
+   before left it, and each may edit it again (one more `$.turn_edits`
+   element). A hook whose reply is `rejected` is logged and counted, and the
+   chain goes on.
 5. With none left the hold ends the way a finished compaction ends: the
    session goes `idle`, the deferred compaction check runs against the turn
    as it now is, and otherwise the idle branch of `advance_session` runs its
@@ -176,7 +211,7 @@ a failure.
 
 A run fails when the script times out, crashes, throws, or — for an awaited
 hook — its reply is `rejected` (unparsable, or a check in
-[turn-review.md](turn-review.md#the-reply) failed) or apply returned `error`.
+[turn-edit.md](turn-edit.md#reply) failed) or apply returned `error`.
 `applied` and `nothing` are successes. A hook that could not be started is
 neither.
 
@@ -204,5 +239,8 @@ A hook script has exactly what a tool call by the same agent has: the
 agent's sandbox profile, its grants, its granted secrets, egress through the
 proxy. Promoting the extension is the approval. What it is shown is the
 session's own latest turn, already scanned on its way in. What it can change
-is what `turn_review_apply` allows — it cannot add content to the turn beyond
-one note, which is scanned for secrets and refused, never stored masked.
+is what `turn_edit_apply` allows: drop unprotected calls of that turn, replace
+result text, add notes. All text it supplies is scanned for secrets and
+refused on a hit, never stored masked; its notes are labelled as the
+extension's on the wire, so they never carry the runtime's `[system]`
+authority.

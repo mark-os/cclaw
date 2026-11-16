@@ -288,7 +288,7 @@ static int check_policies(sqlite3 *db, const char *manifest, char **err_out) {
     return rc;
 }
 
-/* $.tools[].droppable says a turn review may take the tool's calls out of
+/* $.tools[].droppable says a turnSettled hook may take the tool's calls out of
  * context. It must be a JSON boolean: the ingest stores the value as it
  * stands, and "yes" or 2 would not mean what the author thought. */
 static int check_tool_droppable(sqlite3 *db, const char *manifest, char **err_out) {

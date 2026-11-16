@@ -4,7 +4,7 @@
 /* The turnSettled event: when a turn has ended and its reply is out, run the
  * agent's turnSettled hooks, and — for a hook that is waited for — hold the
  * session in state 'settling' until the script is gone and its reply has been
- * through turn_review_apply. The executor side of script hooks, as loop.c is
+ * through turn_edit_apply. The executor side of script hooks, as loop.c is
  * of advance.c; see specs/hooks.md.
  *
  * Event-loop thread only: everything here reads the child table.

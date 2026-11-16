@@ -154,11 +154,17 @@ static int fail_count(const char *ext) {
     return n;
 }
 
-#define DROP_C1 "return JSON.stringify({drop:['c1'], note:'dropped the lookup'});"
+#define DROP_C1 "return JSON.stringify({edits:[{op:'drop',call_id:'c1'}," \
+                "{op:'note',text:'dropped the lookup'}], record:{by_script:1}});"
 #define N_CALLS "SELECT COUNT(*) FROM entries e WHERE e.session_id=?1 AND e.type='tool_call'" \
                 " AND e.id IN (WITH RECURSIVE b(id) AS (SELECT leaf_id FROM sessions WHERE id=?1" \
                 " UNION ALL SELECT e2.parent_id FROM entries e2 JOIN b ON e2.id=b.id) SELECT id FROM b)"
-#define N_REVIEWS "SELECT COUNT(*) FROM entries WHERE session_id=?1 AND type='turn_review'"
+/* Applied edits: elements of $.turn_edits on the session's entries. */
+#define N_EDITS "SELECT COALESCE(SUM(json_array_length(data,'$.turn_edits')),0) FROM entries" \
+                " WHERE session_id=?1 AND json_valid(data)"
+/* Notes a hook left: system entries whose source names an extension. */
+#define N_NOTES "SELECT COUNT(*) FROM entries WHERE session_id=?1 AND type='system'" \
+                " AND json_extract(data,'$.source') LIKE 'hook:%'"
 
 /* The good path: held, inbox left alone, reply applied, released. Also what
  * the script is handed: the turn as `args`, of any size (this one is far past
@@ -167,7 +173,8 @@ static void test_reviewed(void) {
     install("rv", "Rv",
         "if (args.event !== 'turnSettled' || args.iterations[0].calls[0].call_id !== 'c1')"
         "  throw new Error('unexpected input');"
-        "if (args.iterations[0].calls[0].result.lines !== 4000) throw new Error('truncated input');"
+        "if (args.iterations[0].calls[0].result.text.split('\\n').length !== 4001)"
+        "  throw new Error('truncated input');"
         "if (getConfig('greeting') !== 'hello') throw new Error('no config');"
         DROP_C1);
     int64_t sid = seed_turn("Rv", 4000);
@@ -195,8 +202,13 @@ static void test_reviewed(void) {
     }
     assert(child_count() == 0);
     assert(!is_state(sid, "settling"));
-    assert(count(N_REVIEWS, sid) == 1);
+    assert(count(N_EDITS, sid) == 1);
+    assert(count(N_NOTES, sid) == 1);
     assert(count(N_CALLS, sid) == 0);
+    /* The record names the extension and carries the script's own part. */
+    assert(count("SELECT COUNT(*) FROM entries WHERE session_id=?1 AND json_valid(data)"
+                 " AND json_extract(data,'$.turn_edits[0].by')='hook:rv'"
+                 " AND json_extract(data,'$.turn_edits[0].record.by_script')=1", sid) == 1);
     assert(count("SELECT COUNT(*) FROM inbox WHERE session_id=?1 AND consumed=0", sid) == 0);
     /* The queued message became the next turn's user entry, after the
      * reviewed turn's answer. */
@@ -219,7 +231,7 @@ static void test_outcomes(void) {
         assert(turn_settle_begin(sid, cases[i].agent) == 1);
         assert(is_state(sid, "settling"));
         pump_until_idle(sid);
-        assert(count(N_REVIEWS, sid) == 0);
+        assert(count(N_EDITS, sid) == 0 && count(N_NOTES, sid) == 0);
         assert(count(N_CALLS, sid) == 1);
         if (fail_count(cases[i].ext) != cases[i].fails) {
             fprintf(stderr, "FAIL %s: fail_count %d want %d\n", cases[i].ext,
@@ -264,7 +276,7 @@ static void test_deadline(void) {
         fprintf(stderr, "FAIL: held %.2fs, deadline was 1s\n", held);
         abort();
     }
-    assert(count(N_REVIEWS, sid) == 0 && count(N_CALLS, sid) == 1);
+    assert(count(N_EDITS, sid) == 0 && count(N_CALLS, sid) == 1);
     assert(fail_count("slow") == 1);
 
     /* The backstop: freeze the broker so its timer cannot fire. */
@@ -279,7 +291,7 @@ static void test_deadline(void) {
         fprintf(stderr, "FAIL: frozen broker held %.2fs, kill was due at 6s\n", held);
         abort();
     }
-    assert(count(N_REVIEWS, sid) == 0 && count(N_CALLS, sid) == 1);
+    assert(count(N_EDITS, sid) == 0 && count(N_CALLS, sid) == 1);
     assert(fail_count("slow") == 2);
 
     /* Killed from outside (the OOM killer, an operator): reaped as a signal
@@ -291,7 +303,7 @@ static void test_deadline(void) {
     assert(kill(child_at(0)->pid, SIGKILL) == 0);
     pump_until_idle(sid);
     assert(now_s() - t0 < 0.9);
-    assert(count(N_REVIEWS, sid) == 0 && count(N_CALLS, sid) == 1);
+    assert(count(N_EDITS, sid) == 0 && count(N_CALLS, sid) == 1);
     assert(fail_count("slow") == 3);
 
     assert(config_set(g_db, "turn_settled_timeout", "20") == 0);
@@ -299,23 +311,30 @@ static void test_deadline(void) {
 }
 
 /* Two awaited hooks on one agent run one at a time in extension-name order,
- * each on the turn as the one before left it. The second cannot review a
- * turn that already has a review: that is a refusal it is charged with, not
- * a state the session is stuck in. */
+ * each on the turn as the one before left it: the second sees the first's
+ * drop and note, and edits the same turn again. A reply the runtime refuses
+ * is charged to its script, and the session is not stuck. */
 static void test_chain(void) {
     install("ch_a", "Chain", DROP_C1);
     install("ch_b", "Chain",
             "if (args.iterations.length !== 0) throw new Error('saw the unedited turn');"
-            "return JSON.stringify({note:'second opinion'});");
+            "if (args.notes.length !== 1 || args.notes[0].text !== 'dropped the lookup')"
+            "  throw new Error('did not see the first note');"
+            "return JSON.stringify({edits:[{op:'note',text:'second opinion'}]});");
+    install("ch_c", "Chain",
+            "return JSON.stringify({edits:[{op:'drop',call_id:'c1'}]});");
     int64_t sid = seed_turn("Chain", 400);
     assert(turn_settle_begin(sid, "Chain") == 1);
     assert(child_count() == 1);                 /* one at a time */
     pump_until_idle(sid);
-    assert(count(N_REVIEWS, sid) == 1 && count(N_CALLS, sid) == 0);
-    assert(count("SELECT content='dropped the lookup' FROM entries"
-                 " WHERE session_id=?1 AND type='turn_review'", sid) == 1);
+    assert(count(N_EDITS, sid) == 2 && count(N_CALLS, sid) == 0);
+    assert(count("SELECT group_concat(content || '@' || json_extract(data,'$.source'), '|')"
+                 " = 'dropped the lookup@hook:ch_a|second opinion@hook:ch_b' FROM ("
+                 " SELECT content, data FROM entries WHERE session_id=?1 AND type='system'"
+                 " ORDER BY id)", sid) == 1);
     assert(fail_count("ch_a") == 0);
-    assert(fail_count("ch_b") == 1);            /* rejected, not thrown */
+    assert(fail_count("ch_b") == 0);
+    assert(fail_count("ch_c") == 1);            /* c1 is gone: rejected, not thrown */
     printf("  PASS test_chain\n");
 }
 
@@ -328,7 +347,7 @@ static void test_not_awaited(void) {
     assert(is_state(sid, "idle"));
     assert(child_count() == 1 && !child_hook_holds(sid));
     pump_until_idle(sid);
-    assert(count(N_REVIEWS, sid) == 0 && count(N_CALLS, sid) == 1);
+    assert(count(N_EDITS, sid) == 0 && count(N_CALLS, sid) == 1);
     assert(fail_count("obs") == 0);
     printf("  PASS test_not_awaited\n");
 }
@@ -367,7 +386,7 @@ static void test_sweep(void) {
     assert(!child_hook_holds(sid));
     turn_settle_sweep();
     assert(is_state(sid, "idle"));
-    assert(count(N_REVIEWS, sid) == 0 && count(N_CALLS, sid) == 1);
+    assert(count(N_EDITS, sid) == 0 && count(N_CALLS, sid) == 1);
     printf("  PASS test_sweep\n");
 }
 

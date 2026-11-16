@@ -66,7 +66,7 @@ directory.
 |-------|---------|
 | `name` | Extension identity. Primary key in `extensions`. |
 | `version` | Free-form version string (display / update tracking). |
-| `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), hosts?, policy?, droppable?}`. `hosts?` is the tool's declared egress — see [Declared reach](#declared-reach-hosts). `droppable?` (boolean, default `false`) says a [turn review](turn-review.md#protected-calls) may take the tool's calls out of context — set it only on a tool that looks something up; leave it off any tool called for its effect. |
+| `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), hosts?, policy?, droppable?}`. `hosts?` is the tool's declared egress — see [Declared reach](#declared-reach-hosts). `droppable?` (boolean, default `false`) says a [turnSettled hook](turn-edit.md#protected-calls) may take the tool's calls out of context — set it only on a tool that looks something up; leave it off any tool called for its effect. |
 | `hooks[]` | Each: `{event, handler (file), wait?}`. `event` must be `turnSettled` (validate refuses any other name); `wait` is a boolean, default `true` — whether the session is held while the script runs. See [hooks.md](hooks.md). |
 | `channel` | At most one: `{type, handler (file), transports?}`. Runs as a separate process. `transports?` is an optional advisory array (`poll`/`webhook`/`persistent`) validated at `--check` — see [channel-transports.md](channel-transports.md). |
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
@@ -350,8 +350,10 @@ granted secrets, `LLM()` bridged under the source `hook:<extension>`, and
 `getConfig()` reading the extension's own settings. One event exists,
 `turnSettled` — a turn that completed normally on a top-level session, after
 its reply is delivered. The script receives the finished turn as `args` and
-returns its reply as JSON text; the input and reply contract is in
-[turn-review.md](turn-review.md) (being revised). Declared in the manifest:
+returns its reply as JSON text: a list of edits — `drop` a call with its
+result, `replace` a result's text, add a `note` — and an optional opaque
+`record`, or `{}` for none. The input and reply contract is in
+[turn-edit.md](turn-edit.md). Declared in the manifest:
 
 ```json
 "hooks": [ { "event": "turnSettled", "handler": "review.qjs", "wait": true } ]

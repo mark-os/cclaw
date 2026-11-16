@@ -79,9 +79,12 @@ CREATE TABLE IF NOT EXISTS models (
 -- agent's sessions. An agent with no rows for a media purpose uses the global
 -- capability pick (llm_proc.c model_pick_for_media). A media row is refused
 -- unless the model's capabilities include that purpose (trigger below).
+-- 'utility' is the list a script's LLM(prompt, {purpose:"utility"}) walks —
+-- cheap side work such as a turnSettled hook's review. An agent with no
+-- utility rows is served from its chat list. Any model may be on it.
 CREATE TABLE IF NOT EXISTS agent_models (
   agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,  -- whose list this is
-  purpose TEXT NOT NULL DEFAULT 'chat' CHECK (purpose IN ('chat','image','audio')),
+  purpose TEXT NOT NULL DEFAULT 'chat' CHECK (purpose IN ('chat','image','audio','utility')),
   model_id TEXT NOT NULL REFERENCES models(id),  -- the model at this place in the list
   pos INTEGER NOT NULL,                       -- place in the list, 0 = first choice
   -- How hard this agent wants this model to think: off|minimal|low|medium|high.
@@ -96,7 +99,7 @@ CREATE TABLE IF NOT EXISTS agent_models (
 -- caller that forgets to check (dashboard, config doc, clone, sqlite3 --write).
 CREATE TRIGGER IF NOT EXISTS agent_models_capability_bi
 BEFORE INSERT ON agent_models
-WHEN NEW.purpose <> 'chat' AND NOT EXISTS (
+WHEN NEW.purpose IN ('image','audio') AND NOT EXISTS (
   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)
                                          THEN m.capabilities ELSE '[]' END) c
    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)
@@ -105,7 +108,7 @@ BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS agent_models_capability_bu
 BEFORE UPDATE OF purpose, model_id ON agent_models
-WHEN NEW.purpose <> 'chat' AND NOT EXISTS (
+WHEN NEW.purpose IN ('image','audio') AND NOT EXISTS (
   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)
                                          THEN m.capabilities ELSE '[]' END) c
    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)

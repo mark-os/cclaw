@@ -241,7 +241,8 @@ static JSValue js_llm(JSContext *ctx, JSValueConst this_val,
     const char *sock = getenv("CCLAW_LLM_SOCK");
     if (!sock || !sock[0])
         return JS_ThrowTypeError(ctx, "LLM: not available in this context "
-                                      "(no bridge socket)");
+            "(no bridge socket: a restricted agent gets none, otherwise the "
+            "cclaw log says why it was not started)");
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "LLM: prompt required");
 

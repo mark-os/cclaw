@@ -158,13 +158,28 @@ LlmBridge *llm_bridge_start(const char *agent_dir, const char *db_path,
                             const char *agent_name, const char *source,
                             int64_t session_id, int64_t iteration_id) {
     static int seq;   /* event-loop thread only — uniquifies per-call paths */
-    if (!agent_dir || !agent_dir[0] || !db_path || !db_path[0]) return NULL;
+    /* Every refusal below is logged: the caller runs the tool anyway, and a
+     * script whose LLM() throws "no bridge socket" needs a reason on record. */
+    if (!agent_dir || !agent_dir[0] || !db_path || !db_path[0]) {
+        LOG_WARN_("llm_bridge: not started for %s — no agent directory or database path",
+                  source ? source : "js");
+        return NULL;
+    }
     LlmBridge *b = calloc(1, sizeof(*b));
     if (!b) return NULL;
+    size_t sun_max = sizeof(((struct sockaddr_un *)0)->sun_path);
     int n = snprintf(b->sock_path, sizeof(b->sock_path), "%s/.llm.%d.%d.sock",
                      agent_dir, (int)getpid(), ++seq);
-    if (n <= 0 || (size_t)n >= sizeof(b->sock_path) ||
-        (size_t)n >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+    if (n <= 0 || (size_t)n >= sizeof(b->sock_path) || (size_t)n >= sun_max) {
+        /* A socket address holds a short path (108 bytes on Linux) and the
+         * socket has to live in the agent directory, where the sandbox can
+         * bind-mount it — the egress proxy's socket sits beside it under the
+         * same limit. A truncated path would be a different socket, so this
+         * is refused, loudly. */
+        LOG_WARN_("llm_bridge: not started for %s — socket path %s/.llm.<pid>.<n>.sock"
+                  " is %d bytes, the limit is %zu: LLM() is unavailable to this agent's"
+                  " scripts until its directory path is shorter",
+                  source ? source : "js", agent_dir, n, sun_max - 1);
         free(b);
         return NULL;
     }
@@ -184,7 +199,11 @@ LlmBridge *llm_bridge_start(const char *agent_dir, const char *db_path,
 
     unlink(b->sock_path);
     b->listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (b->listen_fd < 0) { free(b->db_path); free(b); return NULL; }
+    if (b->listen_fd < 0) {
+        LOG_WARN_("llm_bridge: socket() failed: %s", strerror(errno));
+        free(b->db_path); free(b);
+        return NULL;
+    }
     struct sockaddr_un addr = { .sun_family = AF_UNIX };
     /* fits: n was checked against sun_path above */
     memcpy(addr.sun_path, b->sock_path, (size_t)n + 1);
@@ -199,6 +218,7 @@ LlmBridge *llm_bridge_start(const char *agent_dir, const char *db_path,
     b->running = 1;
     pthread_mutex_init(&b->mu, NULL);
     if (thread_spawn(&b->thread, 0, bridge_thread, b) != 0) {
+        LOG_WARN_("llm_bridge: could not start the serving thread");
         unlink(b->sock_path);
         bridge_free(b);
         return NULL;

@@ -492,18 +492,22 @@ static int act_agent_copy(Act *a) {
 /* ── model lists ─────────────────────────────────────────────────────────── */
 
 static const char *purpose_word(const char *p) {
-    return strcmp(p, "image") == 0 ? "images" : strcmp(p, "audio") == 0 ? "audio" : "chat";
+    return strcmp(p, "image") == 0 ? "images" : strcmp(p, "audio") == 0 ? "audio"
+         : strcmp(p, "utility") == 0 ? "utility" : "chat";
 }
 
 static int act_models_set(Act *a) {
     char *agent = ftext(a, "agent"), *purpose = ftext(a, "purpose"), *list = fjson(a, "models");
     if (!agent_exists(a, agent)) return refuse(a, 404, "There is no agent called \"%s\".", agent ? agent : "");
     if (!purpose || (strcmp(purpose, "chat") != 0 && strcmp(purpose, "image") != 0 &&
-                     strcmp(purpose, "audio") != 0))
-        return refuse(a, 400, "The purpose must be chat, image or audio.");
+                     strcmp(purpose, "audio") != 0 && strcmp(purpose, "utility") != 0))
+        return refuse(a, 400, "The purpose must be chat, image, audio or utility.");
     if (!list || qi(a, "SELECT json_type(?1) = 'array'", list, NULL, NULL) != 1)
         return refuse(a, 400, "models must be a list of {model_id, reasoning_effort} in order.");
+    /* Media lists (image, audio) take only models with that capability and
+     * no effort; chat and utility take any model, with an effort level. */
     int is_chat = strcmp(purpose, "chat") == 0;
+    int is_media = strcmp(purpose, "image") == 0 || strcmp(purpose, "audio") == 0;
     if (is_chat && qi(a, "SELECT json_array_length(?1)", list, NULL, NULL) == 0)
         return refuse(a, 400, "An agent needs at least one chat model, or it cannot run. Add one"
                               " before removing the last.");
@@ -519,15 +523,15 @@ static int act_models_set(Act *a) {
                       " WHERE value ->> 'model_id' NOT IN (SELECT id FROM models)", list, NULL, NULL);
     if (bad) return refuse(a, 400, "There is no model called %s. Register it on its provider's page"
                                    " first.", bad);
-    if (!is_chat && qi(a, "SELECT 1 FROM json_each(?1) WHERE value ->> 'reasoning_effort' IS NOT NULL",
+    if (is_media && qi(a, "SELECT 1 FROM json_each(?1) WHERE value ->> 'reasoning_effort' IS NOT NULL",
                        list, NULL, NULL) == 1)
-        return refuse(a, 400, "Reasoning effort applies to chat models only.");
+        return refuse(a, 400, "Reasoning effort applies to chat and utility models only.");
     bad = qs(a, "SELECT value ->> 'reasoning_effort' FROM json_each(?1)"
                 " WHERE value ->> 'reasoning_effort' IS NOT NULL AND value ->> 'reasoning_effort'"
                 " NOT IN ('off','minimal','low','medium','high')", list, NULL, NULL);
     if (bad) return refuse(a, 400, "\"%s\" is not an effort level: use off, minimal, low, medium or"
                                    " high, or leave it empty.", bad);
-    if (!is_chat) {
+    if (is_media) {
         bad = qs(a, "SELECT j.value ->> 'model_id' FROM json_each(?1) j WHERE NOT EXISTS ("
                     " SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)"
                     "   THEN m.capabilities ELSE '[]' END) c"
@@ -569,7 +573,9 @@ static int act_models_set(Act *a) {
     if (tx_end(a, ok) != 0) return refuse(a, 500, "The list could not be saved.");
     long long n = qi(a, "SELECT json_array_length(?1)", list, NULL, NULL);
     if (n == 0)
-        return done(a, NULL, "%s has no %s list now: the global pick by capability is used.",
+        return done(a, NULL, is_media
+                    ? "%s has no %s list now: the global pick by capability is used."
+                    : "%s has no %s list now: scripts that ask for a utility model get the chat list.",
                     agent, purpose_word(purpose));
     return done(a, NULL, "Saved %s's %s list (%lld model%s). It applies from the next request.",
                 agent, purpose_word(purpose), n, n == 1 ? "" : "s");
@@ -1042,7 +1048,7 @@ static int act_model_edit(Act *a) {
         /* The capability trigger guards inserts into a media list; taking a
          * capability away from a listed model is refused here instead. */
         char *who = qs(a, "SELECT group_concat(agent_name || ' (' || purpose || ')', ', ')"
-                          " FROM agent_models WHERE model_id=?1 AND purpose <> 'chat'"
+                          " FROM agent_models WHERE model_id=?1 AND purpose IN ('image','audio')"
                           " AND purpose NOT IN (SELECT value FROM json_each(?2))", id, caps, NULL);
         if (who) return refuse(a, 409, "%s is on media lists that need the capability you are"
                                        " removing: %s. Take it off those lists first.", id, who);

@@ -26,8 +26,10 @@
 typedef struct LlmBridge LlmBridge;
 
 /* Bind + serve. `source` labels llm_responses rows (e.g. "js:web_search",
- * "cron:digest"). Returns NULL on failure — the tool then runs with no
- * LLM() (the child's calls fail with a connect error, fail-closed). */
+ * "cron:digest"). Returns NULL on failure, with the reason logged — the tool
+ * then runs with no bridge and its LLM() calls throw (fail-closed). The one
+ * failure a deployment can cause is a socket path longer than sun_path: the
+ * socket lives in the agent directory. */
 LlmBridge *llm_bridge_start(const char *agent_dir, const char *db_path,
                             const char *agent_name, const char *source,
                             int64_t session_id, int64_t iteration_id);

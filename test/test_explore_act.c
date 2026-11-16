@@ -342,11 +342,21 @@ static void test_models(void) {
     has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
                  "{\"model_id\":\"nope/x\"}]}"), "no model called");
     has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"image\",\"models\":["
-                 "{\"model_id\":\"mock/b\",\"reasoning_effort\":\"low\"}]}"), "chat models only");
+                 "{\"model_id\":\"mock/b\",\"reasoning_effort\":\"low\"}]}"), "chat and utility models only");
     has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
                  "{\"model_id\":\"mock/a\",\"reasoning_effort\":\"max\"}]}"), "not an effort level");
     has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"video\",\"models\":[]}"),
-        "chat, image or audio");
+        "chat, image, audio or utility");
+    /* Utility: any model (mock/c has no capabilities), effort allowed, and
+     * an empty list is legal — scripts then get the chat list. */
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"utility\",\"models\":["
+             "{\"model_id\":\"mock/c\",\"reasoning_effort\":\"low\"},{\"model_id\":\"mock/b\"}]}");
+    assert(qeq("SELECT group_concat(model_id || ':' || COALESCE(reasoning_effort, '-'), ',') FROM"
+               " (SELECT * FROM agent_models WHERE agent_name='Beta' AND purpose='utility' ORDER BY pos)",
+               "mock/c:low,mock/b:-"));
+    has(act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"utility\",\"models\":[]}"),
+        "get the chat list");
+    assert(qeq("SELECT count(*) FROM agent_models WHERE agent_name='Beta' AND purpose='utility'", "0"));
     assert(qeq("SELECT group_concat(model_id, ',') FROM (SELECT * FROM agent_models WHERE agent_name='Beta'"
                " AND purpose='chat' ORDER BY pos)", "mock/c,mock/a"));
     printf("PASS: test_models\n");

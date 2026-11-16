@@ -741,6 +741,14 @@ function linksIn(t, res) {
 /* ── shaped views: agents, providers, channels ── */
 var ORD = ["1st choice", "2nd choice", "3rd choice"];
 function ordinal(i) { return ORD[i] || (i + 1) + "th choice"; }
+// An agent's model lists, one per purpose. The media lists take only models
+// with that capability; chat and utility take any model and an effort level.
+var PURPOSES = [["chat", "Chat"], ["image", "Images"], ["audio", "Audio"], ["utility", "Utility"]];
+function isMedia(p) { return p === "image" || p === "audio"; }
+function emptyList(p, chat, lead) {
+  return p === "chat" ? chat : lead + (p === "utility" ? "scripts that ask for a utility model get the chat list."
+                                                       : "the global pick by capability is used.");
+}
 function sub(container, heading, seq, promise, draw) {
   var body = h("p", { class: "muted", text: "Loading…" }), sec = section(heading, body);
   container.appendChild(sec);
@@ -767,14 +775,14 @@ var SHAPED = {
     el.appendChild(h("div", { class: "bar" }, opener("Copy this agent", "Copy " + name, function () { return copyAgentPanel(name, res.row.values); })));
     sub(el, "Models", seq, rowsFull("agent_models", by, 200), function (r, h2) {
       more(h2, "as a list", listHash("agent_models", by), "Model lists");
-      var groups = { chat: [], image: [], audio: [] };
+      var groups = {};
       r.rows.forEach(function (x) { (groups[x.values.purpose] = groups[x.values.purpose] || []).push(x.values); });
       var list = h("div", { class: "rows" });
-      [["chat", "Chat"], ["image", "Images"], ["audio", "Audio"]].forEach(function (p) {
+      PURPOSES.forEach(function (p) {
         var g = (groups[p[0]] || []).sort(function (a, b) { return a.pos - b.pos; });
         if (!g.length) {
           list.appendChild(rowLine(h("span", null, p[1], h("span", { class: "why",
-            text: p[0] === "chat" ? "No models: this agent cannot run." : "No list: the global pick by capability is used." })), h("span", { class: "none", text: "none" })));
+            text: emptyList(p[0], "No models: this agent cannot run.", "No list: ") })), h("span", { class: "none", text: "none" })));
         }
         g.forEach(function (v, i) {
           list.appendChild(rowLine(p[1] + ", " + ordinal(i), [link(rowHash("models", [v.model_id]), v.model_id),
@@ -1227,7 +1235,7 @@ function modelsEditor(name, current) {
     clear(box);
     var byId = {};
     models.forEach(function (m) { byId[m.key[0]] = m.values; });
-    [["chat", "Chat"], ["image", "Images"], ["audio", "Audio"]].forEach(function (p) {
+    PURPOSES.forEach(function (p) {
       var purpose = p[0], list = current.filter(function (x) { return x.purpose === purpose; })
         .sort(function (a, b) { return a.pos - b.pos; })
         .map(function (x) { return { model_id: x.model_id, reasoning_effort: x.reasoning_effort || "" }; });
@@ -1235,11 +1243,11 @@ function modelsEditor(name, current) {
       var adder = h("select", { class: "wide", "aria-label": "Model to add to the " + p[1].toLowerCase() + " list" });
       function draw() {
         clear(items);
-        if (!list.length) items.appendChild(h("p", { class: "none", text: purpose === "chat"
-          ? "Empty: the agent cannot run without a chat model." : "Empty: the global pick by capability is used." }));
+        if (!list.length) items.appendChild(h("p", { class: "none",
+          text: emptyList(purpose, "Empty: the agent cannot run without a chat model.", "Empty: ") }));
         list.forEach(function (it, i) {
           var row = h("div", { class: "it", role: "listitem" }, h("span", { class: "nm", text: (i + 1) + ". " + it.model_id }));
-          if (purpose === "chat") {
+          if (!isMedia(purpose)) {
             var eff = selectIn("effort", EFFORT, it.reasoning_effort);
             eff.setAttribute("aria-label", "Reasoning effort for " + it.model_id);
             eff.addEventListener("change", function () { it.reasoning_effort = eff.value; });
@@ -1257,10 +1265,10 @@ function modelsEditor(name, current) {
         clear(adder);
         var opts = models.filter(function (m) {
           return !list.some(function (x) { return x.model_id === m.key[0]; }) &&
-                 (purpose === "chat" || capsOf(m.values).indexOf(purpose) >= 0);
+                 (!isMedia(purpose) || capsOf(m.values).indexOf(purpose) >= 0);
         });
         adder.appendChild(h("option", { value: "", text: opts.length ? "Add a model…" :
-          purpose === "chat" ? "No other models registered" : "No other model can handle " + purpose }));
+          !isMedia(purpose) ? "No other models registered" : "No other model can handle " + purpose }));
         opts.forEach(function (m) {
           adder.appendChild(h("option", { value: m.key[0], text: m.key[0] + (m.values.status === "disabled" ? " (disabled)" : "") }));
         });
@@ -1276,11 +1284,12 @@ function modelsEditor(name, current) {
         err.textContent = "";
         save.disabled = true;
         act("models_set", { agent: name, purpose: purpose, models: list.map(function (x) {
-          return purpose === "chat" && x.reasoning_effort ? { model_id: x.model_id, reasoning_effort: x.reasoning_effort }
+          return !isMedia(purpose) && x.reasoning_effort ? { model_id: x.model_id, reasoning_effort: x.reasoning_effort }
                                                           : { model_id: x.model_id };
         }) }).then(function (r) { refresh(r.message); }, function (x) { save.disabled = false; err.textContent = x.message; });
       }, "primary");
       box.appendChild(h("div", { class: "grp" }, h("h3", { text: p[1] + (purpose === "chat" ? ", in order of preference"
+        : purpose === "utility" ? ", for side work that extension scripts hand to a model"
         : ", only models whose capabilities include " + purpose) }), items,
         h("div", { class: "actions" }, adder, addBtn), h("div", { class: "actions", style: "margin-top:8px" }, save, err)));
     });

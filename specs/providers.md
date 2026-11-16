@@ -5,7 +5,7 @@
 All provider configuration lives in `cclaw.db`:
 - `providers` table: name, base_url, endpoint_type, api_key_env — **transport only**
 - `models` table: canonical id (`model@provider`), context_window, max_output_tokens, capabilities, effort_map, health status
-- `agent_models` table: each agent's routing lists, one per `purpose` (`chat`, `image`, `audio`), each in `pos` order
+- `agent_models` table: each agent's routing lists, one per `purpose` (`chat`, `image`, `audio`, `utility`), each in `pos` order
 - `secrets` table (scope `system`): encrypted API keys, named by the provider's `api_key_env` (e.g. `OPENROUTER_API_KEY`)
 
 Agents never store provider keys. The trusted process decrypts a key when it loads config and uses it on its LLM worker threads. Provider keys never reach tool children (see Security Model below).
@@ -62,6 +62,23 @@ media is never sent to a model nobody chose for that agent. A row is only
 accepted for a model whose `capabilities` include the purpose (enforced by a
 trigger on `agent_models`). There is no agent-facing way to set these lists
 yet; the operator writes the rows.
+
+### Utility models
+
+The `utility` list is for work an extension's script hands to a model with
+`LLM(prompt, {purpose: "utility"})` ([js-llm.md](js-llm.md#purpose)) — a
+`turnSettled` hook's post-turn review is the intended first user. It lets an
+agent think with one model and tidy up with a cheaper one. The list follows
+the chat rules (pos order, cooldowns sink, `disabled` drops out, any model,
+optional `reasoning_effort`). An agent with no `utility` rows is served from
+its chat list; one whose utility rows are all unroutable gets an error, not
+the chat list. Like the media lists it is the operator's to write — the
+explorer's agent page ("Utility"), or:
+
+```sql
+INSERT INTO agent_models(agent_name, purpose, model_id, pos)
+VALUES ('Assistant', 'utility', 'anthropic/claude-haiku-5-5', 0);
+```
 
 `providers.priority` has one remaining use: at config load, the first
 provider in `priority` order whose key resolves becomes `cfg->provider`.

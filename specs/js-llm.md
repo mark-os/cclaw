@@ -20,7 +20,8 @@ LLM(prompt)                       // -> completion text (string)
 LLM({messages:[{role,content}]})  // conversation form
 LLM(prompt, {
   system: "...",                  // prepended system message
-  model: "gemini",                // substring-match against the routing list
+  purpose: "utility",             // which routing list: "chat" (default) or "utility"
+  model: "gemini",                // substring-match within that list
   max_tokens: 1024, temperature: 0,
   timeout: 90,                    // secs per attempt (default 120, max 600)
   images: ["photo.jpg"],          // files the model should look at
@@ -28,6 +29,26 @@ LLM(prompt, {
   full: true                      // -> {text, model, id, status, body}
 })
 ```
+
+### Purpose
+
+An agent has one routing list per purpose ([providers.md](providers.md)).
+`opts.purpose` says which one the call walks:
+
+- `"chat"` — the default: the models that drive the agent's turns.
+- `"utility"` — the agent's `utility` list, meant for cheap side work
+  (classifying, summarising, a post-turn review). An agent that has no
+  utility list is served from its chat list, so a script can always ask for
+  `utility` and name no model. A utility list that exists but has nothing
+  routable on it (every entry disabled or keyless) is an error, not a quiet
+  move to the chat models.
+
+Anything else — the media purposes `image` and `audio`, an unknown word, a
+non-string — throws `LLM: opts.purpose must be "chat" or "utility"` and sends
+nothing. The media lists pick the model that transcribes inbound media for
+the runtime; a script that wants a model to look at a picture uses
+`opts.images` with `opts.model`. `opts.model` narrows within the chosen list
+and never reaches across lists.
 
 ### Images
 
@@ -73,7 +94,8 @@ sandbox as `$CCLAW_LLM_SOCK`). The parent (`llm_request`, llm_proc.c) does
 everything:
 
 - **Routing**: the agent's `agent_models → models → providers` join — the
-  same loader and order that serves the agent's own turns. Walks the ladder
+  same loader and order that serves the agent's own turns, over the list
+  `opts.purpose` names. Walks the ladder
   on failure; actively-degraded models are sidelined but the walk is never
   emptied; success/failure feeds the same health counters as turn traffic.
 - **Body in SQL**: one prepared statement per wire format (OpenAI chat /
@@ -90,15 +112,23 @@ everything:
   rule as turn routing), used for one request, wiped. They exist only in the
   parent process.
 
+A bridge that cannot start is logged with its reason (`llm_bridge: not
+started for <source> — …`) and the script's `LLM()` throws `not available in
+this context`. The one cause a deployment can produce: the socket lives in
+the agent directory and a socket address holds 107 bytes, so an agent
+directory deeper than about 85 characters leaves that agent's scripts without
+`LLM()`. The egress proxy's socket sits in the same directory under the same
+limit.
+
 The per-call socket is the identity: the parent knows which tool call (and
 therefore which session/agent) each connection belongs to without the
 sandboxed child asserting anything.
 
 ## Trust boundaries
 
-- **Authority is the routing list.** No separate grant: what an agent can
-  spend on its turns is exactly what its tools can spend. `opts.model`
-  narrows within the list and can never widen it.
+- **Authority is the routing lists.** No separate grant: a script can spend
+  what is on the agent's chat list and its utility list, both written by the
+  operator. `opts.model` narrows within a list and can never widen it.
 - **Children never see keys.** Not "held C-side" — absent from the process.
 - **No egress widening.** The child's allowlist is untouched; completions
   never leave the parent. The `restricted` profile (`net_mode=1`, no network) gets no
@@ -112,9 +142,9 @@ sandboxed child asserting anything.
 
 - No streaming, no tool-calling loop inside LLM() — one request, one text.
   A tool needing an agentic loop should be a sub-agent, not a JS loop.
-- No per-extension model config: model choice is `opts.model` against the
-  agent's routing, so the operator's `agent_models` stays the single source
-  of truth.
+- No per-extension model config: model choice is `opts.purpose` and
+  `opts.model` against the agent's routing, so the operator's `agent_models`
+  stays the single source of truth.
 - No concurrent calls — `LLM()` blocks inside the native function, so
   `Promise.all` over it is legal and correct but executes serially.
   Deliberate: no promise lifetimes held C-side, no interleavings to get

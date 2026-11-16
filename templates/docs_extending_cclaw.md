@@ -102,10 +102,13 @@ no `Atomics`; use the provided host bridges:
   non-2xx answer leaves no file and returns the error text in `body`.
 - `fs.readFile` / `fs.writeFile` / `fs.readdir` / `fs.stat` / `fs.lstat` /
   `fs.cwd` — workspace-scoped file access.
-- `LLM(prompt[, {system, model, max_tokens, temperature, timeout, images}])` — a
+- `LLM(prompt[, {system, purpose, model, max_tokens, temperature, timeout, images}])` — a
   completion from your own model routing list, returned as a string. Only
   what your handler returns enters your context, so you can map it over data
   or chain calls without spending context on the intermediate results.
+  `purpose: 'utility'` uses your utility list — the cheaper models your
+  operator set aside for side work — and falls back to your chat list when
+  you have none; the only other value is `'chat'`, the default.
   `images: ['photo.jpg']` attaches image files (JPEG, PNG, GIF, WebP) for the
   model to look at — this is how you see a picture you downloaded. Pick a
   model that can see with `model`.

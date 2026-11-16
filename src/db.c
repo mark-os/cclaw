@@ -1439,6 +1439,55 @@ static int patch_v61_chats(sqlite3 *db) {
     return bad ? -1 : 0;
 }
 
+/* v65: agent_models.purpose gains 'utility' — the list a script's
+ * LLM(prompt, {purpose:"utility"}) walks. A CHECK cannot be altered in place,
+ * so the table is rebuilt under its own name (it is nobody's parent, so the
+ * DROP checks no child rows). The capability triggers go with the table and
+ * come back naming the two media purposes instead of "anything but chat": a
+ * utility row needs no capability. The generated change_log triggers go with
+ * it too; change_log_sync puts them back before the patch commits. */
+static int patch_v65_utility(sqlite3 *db) {
+    static const char sql[] =
+        "CREATE TEMP TABLE v65_am AS SELECT * FROM agent_models;"
+        "DROP TABLE agent_models;"
+        "CREATE TABLE agent_models ("
+        "  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,"
+        "  purpose TEXT NOT NULL DEFAULT 'chat' CHECK (purpose IN ('chat','image','audio','utility')),"
+        "  model_id TEXT NOT NULL REFERENCES models(id),"
+        "  pos INTEGER NOT NULL,"
+        "  reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN"
+        "    ('off','minimal','low','medium','high')),"
+        "  PRIMARY KEY (agent_name, purpose, pos));"
+        "INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort)"
+        "  SELECT agent_name, purpose, model_id, pos, reasoning_effort FROM v65_am;"
+        "DROP TABLE v65_am;"
+        "CREATE TRIGGER agent_models_capability_bi"
+        " BEFORE INSERT ON agent_models"
+        " WHEN NEW.purpose IN ('image','audio') AND NOT EXISTS ("
+        "   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)"
+        "                                          THEN m.capabilities ELSE '[]' END) c"
+        "    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)"
+        " BEGIN"
+        "   SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose');"
+        " END;"
+        "CREATE TRIGGER agent_models_capability_bu"
+        " BEFORE UPDATE OF purpose, model_id ON agent_models"
+        " WHEN NEW.purpose IN ('image','audio') AND NOT EXISTS ("
+        "   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)"
+        "                                          THEN m.capabilities ELSE '[]' END) c"
+        "    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)"
+        " BEGIN"
+        "   SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose');"
+        " END;";
+    char *err = NULL;
+    if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
+        LOG_ERROR_("schema v65: %s", err ? err : "?");
+        sqlite3_free(err);
+        return -1;
+    }
+    return change_log_sync(db);
+}
+
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
     /* Frozen at v40 (2026-07-31, D16): entries.turn_id/llm_responses.turn_id
      * were renamed to iteration_id (they always identified one LLM request) and
@@ -1857,6 +1906,8 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "ALTER TABLE hooks ADD COLUMN wait INTEGER NOT NULL DEFAULT 1;"
       "ALTER TABLE hooks ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0;",
       NULL },
+    /* v65: the 'utility' routing purpose — see patch_v65_utility. */
+    { 65, NULL, patch_v65_utility },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {

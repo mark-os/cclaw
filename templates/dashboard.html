@@ -511,7 +511,7 @@ function agentPage(name, my) {
 var EFFORT = { off: "no extra thinking", minimal: "thinks a little", low: "thinks a little", medium: "thinks some", high: "thinks hard" };
 function thinksWith(models, change) {
   var c = card("Thinks with", [change, "change"]);
-  var by = { chat: [], image: [], audio: [] };
+  var by = { chat: [], image: [], audio: [], utility: [] };
   models.forEach(function (m) { (by[m.purpose] || []).push(m); });
   Object.keys(by).forEach(function (k) { by[k].sort(function (a, b) { return a.pos - b.pos; }); });
   if (!by.chat.length) c.appendChild(none("No chat model set: this agent cannot answer."));
@@ -519,7 +519,8 @@ function thinksWith(models, change) {
     c.appendChild(row([code(m.model_id), m.reasoning_effort ? h("span", { class: "why", text: EFFORT[m.reasoning_effort] + " (" + m.reasoning_effort + ")" }) : null],
       i === 0 ? "first choice" : "if that fails"));
   });
-  [["image", "Looks at pictures with"], ["audio", "Listens to voice notes with"]].forEach(function (p) {
+  [["image", "Looks at pictures with"], ["audio", "Listens to voice notes with"],
+   ["utility", "Hands side work to"]].forEach(function (p) {
     if (!by[p[0]].length) return;
     c.appendChild(h("h3", { text: p[1] }));
     by[p[0]].forEach(function (m, i) { c.appendChild(row(code(m.model_id), i === 0 ? "first choice" : "if that fails")); });

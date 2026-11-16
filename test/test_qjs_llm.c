@@ -20,6 +20,7 @@
 #include "db.h"
 #include "llm_bridge.h"
 #include "llm_proc.h"
+#include "log.h"
 #include "qjs_helpers.h"
 #include "test_util.h"
 
@@ -318,6 +319,156 @@ static void test_bridge_error_throws(void) {
     PASS();
 }
 
+/* ── opts.purpose: which of the agent's lists is walked ── */
+
+/* chat = m-open only; utility = `utility_sql` (rows for agent 't'), or none. */
+static int route_purposes(int port_a, int port_g, const char *utility_sql) {
+    if (route_two(port_a, port_g) != 0) return -1;
+    if (seed("DELETE FROM agent_models WHERE agent_name='t' AND model_id='m-gem';"
+             "UPDATE models SET status='healthy';") != 0) return -1;
+    return utility_sql ? seed(utility_sql) : 0;
+}
+
+#define UTILITY_GEM "INSERT INTO agent_models(agent_name,purpose,model_id,pos)" \
+                    " VALUES('t','utility','m-gem',0);"
+#define ASK(opts) "{\"messages\":[{\"role\":\"user\",\"content\":\"q\"}],\"opts\":" opts "}"
+
+static void test_purpose_utility_list(void) {
+    TEST("purpose_utility_list");
+    MockHttp m = { .nconn = 2, .resp = { RESP_GEMINI, RESP_OPENAI } };
+    pthread_t tid;
+    if (mock_http_start(&m, &tid) != 0) { FAIL("mock"); return; }
+    route_purposes(m.port, m.port, UTILITY_GEM);
+    /* utility walks the utility list, and only it… */
+    char *r = req("t", ASK("{\"purpose\":\"utility\"}"));
+    /* …while chat, named or defaulted, still walks the chat list. */
+    char *c = req("t", ASK("{\"purpose\":\"chat\"}"));
+    mock_http_stop(&m, tid);
+    if (!r || !strstr(r, "\"ok\":true") || !strstr(r, "\"id\":\"m-gem\"")) {
+        FAIL(r ? r : "NULL"); free(r); free(c); return;
+    }
+    if (!c || !strstr(c, "\"ok\":true") || !strstr(c, "\"id\":\"m-open\"")) {
+        FAIL(c ? c : "NULL"); free(r); free(c); return;
+    }
+    free(r); free(c);
+    /* opts.model narrows within the chosen list, never across lists. */
+    r = req("t", ASK("{\"purpose\":\"utility\",\"model\":\"open\"}"));
+    if (!r || !strstr(r, "no routed model matches")) { FAIL(r ? r : "NULL"); free(r); return; }
+    free(r);
+    PASS();
+}
+
+static void test_purpose_utility_falls_back(void) {
+    TEST("purpose_utility_falls_back_to_chat");
+    MockHttp m = { .nconn = 1, .resp = { RESP_OPENAI } };
+    pthread_t tid;
+    if (mock_http_start(&m, &tid) != 0) { FAIL("mock"); return; }
+    route_purposes(m.port, 1, NULL);            /* the agent never made a utility list */
+    char *r = req("t", ASK("{\"purpose\":\"utility\"}"));
+    mock_http_stop(&m, tid);
+    if (!r || !strstr(r, "\"ok\":true") || !strstr(r, "\"id\":\"m-open\"")) {
+        FAIL(r ? r : "NULL"); free(r); return;
+    }
+    free(r);
+    PASS();
+}
+
+/* A utility list the agent does have, with nothing routable on it, is an
+ * error — not a quiet move to the chat models. */
+static void test_purpose_utility_unroutable(void) {
+    TEST("purpose_utility_unroutable");
+    route_purposes(1, 1, UTILITY_GEM "UPDATE models SET status='disabled' WHERE id='m-gem';");
+    char *r = req("t", ASK("{\"purpose\":\"utility\"}"));
+    seed("UPDATE models SET status='healthy';");
+    if (!r || !strstr(r, "\"ok\":false") || !strstr(r, "utility list has no routable model")) {
+        FAIL(r ? r : "NULL"); free(r); return;
+    }
+    free(r);
+    PASS();
+}
+
+static void test_purpose_refused(void) {
+    TEST("purpose_refused");
+    route_purposes(1, 1, UTILITY_GEM);
+    /* The media lists are not a script's to ask for; nor is anything unknown
+     * or not a string. Nothing is sent (the providers are unreachable). */
+    const char *bad[] = { "\"image\"", "\"audio\"", "\"Utility\"", "\"\"", "7", "null",
+                          "[\"utility\"]" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        char body[256];
+        snprintf(body, sizeof(body), ASK("{\"purpose\":%s}"), bad[i]);
+        char *r = req("t", body);
+        if (!r || !strstr(r, "\"ok\":false") ||
+            !strstr(r, "opts.purpose must be \\\"chat\\\" or \\\"utility\\\"")) {
+            printf("(%s) ", bad[i]); FAIL(r ? r : "NULL"); free(r); return;
+        }
+        free(r);
+    }
+    PASS();
+}
+
+/* The script's side: LLM(prompt, {purpose}) reaches the list, and a refusal
+ * is a thrown error the script can read. */
+static void test_purpose_via_bridge(void) {
+    TEST("purpose_via_bridge");
+    MockHttp m = { .nconn = 1, .resp = { RESP_GEMINI } };
+    pthread_t tid;
+    if (mock_http_start(&m, &tid) != 0) { FAIL("mock"); return; }
+    route_purposes(1, m.port, UTILITY_GEM);
+    LlmBridge *b = llm_bridge_start(BRIDGE_DIR, DB_PATH, "t", "hook:test", 7, 42);
+    if (!b) { FAIL("bridge start"); mock_http_stop(&m, tid); return; }
+    setenv("CCLAW_LLM_SOCK", llm_bridge_sock(b), 1);
+    int is_error = 0;
+    char *r = qjs_eval_run(
+        "var f = LLM('q', {purpose:'utility', full:true});"
+        "var e = ''; try { LLM('q', {purpose:'audio'}); } catch (x) { e = String(x.message); }"
+        "f.id + '|' + e",
+        NULL, NULL, NULL, &is_error);
+    unsetenv("CCLAW_LLM_SOCK");
+    llm_bridge_stop(b);
+    mock_http_stop(&m, tid);
+    if (!r || is_error ||
+        strcmp(r, "m-gem|LLM: opts.purpose must be \"chat\" or \"utility\"") != 0) {
+        FAIL(r ? r : "NULL"); free(r); return;
+    }
+    free(r);
+    PASS();
+}
+
+/* An agent directory too deep for a socket address: the bridge is refused
+ * (never bound at a truncated path) and the reason is logged. Runs last —
+ * it turns the stderr tee on. */
+static void test_bridge_long_path_is_loud(void) {
+    TEST("bridge_long_path_is_loud");
+    char dir[160] = "/tmp/test_qjs_llm_long_";
+    memset(dir + strlen(dir), 'x', 110 - strlen(dir));     /* > sun_path with the name */
+    mkdir(dir, 0755);
+    char logf[] = "/tmp/test_qjs_llm_log_XXXXXX";
+    int fd = mkstemp(logf), saved = dup(STDERR_FILENO);
+    if (fd < 0 || saved < 0) { FAIL("capture"); return; }
+    dup2(fd, STDERR_FILENO);
+    close(fd);
+    cclaw_log_init(1);
+    LlmBridge *b = llm_bridge_start(dir, DB_PATH, "t", "hook:review", 7, 42);
+    dup2(saved, STDERR_FILENO);
+    close(saved);
+    char got[1024] = "";
+    FILE *f = fopen(logf, "r");
+    if (f) { size_t n = fread(got, 1, sizeof(got) - 1, f); got[n] = '\0'; fclose(f); }
+    unlink(logf);
+    rmdir(dir);
+    if (b) { llm_bridge_stop(b); FAIL("started on an over-long path"); return; }
+    if (!strstr(got, "llm_bridge: not started for hook:review") ||
+        !strstr(got, "the limit is 107") || !strstr(got, dir)) {
+        FAIL(got); return;
+    }
+    /* A path that fits still starts. */
+    b = llm_bridge_start(BRIDGE_DIR, DB_PATH, "t", "js:test", 7, 42);
+    if (!b) { FAIL("short path refused"); return; }
+    llm_bridge_stop(b);
+    PASS();
+}
+
 static void test_no_sock_throws(void) {
     TEST("no_sock_throws");
     unsetenv("CCLAW_LLM_SOCK");
@@ -588,6 +739,12 @@ int main(void) {
     test_images_refused();
     test_images_anthropic_body();
     unlink(IMG_PATH);
+    test_purpose_utility_list();
+    test_purpose_utility_falls_back();
+    test_purpose_utility_unroutable();
+    test_purpose_refused();
+    test_purpose_via_bridge();
+    test_bridge_long_path_is_loud();
 
     sqlite3_close(g_db);
     unlink(DB_PATH); unlink(DB_PATH "-wal"); unlink(DB_PATH "-shm");

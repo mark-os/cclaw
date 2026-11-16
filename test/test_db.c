@@ -3,6 +3,7 @@
 #include "agent_config.h"
 #include "db.h"
 #include "config_registry.h"
+#include "change_log.h"
 #include "util.h"
 #include "test_util.h"
 #include "advance.h"
@@ -245,10 +246,49 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
-/* Turn a fresh (current) database back into the v63 shape: hooks has no
- * wait or fail_count column. unshape_v63 starts here, so every older patch
- * test replays v64 over a real v63 shape. */
+/* Turn a fresh (current) database back into the v64 shape: agent_models
+ * knows three purposes and its capability triggers guard everything but
+ * chat. Utility rows cannot exist there and are not carried. unshape_v64
+ * starts here, so every older patch test replays v65 over a real v64 shape. */
+static void unshape_v65(sqlite3 *db) {
+    char *err = NULL;
+    int rc = sqlite3_exec(db,
+        "CREATE TEMP TABLE u65 AS SELECT * FROM agent_models WHERE purpose <> 'utility';"
+        "DROP TABLE agent_models;"
+        "CREATE TABLE agent_models ("
+        "  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,"
+        "  purpose TEXT NOT NULL DEFAULT 'chat' CHECK (purpose IN ('chat','image','audio')),"
+        "  model_id TEXT NOT NULL REFERENCES models(id),"
+        "  pos INTEGER NOT NULL,"
+        "  reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN"
+        "    ('off','minimal','low','medium','high')),"
+        "  PRIMARY KEY (agent_name, purpose, pos));"
+        "INSERT INTO agent_models SELECT * FROM u65;"
+        "DROP TABLE u65;"
+        "CREATE TRIGGER agent_models_capability_bi BEFORE INSERT ON agent_models"
+        " WHEN NEW.purpose <> 'chat' AND NOT EXISTS ("
+        "   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)"
+        "     THEN m.capabilities ELSE '[]' END) c"
+        "    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)"
+        " BEGIN SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose'); END;"
+        "CREATE TRIGGER agent_models_capability_bu BEFORE UPDATE OF purpose, model_id ON agent_models"
+        " WHEN NEW.purpose <> 'chat' AND NOT EXISTS ("
+        "   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)"
+        "     THEN m.capabilities ELSE '[]' END) c"
+        "    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)"
+        " BEGIN SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose'); END;",
+        NULL, NULL, &err);
+    if (rc != SQLITE_OK) fprintf(stderr, "unshape_v65: %s\n", err ? err : "?");
+    assert(rc == SQLITE_OK);
+    /* The generated change-log triggers went with the table; a v64 database
+     * has them. */
+    assert(change_log_sync(db) == 0);
+}
+
+/* On to the v63 shape: hooks has no wait or fail_count column. unshape_v63
+ * starts here, so every older patch test replays v64 over a real v63 shape. */
 static void unshape_v64(sqlite3 *db) {
+    unshape_v65(db);
     int rc = sqlite3_exec(db, "ALTER TABLE hooks DROP COLUMN wait;"
                               "ALTER TABLE hooks DROP COLUMN fail_count;",
                           NULL, NULL, NULL);
@@ -1806,6 +1846,80 @@ static void test_schema_patch_v64(void) {
     printf("  PASS test_schema_patch_v64\n");
 }
 
+/* v65 rebuilds agent_models for the 'utility' purpose. Every row and its
+ * effort survive in place, the result is shaped exactly like a fresh
+ * database (columns, both foreign keys, the capability triggers, the
+ * generated change-log triggers), and the rebuild itself logs no change. */
+static void test_schema_patch_v65(void) {
+    const char *path = "/tmp/test_cclaw_schema_v65.sqlite";
+    const char *fresh_path = "/tmp/test_cclaw_schema_v65_fresh.sqlite";
+    test_db_clean(path);
+    test_db_clean(fresh_path);
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v65(db);
+    assert(sqlite3_exec(db,
+        "INSERT INTO agents(name) VALUES('A'),('B');"
+        "INSERT INTO providers(name, base_url) VALUES('p','http://p');"
+        "INSERT INTO models(id, provider_name, model, capabilities) VALUES"
+        " ('plain@p','p','plain','[]'), ('eyes@p','p','eyes','[\"image\"]');"
+        "INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort) VALUES"
+        " ('A','chat','plain@p',0,'high'), ('A','chat','eyes@p',1,NULL),"
+        " ('A','image','eyes@p',0,NULL), ('B','chat','eyes@p',0,'off');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    /* The old shape refuses the new purpose. */
+    assert(sqlite3_exec(db, "INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+        " VALUES('A','utility','plain@p',0);", NULL, NULL, NULL) != SQLITE_OK);
+    int64_t logged = db_scalar_i64(db, "SELECT COUNT(*) FROM change_log", 0, -1);
+    set_user_version(db, 64);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM change_log", 0, -1) == logged);
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT group_concat(agent_name || ':' || purpose || ':' || model_id || ':' || pos"
+        "  || ':' || COALESCE(reasoning_effort,'-'), ',') FROM"
+        " (SELECT * FROM agent_models ORDER BY agent_name, purpose, pos)",
+        -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(st, 0),
+        "A:chat:plain@p:0:high,A:chat:eyes@p:1:-,A:image:eyes@p:0:-,B:chat:eyes@p:0:off") == 0);
+    sqlite3_finalize(st);
+
+    /* A utility row is legal now, for a model with no capability at all; the
+     * media gate still stands, and so does the CHECK. */
+    assert(sqlite3_exec(db, "INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+        " VALUES('A','utility','plain@p',0);", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(db, "INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+        " VALUES('A','audio','plain@p',0);", NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+        " VALUES('A','video','plain@p',0);", NULL, NULL, NULL) != SQLITE_OK);
+    /* The write is logged: the change-log triggers are back on the new table. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM change_log", 0, -1) == logged + 1);
+    /* Foreign keys survived: a listed model cannot be deleted, a deleted
+     * agent takes its lists, a renamed one keeps them. */
+    assert(sqlite3_exec(db, "DELETE FROM models WHERE id='plain@p';", NULL, NULL, NULL)
+           != SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE agents SET name='B2' WHERE name='B';"
+                            "DELETE FROM agents WHERE name='A';", NULL, NULL, NULL) == SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_models WHERE agent_name='B2'", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_models WHERE agent_name<>'B2'", 0, -1) == 0);
+
+    sqlite3 *fresh = db_open(fresh_path);
+    assert(fresh != NULL && db_ensure_schema(fresh) == 0);
+    char *got = schema_shape(db), *want = schema_shape(fresh);
+    if (strcmp(got, want) != 0) fprintf(stderr, "v65 shape differs:\n%s\n---\n%s\n", got, want);
+    assert(strcmp(got, want) == 0);
+    free(got); free(want);
+    db_close(fresh);
+    db_close(db);
+    test_db_clean(path);
+    test_db_clean(fresh_path);
+    printf("  PASS test_schema_patch_v65\n");
+}
+
 static void test_agent_models_capability_gate(void) {
     const char *path = "/tmp/test_cclaw_db_capgate.sqlite";
     test_db_clean(path);
@@ -1830,6 +1944,8 @@ static void test_agent_models_capability_gate(void) {
         { "audio", "eyes@p",  0, 0 },
         { "audio", "ears@p",  0, 1 },
         { "video", "eyes@p",  1, 0 },   /* not a purpose (CHECK) */
+        { "utility", "plain@p", 0, 1 }, /* utility never checks capabilities */
+        { "utility", "junk@p",  1, 1 },
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         sqlite3_stmt *st;
@@ -1856,7 +1972,7 @@ static void test_agent_models_capability_gate(void) {
         " WHERE purpose='audio';", NULL, NULL, NULL) == SQLITE_OK);
     /* One list per purpose: the same pos in two purposes is two rows. */
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_models WHERE agent_name='A';",
-        0, -1) == 3);
+        0, -1) == 5);
     db_close(db);
     test_db_clean(path);
     printf("  PASS test_agent_models_capability_gate\n");
@@ -1889,6 +2005,7 @@ int main(void) {
     test_schema_patch_v62();
     test_schema_patch_v63();
     test_schema_patch_v64();
+    test_schema_patch_v65();
     test_agent_models_capability_gate();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");

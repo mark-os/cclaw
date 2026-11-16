@@ -88,7 +88,7 @@ static void model_config_recover(sqlite3 *db, const char *model_id);
  * llm_req, because health reorders the list but never empties it (R4). Only
  * 'disabled' (an operator statement) and missing-credential rows drop out. */
 static int load_candidates(sqlite3 *db, const char *agent_name,
-                           ModelCandidate *out, int max) {
+                           const char *purpose, ModelCandidate *out, int max) {
     if (max <= 0) return 0;
     int n = 0;
 
@@ -98,12 +98,13 @@ static int load_candidates(sqlite3 *db, const char *agent_name,
         " FROM agent_models am"
         " JOIN models m ON m.id = am.model_id"
         " JOIN providers p ON p.name = m.provider_name"
-        " WHERE am.agent_name = ?1 AND am.purpose = 'chat'"
+        " WHERE am.agent_name = ?1 AND am.purpose = ?2"
         "   AND m.status != 'disabled'"
         " ORDER BY am.pos";
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_text(s, 1, agent_name ? agent_name : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, purpose, -1, SQLITE_STATIC);
     while (n < max && sqlite3_step(s) == SQLITE_ROW) {
         ModelCandidate *c = &out[n];
         memset(c, 0, sizeof(*c));
@@ -438,7 +439,7 @@ int llm_probe_agent(sqlite3 *db, const char *agent_name, int64_t session_id,
 
     /* Whoever would serve the very next request — same loader, same order. */
     ModelCandidate m;
-    if (load_candidates(db, agent_name, &m, 1) != 1) {
+    if (load_candidates(db, agent_name, "chat", &m, 1) != 1) {
         snprintf(reason, reason_sz, "no routable model for this agent");
         return -1;
     }
@@ -598,7 +599,8 @@ static int llm_attempt(sqlite3 *db, ModelCandidate *m, const char *body,
  * the authority to spend these models), body built in SQL, key resolved
  * here and never crossing into any child, every attempt archived to
  * llm_responses, spend gated by token_rate_limit. Walks the ladder in
- * routing order; opts.model substring-narrows within it. */
+ * routing order; opts.purpose picks the list (chat, or utility when the
+ * agent has one); opts.model substring-narrows within it. */
 
 /* Request body per wire format. ?1=model ?2=messages(json array, openai
  * shape) ?3=opts(json) ?4=candidate extra (request_extra+effort merged).
@@ -842,7 +844,7 @@ char *llm_request(sqlite3 *db, const char *agent_name,
 
     Config *cfg = config_load(db);
     if (cfg && !rate_limit_check(db, cfg->token_rate_limit)) {
-        config_free(cfg); free(messages); free(opts);
+        config_free(cfg); free(messages); free(opts); free(archived);
         return llm_request_fail(db, "token rate limit reached — try later");
     }
     if (cfg) config_free(cfg);
@@ -863,13 +865,41 @@ char *llm_request(sqlite3 *db, const char *agent_name,
         if (timeout > JSLLM_TIMEOUT_MAX) timeout = JSLLM_TIMEOUT_MAX;
     }
 
+    /* opts.purpose picks which of the agent's lists is walked. A script may
+     * ask for 'chat' (the default) or 'utility'; the media lists are the
+     * runtime's own. An agent that never made a utility list is served from
+     * its chat list — the same "no rows = never chose" rule the media pick
+     * uses — but a utility list with nothing routable on it is an error, not
+     * a quiet move to the (usually dearer) chat models. */
+    const char *purpose = "chat";
+    if ((w = sql_text(db, "SELECT CASE json_extract(?1,'$.purpose')"
+                          " WHEN 'chat' THEN 'chat' WHEN 'utility' THEN 'utility'"
+                          " ELSE 'bad' END"
+                          " WHERE json_type(?1,'$.purpose') IS NOT NULL", ob, 1))) {
+        int bad = strcmp(w, "bad") == 0, utility = strcmp(w, "utility") == 0;
+        free(w);
+        if (bad) {
+            free(messages); free(opts); free(archived);
+            return llm_request_fail(db,
+                "opts.purpose must be \"chat\" or \"utility\"");
+        }
+        const char *ab[] = { agent_name ? agent_name : "" };
+        if (utility && (w = sql_text(db, "SELECT 1 FROM agent_models"
+                " WHERE agent_name=?1 AND purpose='utility' LIMIT 1", ab, 1))) {
+            free(w);
+            purpose = "utility";
+        }
+    }
+
     ModelCandidate models[JSLLM_MAX_CANDIDATES];
-    int n = load_candidates(db, agent_name, models, JSLLM_MAX_CANDIDATES);
+    int n = load_candidates(db, agent_name, purpose, models, JSLLM_MAX_CANDIDATES);
     if (n <= 0) {
-        free(messages); free(opts);
-        return llm_request_fail(db,
-            "this agent has no routable model (agent_models is empty or "
-            "every provider key is missing)");
+        free(messages); free(opts); free(archived);
+        return llm_request_fail(db, strcmp(purpose, "utility") == 0
+            ? "this agent's utility list has no routable model (every entry "
+              "is disabled or its provider key is missing)"
+            : "this agent has no routable model (agent_models is empty or "
+              "every provider key is missing)");
     }
 
     Buf fails = {0};
@@ -1079,7 +1109,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
     /* ── Routing state machine ─────────────────────────────────── */
     ModelCandidate models[MAX_MODELS];
-    int nmodels = load_candidates(db, agent_name, models, MAX_MODELS);
+    int nmodels = load_candidates(db, agent_name, "chat", models, MAX_MODELS);
 
     /* Fallback: if no models in DB, use config provider directly */
     if (nmodels == 0) {

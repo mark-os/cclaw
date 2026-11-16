@@ -245,10 +245,20 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
-/* Turn a fresh (current) database back into the v62 shape: tools has no
- * droppable column. unshape_v62 starts here, so every older patch test
- * replays v63 over a real v62 shape. */
+/* Turn a fresh (current) database back into the v63 shape: hooks has no
+ * wait or fail_count column. unshape_v63 starts here, so every older patch
+ * test replays v64 over a real v63 shape. */
+static void unshape_v64(sqlite3 *db) {
+    int rc = sqlite3_exec(db, "ALTER TABLE hooks DROP COLUMN wait;"
+                              "ALTER TABLE hooks DROP COLUMN fail_count;",
+                          NULL, NULL, NULL);
+    assert(rc == SQLITE_OK);
+}
+
+/* On to the v62 shape: tools has no droppable column. unshape_v62 starts
+ * here, so every older patch test replays v63 over a real v62 shape. */
 static void unshape_v63(sqlite3 *db) {
+    unshape_v64(db);
     int rc = sqlite3_exec(db, "ALTER TABLE tools DROP COLUMN droppable;",
                           NULL, NULL, NULL);
     assert(rc == SQLITE_OK);
@@ -1750,6 +1760,52 @@ static void test_schema_patch_v63(void) {
     printf("  PASS test_schema_patch_v63\n");
 }
 
+/* v64: hooks.wait and hooks.fail_count. The table has been empty since v62,
+ * but a row that is there is kept, waited for, with no failures on record. */
+static void test_schema_patch_v64(void) {
+    const char *path = "/tmp/test_cclaw_schema_v64.sqlite";
+    test_db_clean(path);
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v64(db);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_table_info('hooks')"
+        " WHERE name IN ('wait','fail_count');", 0, -1) == 0);
+    assert(sqlite3_exec(db,
+        "INSERT INTO extensions(name, path, published) VALUES('ext','/e',1);"
+        "INSERT INTO hooks(extension_name, event, path) VALUES('ext','turnSettled','/e/r.qjs');"
+        "INSERT INTO sessions(agent_name, state) VALUES(NULL,'compacting');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 63);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM hooks WHERE wait=1 AND fail_count=0"
+        " AND enabled=1 AND path='/e/r.qjs';", 0, -1) == 1);
+    /* NOT NULL with defaults: a writer that names neither column still works. */
+    assert(sqlite3_exec(db, "INSERT INTO hooks(extension_name, event, path)"
+        " VALUES('ext','turnSettled','/e/later.qjs');", NULL, NULL, NULL) == SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT wait*10 + fail_count FROM hooks"
+        " WHERE path='/e/later.qjs';", 0, -1) == 10);
+    /* The patched table has the columns where a fresh schema puts them. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_table_info('hooks')"
+        " WHERE (name='wait' AND \"notnull\"=1 AND dflt_value='1' AND cid=4)"
+        "    OR (name='fail_count' AND \"notnull\"=1 AND dflt_value='0' AND cid=5);",
+        0, -1) == 2);
+    /* The primary key survived the column drop and re-add. */
+    assert((sqlite3_exec(db, "INSERT INTO hooks(extension_name, event, path)"
+        " VALUES('ext','turnSettled','/e/later.qjs');", NULL, NULL, NULL) & 0xff)
+        == SQLITE_CONSTRAINT);
+    /* Session states are not enumerated in the schema: the new one needs no
+     * table change, and an existing row's state is untouched. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sessions WHERE state='compacting';",
+        0, -1) == 1);
+
+    db_close(db);
+    test_db_clean(path);
+    printf("  PASS test_schema_patch_v64\n");
+}
+
 static void test_agent_models_capability_gate(void) {
     const char *path = "/tmp/test_cclaw_db_capgate.sqlite";
     test_db_clean(path);
@@ -1832,6 +1888,7 @@ int main(void) {
     test_schema_patch_v61_cursors();
     test_schema_patch_v62();
     test_schema_patch_v63();
+    test_schema_patch_v64();
     test_agent_models_capability_gate();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");

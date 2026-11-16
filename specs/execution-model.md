@@ -29,6 +29,15 @@ tool with selectable delivery (`background: true`).
 | `EXEC_THREAD` | detached thread | DB/session-only tools (memory_*, cron_list/remove, db_query, search_config/models) | call already `running`; completion writes the result |
 | `EXEC_SANDBOX` | fork+exec `--run-tool` child (`CHILD_MAX` 48) | file / shell / web / js tiers | result pipe drained by the poll loop; reap completes the call |
 
+Two kinds of `--run-tool` child have no tool call in front of them and share
+the JS-tier vehicle (`script_child_spawn`, dispatch.c): a scheduled script
+(`CHILD_CRON_SCRIPT`) and an extension's hook script (`CHILD_HOOK`,
+[hooks.md](hooks.md)). They take a `CHILD_MAX` slot but no
+`session_max_concurrent` slot. An awaited hook holds its session in state
+`settling` between turns: the turn is already over (reply delivered), so the
+mid-turn invariant is untouched — the inbox queues until the hold ends, and
+the next turn opens from `idle` as usual.
+
 ## Traits live in the recipe
 
 `ToolRecipe` (tools.h) is the single declaration site, set at each tool's

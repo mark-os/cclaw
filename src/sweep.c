@@ -15,6 +15,7 @@
 #include "loop.h"
 #include "proc.h"
 #include "resolve.h"
+#include "settle.h"
 #include "types.h"
 #include "wake.h"
 
@@ -194,6 +195,10 @@ void db_periodic(void) {
             disk_low = 0;
         }
     }
+
+    /* Both modes: a `cclaw -p` waiting out a hold needs the backstop as much
+     * as the daemon does, and the sweep only touches this process's holds. */
+    turn_settle_sweep();
 
     if (proc_is_daemon()) {
         session_sweep_inbox();

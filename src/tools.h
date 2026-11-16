@@ -137,6 +137,10 @@ void tools_load_extension_tools(ToolRegistry *reg, sqlite3 *db,
  * tool or an extension with no config rows. Caller frees. */
 char *tool_extension_config_json(sqlite3 *db, const char *tool_name);
 
+/* The same object for an extension named directly — what a hook script's
+ * getConfig() reads. "{}" when it declares no settings. Caller frees. */
+char *extension_config_json(sqlite3 *db, const char *extension);
+
 /* Free all heap strings in the registry */
 void tools_free(ToolRegistry *reg);
 

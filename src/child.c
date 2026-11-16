@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -67,6 +68,8 @@ void child_remove(ChildProc *c) {
     c->tool_args = NULL;
     free(c->cron_prompt);
     c->cron_prompt = NULL;
+    free(c->hook_path);
+    c->hook_path = NULL;
     if (c->log_fd >= 0) {
         close(c->log_fd);
         c->log_fd = -1;
@@ -77,10 +80,29 @@ void child_remove(ChildProc *c) {
     g_child_count--;
 }
 
-/* Both --run-tool child kinds: forked, sandboxed, answering over a result
- * pipe. Everything that polls or drains those pipes covers both. */
+/* The --run-tool child kinds: forked, sandboxed, answering over a result
+ * pipe. Everything that polls or drains those pipes covers all of them. */
 static int child_is_run_tool(const ChildProc *c) {
-    return c->type == CHILD_TOOL_EXEC || c->type == CHILD_CRON_SCRIPT;
+    return c->type == CHILD_TOOL_EXEC || c->type == CHILD_CRON_SCRIPT ||
+           c->type == CHILD_HOOK;
+}
+
+void child_hook_unhold(int64_t session_id) {
+    for (int i = 0; i < g_child_count; i++)
+        if (g_children[i].type == CHILD_HOOK
+            && g_children[i].session_id == session_id)
+            g_children[i].hook_wait = 0;
+}
+
+int child_hook_holds(int64_t session_id) {
+    /* deadline -1 = swept: the timeout has been dealt with and the slot is
+     * only waiting to be reaped, so it holds nothing any more. */
+    for (int i = 0; i < g_child_count; i++)
+        if (g_children[i].type == CHILD_HOOK && g_children[i].hook_wait
+            && g_children[i].session_id == session_id
+            && g_children[i].deadline != -1)
+            return 1;
+    return 0;
 }
 
 int child_has_session(int64_t session_id) {
@@ -257,6 +279,33 @@ void drain_ready_result_pipes(const struct pollfd *pfds, int base, int nfds) {
 ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
                                const char *agent_name, const char *blob,
                                size_t blob_len, int timeout_sec) {
+    return spawn_run_tool_blob_fd(type, session_id, agent_name, blob, blob_len,
+                                  -1, timeout_sec);
+}
+
+/* Pass one open descriptor to the peer of a socketpair, riding a single
+ * byte. Returns 0 on success. */
+static int send_fd(int sock, int fd) {
+    char byte = 0;
+    union { struct cmsghdr h; char buf[CMSG_SPACE(sizeof(int))]; } ctl;
+    memset(&ctl, 0, sizeof(ctl));
+    struct iovec iov = { .iov_base = &byte, .iov_len = 1 };
+    struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1,
+                          .msg_control = ctl.buf,
+                          .msg_controllen = sizeof(ctl.buf) };
+    struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c), &fd, sizeof(fd));
+    ssize_t n;
+    do { n = sendmsg(sock, &msg, MSG_NOSIGNAL); } while (n < 0 && errno == EINTR);
+    return n == 1 ? 0 : -1;
+}
+
+ChildProc *spawn_run_tool_blob_fd(ChildType type, int64_t session_id,
+                                  const char *agent_name, const char *blob,
+                                  size_t blob_len, int arg_fd, int timeout_sec) {
     if (g_child_count >= CHILD_MAX) return NULL;
 
     int sp[2];
@@ -302,6 +351,16 @@ ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
             return NULL;
         }
         written += w;
+    }
+    /* The request's TOOL_ARG_JSON_FD value, if it has one: the descriptor
+     * follows the blob. One byte into an empty socket buffer — it cannot
+     * block — and the child reads the file itself, so a value of any size
+     * costs the event loop nothing. */
+    if (arg_fd >= 0 && send_fd(sp[0], arg_fd) != 0) {
+        close(sp[0]);
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        return NULL;
     }
 
     /* Switch to nonblocking for result reads in poll loop */

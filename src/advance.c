@@ -1092,6 +1092,20 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         return out;
     }
 
+    if (strcmp(state, "settling") == 0) {
+        /* The turn is over and a turnSettled hook is being awaited
+         * (settle.c). Whatever woke us — an inbox insert, a cron fire, a
+         * sub-agent's result — queues: the script is judging the turn as it
+         * stands, and its reply is applied to that turn before anything is
+         * appended after it. There is nothing to decide here and no
+         * completion to recognise; the hold is ended by whoever reaps the
+         * script, by flipping the session back to idle, and the idle branch
+         * above then drains the inbox as it always does. */
+        AdvanceOutput out = make_output(ADVANCE_WAITING, session_id, agent, iter);
+        free(agent);
+        return out;
+    }
+
     if (strcmp(state, "idle") == 0) {
         /* Quiesce lease (`cclaw rename-agent`): while the agent's identity is
          * being changed underneath it, no NEW turn opens. Inbox and cron keep

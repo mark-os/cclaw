@@ -15,6 +15,8 @@
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -843,6 +845,57 @@ static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
     _exit(0);
 }
 
+/* Turn every TOOL_ARG_JSON_FD param into a TOOL_ARG_JSON one. The parent
+ * sent one descriptor per such param, in param order, each riding a single
+ * byte on the request socket right behind the blob; the wire value is the
+ * byte count to read from it. Done here, before any sandbox or fork, so the
+ * tiers never learn the value came another way. Returns 0, -1 on any
+ * mismatch — a request that promised a file and did not deliver one must not
+ * run with an argument missing. */
+static int load_fd_params(RunToolParsed *q) {
+    for (size_t i = 0; i < q->param_count; i++) {
+        struct RunToolParam *p = &q->params[i];
+        if (p->kind != TOOL_ARG_JSON_FD) continue;
+        char *end = NULL;
+        unsigned long long want = p->value ? strtoull(p->value, &end, 10) : 0;
+        if (!p->value || !end || *end || want == 0 || want > RUNTOOL_ARG_FD_MAX)
+            return -1;
+
+        char byte;
+        union { struct cmsghdr h; char buf[CMSG_SPACE(sizeof(int))]; } ctl;
+        memset(&ctl, 0, sizeof(ctl));
+        struct iovec iov = { .iov_base = &byte, .iov_len = 1 };
+        struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1,
+                              .msg_control = ctl.buf,
+                              .msg_controllen = sizeof(ctl.buf) };
+        ssize_t n;
+        do { n = recvmsg(FD_REQUEST, &msg, MSG_CMSG_CLOEXEC); }
+        while (n < 0 && errno == EINTR);
+        struct cmsghdr *c = n == 1 ? CMSG_FIRSTHDR(&msg) : NULL;
+        if (!c || c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS ||
+            c->cmsg_len != CMSG_LEN(sizeof(int)))
+            return -1;
+        int fd;
+        memcpy(&fd, CMSG_DATA(c), sizeof(fd));
+
+        char *buf = malloc((size_t)want + 1);
+        size_t got = 0;
+        while (buf && got < want) {
+            ssize_t r = pread(fd, buf + got, (size_t)want - got, (off_t)got);
+            if (r < 0 && errno == EINTR) continue;
+            if (r <= 0) break;
+            got += (size_t)r;
+        }
+        close(fd);
+        if (!buf || got != want) { free(buf); return -1; }
+        buf[want] = '\0';
+        free(p->value);
+        p->value = buf;
+        p->kind = TOOL_ARG_JSON;
+    }
+    return 0;
+}
+
 int run_tool_main(void) {
     /* Verify fd 3 is open */
     if (fcntl(FD_REQUEST, F_GETFD) < 0)
@@ -893,6 +946,8 @@ int run_tool_main(void) {
     if (parse_request(&r, &q) != 0)
         die("error: malformed request");
     if (!q.tool_name) die("error: missing tool_name");
+    if (load_fd_params(&q) != 0)
+        die("error: could not read the request's file-carried argument");
 
     const TierDescriptor *desc = tier_descriptor(q.tier);
     if (!desc) die("error: unsupported tier");

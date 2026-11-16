@@ -53,7 +53,12 @@ int web_args_url_host(sqlite3 *db, const char *args, char *out, size_t cap);
  * edits array is flattened to an oldText/newText string list so the file
  * tier never parses JSON at all. */
 
-enum { TOOL_ARG_TEXT = 0, TOOL_ARG_JSON = 1, TOOL_ARG_LIST = 2 };
+enum { TOOL_ARG_TEXT = 0, TOOL_ARG_JSON = 1, TOOL_ARG_LIST = 2,
+       /* A JSON value too large for the request blob (run_tool.h): the wire
+        * value is its byte length in decimal, and the bytes are in a file
+        * whose descriptor follows the blob on the request socket. The child
+        * turns it into an ordinary TOOL_ARG_JSON before any tier sees it. */
+       TOOL_ARG_JSON_FD = 3 };
 
 typedef struct {
     char *key;

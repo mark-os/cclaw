@@ -19,6 +19,16 @@
  * → should be a file). */
 #define RUNTOOL_REQUEST_MAX 32768
 
+/* Largest value a TOOL_ARG_JSON_FD param may carry. The request blob stays
+ * small because the event loop writes it with a blocking write(); a value
+ * that cannot fit — a finished turn handed to a hook script — travels in an
+ * unnamed file instead, its descriptor passed on the request socket after the
+ * blob (spawn_run_tool_blob_fd). This bound is a sanity limit on what the
+ * child will allocate, not a tuning knob: a finished turn bigger than this
+ * is not handed to a hook at all (the spawn is refused, the turn left as it
+ * is), and the script's own js_heap_mb is what bounds a large one in practice. */
+#define RUNTOOL_ARG_FD_MAX (16 * 1024 * 1024)
+
 /* Largest tool result that may cross the wire and reach the DB. Anything
  * bigger is written to the request's spill_path by the child that already
  * holds it in memory, and the result names that file instead.

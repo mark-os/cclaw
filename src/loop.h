@@ -24,6 +24,12 @@ int session_max_iter(int64_t session_id);
  * returns. Self-recursive: an all-inline tool batch re-advances immediately. */
 void run_advance(int64_t session_id);
 
+/* The compaction check that closes a turn: if the idle session needs
+ * compacting, mark it 'compacting' and hand it to the worker. Returns 1 when
+ * a compaction is now in flight (its completion drains the inbox), 0 when
+ * the session was left idle. */
+int turn_end_compact(int64_t session_id, const char *agent_name);
+
 /* Turn-final delivery: CLI stdout for the root session, or the daemon's FIFO
  * nudge for whatever advance_deliver_boundary already wrote to the outbox. */
 void deliver_response(int64_t session_id);

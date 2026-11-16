@@ -1850,6 +1850,13 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
     { 63,
       "ALTER TABLE tools ADD COLUMN droppable INTEGER NOT NULL DEFAULT 0;",
       NULL },
+    /* v64: script hooks. hooks.wait — whether the session is held for the
+     * script; hooks.fail_count — consecutive failed runs. The table has been
+     * empty since v62, so the defaults only matter for the column shape. */
+    { 64,
+      "ALTER TABLE hooks ADD COLUMN wait INTEGER NOT NULL DEFAULT 1;"
+      "ALTER TABLE hooks ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0;",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
@@ -2809,7 +2816,10 @@ int64_t entry_append_cron_result(sqlite3 *db, int64_t session_id,
  * llm_running → tool_running → llm_running, and ends llm_running → compacting);
  * idle is reachable from any busy state plus awaiting_approval;
  * awaiting_approval is reachable from llm_running/tool_running;
- * tool_running is also reachable from awaiting_approval (approval resolved). */
+ * tool_running is also reachable from awaiting_approval (approval resolved).
+ * settling (a turnSettled hook is awaited, settle.c) is entered from idle
+ * only and left to idle only: nothing that resumes a turn can pull a held
+ * session out from under the script. */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     /* Stamp ownership in the same guarded CAS: idle clears the owner (invariant
      * state='idle' ⟺ owner_instance IS NULL), any busy state stamps this
@@ -2824,8 +2834,10 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
         "  (?1 IN ('llm_running','tool_running','compacting','rate_limited')"
         "     AND state IN ('idle','llm_running','tool_running','compacting','rate_limited','awaiting_approval')) OR"
         "  (?1 = 'awaiting_approval' AND state IN ('llm_running','tool_running')) OR"
+        "  (?1 = 'settling' AND state = 'idle') OR"
         "  (?1 = 'idle' AND state IN"
-        "     ('llm_running','tool_running','compacting','rate_limited','awaiting_approval'))"
+        "     ('llm_running','tool_running','compacting','rate_limited','awaiting_approval',"
+        "      'settling'))"
         ");";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -4330,7 +4342,8 @@ int64_t db_cost_last_24h(sqlite3 *db) {
 /* Set of session states that mean "a turn was in flight" — a crash here leaves
  * the edge-triggered loop with no event to re-advance them. */
 #define RECOVER_STALE_STATES \
-    "('llm_running','tool_running','compacting','awaiting_approval','rate_limited')"
+    "('llm_running','tool_running','compacting','awaiting_approval','rate_limited'," \
+    "'settling')"
 
 /* Dead-owner predicate: a stale-state session whose owner is gone. owner NULL
  * (legacy/idle-races) or an owner with no live processes row both qualify; a

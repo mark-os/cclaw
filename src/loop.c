@@ -18,6 +18,7 @@
 #include "log.h"
 #include "proc.h"
 #include "resolve.h"
+#include "settle.h"
 #include "types.h"
 
 /* Effective iteration cap for a session: agents.max_iterations (if > 0)
@@ -54,6 +55,19 @@ static const char *advance_action_name(AdvanceResult a) {
     case ADVANCE_ERROR:          return "error";
     }
     return "?";
+}
+
+int turn_end_compact(int64_t session_id, const char *agent_name) {
+    if (!(proc_cfg()->compaction && llm_worker_alive() &&
+          session_needs_compaction(proc_db(), session_id, proc_cfg())))
+        return 0;
+    if (session_set_state(proc_db(), session_id, "compacting") != 0)
+        return 0;
+    if (llm_worker_submit_compact(proc_db(), session_id, agent_name) != 0) {
+        session_set_state(proc_db(), session_id, "idle");
+        return 0;
+    }
+    return 1;
 }
 
 void run_advance(int64_t session_id) {
@@ -137,13 +151,12 @@ void run_advance(int64_t session_id) {
     case ADVANCE_DONE:
         deliver_response(session_id);
         if (proc_is_daemon()) update_verify_turn_done(proc_db(), session_id);
-        /* Attempt compaction if configured */
-        if (proc_cfg()->compaction && llm_worker_alive() &&
-            session_needs_compaction(proc_db(), session_id, proc_cfg())) {
-            session_set_state(proc_db(), session_id, "compacting");
-            if (llm_worker_submit_compact(proc_db(), session_id, out.agent_name) != 0)
-                session_set_state(proc_db(), session_id, "idle");
-        }
+        /* Turn end, in order: reply delivered (above) → the agent's
+         * turnSettled hooks → compaction check. A hook that is waited for
+         * holds the session, and the compaction check runs when that hold
+         * ends (settle.c), against the turn as the hook left it. */
+        if (!turn_settle_begin(session_id, out.agent_name))
+            turn_end_compact(session_id, out.agent_name);
         if (!proc_is_daemon() && session_id == proc_cli_session()) {
             proc_set_cli_turn_active(0);
         }
@@ -158,8 +171,12 @@ void run_advance(int64_t session_id) {
         /* Root turn stays active while its own async work (forked tools or
          * sub-agents) is in flight; awaiting_approval has neither, so the prompt
          * is released for the user's y/n. Sub-agents never touch the root flag. */
+        /* A message typed while a turnSettled hook holds the session is
+         * queued, not lost: the turn it opens starts when the hold ends, so
+         * the prompt stays busy until then. */
         if (!proc_is_daemon() && session_id == proc_cli_session()
             && !child_has_session(session_id)
+            && !child_hook_holds(session_id)
             && !db_tool_call_any_running(proc_db(), session_id))
             proc_set_cli_turn_active(0);
         break;

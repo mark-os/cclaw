@@ -41,6 +41,7 @@ stores only definitions and paths.
   ],
   "skills":  [ "skills/my-skill" ],
   "scripts": [ { "name": "cleanup", "handler": "scripts/cleanup.qjs" } ],
+  "hooks":   [ { "event": "turnSettled", "handler": "hooks/settled.qjs", "wait": true } ],
   "config":  [ { "key": "api_base", "default": "https://…", "description": "…",
                  "secret": false, "required": false } ],
   "channel": { "type": "…", "handler": "channel.qjs" },
@@ -51,7 +52,12 @@ stores only definitions and paths.
 All handler paths are bundle-relative; no `..`, no absolute paths. `config[]`
 keys register as `<name>.<key>` in the config registry. `agents[]` entries use
 the agent-definition schema (see the creating-agents skill); an entry whose name
-already exists is skipped, never overwritten.
+already exists is skipped, never overwritten. A `hooks[]` entry runs its handler
+after every normally finished top-level turn of an agent the extension is
+attached to (`turnSettled`, the only event); it gets the finished turn as
+`args`, and with `wait: true` the session waits for it (at most
+`turn_settled_timeout` seconds) and its JSON reply may edit that turn. Return
+`"{}"` to leave a turn alone.
 
 ## Handler contract (QuickJS)
 

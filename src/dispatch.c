@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -42,6 +43,7 @@
 #include "secret_interp.h"
 #include "secret_scan.h"
 #include "secret_store.h"
+#include "settle.h"
 #include "skills.h"
 #include "tool_args.h"
 #include "tool_file.h"
@@ -1751,27 +1753,81 @@ int dispatch_tool(int64_t session_id, const char *agent_name,
     return rc;
 }
 
-/* ── cron script fires ──────────────────────────────────────────────
- * The daemon's half of cron.c's script dispatcher: resolve the file inside the
- * TARGET agent's workspace, build exactly the SBX_JS request a js_eval call
- * would, and fork it. Refreshing caps to the target agent first is what makes
- * "runs under that agent's sandbox_profile and grants" true — the shared setup
- * is rebound before every tool batch anyway, so borrowing it here between
- * turns costs nothing on the single event-loop thread. {{SECRET:name}} in the
- * script file is never rewritten on disk — it resolves in the child at the
- * fetch boundary, same as any js dispatch. */
-CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len) {
+/* ── script children: cron fires and hooks ──────────────────────────
+ * A script with no model tool call in front of it — the daemon's half of
+ * cron.c's script dispatcher, and a hook's handler. Resolve the file inside
+ * the TARGET agent's workspace or the extension store, build exactly the
+ * SBX_JS request a js_eval call would, and fork it. Refreshing caps to the
+ * target agent first is what makes "runs under that agent's sandbox_profile
+ * and grants" true — the shared setup is rebound before every tool batch
+ * anyway, so borrowing it here between turns costs nothing on the single
+ * event-loop thread. {{SECRET:name}} in the script file is never rewritten on
+ * disk — it resolves in the child at the fetch boundary, same as any js
+ * dispatch. */
+/* What stopped a script from starting. BUSY is the one worth retrying: no
+ * child slot (or the fork failed) right now. */
+typedef enum { SCRIPT_SPAWNED = 0, SCRIPT_BUSY, SCRIPT_FAILED } ScriptRc;
+
+/* An unnamed file holding `data`, positioned at its start: the carrier for a
+ * TOOL_ARG_JSON_FD value. A memory file where the kernel has them, else an
+ * unlinked temp file — either way nothing is left on disk to clean up.
+ * Returns the descriptor (close-on-exec) or -1. */
+static int unnamed_file(const char *data, size_t len) {
+    int fd = -1;
+#if defined(__linux__) && defined(SYS_memfd_create)
+    fd = (int)syscall(SYS_memfd_create, "cclaw-arg", 1U /* MFD_CLOEXEC */);
+#endif
+    if (fd < 0) {
+        const char *dir = getenv("TMPDIR");
+        char path[PATH_MAX];
+        int n = snprintf(path, sizeof(path), "%s/cclaw-arg-XXXXXX",
+                         dir && dir[0] ? dir : "/tmp");
+        if (n <= 0 || (size_t)n >= sizeof(path)) return -1;
+        fd = mkstemp(path);
+        if (fd < 0) return -1;
+        unlink(path);
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+    }
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, data + off, len - off);
+        if (w <= 0) { close(fd); return -1; }
+        off += (size_t)w;
+    }
+    return fd;
+}
+
+/* Fork a script file as `agent`, in exactly the JS-tier sandbox a js_eval
+ * tool call would get — the one vehicle behind a cron fire and a hook. The
+ * agent's caps are re-read first; only the secrets it is granted ride along;
+ * LLM() is bridged under `llm_source`. `args_json`, when given, becomes the
+ * script's `args` — of any size, since it travels in a file, not the request
+ * blob. `config_ext`, when given, names the extension whose settings the
+ * script's getConfig() reads. On success returns the child's slot (the caller fills the fields of
+ * its kind); on failure NULL with *rc and err set. */
+static ChildProc *script_child_spawn(ChildType type, const char *agent_name,
+                                     int64_t session_id, const char *script,
+                                     const char *args_json,
+                                     const char *config_ext,
+                                     const char *llm_source, int js_timeout,
+                                     int child_timeout, ScriptRc *rc,
+                                     char *err, size_t err_len) {
+    *rc = SCRIPT_FAILED;
     if (!proc_tool_setup() || !proc_db()) {
         snprintf(err, err_len, "the daemon cannot run scripts right now");
-        return CRON_SCRIPT_FAILED;
+        return NULL;
     }
-    if (child_count() >= CHILD_MAX) return CRON_SCRIPT_BUSY;
+    if (child_count() >= CHILD_MAX) {
+        *rc = SCRIPT_BUSY;
+        snprintf(err, err_len, "no child slot free");
+        return NULL;
+    }
 
-    agent_setup_refresh_caps(proc_tool_setup(), proc_db(), f->agent_name);
+    agent_setup_refresh_caps(proc_tool_setup(), proc_db(), agent_name);
     JsEvalCtx *jc = &proc_tool_setup()->js_eval_ctx;
     if (!jc->workspace || !jc->workspace[0]) {
-        snprintf(err, err_len, "agent '%s' has no workspace", f->agent_name);
-        return CRON_SCRIPT_FAILED;
+        snprintf(err, err_len, "agent '%s' has no workspace", agent_name);
+        return NULL;
     }
     /* Two legal shapes, re-validated at fire time (cron_set checked when the
      * job was written, but the job outlives that check): a workspace-relative
@@ -1781,75 +1837,221 @@ CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len)
     char full[PATH_MAX];
     struct stat sb;
     int n;
-    if (f->script[0] == '/') {
-        n = snprintf(full, sizeof(full), "%s", f->script);
+    if (script[0] == '/') {
+        n = snprintf(full, sizeof(full), "%s", script);
         if (n <= 0 || (size_t)n >= sizeof(full) ||
             !extension_path_in_store(proc_db(), full)) {
             snprintf(err, err_len, "script '%s' is outside the extension store",
-                     f->script);
-            return CRON_SCRIPT_FAILED;
+                     script);
+            return NULL;
         }
     } else {
-        n = snprintf(full, sizeof(full), "%s/%s", jc->workspace, f->script);
-        if (strstr(f->script, "..") || n <= 0 || (size_t)n >= sizeof(full)) {
+        n = snprintf(full, sizeof(full), "%s/%s", jc->workspace, script);
+        if (strstr(script, "..") || n <= 0 || (size_t)n >= sizeof(full)) {
             snprintf(err, err_len, "script '%s' is not a workspace-relative path",
-                     f->script);
-            return CRON_SCRIPT_FAILED;
+                     script);
+            return NULL;
         }
     }
     if (stat(full, &sb) != 0 || !S_ISREG(sb.st_mode)) {
         snprintf(err, err_len, "script '%s' is missing or not a file", full);
-        return CRON_SCRIPT_FAILED;
+        return NULL;
     }
 
-    ToolWireArg *params = calloc(1, sizeof(*params));
+    int arg_fd = -1;
+    size_t args_len = args_json ? strlen(args_json) : 0;
+    if (args_len > RUNTOOL_ARG_FD_MAX) {
+        snprintf(err, err_len, "the script's input is too large (%zu bytes)",
+                 args_len);
+        return NULL;
+    }
+    if (args_len > 0 && (arg_fd = unnamed_file(args_json, args_len)) < 0) {
+        snprintf(err, err_len, "could not stage the script's input");
+        return NULL;
+    }
+
+    size_t param_n = 0;
+    ToolWireArg *params = calloc(3, sizeof(*params));
+    int ok_params = params != NULL;
     if (params) {
         params[0].key = strdup("filename");
         params[0].kind = TOOL_ARG_TEXT;
         params[0].value = strdup(full);
+        ok_params = params[0].key && params[0].value;
+        param_n = 1;
+        if (arg_fd >= 0) {
+            char lenbuf[24];
+            snprintf(lenbuf, sizeof(lenbuf), "%zu", args_len);
+            ToolWireArg *p = &params[param_n++];
+            p->key = strdup("args");
+            p->kind = TOOL_ARG_JSON_FD;
+            p->value = strdup(lenbuf);
+            ok_params = ok_params && p->key && p->value;
+        }
+        if (config_ext) {
+            ToolWireArg *p = &params[param_n++];
+            p->key = strdup("config");
+            p->kind = TOOL_ARG_JSON;
+            p->value = extension_config_json(proc_db(), config_ext);
+            ok_params = ok_params && p->key && p->value;
+        }
     }
-    if (!params || !params[0].key || !params[0].value) {
-        tool_wire_args_free(params, params ? 1 : 0);
+    if (!ok_params) {
+        tool_wire_args_free(params, param_n);
+        if (arg_fd >= 0) close(arg_fd);
         snprintf(err, err_len, "out of memory building the script request");
-        return CRON_SCRIPT_FAILED;
+        return NULL;
     }
 
     size_t blob_len = 0;
-    /* Scheduled script: no tool_call_id to name a spill file after, so the
-     * parent's truncate_and_spill handles it as before. Secrets ride along
-     * like any js dispatch — a cron script's {{SECRET:name}} resolves at the
-     * fetch boundary in the child, never in the file itself. */
+    /* No tool_call_id to name a spill file after, so the parent's
+     * truncate_and_spill handles a cron result as before. Secrets ride along
+     * like any js dispatch — a script's {{SECRET:name}} resolves at the fetch
+     * boundary in the child, never in the file itself. */
     size_t snap_n = 0, ok_n = 0;
     ShellSecret *snap = secrets_snapshot(proc_db(),
         proc_tool_setup()->secrets, proc_tool_setup()->secret_count, &snap_n);
     /* A script runs as its agent: only the secrets that agent is granted. */
-    ShellSecret *ok = secrets_granted(proc_db(), f->agent_name, snap, snap_n, &ok_n);
-    char llm_source[96];
-    snprintf(llm_source, sizeof(llm_source), "cron:%s",
-             f->job_name ? f->job_name : "?");
+    ShellSecret *ok = secrets_granted(proc_db(), agent_name, snap, snap_n, &ok_n);
     LlmBridge *bridge = NULL;
-    char *blob = js_request_serialize(jc, f->agent_name, "js_eval", "{}",
-                                      NULL, ok, ok_n, params, 1, NULL,
-                                      JSEVAL_DEFAULT_TIMEOUT,
-                                      llm_source, f->session_id, 0, &bridge,
+    char *blob = js_request_serialize(jc, agent_name, "js_eval", "{}",
+                                      NULL, ok, ok_n, params, param_n, NULL,
+                                      js_timeout,
+                                      llm_source, session_id, 0, &bridge,
                                       &blob_len);
     free(ok);
     secrets_snapshot_free(snap, snap_n);
     if (!blob) {
+        if (arg_fd >= 0) close(arg_fd);
         snprintf(err, err_len, "the script request exceeds the 32KB wire cap");
-        return CRON_SCRIPT_FAILED;
+        return NULL;
     }
-    ChildProc *c = spawn_run_tool_blob(CHILD_CRON_SCRIPT, f->session_id,
-                                       f->agent_name, blob, blob_len, 150);
+    ChildProc *c = spawn_run_tool_blob_fd(type, session_id, agent_name, blob,
+                                          blob_len, arg_fd, child_timeout);
     explicit_bzero(blob, blob_len);
     free(blob);
-    if (!c) { llm_bridge_stop(bridge); return CRON_SCRIPT_BUSY; }
+    if (arg_fd >= 0) close(arg_fd);
+    if (!c) {
+        llm_bridge_stop(bridge);
+        *rc = SCRIPT_BUSY;
+        snprintf(err, err_len, "could not start a child process");
+        return NULL;
+    }
     c->llm_bridge = bridge;
+    *rc = SCRIPT_SPAWNED;
+    return c;
+}
+
+CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len) {
+    char llm_source[96];
+    snprintf(llm_source, sizeof(llm_source), "cron:%s",
+             f->job_name ? f->job_name : "?");
+    ScriptRc rc;
+    ChildProc *c = script_child_spawn(CHILD_CRON_SCRIPT, f->agent_name,
+                                      f->session_id, f->script, NULL, NULL,
+                                      llm_source,
+                                      JSEVAL_DEFAULT_TIMEOUT, 150, &rc,
+                                      err, err_len);
+    if (!c) return rc == SCRIPT_BUSY ? CRON_SCRIPT_BUSY : CRON_SCRIPT_FAILED;
     snprintf(c->cron_job, sizeof(c->cron_job), "%s", f->job_name ? f->job_name : "");
     c->cron_prompt = f->prompt ? strdup(f->prompt) : NULL;
     LOG_INFO_("cron script fork job=%s agent=%s session=%lld",
               c->cron_job, f->agent_name, (long long)f->session_id);
     return CRON_SCRIPT_SPAWNED;
+}
+
+/* ── Hook scripts (settle.c decides when; this is the fork and the bytes) ── */
+
+/* How long after its deadline a hook child that has not ended on its own is
+ * killed outright. A fixed margin between two timers, not a tuning knob. */
+#define HOOK_KILL_GRACE 5
+
+int hook_script_spawn(const HookRef *h, const char *agent_name,
+                      int64_t session_id, const char *args_json,
+                      int timeout_sec, char *err, size_t err_len) {
+    char llm_source[sizeof(h->extension) + 8];
+    snprintf(llm_source, sizeof(llm_source), "hook:%s", h->extension);
+    char *path = strdup(h->path);
+    if (!path) { snprintf(err, err_len, "out of memory"); return -1; }
+    ScriptRc rc;
+    /* Two clocks, as for every sandboxed child. The broker's own timer ends
+     * an overrunning script at the deadline and tears its sandbox down
+     * cleanly (proxy socket, inner process); the loop's deadline sweep, a
+     * few seconds behind, is the backstop for a broker that is itself
+     * stuck. Either way the hold ends. */
+    ChildProc *c = script_child_spawn(CHILD_HOOK, agent_name, session_id,
+                                      h->path, args_json, h->extension,
+                                      llm_source,
+                                      timeout_sec, timeout_sec + HOOK_KILL_GRACE,
+                                      &rc,
+                                      err, err_len);
+    if (!c) { free(path); return -1; }
+    snprintf(c->hook_ext, sizeof(c->hook_ext), "%s", h->extension);
+    c->hook_path = path;
+    c->hook_wait = h->wait;
+    return 0;
+}
+
+/* A hook child is gone (reaped, or just killed at its deadline): describe it
+ * for settle.c. The script's bytes are handed over exactly as written — they
+ * are a reply for turn_review_apply to judge, which does its own secret
+ * check and must see what the script said, not a masked copy. A failure's
+ * text is only ever logged, so that goes through the scrub. */
+static void hook_child_report(ChildProc *c, int status, int timed_out,
+                              SettleChild *sc) {
+    memset(sc, 0, sizeof(*sc));
+    sc->session_id = c->session_id;
+    snprintf(sc->agent, sizeof(sc->agent), "%s", c->agent_name);
+    snprintf(sc->hook.extension, sizeof(sc->hook.extension), "%s", c->hook_ext);
+    snprintf(sc->hook.path, sizeof(sc->hook.path), "%s",
+             c->hook_path ? c->hook_path : "");
+    sc->hook.wait = c->hook_wait;
+
+    if (timed_out) {
+        if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
+        sc->failed = 1;
+        snprintf(sc->why, sizeof(sc->why), "killed %ds after its %ds deadline",
+                 HOOK_KILL_GRACE, c->timeout_sec - HOOK_KILL_GRACE);
+        return;
+    }
+    child_drain_pipe(c);
+    if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
+    int crashed = WIFSIGNALED(status) ||
+                  (WIFEXITED(status) && WEXITSTATUS(status) != 0);
+    if (crashed || c->frame_status) {
+        sc->failed = 1;
+        char said[160] = "";
+        if (c->outbuf && c->outbuf_len) {
+            size_t snap_n = 0;
+            ShellSecret *snap = secrets_snapshot(proc_db(),
+                proc_tool_setup() ? proc_tool_setup()->secrets : NULL,
+                proc_tool_setup() ? proc_tool_setup()->secret_count : 0, &snap_n);
+            char *pp = tool_result_postprocess(c->outbuf, snap, snap_n);
+            secrets_snapshot_free(snap, snap_n);
+            /* NULL = nothing to mask */
+            snprintf(said, sizeof(said), "%s", pp ? pp : c->outbuf);
+            free(pp);
+            for (char *p = said; *p; p++)
+                if ((unsigned char)*p < 0x20) *p = ' ';
+        }
+        if (WIFSIGNALED(status))
+            snprintf(sc->why, sizeof(sc->why), "killed by signal %d",
+                     WTERMSIG(status));
+        else if (crashed)
+            snprintf(sc->why, sizeof(sc->why), "exited %d: %s",
+                     WEXITSTATUS(status), said);
+        else if (strncmp(said, "error: tool timed out", 21) == 0)
+            /* The broker's own timer: say it in this feature's terms. */
+            snprintf(sc->why, sizeof(sc->why),
+                     "timed out after %ds (config turn_settled_timeout)",
+                     c->timeout_sec - HOOK_KILL_GRACE);
+        else
+            snprintf(sc->why, sizeof(sc->why), "script failed: %s", said);
+        return;
+    }
+    sc->reply = c->outbuf ? c->outbuf : strdup("");
+    c->outbuf = NULL;           /* ownership moves to the report */
+    c->outbuf_len = 0;
 }
 
 /* ── reap_children (state machine) ──────────────────────────────── */
@@ -1911,6 +2113,15 @@ void child_sweep_deadlines(void) {
             entry_append_with_iteration(proc_db(), c->session_id, &msg, c->iteration_id);
             db_tool_call_complete_with_result(proc_db(), c->entry_id, c->tool_call_id, -1);
             free(errbuf);
+        } else if (c->type == CHILD_HOOK) {
+            /* Marked swept before the report is acted on: settle.c may start
+             * the next hook or release the session, and this slot must not
+             * count as the one still holding it. */
+            SettleChild sc;
+            hook_child_report(c, 0, 1, &sc);
+            c->deadline = -1;
+            turn_settle_child_done(&sc);
+            continue;
         } else if (c->type == CHILD_CRON_SCRIPT) {
             if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
             free(c->outbuf); c->outbuf = NULL; c->outbuf_len = 0;
@@ -2083,6 +2294,18 @@ void reap_children(void) {
         if (!c) {
             /* Check if it's a channel process */
             channel_reap(pid, proc_db());
+            continue;
+        }
+
+        if (c->type == CHILD_HOOK) {
+            if (c->deadline == -1) { child_remove(c); continue; }  /* swept */
+            SettleChild sc;
+            hook_child_report(c, status, 0, &sc);
+            /* Slot freed first: what follows may fork the next hook, and
+             * child_remove moves the last slot into this one. */
+            child_remove(c);
+            turn_settle_child_done(&sc);
+            free(sc.reply);
             continue;
         }
 

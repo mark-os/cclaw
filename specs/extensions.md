@@ -9,7 +9,7 @@ of each:
 | Component | Runs in | Lifecycle |
 |-----------|---------|-----------|
 | Tools | forked child of the agent process (one fork+exec per call) | per-call, isolated |
-| Hooks | not available in this build — see [hooks.md](hooks.md) | — |
+| Hooks | forked child, when its event fires (one event: `turnSettled`) — see [hooks.md](hooks.md) | per-run, isolated |
 | Channel | separate `cclaw --channel` process (daemon-managed) | long-lived, restarted on crash |
 | Scripts | forked child, on a cron schedule | per-run, isolated |
 | Skills | prompt index entry; body `file_read` on demand ([skills.md](skills.md)) | indexed at prompt build |
@@ -67,7 +67,7 @@ directory.
 | `name` | Extension identity. Primary key in `extensions`. |
 | `version` | Free-form version string (display / update tracking). |
 | `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), hosts?, policy?, droppable?}`. `hosts?` is the tool's declared egress — see [Declared reach](#declared-reach-hosts). `droppable?` (boolean, default `false`) says a [turn review](turn-review.md#protected-calls) may take the tool's calls out of context — set it only on a tool that looks something up; leave it off any tool called for its effect. |
-| `hooks[]` | Each: `{event, handler (file)}`. No hook event exists in this build, so validate rejects any non-empty `hooks[]` — see [hooks.md](hooks.md). |
+| `hooks[]` | Each: `{event, handler (file), wait?}`. `event` must be `turnSettled` (validate refuses any other name); `wait` is a boolean, default `true` — whether the session is held while the script runs. See [hooks.md](hooks.md). |
 | `channel` | At most one: `{type, handler (file), transports?}`. Runs as a separate process. `transports?` is an optional advisory array (`poll`/`webhook`/`persistent`) validated at `--check` — see [channel-transports.md](channel-transports.md). |
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
 | `skills[]` | Bundle-relative paths, each a directory containing `SKILL.md` or a bare `.md` file ([skills.md](skills.md) format). Validated at promote: path must be bundle-relative and its frontmatter must parse with a `description`. |
@@ -344,9 +344,23 @@ way the value is never visible to the model or written to disk.
 
 ## Hooks
 
-Not available in this build. In-process hooks were removed and will return as
-sandboxed scripts bound to events; until then the manifest validator rejects
-every `hooks[]` entry. See [hooks.md](hooks.md).
+A hook is a `.qjs` handler the runtime forks when an event happens, through
+the same vehicle as a scheduled script: the agent's sandbox profile, its
+granted secrets, `LLM()` bridged under the source `hook:<extension>`, and
+`getConfig()` reading the extension's own settings. One event exists,
+`turnSettled` — a turn that completed normally on a top-level session, after
+its reply is delivered. The script receives the finished turn as `args` and
+returns its reply as JSON text; the input and reply contract is in
+[turn-review.md](turn-review.md) (being revised). Declared in the manifest:
+
+```json
+"hooks": [ { "event": "turnSettled", "handler": "review.qjs", "wait": true } ]
+```
+
+Promote writes one `hooks` row per entry; an agent runs the hooks of the
+extensions attached and enabled for it, resolved from the DB at each event.
+The hold, the deadline (`turn_settled_timeout`) and the failure rules are in
+[hooks.md](hooks.md).
 
 ## Channel Component
 
@@ -552,8 +566,8 @@ This spec's declarative model is implemented: the manifest loader
 (`src/extension_manifest.c`), the shared store + promote copy, the
 `tools`/`hooks`/`extensions` schema, the read-only mount, and the
 promote/publish/attach operations. There is no `registerTool`/`registerHook`
-runtime scrape, and no hook dispatch at all in this build
-([hooks.md](hooks.md)). The **channel component contract is also
+runtime scrape; hooks are dispatched as forked scripts on the `turnSettled`
+event ([hooks.md](hooks.md)). The **channel component contract is also
 implemented** (`cclaw --channel`, the `channels`/`channel_*` tables, the
 `channel.*` channel API). The `skills[]` and `config[]` manifest sections are
 implemented (validation + ingest in `src/extension_manifest.c`; extension

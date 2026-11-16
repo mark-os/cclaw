@@ -510,6 +510,15 @@ static int run_daemon(char *db_path) {
     return 0;
 }
 
+/* `cclaw -p`: is the one turn it came for finished? Its reply is printed when
+ * the turn goes inactive, but an awaited turnSettled hook may still hold the
+ * session — leaving then would abandon the hold to recovery and a scripted
+ * run would never see what the daemon does with the same turn. The hold is
+ * bounded by the hook's deadline (config turn_settled_timeout). */
+static int cli_single_turn_over(void) {
+    return g_cli_done && !child_hook_holds(proc_cli_session());
+}
+
 static int run_cli(char *db_path, const char *prompt,
                    int64_t session_id, int new_session, int host_mode, int auto_approve) {
     /* ── CLI mode ────────────────────────────────────────────────── */
@@ -724,16 +733,16 @@ static int run_cli(char *db_path, const char *prompt,
             event_step_chld();
 
             if (!proc_is_daemon() && !proc_cli_turn_active()) {
-                if (g_cli_done) goto done;
-                cli_prompt();
+                if (cli_single_turn_over()) goto done;
+                if (!g_cli_done) cli_prompt();
             }
         }
         if (worker_idx >= 0 && (cli_pfds[worker_idx].revents & POLLIN)) {
             event_step_worker(worker_fd);
 
             if (!proc_is_daemon() && !proc_cli_turn_active()) {
-                if (g_cli_done) goto done;
-                cli_prompt();
+                if (cli_single_turn_over()) goto done;
+                if (!g_cli_done) cli_prompt();
             }
         }
         if (wake_idx >= 0 && (cli_pfds[wake_idx].revents & POLLIN)) {
@@ -744,15 +753,15 @@ static int run_cli(char *db_path, const char *prompt,
                 run_advance(msg.session_id);
             }
             if (!proc_is_daemon() && !proc_cli_turn_active()) {
-                if (g_cli_done) goto done;
-                cli_prompt();
+                if (cli_single_turn_over()) goto done;
+                if (!g_cli_done) cli_prompt();
             }
         }
         if (tool_idx >= 0 && (cli_pfds[tool_idx].revents & POLLIN)) {
             event_step_tool_thread();
             if (!proc_is_daemon() && !proc_cli_turn_active()) {
-                if (g_cli_done) goto done;
-                cli_prompt();
+                if (cli_single_turn_over()) goto done;
+                if (!g_cli_done) cli_prompt();
             }
         }
         if (stdin_idx >= 0 && (cli_pfds[stdin_idx].revents & (POLLERR | POLLNVAL))) {
@@ -823,6 +832,8 @@ static int run_cli(char *db_path, const char *prompt,
         if (now >= g_next_db_poll) {
             db_periodic();
             g_next_db_poll = now + POLL_DB_INTERVAL;
+            /* The tick can end a hold no event announced (turn_settle_sweep). */
+            if (!proc_cli_turn_active() && cli_single_turn_over()) goto done;
         }
     }
 

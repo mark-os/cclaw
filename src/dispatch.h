@@ -26,6 +26,7 @@
 
 #include "cron.h"
 #include "db.h"
+#include "hook.h"
 
 /* Execute one claimed tool call. Returns 1 = inline (result written),
  * 3 = parallel-safe async dispatched, 0 = serial async dispatched (caller
@@ -58,5 +59,15 @@ void child_sweep_deadlines(void);
  * scheduled script as the target agent, in exactly the JS-tier sandbox a
  * js_eval tool call would get. */
 CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len);
+
+/* Fork a hook's script as `agent_name`, the way a cron script is forked —
+ * same caps refresh, same store-path check, same granted-secrets rule, same
+ * LLM() bridge (source "hook:<extension>"). `args_json` is the script's
+ * `args`; the child is killed `timeout_sec` after it starts. Returns 0 with
+ * the child registered, or -1 with a reason in err: nothing was started. Its
+ * end reaches settle.c as a SettleChild, from reap or the deadline sweep. */
+int hook_script_spawn(const HookRef *h, const char *agent_name,
+                      int64_t session_id, const char *args_json,
+                      int timeout_sec, char *err, size_t err_len);
 
 #endif

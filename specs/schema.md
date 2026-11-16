@@ -566,6 +566,7 @@ Unique: `(session_id, target_kind, target_ref)`.
 | `compacting` | Context compaction running |
 | `rate_limited` | Parked waiting for rate-limit window |
 | `awaiting_approval` | Parked for human approval of a tool call |
+| `settling` | The turn is over and an awaited `turnSettled` hook script is running ([hooks.md](hooks.md#the-hold)). Entered from `idle` only, left to `idle` only; the inbox queues and is not consumed. A dead owner's `settling` is recovered to `idle` with no resume nudge |
 
 Transitions are guarded by a CAS in `session_set_state()` (`src/db.c`): idle clears `owner_instance`, any busy state stamps it. `turn_iteration` resets to 0 on transition to idle.
 
@@ -791,14 +792,16 @@ Tool registry. Built-in C tools have NULL `extension_name`/`path`; JS tools poin
 
 ## hooks
 
-Extension-provided hooks. Same provenance model as tools — the DB holds config + a path, never code. No hook event exists in this build ([hooks.md](hooks.md)): the manifest validator rejects every `hooks[]` entry and the v62 patch deleted the rows of the removed in-process events, so the table is empty.
+Extension-provided hooks. Same provenance model as tools — the DB holds config + a path, never code. One event exists, `turnSettled` ([hooks.md](hooks.md)); the manifest validator refuses any other name. Rows are written by promote, one per `$.hooks[]` entry, and read at each event for the session's agent (never cached).
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `extension_name` | TEXT NOT NULL | FK → `extensions(name)` ON UPDATE CASCADE (v59) |
-| `event` | TEXT NOT NULL | event name |
+| `event` | TEXT NOT NULL | event name: `turnSettled` |
 | `path` | TEXT NOT NULL | handler file in extension store |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
+| `wait` | INTEGER NOT NULL DEFAULT 1 | v64. 1 = the session is held in `settling` until the script ends and its reply is applied; 0 = started, not awaited, output discarded. From `$.hooks[].wait` |
+| `fail_count` | INTEGER NOT NULL DEFAULT 0 | v64. Consecutive failed runs of this hook, any session; a success zeroes it, re-promote resets it. The 3rd in a row sends one operator notice |
 | PRIMARY KEY | (extension_name, event, path) | |
 
 ---

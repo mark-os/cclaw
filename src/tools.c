@@ -158,6 +158,28 @@ void tools_load_extension_tools(ToolRegistry *reg, sqlite3 *db,
     sqlite3_finalize(st);
 }
 
+char *extension_config_json(sqlite3 *db, const char *extension) {
+    if (!db || !extension || !extension[0]) return strdup("{}");
+    /* The same rows, prefix rule and secret exclusion as
+     * tool_extension_config_json below, keyed by the extension itself — for
+     * a script that is not a tool (a hook). */
+    static const char *sql =
+        "SELECT json_group_object(substr(c.key, length(?1) + 2),"
+        "                         COALESCE(c.value, c.default_value))"
+        " FROM config c"
+        " WHERE substr(c.key, 1, length(?1) + 1) = ?1 || '.' AND c.secret = 0;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(st, 1, extension, -1, SQLITE_STATIC);
+    char *out = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) out = strdup(v);
+    }
+    sqlite3_finalize(st);
+    return out ? out : strdup("{}");
+}
+
 /* Mirrors channel_config_get(): the registry holds an extension's settings as
  * <extension>.<key> rows, and the JS side sees them with the prefix stripped.
  * secret=1 rows are excluded — a secret reaches a tool child by {{SECRET:name}}

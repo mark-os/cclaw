@@ -90,6 +90,11 @@ static const ConfigDef s_defs[] = {
       " running tool child; parents blocked on sub-agents hold nothing. Past it,"
       " autonomous turn opens defer (inbox rows stay queued); batches with a"
       " human in them always open (0 = unlimited)" },
+    { "turn_settled_timeout", "60",
+      "Seconds a turnSettled hook script may run before it is killed and the"
+      " turn left untouched. While an awaited hook runs the session is held"
+      " and new messages queue, so this is also the longest such a wait can"
+      " be; raise it on slow boxes or links" },
     { "max_autonomous_turn_streak", "50",
       "Consecutive turns a session may open with no human in the causal chain"
       " (cron fires, sub-agent results, system notices) before turn-open"

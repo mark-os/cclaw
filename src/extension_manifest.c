@@ -515,39 +515,40 @@ static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_di
     return rc;
 }
 
-/* No hook event exists in this build, so every $.hooks[] entry is refused:
- * a registered hook that never fires is a silent lie. The section and its
- * ingest stay for the events that will be added. */
+/* Verify every $.hooks[] entry names an event this build fires and, when it
+ * says whether the session waits for it, says so with a boolean. A hook
+ * registered under an event that never fires would be a silent lie, so an
+ * unknown name is refused rather than stored. The one event: turnSettled
+ * (specs/hooks.md). */
 static int check_hook_events(sqlite3 *db, const char *manifest, char **err_out) {
     if (check_array_shape(db, manifest, "'$.hooks'",
                           "manifest '$.hooks' must be an array", err_out) != 0)
         return -1;
     sqlite3_stmt *st;
-    char *bad = NULL;
     if (sqlite3_prepare_v2(db,
-            "SELECT json_extract(value,'$.event')"
+            "SELECT COALESCE(json_extract(value,'$.event'),'(missing)'),"
+            "       COALESCE(json_extract(value,'$.event'),'') = 'turnSettled'"
             " FROM json_each(COALESCE(json_extract(?1,'$.hooks'),'[]'))"
-            " LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
-        if (sqlite3_step(st) == SQLITE_ROW) {
-            const char *v = (const char *)sqlite3_column_text(st, 0);
-            bad = strdup(v ? v : "(missing)");
-        }
-        sqlite3_finalize(st);
+            " WHERE COALESCE(json_extract(value,'$.event'),'') != 'turnSettled'"
+            "    OR COALESCE(json_type(value,'$.wait'),'true')"
+            "       NOT IN ('true','false')"
+            " LIMIT 1", -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+    int rc = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *ev = (const char *)sqlite3_column_text(st, 0);
+        char m[256];
+        if (sqlite3_column_int(st, 1))
+            snprintf(m, sizeof(m), "hook '%s': 'wait' must be true or false", ev);
+        else
+            snprintf(m, sizeof(m), "hook event '%.80s' rejected — the only hook "
+                     "event is 'turnSettled'", ev);
+        xerr(err_out, m);
+        rc = -1;
     }
-    if (!bad) return 0;
-    if (err_out) {
-        size_t n = strlen(bad) + 128;
-        char *m = malloc(n);
-        if (m) {
-            snprintf(m, n, "hook event '%s' rejected — hook events are not "
-                     "available in this build; remove the manifest's 'hooks' "
-                     "section", bad);
-            *err_out = m;
-        }
-    }
-    free(bad);
-    return -1;
+    sqlite3_finalize(st);
+    return rc;
 }
 
 /* Verify the (at most one) $.channel object: its handler is a .qjs file
@@ -852,11 +853,15 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
         "WHERE json_extract(t.value,'$.name') IS NOT NULL",
         manifest, name, store, owner_agent);
 
-    /* hooks: one row per $.hooks[] entry. */
+    /* hooks: one row per $.hooks[] entry; an entry that does not say whether
+     * the session waits for it does (check_hook_events admits booleans only).
+     * The rows were deleted above, so a re-promote starts the failure count
+     * over — new code has not failed yet. */
     rc |= run_ingest(db,
-        "INSERT INTO hooks(extension_name, event, path, enabled) "
+        "INSERT INTO hooks(extension_name, event, path, enabled, wait) "
         "SELECT :name, json_extract(value,'$.event'), "
-        "       :store || '/' || json_extract(value,'$.handler'), 1 "
+        "       :store || '/' || json_extract(value,'$.handler'), 1, "
+        "       COALESCE(json_extract(value,'$.wait'), 1) "
         "FROM json_each(COALESCE(json_extract(:m,'$.hooks'),'[]')) "
         "WHERE json_extract(value,'$.event') IS NOT NULL",
         manifest, name, store, owner_agent);

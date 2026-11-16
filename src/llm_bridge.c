@@ -28,6 +28,12 @@ struct LlmBridge {
     int thread_started;
     int calls;          /* served on this bridge (single accept thread) */
     int max_calls;      /* llm_max_calls_per_tool; <=0 = unlimited */
+    /* Guards the hand-off in llm_bridge_stop: `serving` is 1 while the
+     * thread is inside a completion; `abandoned` tells it nobody will join
+     * and the struct is its own to free. */
+    pthread_mutex_t mu;
+    int serving;
+    int abandoned;
 };
 
 static int read_full(int fd, void *buf, size_t n) {
@@ -102,8 +108,16 @@ static void serve_conn(LlmBridge *b, sqlite3 *db, int fd) {
     free(req);
 }
 
+static void bridge_free(LlmBridge *b) {
+    close(b->listen_fd);
+    pthread_mutex_destroy(&b->mu);
+    free(b->db_path);
+    free(b);
+}
+
 static void *bridge_thread(void *arg) {
     LlmBridge *b = arg;
+    int abandoned = 0;
     /* Own connection: the poll-loop thread's handle is not ours to share, and
      * a fresh WAL reader sees every write (the update-detector lesson). */
     sqlite3 *db = db_open(b->db_path);
@@ -116,10 +130,23 @@ static void *bridge_thread(void *arg) {
         if (pr <= 0) continue;
         int c = accept(b->listen_fd, NULL, NULL);
         if (c < 0) continue;
+        pthread_mutex_lock(&b->mu);
+        int go = b->running;
+        if (go) b->serving = 1;
+        pthread_mutex_unlock(&b->mu);
+        if (!go) { close(c); break; }
         serve_conn(b, db, c);
         close(c);
+        pthread_mutex_lock(&b->mu);
+        b->serving = 0;
+        abandoned = b->abandoned;
+        pthread_mutex_unlock(&b->mu);
+        if (abandoned) break;
     }
     if (db) sqlite3_close(db);
+    /* Stopped mid-completion: the stopper did not wait, so the rest of the
+     * teardown is ours. (`abandoned` is only ever set while serving.) */
+    if (abandoned) bridge_free(b);
     return NULL;
 }
 
@@ -170,11 +197,10 @@ LlmBridge *llm_bridge_start(const char *agent_dir, const char *db_path,
         return NULL;
     }
     b->running = 1;
+    pthread_mutex_init(&b->mu, NULL);
     if (thread_spawn(&b->thread, 0, bridge_thread, b) != 0) {
-        close(b->listen_fd);
         unlink(b->sock_path);
-        free(b->db_path);
-        free(b);
+        bridge_free(b);
         return NULL;
     }
     b->thread_started = 1;
@@ -183,16 +209,27 @@ LlmBridge *llm_bridge_start(const char *agent_dir, const char *db_path,
 
 void llm_bridge_stop(LlmBridge *b) {
     if (!b) return;
+    /* This runs on the event-loop thread (child reap), so it must not wait
+     * on the network. An idle accept thread is woken and joined at once. One
+     * that is inside a completion is not waited for: the child that asked is
+     * gone — typically killed at its deadline while the provider was still
+     * answering — and joining would freeze every session until that request
+     * returned or timed out. The thread is detached instead and frees the
+     * bridge when its call ends; it shares nothing with the loop (own DB
+     * handle, own copy of everything it reads). */
+    pthread_mutex_lock(&b->mu);
     b->running = 0;
-    /* Wake the accept thread now rather than at its next poll timeout: this
-     * runs on the event-loop thread (child reap), so the wait stalled the
-     * whole daemon for up to 300 ms per JS tool call. Shutdown is sticky, so
-     * a thread not yet in poll() returns from it at once; one inside
-     * serve_conn finishes that call first, as before. */
+    int busy = b->thread_started && b->serving;
+    if (busy) b->abandoned = 1;
+    pthread_mutex_unlock(&b->mu);
+    unlink(b->sock_path);
+    if (busy) {
+        pthread_detach(b->thread);
+        return;
+    }
+    /* Shutdown is sticky, so a thread not yet in poll() returns from it at
+     * once rather than at its next timeout. */
     shutdown(b->listen_fd, SHUT_RDWR);
     if (b->thread_started) pthread_join(b->thread, NULL);
-    close(b->listen_fd);
-    unlink(b->sock_path);
-    free(b->db_path);
-    free(b);
+    bridge_free(b);
 }

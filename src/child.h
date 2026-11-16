@@ -30,7 +30,10 @@
  * same JS tier, same result pipe — answering a cron fire instead of a model
  * tool call, so its completion posts a cron_result (or an inbox row) rather
  * than a tool result. */
-typedef enum { CHILD_CHANNEL, CHILD_TOOL_EXEC, CHILD_CRON_SCRIPT } ChildType;
+/* CHILD_HOOK is the third of that kind: an extension's hook script, started
+ * by an event rather than a call or a schedule (settle.c). */
+typedef enum { CHILD_CHANNEL, CHILD_TOOL_EXEC, CHILD_CRON_SCRIPT,
+               CHILD_HOOK } ChildType;
 
 typedef struct {
     pid_t pid;
@@ -69,6 +72,10 @@ typedef struct {
     char cron_job[80];      /* job name — the result's source_ref / data.job */
     char *cron_prompt;      /* 'both' payload: rides one inbox row with the
                              * script output; NULL for a script-only fire */
+    /* HOOK fields */
+    char hook_ext[128];     /* the extension the script belongs to */
+    char *hook_path;        /* the script; with hook_ext, the hooks row's key */
+    int hook_wait;          /* 1 = its session is held in 'settling' for it */
     /* Background job (blocking-vs-background step 4): the call was answered
      * at dispatch with a synthetic result (tool_calls.status='background');
      * the drain streams body bytes to log_fd (a file in the session's
@@ -100,6 +107,14 @@ void child_remove(ChildProc *c);
 /* 1 if a tool child is already running for this session. */
 int child_has_session(int64_t session_id);
 
+/* 1 if an awaited hook script is running for this session — the thing a
+ * session in state 'settling' is waiting for. */
+int child_hook_holds(int64_t session_id);
+
+/* The session could not be held after all: its hook children run on as
+ * unawaited ones, their replies discarded. */
+void child_hook_unhold(int64_t session_id);
+
 /* ── SIGCHLD self-pipe ──────────────────────────────────────────────
  * The handler writes one byte; the poll loop drains child_sigchld_fd() and
  * reaps. init returns 0, or -1 after reporting the failure. */
@@ -130,6 +145,13 @@ void drain_ready_result_pipes(const struct pollfd *pfds, int base, int nfds);
 ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
                                const char *agent_name, const char *blob,
                                size_t blob_len, int timeout_sec);
+
+/* The same, for a request with a TOOL_ARG_JSON_FD param: `arg_fd` is the open
+ * file holding that param's bytes, handed to the child on the request socket
+ * after the blob. The caller keeps (and closes) its own copy. -1 = none. */
+ChildProc *spawn_run_tool_blob_fd(ChildType type, int64_t session_id,
+                                  const char *agent_name, const char *blob,
+                                  size_t blob_len, int arg_fd, int timeout_sec);
 
 /* spawn_run_tool_blob wrapper for a model tool call: 0 on success, -1 on
  * failure (caller writes the error result inline). */

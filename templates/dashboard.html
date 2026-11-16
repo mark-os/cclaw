@@ -234,9 +234,9 @@ function list(a) { return a.length <= 1 ? a.join("") : a.slice(0, -1).join(", ")
 function firstLine(s, n) { s = String(s || "").split("\n")[0]; return s.length > (n || 90) ? s.slice(0, n || 90) + "…" : s; }
 function hostOf(u) { try { return new URL(u).host; } catch (e) { return String(u); } }
 
-var BUSY = ["llm_running", "tool_running", "compacting", "rate_limited", "awaiting_approval"];
+var BUSY = ["llm_running", "tool_running", "compacting", "settling", "rate_limited", "awaiting_approval"];
 var STATE_WORD = { idle: ["idle", ""], llm_running: ["thinking", "ok"], tool_running: ["running a tool", "ok"],
-  compacting: ["summarizing", "ok"], rate_limited: ["waiting to retry", "warn"], awaiting_approval: ["waiting on you", "warn"] };
+  compacting: ["summarizing", "ok"], settling: ["tidying up", "ok"], rate_limited: ["waiting to retry", "warn"], awaiting_approval: ["waiting on you", "warn"] };
 function stateWord(st) { return STATE_WORD[st] || [st, ""]; }
 
 /* What a parked call asks for, as a sentence after the agent's name. */

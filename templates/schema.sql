@@ -332,7 +332,8 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- anything itself. A chat's filter is not copied
                                             -- here: channel_chats.tool_filter is read live.
   state TEXT NOT NULL DEFAULT 'idle',         -- idle | llm_running | tool_running | awaiting_approval |
-                                              -- compacting | rate_limited
+                                              -- compacting | rate_limited | settling (a turnSettled
+                                              -- hook is being awaited; the inbox queues)
   owner_instance TEXT,                      -- live owner (processes.instance_id); NULL ⟺ state='idle'
   turn_iteration INTEGER NOT NULL DEFAULT 0,  -- LLM requests made so far in the current turn
   turn_context TEXT,                        -- <RELEVANT_CONTEXT> block, materialized once at turn
@@ -615,13 +616,20 @@ CREATE TABLE IF NOT EXISTS tools (
 );
 
 -- ═══ Hooks ═══
--- Same provenance model as tools. No hook event exists in this build (the
--- manifest validator refuses every hooks[] entry), so the table is empty.
+-- Same provenance model as tools. A hook is a script the runtime forks, in
+-- the agent's sandbox, when its event happens (specs/hooks.md). One event
+-- exists: turnSettled.
 CREATE TABLE IF NOT EXISTS hooks (
   extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,
-  event TEXT NOT NULL,                        -- event name
+  event TEXT NOT NULL,                        -- event name: 'turnSettled'
   path TEXT NOT NULL,                         -- handler file (in the shared store)
   enabled INTEGER NOT NULL DEFAULT 1,
+  wait INTEGER NOT NULL DEFAULT 1,            -- 1 = the session is held until the script ends and
+                                              -- its reply is applied; 0 = started and not awaited,
+                                              -- its output discarded
+  fail_count INTEGER NOT NULL DEFAULT 0,      -- consecutive failed runs, any session; zeroed by a
+                                              -- run that works. At 3 the operator gets one notice
+                                              -- (settle.c) — the agent is never told.
   PRIMARY KEY (extension_name, event, path)
 );
 

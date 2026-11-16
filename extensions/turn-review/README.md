@@ -86,7 +86,7 @@ and costs more.
 | `turn-review.max_turn_tokens` | 60000 | A turn bigger than this is not reviewed; ordinary compaction deals with it. |
 | `turn_settled_timeout` | 60 | The runtime's deadline for any hook script, in seconds. The review asks its model with a 45 s limit. |
 
-Token counts are the runtime's estimates. The prompt, the note length and the
+Token counts are the runtime's estimates (chars/3, `entries.token_estimate`), not the provider's count, which can run higher. The prompt, the note length and the
 marker wording are constants at the top of `review.qjs`: edit the draft and
 promote again.
 

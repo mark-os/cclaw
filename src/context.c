@@ -93,6 +93,8 @@ static int plan_find_cut(const PlanEntry *entries, int count, int budget) {
 
 int context_compaction_keep_from(const ContextPlan *plan, int target_tokens) {
     if (!plan || plan->count <= 0) return 0;
+    /* The target is in the provider's tokens; the walk sums estimates. */
+    if (plan->factor > 1.0) target_tokens = (int)((double)target_tokens / plan->factor);
 
     /* Walk backwards from the tail, accumulating until the target is spent. */
     int keep_from = 0;
@@ -205,8 +207,12 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
                 * (float)cfg->context_window);
     if (budget <= 0) budget = 8000;
 
-    /* Subtract fixed overhead (tool definitions, max_tokens reply reservation) */
-    int effective = budget - overhead;
+    /* The budget is in the provider's tokens, the entries and the overhead
+     * are estimates: (history + overhead) x factor must fit, so the room in
+     * estimate units is budget / factor less the overhead. */
+    ContextCalibration cal;
+    context_calibrate(db, session_id, overhead, &cal);
+    int effective = (int)((double)budget / cal.factor) - overhead;
     if (effective < 256) effective = 256;
 
     int cut = plan_find_cut(filtered, fcount, effective);
@@ -215,6 +221,7 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
     out->count = fcount;
     out->cut = cut;
     out->budget = budget;
+    out->factor = cal.factor;
     return 0;
 }
 
@@ -584,23 +591,109 @@ int context_head_estimate(sqlite3 *db, const char *agent_name, int64_t session_i
     return head;
 }
 
-/* Compaction trigger. Three measures of the context, the largest wins:
- *   1. branch sum of token_estimate + head   — always available, the base
- *   2. the provider's own prompt_tokens for the newest request (usage_in on
- *      the newest assistant entry)            — a floor when present
- *   3. the request body we actually sent, /3  — llm_responses.request_body
- * 2 and 3 are refinements, never dependencies: absent/zero/pruned they drop
- * out, and both are ignored when they predate the newest compaction entry
- * (a just-compacted session would otherwise re-read its pre-compaction bill
- * and compact again). max() also makes a cache-discounted prompt_tokens
- * harmless — it can only ever raise the answer, never lower it.
+/* Provider calibration — the provider's count is the measure, the estimate
+ * the fallback (plan/projects/context-accounting.md). Every reader that
+ * compares estimates against a window scales them by this factor:
+ *
+ *   factor = usage_in of the newest response on the branch
+ *            ÷ our estimate of the request that produced it
+ *
+ * The estimate of that request is its archived request_body /3 — what we
+ * sent, in the same unit as every other estimate — or, when the body is
+ * pruned, the branch root-ward of that response (as it stood before any turn
+ * edit) plus the head. "Newest response" is the newest successful
+ * assistant_message that post-dates every compaction: one request behind,
+ * from the model actually in use. No report, a zero, a request too small to
+ * calibrate on, or a report older than the newest compaction leaves 1.0 —
+ * the pure estimate. The factor never goes below 1.0: the estimate errs high
+ * by policy and a provider counting less (a cache-discounted count, a
+ * generous tokenizer) never lowers it.
+ *
+ * Bounds. Below CONTEXT_FACTOR_MIN_SAMPLE estimated tokens a provider's own
+ * fixed additions (a tool-use preamble of a few hundred tokens) swamp the
+ * ratio; every real request carries the head and clears it, only toy ones do
+ * not. Above CHARS_PER_TOKEN the ratio says more than one token per byte
+ * sent, which no byte-level tokenizer produces — a report that size counts
+ * something we did not send, and is clamped rather than believed. */
+#define CONTEXT_FACTOR_MIN_SAMPLE 2048
+
+void context_calibrate(sqlite3 *db, int64_t session_id, int head,
+                       ContextCalibration *out) {
+    out->factor = 1.0;
+    out->provider = out->sent = out->shrink = 0;
+    if (!db) return;
+    const char *sql =
+        "WITH RECURSIVE branch(id, parent_id, role, type, stop_reason, token_estimate,"
+        "                      usage_in, iteration_id, lvl) AS ("
+        "  SELECT id, parent_id, role, type, stop_reason, token_estimate, usage_in,"
+        "         iteration_id, 0"
+        "    FROM entries WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1) AND session_id=?1"
+        "  UNION ALL"
+        "  SELECT e.id, e.parent_id, e.role, e.type, e.stop_reason, e.token_estimate,"
+        "         e.usage_in, e.iteration_id, b.lvl+1"
+        "    FROM entries e JOIN branch b ON e.id=b.parent_id"
+        "), newest AS ("
+        /* ids are creation-ordered; a compaction entry sits root-ward of the
+         * tail it kept, so branch order cannot tell them apart. */
+        "  SELECT id, lvl, usage_in, iteration_id FROM branch"
+        "   WHERE type='assistant_message' AND COALESCE(stop_reason,0) NOT IN (4,5)"
+        "     AND id > COALESCE((SELECT MAX(id) FROM branch WHERE role=4), -1)"
+        "   ORDER BY lvl LIMIT 1"
+        ") SELECT"
+        "  (SELECT COALESCE(usage_in,0) FROM newest),"
+        "  (SELECT COALESCE(length(json(r.request_body)),0) FROM llm_responses r"
+        "    WHERE r.session_id=?1 AND r.request_body IS NOT NULL"
+        "      AND r.iteration_id=(SELECT iteration_id FROM newest)"
+        "    ORDER BY r.id DESC LIMIT 1),"
+        "  (SELECT COALESCE(SUM(token_estimate),0) FROM branch"
+        "    WHERE lvl > (SELECT lvl FROM newest)),"
+        /* Turn edits record on the answer itself (turn-edit.md, "The record"),
+         * so the ones on the newest response are exactly those made since
+         * the provider counted. */
+        "  (SELECT COALESCE(SUM(json_extract(j.value,'$.tokens.before')"
+        "                     - json_extract(j.value,'$.tokens.after')),0)"
+        "     FROM entries n, json_each(CASE WHEN json_valid(n.data) THEN n.data END,"
+        "                               '$.turn_edits') j"
+        "    WHERE n.id=(SELECT id FROM newest));";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    int before = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        out->provider = sqlite3_column_int(stmt, 0);
+        out->sent     = sqlite3_column_int(stmt, 1) / CHARS_PER_TOKEN;
+        before        = sqlite3_column_int(stmt, 2);
+        out->shrink   = sqlite3_column_int(stmt, 3);
+    }
+    sqlite3_finalize(stmt);
+
+    int estimate = out->sent > 0 ? out->sent : before + out->shrink + head;
+    if (out->provider <= 0 || estimate < CONTEXT_FACTOR_MIN_SAMPLE) return;
+    double f = (double)out->provider / (double)estimate;
+    if (f > CHARS_PER_TOKEN) f = CHARS_PER_TOKEN;
+    if (f > 1.0) out->factor = f;
+}
+
+/* Compaction trigger. The size of the context is the largest of:
+ *   1. (branch sum of token_estimate + head) × factor — always available
+ *   2. the provider's own prompt_tokens for the newest request, less what a
+ *      turn edit has removed since (shrink × factor)
+ *   3. the request body we actually sent, /3, less the same shrink
+ * 2 and 3 are the provider's measure and ours of the request just made; 1 is
+ * the branch as it stands now. Without a turn edit 2 and 3 are today's
+ * floors and 1 is at least the old estimate, so the answer only rises; after
+ * one, 2 and 3 come down by what the edit took out, so the shrink is seen at
+ * the check that follows the edit rather than one request later. Absent,
+ * zero or pruned measures drop out; all three are ignored when they predate
+ * the newest compaction (a just-compacted session would otherwise re-read
+ * its pre-compaction bill and compact again).
  *
  * The limit is threshold × window, the same ceiling the cut enforces, less
- * the size of the turn just completed: compaction only runs at a turn
- * boundary, so it must fire while the *next* turn (assumed to be like the
- * last) can still fit under the cut. That keeps compaction — one cache
- * invalidation, then append-only — ahead of the cut, which invalidates the
- * prompt-cache prefix on every request it moves. */
+ * the size of the turn just completed (scaled the same way): compaction only
+ * runs at a turn boundary, so it must fire while the *next* turn (assumed to
+ * be like the last) can still fit under the cut. That keeps compaction — one
+ * cache invalidation, then append-only — ahead of the cut, which invalidates
+ * the prompt-cache prefix on every request it moves. */
 int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg) {
     if (!db || !cfg || !cfg->compaction) return 0;
     float threshold = cfg->context_threshold > 0 ? cfg->context_threshold : 0.6f;
@@ -613,50 +706,40 @@ int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg)
     if (token_limit <= 0) token_limit = 8000;
 
     const char *sql =
-        "WITH RECURSIVE branch(id, parent_id, role, token_estimate, turn_id,"
-        "                      usage_in, iteration_id, lvl) AS ("
-        "  SELECT id, parent_id, role, token_estimate, turn_id, usage_in, iteration_id, 0"
+        "WITH RECURSIVE branch(id, parent_id, token_estimate, turn_id, lvl) AS ("
+        "  SELECT id, parent_id, token_estimate, turn_id, 0"
         "    FROM entries WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1) AND session_id=?1"
         "  UNION ALL"
-        "  SELECT e.id, e.parent_id, e.role, e.token_estimate, e.turn_id, e.usage_in,"
-        "         e.iteration_id, b.lvl+1"
+        "  SELECT e.id, e.parent_id, e.token_estimate, e.turn_id, b.lvl+1"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
-        "), newest AS ("
-        /* The newest assistant entry that post-dates every compaction on the
-         * branch (ids are creation-ordered; a compaction entry sits root-ward
-         * of the tail it kept, so branch order cannot tell them apart). */
-        "  SELECT usage_in, iteration_id FROM branch"
-        "   WHERE role=2 AND id > COALESCE((SELECT MAX(id) FROM branch WHERE role=4), -1)"
-        "   ORDER BY lvl LIMIT 1"
         ") SELECT"
         "  (SELECT COALESCE(SUM(token_estimate),0) FROM branch),"
         "  (SELECT COALESCE(SUM(token_estimate),0) FROM branch"
-        "    WHERE turn_id=(SELECT turn_id FROM branch WHERE lvl=0)),"
-        "  (SELECT COALESCE(usage_in,0) FROM newest),"
-        "  (SELECT COALESCE(length(json(r.request_body)),0) FROM llm_responses r"
-        "    WHERE r.session_id=?1 AND r.request_body IS NOT NULL"
-        "      AND r.iteration_id=(SELECT iteration_id FROM newest)"
-        "    ORDER BY r.id DESC LIMIT 1);";
+        "    WHERE turn_id=(SELECT turn_id FROM branch WHERE lvl=0));";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_int64(stmt, 1, session_id);
-    int branch_sum = 0, last_turn = 0, provider = 0, sent = 0;
+    int branch_sum = 0, last_turn = 0;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         branch_sum = sqlite3_column_int(stmt, 0);
         last_turn  = sqlite3_column_int(stmt, 1);
-        provider   = sqlite3_column_int(stmt, 2);
-        sent       = sqlite3_column_int(stmt, 3) / CHARS_PER_TOKEN;
     }
     sqlite3_finalize(stmt);
 
-    int size = branch_sum + head;
+    ContextCalibration cal;
+    context_calibrate(db, session_id, head, &cal);
+    double f = cal.factor;
+    int size = (int)((double)(branch_sum + head) * f);
+    int provider = cal.provider > 0 ? cal.provider - (int)((double)cal.shrink * f) : 0;
+    int sent = cal.sent > 0 ? cal.sent - cal.shrink : 0;
     if (provider > size) size = provider;
     if (sent > size) size = sent;
-    int fire = size > token_limit - last_turn;
-    LOG_DEBUG_("compaction check session=%lld estimate=%d provider=%d sent=%d"
-               " head=%d last_turn=%d limit=%d fire=%d",
-               (long long)session_id, branch_sum + head, provider, sent, head,
-               last_turn, token_limit, fire);
+    int turn = (int)((double)last_turn * f);
+    int fire = size > token_limit - turn;
+    LOG_DEBUG_("compaction check session=%lld estimate=%d factor=%.3f provider=%d"
+               " sent=%d shrink=%d head=%d last_turn=%d limit=%d fire=%d",
+               (long long)session_id, branch_sum + head, f, cal.provider, cal.sent,
+               cal.shrink, head, turn, token_limit, fire);
     return fire;
 }
 
@@ -664,8 +747,10 @@ int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg)
  * current turn's own entries exceed what the window can hold beside the
  * head, no cut fits and the next request would 400 (E5). Compared against
  * the window itself, not the threshold — the threshold is a cost margin,
- * this is the wall. Returns 1 when the turn no longer fits; *turn_tokens
- * gets the turn's size either way (0 when nothing is known). */
+ * this is the wall. Both the turn and the head are estimates scaled by the
+ * session's calibration factor, the window is the provider's. Returns 1 when
+ * the turn no longer fits; *turn_tokens gets the turn's scaled size either
+ * way (0 when nothing is known). */
 int context_turn_overflows(sqlite3 *db, int64_t session_id, int window, int head,
                            int *turn_tokens) {
     if (turn_tokens) *turn_tokens = 0;
@@ -685,6 +770,10 @@ int context_turn_overflows(sqlite3 *db, int64_t session_id, int window, int head
     int turn = 0;
     if (sqlite3_step(stmt) == SQLITE_ROW) turn = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
-    if (turn_tokens) *turn_tokens = turn;
-    return turn > window - head;
+    ContextCalibration cal;
+    context_calibrate(db, session_id, head, &cal);
+    int scaled_turn = (int)((double)turn * cal.factor);
+    int scaled_head = (int)((double)head * cal.factor);
+    if (turn_tokens) *turn_tokens = scaled_turn;
+    return scaled_turn > window - scaled_head;
 }

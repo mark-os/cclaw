@@ -166,16 +166,58 @@ Not yet implemented:
 
 ## Context Window Management
 
-- Load ≤ `context_threshold` × context_window tokens of most recent turns
+**Measure.** The provider's reported prompt count is the measure of the
+context; our character estimate (`entries.token_estimate`, chars/3 + 4) is
+the fallback. Stored estimates are never rescaled — readers scale them by a
+per-session **calibration factor** (`context_calibrate`, `context.c`),
+derived from the DB on every call:
+
+- factor = `usage_in` of the newest successful `assistant_message` on the
+  branch that post-dates every compaction ÷ our estimate of the request that
+  produced it — its archived `llm_responses.request_body` length / 3, or,
+  when the body is pruned, the branch root-ward of that response (before any
+  turn edit) plus the head.
+- 1.0 (pure estimate) when there is no report, a zero, the report predates
+  the newest compaction, or the request estimate is under 2048 tokens (a
+  provider's own fixed preamble would swamp the ratio).
+- Never below 1.0 — a provider counting less than the estimate (a
+  cache-discounted count, a generous tokenizer) never lowers it — and never
+  above `CHARS_PER_TOKEN` (3.0 = one token per byte sent, more than any
+  byte-level tokenizer produces; a bigger report counts something we did not
+  send and is clamped).
+- The newest response wins, so after a model switch the factor is the new
+  model's as soon as it has answered once.
+
+Budgets and windows are in provider tokens; estimates × factor are compared
+against them at every site below.
+
+- Load ≤ `context_threshold` × context_window tokens of most recent turns:
+  the cut keeps history whose (estimate + head) × factor fits, i.e. the
+  estimate-unit room is budget ÷ factor − head (`context_plan`)
 - Never cut mid-tool-call; the cut snaps **backwards to the start of the turn it
   lands in** (`entries.turn_id`, `plan_find_cut` in `context.c`) — not to "the
   previous user message", which would split a turn that opened with several
   inbox-drained user entries, and not forwards, which could drop the very turn
   being answered. Keeping a whole turn can overshoot the budget by one turn.
 - Cutoff notice prepended when truncated
+- Mid-turn overflow probe (`context_turn_overflows`, run before each
+  iteration ≥ 1): the cut cannot split the current turn, so once the turn's
+  own entries × factor exceed the window less head × factor, the turn stops
+  with the context-budget notice instead of sending a request the provider
+  would refuse (E5). The notice quotes the scaled size.
+- Compaction trigger (`session_needs_compaction`, after each turn): the
+  context size is the largest of (branch estimate + head) × factor, the
+  newest provider count less what a turn edit removed since (shrink ×
+  factor, shrink read from the answer's `$.turn_edits` record), and the sent
+  body / 3 less that shrink; it fires above `context_threshold` × window less
+  the just-finished turn × factor. Without an edit this is never lower than
+  the plain floors; after one, the shrink is seen at the check that follows
+  the edit, not one request later.
 - Compaction: summarize old entries, reparent tree. Its keep boundary
-  (`context_compaction_keep_from`) snaps the same way, so a summary never lands
-  inside a turn; a branch that is one giant turn compacts to nothing.
+  (`context_compaction_keep_from`) keeps `compaction_target` × window
+  provider tokens (target ÷ factor in estimates) and snaps the same way, so a
+  summary never lands inside a turn; a branch that is one giant turn
+  compacts to nothing.
 - Turn edit: a turnSettled hook script can edit the turn that just finished
   before the next one starts — tool calls dropped, result text replaced,
   notes added — with the same re-pointing compaction uses, inside one turn.

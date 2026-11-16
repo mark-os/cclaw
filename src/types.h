@@ -10,12 +10,19 @@
 #include <stddef.h>
 #include <time.h>
 
-/* Token estimate for a byte length. The divisor is 3, measured (not chosen)
- * against real payloads on 2026-08-13: /3 lands at 100-107% of Claude's
- * count and ~130% of DeepSeek's; /4 under-measured by 25-45% and put the
- * compaction trigger past the window. The estimate errs high by policy — an
+/* Token estimate for a byte length — the fallback, not the measure. The
+ * provider's reported prompt count is the measure: every reader that holds
+ * estimates against a window scales them by the session's calibration
+ * factor (context_calibrate, src/context.c: provider count ÷ our estimate of
+ * the newest request, never below 1.0), so a tokenizer that counts more
+ * than this divisor assumes is followed, not guessed at. The divisor is 3,
+ * measured against real payloads on 2026-08-13 (100-107% of Claude's count
+ * then, ~130% of DeepSeek's); tokenizers have since moved — Claude counted
+ * ~2x it on dense tool output on 2026-11-16, which is why the factor exists.
+ * With no report it stands alone, and it errs high by policy: an
  * over-estimate compacts a little early, an under-estimate is an outage.
- * Every C and SQL site must agree (plan/projects/context-accounting.md). */
+ * Stored entries.token_estimate stays in these units. Every C and SQL site
+ * must agree (plan/projects/context-accounting.md). */
 #define CHARS_PER_TOKEN 3
 #define TOKEN_ESTIMATE(len) ((int)((len) / CHARS_PER_TOKEN) + 4)
 

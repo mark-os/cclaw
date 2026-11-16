@@ -17,7 +17,7 @@ typedef struct {
     int64_t turn_id;        /* the turn this entry belongs to — cut boundaries key on it */
     Role role;
     StopReason stop_reason;
-    int token_estimate;     /* chars/4 heuristic from length(data) */
+    int token_estimate;     /* TOKEN_ESTIMATE of the stored text (chars/3 + 4) */
     int tool_call_count;    /* number of tool_calls in assistant msg (0 otherwise) */
 } PlanEntry;
 
@@ -26,7 +26,8 @@ typedef struct {
     PlanEntry *entries;     /* heap-allocated array */
     int count;              /* total entries after filtering */
     int cut;               /* index of first included entry (skip entries[0..cut-1]) */
-    int budget;            /* token budget used for planning */
+    int budget;            /* token budget used for planning (provider tokens) */
+    double factor;         /* calibration the cut used (context_calibrate), >= 1.0 */
 } ContextPlan;
 
 /* Plan which entries to include in LLM request (pass 1).
@@ -81,12 +82,31 @@ void session_tmp_dir(sqlite3 *db, int64_t session_id, char *buf, size_t bufsz);
 int context_head_estimate(sqlite3 *db, const char *agent_name, int64_t session_id,
                           const Config *cfg, const char *system_prompt);
 
-/* Compaction trigger: max(branch estimate + head, provider count, sent
- * payload) exceeds context_threshold x window less the last turn's size. */
+/* How many provider tokens one estimated token is worth for this session,
+ * from the newest response that post-dates every compaction: its usage_in
+ * over our estimate of that request (request_body /3, else the branch before
+ * it + head). Clamped to [1.0, CHARS_PER_TOKEN]; 1.0 when there is no
+ * usable report. provider/sent are that response's usage_in and body /3 (0
+ * when absent); shrink is the estimate turn edits have removed since. Read
+ * from the DB on every call — no cache. */
+typedef struct {
+    double factor;
+    int provider;
+    int sent;
+    int shrink;
+} ContextCalibration;
+
+void context_calibrate(sqlite3 *db, int64_t session_id, int head,
+                       ContextCalibration *out);
+
+/* Compaction trigger: max((branch estimate + head) x factor, provider count
+ * and sent payload less any turn-edit shrink since) exceeds
+ * context_threshold x window less the last turn's scaled size. */
 int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg);
 
-/* 1 when the leaf turn's own entries no longer fit in window - head, so no
- * cut can rescue the next request. *turn_tokens receives the turn's size. */
+/* 1 when the leaf turn's own entries no longer fit in window - head (both
+ * scaled by the calibration factor), so no cut can rescue the next request.
+ * *turn_tokens receives the turn's scaled size. */
 int context_turn_overflows(sqlite3 *db, int64_t session_id, int window, int head,
                            int *turn_tokens);
 

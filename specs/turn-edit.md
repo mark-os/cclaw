@@ -138,7 +138,9 @@ the ordinary case there is one run.
 
 - `input` — the options this input was built with (above).
 - `tokens` — sums of `entries.token_estimate`: the whole turn, and its
-  `tool_call` + `tool_result` entries.
+  `tool_call` + `tool_result` entries. These are the runtime's estimates
+  (chars/3), not the provider's count, which can be higher; thresholds a
+  script compares them with are in the same estimate units.
 - `user_messages` — the turn's `user_message` entries, in order.
 - `notes` — `system` entries already in the turn (runtime notices, notes an
   earlier hook left), with the id of the iteration each precedes (the
@@ -340,7 +342,10 @@ once — by several hooks in a row — and each apply appends one element.
 - `left_branch` — every entry that left the branch, in chain order, replaced
   originals included.
 - `replaced`, `notes` — in edit order.
-- `tokens` — the turn's size before and after this apply.
+- `tokens` — the turn's size before and after this apply, in estimate units
+  (`entries.token_estimate`). The compaction check that follows the apply
+  reads `before − after` back as the shrink since the provider last counted
+  ([memory.md](memory.md#context-window-management)).
 
 ## On the wire
 

@@ -1,0 +1,14 @@
+{
+  "name": "turn-review",
+  "version": "0.1.0",
+  "description": "After a turn ends, a utility model picks the tool calls later turns no longer need: dead-end calls are dropped, long results are cut down to the lines that mattered. Reference example for turnSettled hooks.",
+  "hooks": [
+    { "event": "turnSettled", "handler": "review.qjs", "wait": true }
+  ],
+  "config": [
+    { "key": "min_tool_tokens", "default": "4000",
+      "description": "A turn whose tool calls and results add up to fewer estimated tokens than this is left alone, without asking the model." },
+    { "key": "max_turn_tokens", "default": "60000",
+      "description": "A turn larger than this many estimated tokens is not reviewed (it would not fit the reviewer comfortably); ordinary compaction deals with it." }
+  ]
+}

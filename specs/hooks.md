@@ -223,6 +223,15 @@ with no channel), once per streak, the way failing compaction reports. The
 agent is never told: it cannot fix an extension's script, and its turn is
 intact.
 
+## A shipped example
+
+`extensions/turn-review` is a complete `turnSettled` hook: it decides for
+itself whether a turn is worth a model call, asks the agent's utility model
+which tool calls to drop and which result lines to keep, builds the excerpts
+in JavaScript, and returns `{}` whenever the model's answer is in doubt. Its
+README covers attaching it and reading what it did;
+`test/test_turn_review_ext.c` runs the shipped file against a mock provider.
+
 ## Configuration
 
 | Key | Default | |

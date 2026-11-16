@@ -66,8 +66,8 @@ yet; the operator writes the rows.
 ### Utility models
 
 The `utility` list is for work an extension's script hands to a model with
-`LLM(prompt, {purpose: "utility"})` ([js-llm.md](js-llm.md#purpose)) — a
-`turnSettled` hook's post-turn review is the intended first user. It lets an
+`LLM(prompt, {purpose: "utility"})` ([js-llm.md](js-llm.md#purpose)) — the
+post-turn review in `extensions/turn-review` is the first user. It lets an
 agent think with one model and tidy up with a cheaper one. The list follows
 the chat rules (pos order, cooldowns sink, `disabled` drops out, any model,
 optional `reasoning_effort`). An agent with no `utility` rows is served from

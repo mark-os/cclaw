@@ -38,3 +38,14 @@ then register the extension, tool, and `gemini-search.models` config, and grant
 `hosts: ["generativelanguage.googleapis.com"]`, which *replaces* the agent's
 host grants for its own calls — so granting it adds search without opening
 general egress.
+
+## turn-review
+
+A `turnSettled` hook: after a turn ends, a utility model picks the tool calls
+later turns no longer need. Dead-end calls are dropped, long results are cut
+to the lines that mattered, and one short note says what the removed material
+established. The model only selects — the script builds each excerpt from the
+original text, and the originals stay in the database. It is the reference
+example for [hooks](../specs/hooks.md) and for `LLM(…, {purpose: "utility"})`;
+attached by hand, never a default. Install, model routing, settings and how to
+see what it did are in [turn-review/README.md](turn-review/README.md).

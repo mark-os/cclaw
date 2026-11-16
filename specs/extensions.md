@@ -362,7 +362,7 @@ result, `replace` a result's text, add a `note` — and an optional opaque
 Promote writes one `hooks` row per entry; an agent runs the hooks of the
 extensions attached and enabled for it, resolved from the DB at each event.
 The hold, the deadline (`turn_settled_timeout`) and the failure rules are in
-[hooks.md](hooks.md).
+[hooks.md](hooks.md). `extensions/turn-review` is a working example.
 
 ## Channel Component
 

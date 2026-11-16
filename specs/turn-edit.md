@@ -18,6 +18,8 @@ touch only the finished turn; a call leaves with its result; the answer and
 the user messages are never edited; protected calls are not dropped; text a
 script supplies passes the secret scanner; all or nothing.
 
+`extensions/turn-review` is the reference script built on this contract.
+
 ## Input
 
 `turn_edit_input(db, session_id)` returns the newest turn on the active branch

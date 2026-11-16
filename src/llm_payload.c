@@ -19,9 +19,12 @@
 /* ── Populate temp plan table with entry IDs in order ──────────── */
 
 static int populate_plan(sqlite3 *db, const ContextPlan *plan) {
-    sqlite3_exec(db, "DROP TABLE IF EXISTS _plan;", NULL, NULL, NULL);
+    /* The index answers "is this entry on the plan?" for the transcript's
+     * reasoning lookup without a scan of the plan per iteration. */
     sqlite3_exec(db,
-        "CREATE TEMP TABLE _plan(pos INTEGER PRIMARY KEY, entry_id INTEGER NOT NULL);",
+        "DROP TABLE IF EXISTS _plan;"
+        "CREATE TEMP TABLE _plan(pos INTEGER PRIMARY KEY, entry_id INTEGER NOT NULL);"
+        "CREATE INDEX temp._plan_entry ON _plan(entry_id);",
         NULL, NULL, NULL);
     sqlite3_stmt *ins;
     if (sqlite3_prepare_v2(db, "INSERT INTO _plan(pos,entry_id) VALUES(?,?);",
@@ -38,7 +41,47 @@ static int populate_plan(sqlite3 *db, const ContextPlan *plan) {
     return 0;
 }
 
-/* ── SQL templates ─────────────────────────────────────────────── */
+/* ── The transcript ────────────────────────────────────────────────
+ *
+ * Everything the three wire formats agree on is decided once, here: which
+ * entries are sent, what role each speaks in, how its text is decorated,
+ * which rows belong to the same iteration, and where the user context block
+ * sits. The provider queries below are projections of this table into a wire
+ * shape; the only other thing they read is the reasoning blob a row points
+ * at, so a row that is not on the plan cannot reach any provider.
+ *
+ * One row per part:
+ *   pos    2 × plan position. The odd slots are free; the user context block
+ *          takes the one before its anchor.
+ *   grp    rows that make one message where a format groups: an iteration's
+ *          assistant text and tool calls share a key, that iteration's tool
+ *          results share another, every other row has its own. Three disjoint
+ *          ranges — negative odd, negative even, entry ids (positive; 0 is
+ *          the user context block) — so a user_message with id N can never
+ *          land in the bucket of iteration N.
+ *   role   'user' | 'assistant' | 'tool' — neutral; each format spells it.
+ *   kind   'text' | 'tool_call' | 'tool_result'.
+ *   text   decorated and ready to send (NULL on a tool call, and on an
+ *          assistant message that had none).
+ *   reasoning_id   on an iteration's assistant rows: the reasoning entry of
+ *          that iteration, if it is on the plan. Reasoning is a property of
+ *          the assistant message, never a row of its own, and an iteration
+ *          whose reasoning entry was taken off the branch replays nothing.
+ *
+ * A temp table rather than a view or a shared CTE: a view cannot take the
+ * bound context text, and a CTE pasted into three queries would be
+ * materialized by SQLite anyway wherever it is read twice — the same copy,
+ * made out of sight. The request body is still returned zero-copy: the
+ * statement that stays open (SQL_*_FULL) reads neither temp table. */
+
+static const char SQL_TRANSCRIPT_CREATE[] =
+    "DROP TABLE IF EXISTS _transcript;"
+    "CREATE TEMP TABLE _transcript("
+    "  pos INTEGER PRIMARY KEY, grp INTEGER NOT NULL,"
+    "  role TEXT NOT NULL, kind TEXT NOT NULL, text TEXT,"
+    "  call_id TEXT, tool_name TEXT, args TEXT, is_error INTEGER NOT NULL,"
+    "  entry_id INTEGER, iteration_id INTEGER, turn_id INTEGER,"
+    "  reasoning_id INTEGER);";
 
 /* Query-time untrusted-content wrap: a tool_result whose entry carries a
  * network_hosts tag came (at least partly) from the network. Both tags carry
@@ -64,94 +107,145 @@ static int populate_plan(sqlite3 *db, const ContextPlan *plan) {
     " CASE WHEN e.is_error THEN ' failed]' ELSE ' output]' END ||" \
     " char(10) || COALESCE(e.content,'')"
 
+/* ?1 = session id. Entry types not named in the WHERE are not sent. */
+static const char SQL_TRANSCRIPT_PARTS[] =
+    "INSERT INTO _transcript"
+    " SELECT 2*p.pos,"
+    /* An entry with no iteration_id stands alone rather than pooling with
+     * every other such entry. */
+    "  COALESCE(CASE"
+    "    WHEN e.type IN ('assistant_message','tool_call') THEN -2*e.iteration_id - 1"
+    "    WHEN e.type = 'tool_result' THEN -2*e.iteration_id - 2 END, e.id),"
+    "  CASE WHEN e.type IN ('assistant_message','tool_call','cron_result') THEN 'assistant'"
+    "       WHEN e.type = 'tool_result' THEN 'tool' ELSE 'user' END,"
+    "  CASE WHEN e.type IN ('tool_call','tool_result') THEN e.type ELSE 'text' END,"
+    "  CASE e.type"
+    /* No format carries a non-leading system role: no provider documents
+     * mid-array system messages (OpenRouter rewrites them per-upstream,
+     * Anthropic/Gemini structurally can't carry them), and a tail-append is
+     * cache-safe whatever role it wears. Mid-conversation system entries
+     * therefore ride as '[system] '-prefixed user text everywhere; only the
+     * leading system prompt (SQL_*_FULL) keeps the system role. */
+    "    WHEN 'system' THEN '[system] ' || COALESCE(e.content,'')"
+    "    WHEN 'compaction' THEN"
+    "      '[Summary of earlier conversation]' || char(10) || COALESCE(e.content,'')"
+    "    WHEN 'user_message' THEN COALESCE(e.content,'')"
+    "    WHEN 'assistant_message' THEN e.content"
+    "    WHEN 'cron_result' THEN " SQL_CRON_RESULT_TEXT
+    "    WHEN 'tool_result' THEN " SQL_WRAP_TOOL_CONTENT
+    "  END,"
+    "  CASE WHEN e.type IN ('tool_call','tool_result') THEN e.tool_call_id END,"
+    "  CASE WHEN e.type IN ('tool_call','tool_result') THEN e.tool_name END,"
+    "  CASE WHEN e.type = 'tool_call' THEN COALESCE(e.content,'{}') END,"
+    "  e.is_error, e.id, e.iteration_id, e.turn_id,"
+    "  CASE WHEN e.type IN ('assistant_message','tool_call') THEN"
+    "    (SELECT r.id FROM entries r"
+    "      WHERE r.session_id=e.session_id AND r.iteration_id=e.iteration_id"
+    "        AND r.type='reasoning' AND r.id IN (SELECT entry_id FROM _plan)"
+    "      LIMIT 1) END"
+    " FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
+    " WHERE e.type IN ('system','compaction','user_message','assistant_message',"
+    "                  'cron_result','tool_call','tool_result');";
+
+/* The user context block (clock, recall, live state) rides at the turn
+ * boundary: right before the first entry of the newest turn on the plan. A
+ * turn can open with several queued user messages, and the block goes before
+ * all of them, so the messages being answered stay the true tail on iteration
+ * 1 (recency weighting). Tool-loop iterations never split an assistant's tool
+ * calls from their results (strict providers 400 on non-adjacency), and the
+ * block's position — like its content, frozen per turn in llm_proc.c — never
+ * moves mid-turn, keeping the request prefix byte-stable for prompt caching.
+ * A compaction summary inherits the turn of the entry it follows, and a
+ * cron_result the turn it lands in, so neither opens a turn or moves the
+ * block. When no entry carries a turn_id the block goes before the first
+ * entry, which is equally adjacency-safe. ?1 = the block's text, or NULL. */
+static const char SQL_TRANSCRIPT_CONTEXT[] =
+    "INSERT INTO _transcript(pos, grp, role, kind, text, is_error)"
+    " SELECT COALESCE("
+    "    (SELECT MIN(pos) FROM _transcript"
+    "      WHERE turn_id = (SELECT MAX(turn_id) FROM _transcript)),"
+    "    (SELECT MIN(pos) FROM _transcript)) - 1,"
+    "  0, 'user', 'text', ?1, 0"
+    " WHERE ?1 IS NOT NULL AND EXISTS (SELECT 1 FROM _transcript);";
+
+/* Run one statement with ?1 bound to text when given, else to id. */
+static int run_bound(sqlite3 *db, const char *sql, int64_t id, const char *text) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
+    if (text) sqlite3_bind_text(s, 1, text, -1, SQLITE_STATIC);
+    else sqlite3_bind_int64(s, 1, id);
+    int rc = sqlite3_step(s);
+    sqlite3_finalize(s);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+/* user_context: the user context block's text, or NULL/"" for none. */
+static int build_transcript(sqlite3 *db, int64_t session_id, const ContextPlan *plan,
+                            const char *user_context) {
+    if (populate_plan(db, plan) != 0) return -1;
+    if (sqlite3_exec(db, SQL_TRANSCRIPT_CREATE, NULL, NULL, NULL) != SQLITE_OK) return -1;
+    if (run_bound(db, SQL_TRANSCRIPT_PARTS, session_id, NULL) != 0) return -1;
+    if (!user_context || !user_context[0]) return 0;
+    return run_bound(db, SQL_TRANSCRIPT_CONTEXT, 0, user_context);
+}
+
+/* ── Wire projections ──────────────────────────────────────────────
+ *
+ * Each *_MESSAGES / *_CONTENTS query reads _transcript and takes one
+ * parameter, ?1 = the requesting model.
+ *
+ * Reasoning replay is model-bound (pi's rule): the join below finds a row
+ * only when the iteration's reasoning entry is on the plan and was produced
+ * by the model being called now, so switching models strips the replay for
+ * free. Entries with no captured blob (pre-v48, or a provider that sent none)
+ * likewise yield nothing: never invent a reasoning field. */
+#define SQL_REPLAY_JOIN \
+    " LEFT JOIN entries r ON r.id = t.reasoning_id" \
+    "   AND json_extract(r.reasoning_meta,'$.model') = ?1"
+
+/* An iteration's assistant rows are one message; everything else, tool
+ * results included, is a message per row. Within a group `role` is the same
+ * on every row, and a group of one is the only place a bare text/call_id
+ * column is read. */
+#define SQL_GROUP_RESULTS_APART \
+    " GROUP BY t.grp, CASE WHEN t.kind = 'tool_result' THEN t.pos END"
+
 /* Reasoning replay (OpenAI-compat). The provider wants its own reasoning
  * artifact back on the assistant message that carried the tool calls —
  * OpenRouter's reasoning_details array verbatim (order and every field matter:
  * it is how Gemini's thoughtSignature survives the OpenAI-shaped envelope),
  * or DeepSeek's bare reasoning_content string (documented 400 / a silently
- * invalidated cache prefix when it goes missing after a tool-call turn).
- * Reasoning is a *field of* the assistant message, never a message of its own,
- * so the WHERE clause below still drops reasoning entries as rows.
- * ?3 = the requesting model: a mismatch yields no row, so switching models
- * strips the replay for free (pi's rule — reasoning is model-bound). Entries
- * with no captured blob (pre-v48, or a provider that sent none) likewise yield
- * nothing: never invent a reasoning field. */
+ * invalidated cache prefix when it goes missing after a tool-call turn). */
 #define SQL_OPENAI_REASONING \
-    "(SELECT CASE json_extract(r.reasoning_meta,'$.format')" \
-    "   WHEN 'reasoning_details' THEN" \
-    "     json_object('reasoning_details'," \
-    "       json(json_extract(r.reasoning_meta,'$.blob')))" \
-    "   WHEN 'reasoning_content' THEN" \
-    "     json_object('reasoning_content'," \
-    "       json_extract(r.reasoning_meta,'$.blob'))" \
-    "   ELSE NULL END" \
-    "  FROM entries r WHERE r.session_id=e.session_id" \
-    "    AND r.iteration_id=e.iteration_id AND r.type='reasoning'" \
-    "    AND json_extract(r.reasoning_meta,'$.model')=?3" \
-    "  LIMIT 1)"
+    "CASE json_extract(r.reasoning_meta,'$.format')" \
+    "  WHEN 'reasoning_details' THEN" \
+    "    json_object('reasoning_details'," \
+    "      json(json_extract(r.reasoning_meta,'$.blob')))" \
+    "  WHEN 'reasoning_content' THEN" \
+    "    json_object('reasoning_content'," \
+    "      json_extract(r.reasoning_meta,'$.blob')) END"
 
 static const char SQL_OPENAI_MESSAGES[] =
     "SELECT json_group_array(json(msg) ORDER BY pos) FROM ("
-    "  SELECT p.pos,"
-    "    CASE e.type"
-    /* No builder emits a non-leading role:system message: no provider
-     * documents mid-array system messages (OpenRouter rewrites them
-     * per-upstream, Anthropic/Gemini structurally can't carry them), and a
-     * tail-append is cache-safe whatever role it wears. Mid-turn system
-     * entries therefore ride as '[system] '-prefixed user messages on every
-     * path — same convention as the Gemini builder. Only the leading system prompt (SQL_OPENAI_FULL) keeps
-     * the system role. */
-    "      WHEN 'system' THEN"
-    "        json_object('role','user','content','[system] ' || COALESCE(e.content,''))"
-    "      WHEN 'compaction' THEN"
-    "        json_object('role','user','content',"
-    "          '[Summary of earlier conversation]' || char(10) || COALESCE(e.content,''))"
-    "      WHEN 'user_message' THEN"
-    "        json_object('role','user','content',COALESCE(e.content,''))"
-    "      WHEN 'assistant_message' THEN"
-    "        json_patch("
-    "        CASE WHEN EXISTS("
-    "          SELECT 1 FROM entries tc WHERE tc.session_id=e.session_id"
-    "            AND tc.iteration_id=e.iteration_id AND tc.type='tool_call')"
-    "        THEN json_patch("
-    "          json_object('role','assistant','content',e.content),"
-    "          json_object('tool_calls',"
-    "            (SELECT json_group_array("
-    "              json_object('id',tc2.tool_call_id,'type','function',"
-    "                'function',json_object('name',tc2.tool_name,"
-    "                  'arguments',COALESCE(tc2.content,'{}'))))"
-    "             FROM entries tc2 WHERE tc2.session_id=e.session_id"
-    "               AND tc2.iteration_id=e.iteration_id AND tc2.type='tool_call'"
-    "             ORDER BY tc2.part_index)))"
-    "        ELSE json_object('role','assistant','content',e.content)"
-    "        END,"
-    "        COALESCE(" SQL_OPENAI_REASONING ",'{}'))"
-    "      WHEN 'tool_result' THEN"
-    "        json_object('role','tool','tool_call_id',e.tool_call_id,"
-    "                    'content'," SQL_WRAP_TOOL_CONTENT ")"
-    "      WHEN 'cron_result' THEN"
-    "        json_object('role','assistant','content'," SQL_CRON_RESULT_TEXT ")"
-    "      ELSE NULL"
+    "  SELECT MIN(t.pos) AS pos,"
+    "    CASE t.role"
+    "      WHEN 'user' THEN json_object('role','user','content',t.text)"
+    "      WHEN 'tool' THEN json_object('role','tool','tool_call_id',t.call_id,"
+    "                                   'content',t.text)"
+    "      ELSE json_patch(json_patch("
+    "        json_object('role','assistant',"
+    "          'content',MAX(t.text) FILTER (WHERE t.kind = 'text')),"
+    "        CASE WHEN COUNT(*) FILTER (WHERE t.kind = 'tool_call') > 0 THEN"
+    "          json_object('tool_calls', json_group_array("
+    "            json_object('id',t.call_id,'type','function',"
+    "              'function',json_object('name',t.tool_name,'arguments',t.args))"
+    "            ORDER BY t.pos) FILTER (WHERE t.kind = 'tool_call'))"
+    "        ELSE '{}' END),"
+    "        COALESCE(MAX(" SQL_OPENAI_REASONING "),'{}'))"
     "    END AS msg"
-    "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
-    "  WHERE e.type NOT IN ('tool_call','reasoning')"
-    /* Session context (recall + live state) rides at the turn boundary:
-     * right before the newest user_message. The user's actual message stays
-     * the true tail on iteration 0 (recency weighting), tool-loop iterations
-     * never split an assistant tool_calls message from its tool result
-     * (strict providers 400 on non-adjacency), and the block's position —
-     * like its content, frozen per turn in llm_proc.c — never moves
-     * mid-turn, keeping the request prefix byte-stable for prompt caching.
-     * A plan with no user_message anchors before its first entry instead,
-     * which is equally adjacency-safe. */
-    "  UNION ALL"
-    "  SELECT COALESCE("
-    "      (SELECT MAX(pu.pos) FROM _plan pu JOIN entries eu"
-    "         ON eu.id = pu.entry_id AND eu.type = 'user_message'),"
-    "      (SELECT MIN(pp.pos) FROM _plan pp)) - 0.5 AS pos,"
-    "    json_object('role','user','content',?2) AS msg"
-    "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
-    ") sub WHERE msg IS NOT NULL;";
+    "  FROM _transcript t" SQL_REPLAY_JOIN
+       SQL_GROUP_RESULTS_APART
+    ");";
 
 /* launch_agent's description carries a live roster of delegable agents and the
  * live default worker toolset (?3), both recomputed every request — no refresh
@@ -205,9 +299,9 @@ static const char SQL_OPENAI_FULL[] =
     "      COALESCE(?2,'') || COALESCE(char(10) || char(10) || ?6, '')) AS m"
     "      WHERE ?2 IS NOT NULL OR ?6 IS NOT NULL"
     "    UNION ALL"
-    /* ?3 (SQL_OPENAI_MESSAGES) already carries session context in the right
-     * spot — at the turn boundary, before the newest user_message — so it
-     * needs no special-casing here. */
+    /* ?3 (SQL_OPENAI_MESSAGES) already carries the user context block in the
+     * right spot — the transcript put it at the turn boundary — so it needs
+     * no special-casing here. */
     "    SELECT 1, rowid, json(value) FROM json_each(?3)"
     "    ORDER BY ord, sub)),"
     "  'max_tokens', CASE WHEN ?4 > 0 THEN ?4 ELSE NULL END,"
@@ -217,91 +311,42 @@ static const char SQL_OPENAI_FULL[] =
     ")), json(?8)), " SQL_REQUEST_EXTRA("?7") ");";
 
 static const char SQL_GEMINI_CONTENTS[] =
-    "SELECT json_group_array(json(content_obj) ORDER BY min_pos) FROM ("
-    "  SELECT MIN(p.pos) AS min_pos,"
-    "    CASE"
-    "      WHEN e.type IN ('assistant_message','tool_call','reasoning') THEN"
-    "        json_object('role','model','parts',"
-    "          (SELECT json_group_array(json(part)) FROM ("
-    "            SELECT e2.part_index AS ord,"
-    "              CASE e2.type"
-    "                WHEN 'assistant_message' THEN"
-    "                  CASE WHEN e2.content IS NOT NULL AND e2.content != ''"
-    "                  THEN json_object('text',e2.content) ELSE NULL END"
-    "                WHEN 'tool_call' THEN"
+    "SELECT json_group_array(json(content_obj) ORDER BY pos) FROM ("
+    "  SELECT MIN(t.pos) AS pos,"
+    "    CASE t.role"
+    "      WHEN 'assistant' THEN"
+    "        json_object('role','model','parts', json_group_array(json("
+    "          CASE t.kind WHEN 'tool_call' THEN"
     /* Google requires the thoughtSignature it issued back on the replayed
      * functionCall part; without it a thinking model 400s the request. The
      * signature is matched by tool name (part_index counts only the parts we
      * kept, so it can't index back into the wire parts array), and only when
      * the producing model is the one we're calling now. No captured
-     * signature → the part goes out exactly as it does today. */
-    "                  json_patch("
-    "                    json_object('functionCall',json_object('name',e2.tool_name,"
-    "                      'args',CASE WHEN json_valid(e2.content) THEN json(e2.content)"
-    "                               ELSE json('{}') END)),"
-    "                    COALESCE((SELECT json_object('thoughtSignature',"
-    "                                json_extract(sg.value,'$.sig'))"
-    "                       FROM entries r,"
-    "                            json_each(json_extract(r.reasoning_meta,'$.blob')) sg"
-    "                       WHERE r.session_id=e2.session_id"
-    "                         AND r.iteration_id=e2.iteration_id"
-    "                         AND r.type='reasoning'"
-    "                         AND json_extract(r.reasoning_meta,'$.format')='gemini_parts'"
-    "                         AND json_extract(r.reasoning_meta,'$.model')=?3"
-    "                         AND json_extract(sg.value,'$.fn')=e2.tool_name"
-    "                       LIMIT 1),'{}'))"
-    "                ELSE NULL"
-    "              END AS part"
-    "            FROM _plan p2 JOIN entries e2 ON e2.id=p2.entry_id AND e2.session_id=?1"
-    "            WHERE e2.iteration_id=e.iteration_id"
-    "              AND e2.type IN ('assistant_message','tool_call')"
-    "            ORDER BY e2.part_index"
-    "          ) WHERE part IS NOT NULL))"
-    "      WHEN e.type = 'tool_result' THEN"
+     * signature → the part goes out bare. */
+    "            json_patch("
+    "              json_object('functionCall',json_object('name',t.tool_name,"
+    "                'args',CASE WHEN json_valid(t.args) THEN json(t.args)"
+    "                         ELSE json('{}') END)),"
+    "              COALESCE((SELECT json_object('thoughtSignature',"
+    "                          json_extract(sg.value,'$.sig'))"
+    "                 FROM json_each(json_extract(r.reasoning_meta,'$.blob')) sg"
+    "                 WHERE json_extract(r.reasoning_meta,'$.format')='gemini_parts'"
+    "                   AND json_extract(sg.value,'$.fn')=t.tool_name"
+    "                 LIMIT 1),'{}'))"
+    "          ELSE json_object('text',t.text) END)"
+    "          ORDER BY t.pos)"
+    "          FILTER (WHERE t.kind = 'tool_call' OR COALESCE(t.text,'') != ''))"
+    "      WHEN 'tool' THEN"
     "        json_object('role','user','parts',"
     "          json_array(json_object('functionResponse',"
-    "            json_object('name',COALESCE(e.tool_name,e.tool_call_id),"
-    "              'response',json_object('content'," SQL_WRAP_TOOL_CONTENT ")))))"
-    "      WHEN e.type = 'user_message' THEN"
-    "        json_object('role','user','parts',"
-    "          json_array(json_object('text',COALESCE(e.content,''))))"
-    /* Same universal convention as SQL_OPENAI_MESSAGES: a mid-turn system
-     * entry becomes a '[system] '-prefixed user turn rather than being
-     * dropped (it used to be, silently losing the content here). */
-    "      WHEN e.type = 'system' THEN"
-    "        json_object('role','user','parts',"
-    "          json_array(json_object('text','[system] ' || COALESCE(e.content,''))))"
-    "      WHEN e.type = 'compaction' THEN"
-    "        json_object('role','user','parts',"
-    "          json_array(json_object('text',"
-    "            '[Summary of earlier conversation]' || char(10) || COALESCE(e.content,''))))"
-    "      WHEN e.type = 'cron_result' THEN"
-    "        json_object('role','model','parts',"
-    "          json_array(json_object('text'," SQL_CRON_RESULT_TEXT ")))"
-    "      ELSE NULL"
+    "            json_object('name',COALESCE(t.tool_name,t.call_id),"
+    "              'response',json_object('content',t.text)))))"
+    "      ELSE json_object('role','user','parts',"
+    "             json_array(json_object('text',t.text)))"
     "    END AS content_obj"
-    "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
-    /* -iteration_id vs id: both are always positive, so negating iteration_id
-     * puts the two group-key domains in disjoint ranges. Without this, a
-     * user_message with id=N and an assistant/tool_call/reasoning entry with
-     * iteration_id=N collide into one GROUP BY bucket — silently merging
-     * unrelated messages and dropping one (hits fresh/short sessions, where
-     * id is still small). */
-    "  GROUP BY CASE WHEN e.type IN ('assistant_message','tool_call','reasoning')"
-    "    THEN -e.iteration_id ELSE e.id END"
-    /* Session context (recall + live state) at the turn boundary: right
-     * before the newest user_message — see SQL_OPENAI_MESSAGES for
-     * rationale (tail recency, functionCall/functionResponse adjacency,
-     * position stability for prompt caching). */
-    "  UNION ALL"
-    "  SELECT COALESCE("
-    "      (SELECT MAX(pu.pos) FROM _plan pu JOIN entries eu"
-    "         ON eu.id = pu.entry_id AND eu.type = 'user_message'),"
-    "      (SELECT MIN(pp.pos) FROM _plan pp)) - 0.5 AS min_pos,"
-    "    json_object('role','user','parts',"
-    "      json_array(json_object('text',?2))) AS content_obj"
-    "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
-    ") sub WHERE content_obj IS NOT NULL;";
+    "  FROM _transcript t" SQL_REPLAY_JOIN
+       SQL_GROUP_RESULTS_APART
+    ");";
 
 static const char SQL_GEMINI_TOOLS[] =
     "SELECT json_array(json_object('functionDeclarations',"
@@ -325,8 +370,8 @@ static const char SQL_GEMINI_FULL[] =
     "    THEN json_object('parts',json_array(json_object('text',"
     "      COALESCE(?1,'') || COALESCE(char(10) || char(10) || ?5, ''))))"
     "    ELSE NULL END,"
-    /* ?2 (SQL_GEMINI_CONTENTS) already carries session context in the right
-     * spot — at the turn boundary, before the newest user_message. */
+    /* ?2 (SQL_GEMINI_CONTENTS) already carries the user context block in the
+     * right spot — see SQL_OPENAI_FULL. */
     "  'contents', json(?2),"
     "  'tools', CASE WHEN json_array_length(json_extract(?3,'$[0].functionDeclarations')) > 0"
     "    THEN json(?3) ELSE NULL END,"
@@ -341,108 +386,68 @@ static const char SQL_GEMINI_FULL[] =
  * Content is always an array of typed blocks; an iteration's assistant text
  * and tool calls are one assistant message, and all of that iteration's tool
  * results are one user message (the API reads split results as "don't call
- * tools in parallel"). Adjacent same-role messages are legal — the API merges
- * them — so the context block and '[system] ' notes ride as their own user
- * messages exactly as in the other two builders. Empty text blocks are a 400,
- * hence the guards: an assistant message with nothing to say is dropped. */
-
-#define SQL_ANTHROPIC_TEXT(role, expr) \
-    "json_object('role','" role "','content'," \
-    "  json_array(json_object('type','text','text'," expr ")))"
+ * tools in parallel") — the transcript's grp, as is. Adjacent same-role
+ * messages are legal — the API merges them — so the user context block and
+ * '[system] ' notes ride as their own user messages exactly as in the other
+ * two formats. Empty text blocks are a 400, hence the guards: an assistant
+ * message with nothing to say has no blocks and is dropped. */
 
 #define SQL_CACHE_MARK "json('{\"type\":\"ephemeral\"}')"
 
 static const char SQL_ANTHROPIC_MESSAGES[] =
-    "WITH seq(pos, msg) AS MATERIALIZED ("
-    "  SELECT MIN(p.pos),"
-    "    CASE"
-    "      WHEN e.type IN ('assistant_message','tool_call','reasoning') THEN"
-    "        (SELECT CASE WHEN json_array_length(c) > 0"
-    "                  THEN json_object('role','assistant','content',json(c)) END"
-    "         FROM (SELECT COALESCE("
+    "WITH grouped(pos, role, content) AS MATERIALIZED ("
+    "  SELECT MIN(t.pos), t.role,"
+    "    CASE t.role"
+    "      WHEN 'assistant' THEN COALESCE("
     /* Thinking replay. The API binds a thinking block's signature to
      * everything that preceded it, and wants the block back in its original
      * position among the text and tool_use blocks — so what is replayed is
      * the response's whole content array, verbatim, not a reconstruction.
-     * Only within the turn that produced it: the context block moves at every
-     * turn boundary, which is an edit to the prefix those signatures cover,
-     * while inside a turn the prefix is byte-stable (the mid-turn invariant).
-     * Dropping the blocks of earlier turns is a leading run, which the API
-     * allows. A model switch (?3) falls through to the reconstruction below,
-     * as does any iteration that carried no thinking. */
-    "           (SELECT json_extract(r.reasoning_meta,'$.blob') FROM entries r"
-    "             WHERE r.session_id=?1 AND r.iteration_id=e.iteration_id"
-    "               AND r.type='reasoning'"
-    "               AND json_extract(r.reasoning_meta,'$.format')='anthropic_content'"
-    "               AND json_extract(r.reasoning_meta,'$.model')=?3"
-    "               AND r.turn_id=(SELECT MAX(et.turn_id) FROM _plan pt"
-    "                               JOIN entries et ON et.id=pt.entry_id)"
-    "             LIMIT 1),"
-    "           (SELECT json_group_array(json(part)) FROM ("
-    "              SELECT CASE e2.type"
-    "                WHEN 'assistant_message' THEN"
-    "                  CASE WHEN COALESCE(e2.content,'') != ''"
-    "                  THEN json_object('type','text','text',e2.content) END"
-    "                WHEN 'tool_call' THEN"
-    "                  json_object('type','tool_use','id',e2.tool_call_id,"
-    "                    'name',e2.tool_name,"
-    "                    'input',CASE WHEN json_valid(e2.content) THEN json(e2.content)"
-    "                              ELSE json('{}') END)"
-    "                END AS part"
-    "              FROM _plan p2 JOIN entries e2 ON e2.id=p2.entry_id AND e2.session_id=?1"
-    "              WHERE e2.iteration_id=e.iteration_id"
-    "                AND e2.type IN ('assistant_message','tool_call')"
-    "              ORDER BY e2.part_index"
-    "            ) WHERE part IS NOT NULL)) AS c))"
-    "      WHEN e.type = 'tool_result' THEN"
-    "        json_object('role','user','content',"
-    "          json_group_array(json(json_patch("
-    "            json_object('type','tool_result','tool_use_id',e.tool_call_id,"
-    "                        'content'," SQL_WRAP_TOOL_CONTENT "),"
-    "            CASE WHEN e.is_error THEN json_object('is_error',json('true'))"
-    "                 ELSE '{}' END)) ORDER BY p.pos))"
-    "      WHEN e.type = 'user_message' THEN "
-             SQL_ANTHROPIC_TEXT("user", "COALESCE(NULLIF(e.content,''),'(empty message)')")
-    /* Same universal convention as the other builders: no mid-array system
-     * role; the note rides as a '[system] '-prefixed user message. */
-    "      WHEN e.type = 'system' THEN "
-             SQL_ANTHROPIC_TEXT("user", "'[system] ' || COALESCE(e.content,'')")
-    "      WHEN e.type = 'compaction' THEN "
-             SQL_ANTHROPIC_TEXT("user",
-                 "'[Summary of earlier conversation]' || char(10) || COALESCE(e.content,'')")
-    "      WHEN e.type = 'cron_result' THEN "
-             SQL_ANTHROPIC_TEXT("assistant", SQL_CRON_RESULT_TEXT)
+     * Only within the turn that produced it: the user context block moves at
+     * every turn boundary, which is an edit to the prefix those signatures
+     * cover, while inside a turn the prefix is byte-stable (the mid-turn
+     * invariant). Dropping the blocks of earlier turns is a leading run,
+     * which the API allows. A model switch falls through to the
+     * reconstruction below, as does any iteration that carried no thinking. */
+    "        MAX(CASE WHEN json_extract(r.reasoning_meta,'$.format')='anthropic_content'"
+    "                  AND r.turn_id = (SELECT MAX(turn_id) FROM _transcript)"
+    "                 THEN json_extract(r.reasoning_meta,'$.blob') END),"
+    "        json_group_array(json("
+    "          CASE t.kind WHEN 'tool_call' THEN"
+    "            json_object('type','tool_use','id',t.call_id,'name',t.tool_name,"
+    "              'input',CASE WHEN json_valid(t.args) THEN json(t.args)"
+    "                        ELSE json('{}') END)"
+    "          ELSE json_object('type','text','text',t.text) END)"
+    "          ORDER BY t.pos)"
+    "          FILTER (WHERE t.kind = 'tool_call' OR COALESCE(t.text,'') != ''))"
+    "      WHEN 'tool' THEN"
+    "        json_group_array(json(json_patch("
+    "          json_object('type','tool_result','tool_use_id',t.call_id,"
+    "                      'content',t.text),"
+    "          CASE WHEN t.is_error THEN json_object('is_error',json('true'))"
+    "               ELSE '{}' END)) ORDER BY t.pos)"
+    "      ELSE json_array(json_object('type','text',"
+    "             'text',COALESCE(NULLIF(t.text,''),'(empty message)')))"
     "    END"
-    "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
-    /* Three disjoint key ranges: an iteration's assistant parts, that
-     * iteration's tool results, and every other entry on its own (ids are
-     * positive — see SQL_GEMINI_CONTENTS for the collision this avoids). */
-    "  GROUP BY CASE"
-    "    WHEN e.type IN ('assistant_message','tool_call','reasoning') THEN -2*e.iteration_id"
-    "    WHEN e.type = 'tool_result' THEN -2*e.iteration_id - 1"
-    "    ELSE e.id END"
-    /* Session context at the turn boundary — see SQL_OPENAI_MESSAGES. */
-    "  UNION ALL"
-    "  SELECT COALESCE("
-    "      (SELECT MAX(pu.pos) FROM _plan pu JOIN entries eu"
-    "         ON eu.id = pu.entry_id AND eu.type = 'user_message'),"
-    "      (SELECT MIN(pp.pos) FROM _plan pp)) - 0.5, "
-           SQL_ANTHROPIC_TEXT("user", "?2")
-    "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
-    "), live AS (SELECT pos, msg FROM seq WHERE msg IS NOT NULL),"
+    "  FROM _transcript t" SQL_REPLAY_JOIN
+    "  GROUP BY t.grp"
+    "), live(pos, msg) AS ("
+    "  SELECT pos, json_object('role',CASE role WHEN 'assistant' THEN 'assistant'"
+    "                                 ELSE 'user' END, 'content',json(content))"
+    "  FROM grouped WHERE json_array_length(content) > 0),"
     /* Prompt-cache breakpoints. Anthropic caching is opt-in and keyed on the
-     * exact prefix up to a marked block, and the context block's move at each
-     * turn boundary changes everything after its old position. So the stable
-     * prefix ends at the last message before the newest user_message: marking
+     * exact prefix up to a marked block, and the user context block's move at
+     * each turn boundary changes everything after its old position. So the
+     * stable prefix ends at the last message before the newest turn: marking
      * it writes the entry the NEXT turn reads, and marking the same spot one
-     * user_message back reads the entry the PREVIOUS turn wrote (the API only
-     * looks ~20 blocks behind a marker on its own — a long tool loop is more
-     * than that). Within a turn the request-level marker in SQL_ANTHROPIC_FULL
+     * turn back reads the entry the PREVIOUS turn wrote (the API only looks
+     * ~20 blocks behind a marker on its own — a long tool loop is more than
+     * that). Within a turn the request-level marker in SQL_ANTHROPIC_FULL
      * follows the growing tail. That is 4 markers with the system prompt's,
-     * the API's limit. */
-    " bp(pos) AS (SELECT (SELECT MAX(l.pos) FROM live l WHERE l.pos < u.pos - 0.5)"
-    "   FROM (SELECT pu.pos FROM _plan pu JOIN entries eu ON eu.id = pu.entry_id"
-    "          WHERE eu.type = 'user_message' ORDER BY pu.pos DESC LIMIT 2) u)"
+     * the API's limit. The block sits at start - 1, hence the bound. */
+    " bp(pos) AS (SELECT (SELECT MAX(l.pos) FROM live l WHERE l.pos < s.start - 1)"
+    "   FROM (SELECT MIN(pos) AS start FROM _transcript WHERE turn_id IS NOT NULL"
+    "          GROUP BY turn_id ORDER BY turn_id DESC LIMIT 2) s)"
     "SELECT json_group_array(json(CASE WHEN pos IN (SELECT pos FROM bp)"
     "    THEN json_set(msg,'$.content[#-1].cache_control'," SQL_CACHE_MARK ")"
     "    ELSE msg END) ORDER BY pos)"
@@ -647,19 +652,12 @@ static char *json_intersect(sqlite3 *db, const char *a, const char *b) {
     return r ? r : strdup("[]");
 }
 
-/* context_text: session context (recall + live state), or NULL. Used by the
- * messages/contents builders, which bind it at ?2 alongside session_id (?1)
- * and the requesting model at ?3 (reasoning replay matches on it). */
-static char *query_text(sqlite3 *db, const char *sql, int64_t session_id,
-                        const char *context_text, const char *model) {
+/* One of the wire projections of _transcript. model (?1) is the requesting
+ * model, which reasoning replay matches on. */
+static char *query_text(sqlite3 *db, const char *sql, const char *model) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_int64(s, 1, session_id);
-    if (context_text && context_text[0])
-        sqlite3_bind_text(s, 2, context_text, -1, SQLITE_STATIC);
-    else sqlite3_bind_null(s, 2);
-    if (model && model[0]) sqlite3_bind_text(s, 3, model, -1, SQLITE_STATIC);
-    else sqlite3_bind_null(s, 3);
+    if (model && model[0]) sqlite3_bind_text(s, 1, model, -1, SQLITE_STATIC);
     char *r = NULL;
     if (sqlite3_step(s) == SQLITE_ROW) {
         const char *t = (const char *)sqlite3_column_text(s, 0);
@@ -715,7 +713,7 @@ static char *query_tools(sqlite3 *db, const char *sql, const char *agent_name,
  * plus three live-state sections queried directly. Each optional section is
  * COALESCE'd away when empty — never an empty tag. The block itself is
  * unconditional: the clock always has something to say. */
-static const char SQL_SESSION_CONTEXT[] =
+static const char SQL_USER_CONTEXT[] =
     "WITH mb AS ("
     "  SELECT group_concat(" MEMORY_BLOCK_RENDER_SQL ", '' ORDER BY b.id) AS txt"
     "  FROM agent_memory_blocks a JOIN memory_blocks b ON b.id=a.block_id"
@@ -727,7 +725,7 @@ static const char SQL_SESSION_CONTEXT[] =
     "  FROM sessions s WHERE s.parent_session_id=?1 AND s.state != 'idle'"
     "), jobs AS ("
     /* Background jobs (status='background'): id + command snippet + age +
-     * log path. Frozen with the rest of the turn context — mid-turn
+     * log path. Frozen with the rest of the user context block — mid-turn
      * freshness is pull-based (read the log / check_session), and the
      * completion arrives as its own user entry, so block and entries never
      * disagree at turn start. */
@@ -769,7 +767,7 @@ static const char SQL_SESSION_CONTEXT[] =
 
 /* ── Public API ────────────────────────────────────────────────── */
 
-/* Wall clock for the context block, stated with its zone — the model can't
+/* Wall clock for the user context block, stated with its zone — the model can't
  * turn "9am" into a cron_expr (which evaluates local, see cron.c) unless it
  * knows what local means here. Volatile by nature, so it lives in the
  * turn-boundary block, never in the cache-sensitive system prompt (F22). */
@@ -781,9 +779,9 @@ static void local_now_text(char *buf, size_t n) {
         snprintf(buf, n, "%lld (unix epoch)", (long long)now);
 }
 
-char *session_context_text(sqlite3 *db, int64_t session_id, const char *recall_text) {
+char *user_context_text(sqlite3 *db, int64_t session_id, const char *recall_text) {
     sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db, SQL_SESSION_CONTEXT, -1, &st, NULL) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db, SQL_USER_CONTEXT, -1, &st, NULL) != SQLITE_OK)
         return NULL;
     char now_buf[96];
     local_now_text(now_buf, sizeof(now_buf));
@@ -802,14 +800,14 @@ char *session_context_text(sqlite3 *db, int64_t session_id, const char *recall_t
 }
 
 int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
-                      const ContextPlan *plan, const char *context_text,
+                      const ContextPlan *plan, const char *user_context,
                       const char *system_prompt, LlmPayload *out) {
     if (!db || !cfg || !plan || !out) return -1;
     memset(out, 0, sizeof(*out));
     out->db = db;
 
     int gemini = (cfg->provider.endpoint_type == ENDPOINT_GEMINI);
-    if (populate_plan(db, plan) != 0) return -1;
+    if (build_transcript(db, session_id, plan, user_context) != 0) return -1;
 
     /* Effective tool scope = grants ∩ session tool_filter ∩ the pinned chat's
      * tool_filter as it is now. An agent with an empty grant set keeps "[]"
@@ -845,8 +843,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
                                                       : cfg->provider.model;
 
     if (gemini) {
-        char *contents = query_text(db, SQL_GEMINI_CONTENTS, session_id, context_text,
-                                    replay_model);
+        char *contents = query_text(db, SQL_GEMINI_CONTENTS, replay_model);
         char *tools_json = query_tools(db, SQL_GEMINI_TOOLS, agent_name,
                                        allowed_tools, worker_tools);
 
@@ -883,7 +880,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         int anthropic = (cfg->provider.endpoint_type == ENDPOINT_ANTHROPIC);
         char *messages = query_text(db, anthropic ? SQL_ANTHROPIC_MESSAGES
                                                   : SQL_OPENAI_MESSAGES,
-                                    session_id, context_text, replay_model);
+                                    replay_model);
         if (!messages) messages = strdup("[]");
         char *tools_json = query_tools(db, anthropic ? SQL_ANTHROPIC_TOOLS
                                                      : SQL_OPENAI_TOOLS,
@@ -931,6 +928,8 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
 void llm_payload_release(LlmPayload *p) {
     if (!p) return;
     if (p->stmt) { sqlite3_finalize(p->stmt); p->stmt = NULL; }
-    if (p->db) { sqlite3_exec(p->db, "DROP TABLE IF EXISTS _plan;", NULL, NULL, NULL); }
+    if (p->db)
+        sqlite3_exec(p->db, "DROP TABLE IF EXISTS _transcript; DROP TABLE IF EXISTS _plan;",
+                     NULL, NULL, NULL);
     p->body = NULL;
 }

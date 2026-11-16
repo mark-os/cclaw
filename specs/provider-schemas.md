@@ -568,7 +568,7 @@ total = input + output + cacheRead + cacheWrite  (computed)
   rides as user-role content with the `'[system] '` prefix.
 - **Cache hash order**: tools → system → messages (prefix-based, like OpenAI).
 - **Implication for CClaw**: the top-level marker alone is not enough. The
-  prefix is deterministic *within* a turn, but the session context block moves
+  prefix is deterministic *within* a turn, but the user context block moves
   at each turn boundary, so everything after its old position stops matching.
   The builder adds explicit markers at the stable-prefix boundary — see
   [providers.md](providers.md#anthropic-messages).

@@ -127,7 +127,7 @@ not, because nothing in the loop ever re-read the state.
 `search_config` closes the loop from the other side: a **pending approvals**
 section in both formats (id, age, one-line summary — `approval_format_summary`,
 clipped in the prose view), pending-only, matching the `<open_approvals>`
-context block. "Waiting on a human" is the one approval state the model can
+section of the user context block. "Waiting on a human" is the one approval state the model can
 act on.
 
 ## `format:json`

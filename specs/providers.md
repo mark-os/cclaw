@@ -87,12 +87,67 @@ reaches CClaw through OpenRouter's normalization.
 **System-role convention (all builders)**: only the leading system prompt
 carries the system role (`messages[0]` / `systemInstruction` / top-level
 `system`). All other
-system-originated content — mid-turn `type='system'` entries, compaction
-summaries — is emitted as a `'[system] '`-prefixed **user**
-message on every provider. No builder ever emits a non-leading `role: system`.
+system-originated content is emitted as a **user** message on every provider:
+mid-turn `type='system'` entries with a `'[system] '` prefix, compaction
+summaries with `'[Summary of earlier conversation]'`. No builder ever emits a
+non-leading `role: system`. The prefixes are applied once, in the transcript
+step below.
 
 Key: OpenAI is the odd one out — `arguments` is a string. Everyone else uses objects.
-CClaw stores `args` as object in `tool_calls` column (provider-neutral). OpenAI emitter stringifies at wire time.
+A tool call's arguments are stored once, as JSON text in the `tool_call`
+entry's `content`; the OpenAI projection sends that string, the other two
+send it as an object.
+
+### Payload assembly: plan → transcript → wire
+
+Every request is built in three steps, all in SQL (`llm_build_payload`):
+
+1. **Plan** — `context_plan()` picks the entries on the branch that fit the
+   budget; their ids go into the temp table `_plan(pos, entry_id)`.
+2. **Transcript** — one statement turns the plan into the temp table
+   `_transcript`, one row per part, in a provider-neutral form. Everything the
+   three formats agree on is decided here and nowhere else:
+   - which entries are sent, and each one's role (`user` / `assistant` /
+     `tool`) and kind (`text` / `tool_call` / `tool_result`);
+   - text decoration: the `'[system] '` and `'[Summary of earlier
+     conversation]'` prefixes, the `cron_result` label, the untrusted-content
+     wrap on tool results;
+   - grouping (`grp`): an iteration's assistant text and tool calls share a
+     key, that iteration's tool results share another, every other row has its
+     own;
+   - reasoning: each assistant row carries the id of its iteration's
+     `reasoning` entry **if that entry is on the plan**;
+   - the user context block, as a row of its own (below).
+3. **Wire** — `SQL_OPENAI_MESSAGES`, `SQL_GEMINI_CONTENTS` and
+   `SQL_ANTHROPIC_MESSAGES` each project `_transcript` into their shape. What
+   stays per format is what genuinely differs: how groups become messages
+   (OpenAI and Gemini send each tool result separately, Anthropic sends an
+   iteration's results as one user message), the reasoning replay artifact,
+   cache markers, empty-text guards.
+
+The wire queries read the conversation only through `_transcript`, so **only
+what is on the plan is sent**: a tool call, tool result or reasoning entry
+that has been taken off the branch (the row still exists) appears on no
+provider, and an iteration with neither text nor a tool call on the plan sends
+no message. Both temp tables are dropped by `llm_payload_release()`; the
+request body itself comes zero-copy from a statement that reads neither.
+
+### The user context block
+
+The per-turn `<RELEVANT_CONTEXT>` text (clock, recall, context-placement
+memory, running sub-agents, background jobs, pending approvals) is called the
+**user context block**. It is built once at turn start, stored in
+`sessions.turn_context`, and sent as a user message of its own.
+
+**Position**: immediately before the first entry of the newest turn on the
+plan (newest = highest `entries.turn_id`). A turn that opens with several
+queued user messages gets the block before all of them. It does not move while
+the turn runs, so every iteration of a turn extends the same prompt-cache
+prefix, and it never lands between an assistant's tool calls and their
+results. Entries that do not open a turn do not move it: a compaction summary
+inherits the turn of the entry it follows, a `cron_result` the turn it lands
+in. If no entry on the plan has a `turn_id`, the block goes before the first
+entry.
 
 ## Anthropic Messages
 
@@ -119,11 +174,12 @@ What the builder does that the other two don't, and why:
   `tools`, every earlier message — and the block must come back in its
   original position, so what is stored (`reasoning_meta.format =
   'anthropic_content'`) and replayed is the response's whole `content` array.
-  CClaw's session context block moves at every turn boundary, which is an edit
+  CClaw's user context block moves at every turn boundary, which is an edit
   to that prefix; inside a turn the prefix is byte-stable (the mid-turn
   invariant). So blocks from earlier turns are dropped (a leading run, which
   the API permits) and the current turn's go back untouched. A model switch
-  falls back to rebuilding the message from entries, without thinking.
+  falls back to rebuilding the message from entries, without thinking, and so
+  does an iteration whose `reasoning` entry is not on the plan.
 - **`thinking.block_binding.prefix_mismatch_behavior: "drop_block"`.** On
   accounts where the binding check is enforced, replaying a block after its
   prefix changed is a 400. The scoping above should prevent that, but a
@@ -136,11 +192,11 @@ What the builder does that the other two don't, and why:
   ```
 - **Prompt caching is opt-in, so the builder opts in** with four markers (the
   API's limit): the system prompt; the request-level marker, which follows the
-  growing tail inside a turn; and the last message before each of the two
-  newest user messages. That last pair exists because of the same moving
-  context block — the stable prefix ends just before it, so one marker writes
-  the entry the next turn reads and the other reads the entry the previous
-  turn wrote. `llm_responses.cached_tokens` / `cache_write_tokens` show it
+  growing tail inside a turn; and the last message before the start of each
+  of the two newest turns. That last pair exists because of the same moving
+  user context block — the stable prefix ends just before it, so one marker
+  writes the entry the next turn reads and the other reads the entry the
+  previous turn wrote. `llm_responses.cached_tokens` / `cache_write_tokens` show it
   working. Changing an agent's tool set invalidates everything (tools are the
   head of the prefix).
 - **Usage is normalized.** Anthropic's `input_tokens` excludes cache reads and

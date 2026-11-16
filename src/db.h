@@ -233,7 +233,7 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state);
 int session_set_iteration(sqlite3 *db, int64_t session_id, int iter);
 int session_bump_iteration(sqlite3 *db, int64_t session_id);
 
-/* Per-turn materialized <RELEVANT_CONTEXT> block. Written once at turn start
+/* The per-turn materialized user context block. Written once at turn start
  * (NULL/empty clears), read back verbatim by tool-loop iterations so the
  * request prefix stays byte-stable across the turn (prompt caching). */
 int session_set_turn_context(sqlite3 *db, int64_t session_id, const char *text);
@@ -491,7 +491,7 @@ typedef struct {
     char *description;
     int char_limit;
     int read_only;    /* effective for the agent that asked: block OR attachment */
-    char *placement;  /* 'system' (system prompt) or 'context' (per-turn session context) */
+    char *placement;  /* 'system' (system prompt) or 'context' (per-turn user context block) */
     int64_t created_at;
     int64_t updated_at;
 } MemoryBlock;
@@ -500,7 +500,7 @@ typedef struct {
  * read-write (agent_name NULL: an unattached block — the operator's path).
  * Returns row id (>0) or -1: invalid label, or the agent already has a block
  * with that label. placement: NULL/"" defaults to 'context' — new memory
- * rides in the per-turn session context block; pass "system" only for stable
+ * rides in the per-turn user context block; pass "system" only for stable
  * identity content worth baking into the (cached, once-per-session) system
  * prompt. */
 int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
@@ -565,7 +565,7 @@ int memory_note_set_guarded(sqlite3 *db, int64_t block_id, int64_t note_id, cons
 int memory_note_delete(sqlite3 *db, int64_t block_id, int64_t note_id);
 
 /* SQL expression rendering one block for the prompt, shared by the two
- * places that show memory (system prompt, per-turn context) so they cannot
+ * places that show memory (system prompt, user context block) so they cannot
  * drift. Expects `b` = memory_blocks row and `a` = the asking agent's
  * agent_memory_blocks row. A note shows as "[id date] text": the date (UTC)
  * is when its text last changed — a date, not an age, so the rendered prompt

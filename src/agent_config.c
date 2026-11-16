@@ -17,7 +17,7 @@
 
 /* helper — render template vars in a string. {date} stays date-only on
  * purpose: anything finer would bust the provider prompt cache every render
- * (review-1 F22); time-of-day belongs in session_context_text(). */
+ * (review-1 F22); time-of-day belongs in user_context_text(). */
 static char *render_template(const char *tmpl, int64_t session_id,
                              const char *agent_name, const char *agents_dir) {
     if (!tmpl) return NULL;

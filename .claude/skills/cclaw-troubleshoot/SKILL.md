@@ -110,7 +110,7 @@ cclaw sqlite3 <db> "SELECT ...;"
    - `memory_blocks` (metadata) + `memory_entries` (text, joined on
      `agent_name`+`block_label`, ordered by `pos`). `memory_blocks.placement`
      decides where a block renders: `system` → system prompt (cached prefix),
-     `context` → per-turn session context block.
+     `context` → per-turn user context block.
 
 6. **Reproduction (CLI)** — default is error-only; opt in for detail:
    ```bash

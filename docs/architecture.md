@@ -59,14 +59,14 @@ Mid-turn, only LLM output and the results of this turn's tool calls are written 
 
 2. **Cut**: walk from the leaf toward the root, adding up token estimates until the budget runs out. The cut snaps back to the start of a turn, so a turn is never split.
 
-3. **Payload pass**: the surviving entry IDs are joined against `entries`, and SQLite's `json_object()`/`json_group_array()` produce the request body. Zero-copy: the body points into the SQLite statement buffer until `llm_payload_release()`.
+3. **Payload pass**: the surviving entry IDs are joined against `entries` once, into a provider-neutral transcript (role, decorated text, iteration grouping, the user context block's position), and each wire format is a `json_object()`/`json_group_array()` projection of it. Zero-copy: the body points into the SQLite statement buffer until `llm_payload_release()`.
 
 ### Prompt Caching
 
 Providers cache on a stable request prefix. CClaw keeps the prefix stable because:
 - The payload is deterministic (same entries → same JSON, byte for byte)
 - Conversations grow by appending
-- The session context block (recall and live state) is computed once per turn and placed just before the newest user message, so it never moves mid-turn
+- The user context block (clock, recall and live state) is computed once per turn and placed just before the first entry of the newest turn, so it never moves mid-turn
 
 ## State Machine
 

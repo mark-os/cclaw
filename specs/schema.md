@@ -523,7 +523,7 @@ in the comment on `patch_v61_chats()` (`src/db.c`).
 | `state` | TEXT NOT NULL DEFAULT 'idle' | see state machine below |
 | `owner_instance` | TEXT | FK to `processes.instance_id`; NULL ⟺ idle |
 | `turn_iteration` | INTEGER NOT NULL DEFAULT 0 | iteration within current turn |
-| `turn_context` | TEXT | `<RELEVANT_CONTEXT>` block, materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; always present (it carries `<current_time>` even when nothing else is live) |
+| `turn_context` | TEXT | The user context block (`<RELEVANT_CONTEXT>` text), materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; always present (it carries `<current_time>` even when nothing else is live) |
 | `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
 | `compaction_fail_count` | INTEGER NOT NULL DEFAULT 0 | consecutive failed compaction attempts; zeroed on success. At 3 (`COMPACTION_FAIL_NOTIFY`, `llm_proc.c`) the session's channel gets one operator notice per streak — the agent is never told; the session keeps running on the read-time context window (`plan_find_cut`), nothing is deleted |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
@@ -716,7 +716,7 @@ The AFTER INSERT trigger keys on `entries.type` (not `role`): for `tool_call` an
 
 ```
 idx_entries_session    (session_id, id)                         -- per-session scans in entry order
-idx_entries_iteration_type (session_id, iteration_id, type, part_index) -- covering: payload builder's sibling-part lookup
+idx_entries_iteration_type (session_id, iteration_id, type, part_index) -- covering: the payload transcript's reasoning lookup
 idx_entries_created    (created_at)                             -- budget gate time-window sums
 ```
 
@@ -791,7 +791,7 @@ Named memory blocks. A block is a pure **container**: it carries a label, char l
 | `description` | TEXT | tells agent what block is for |
 | `char_limit` | INTEGER NOT NULL DEFAULT 5000 | budget for the notes' total length |
 | `read_only` | INTEGER NOT NULL DEFAULT 0 | 1 = no agent may change the block |
-| `placement` | TEXT NOT NULL DEFAULT 'system' | `system` = rendered into the system prompt once per session (`agent_config.c`); `context` = rendered into the `<RELEVANT_CONTEXT>` block at each turn start. New blocks default to `context` via `memory_block_create` (the API default every insert path goes through — the column DEFAULT is inert); only the Assistant's seeded AGENT/USER identity blocks ask for `system` |
+| `placement` | TEXT NOT NULL DEFAULT 'system' | `system` = rendered into the system prompt once per session (`agent_config.c`); `context` = rendered into the user context block (`<RELEVANT_CONTEXT>`) at each turn start. New blocks default to `context` via `memory_block_create` (the API default every insert path goes through — the column DEFAULT is inert); only the Assistant's seeded AGENT/USER identity blocks ask for `system` |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | UNIQUE | (created_by, label) | |
@@ -940,7 +940,7 @@ seconds) — the unused fields are `''` / NULL / NULL respectively
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE |
 | `name` | TEXT NOT NULL | |
-| `cron_expr` | TEXT NOT NULL | Fields are matched in the **daemon's local timezone** (`localtime_r`/`mktime`), so a "9am" job follows DST; the `<current_time>` line in the turn-context block states that zone so the model can write the expression. `''` sentinel when `run_at` or `interval_s` is used instead (kept NOT NULL — SQLite can't relax it without a table rebuild) |
+| `cron_expr` | TEXT NOT NULL | Fields are matched in the **daemon's local timezone** (`localtime_r`/`mktime`), so a "9am" job follows DST; the `<current_time>` line in the user context block states that zone so the model can write the expression. `''` sentinel when `run_at` or `interval_s` is used instead (kept NOT NULL — SQLite can't relax it without a table rebuild) |
 | `run_at` | INTEGER | one-shot fire time; row is deleted (not rescheduled) once fired |
 | `interval_s` | INTEGER | fixed-period cadence; not exposed on the model-facing `cron_set` schema and no longer written by anything — a legal column that only pre-v41 rows still use |
 | `session_id` | INTEGER NOT NULL | meaning follows `target`: the pinned session (`'pin'`), else the fire anchor — the session that set the job, and for `'new'` the most recently fired one. `0` = resolve to the agent's most recently active session at fire time (its state is not a filter: a fire into a busy session queues and lands at the next turn boundary) |

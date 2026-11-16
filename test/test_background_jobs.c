@@ -1,6 +1,6 @@
 /* Background jobs (blocking-vs-background step 4): the job IS the tool_calls
  * row in status 'background'. Unit-level coverage — the drain-to-log stream,
- * the jobs snapshot in the turn context, orphan reconciliation at recovery,
+ * the jobs snapshot in the user context block, orphan reconciliation at recovery,
  * and the check_session/cancel surfaces. The full fork path (job start,
  * live log growth, inbox completion) is exercised against a live daemon
  * before release, like the other EXEC_SANDBOX behaviors. */
@@ -133,12 +133,12 @@ static void test_log_path_and_tail(void) {
     printf("  PASS test_log_path_and_tail\n");
 }
 
-/* ── jobs snapshot renders into the session context block ─────────── */
+/* ── jobs snapshot renders into the user context block ────────────── */
 static void test_context_block_lists_jobs(void) {
     sqlite3 *db = test_db_open(":memory:");
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     int64_t job = seed_job(db, sid, "call_ctx", "background", "inst-live");
-    char *ctx = session_context_text(db, sid, NULL);
+    char *ctx = user_context_text(db, sid, NULL);
     assert(ctx != NULL);
     assert(strstr(ctx, "<background_jobs>") != NULL);
     char needle[64];
@@ -153,7 +153,7 @@ static void test_context_block_lists_jobs(void) {
     assert(sqlite3_exec(db,
         "UPDATE tool_calls SET status='done', resolved_by='job:exit=0';",
         NULL, NULL, NULL) == SQLITE_OK);
-    ctx = session_context_text(db, sid, NULL);
+    ctx = user_context_text(db, sid, NULL);
     assert(ctx && strstr(ctx, "<background_jobs>") == NULL);
     free(ctx);
     db_close(db);

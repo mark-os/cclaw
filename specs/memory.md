@@ -6,7 +6,7 @@ Design reference. Derived from Letta's persistent agent memory architecture, ada
 
 | Tier | CClaw Implementation | Access Pattern |
 |------|---------------------|----------------|
-| Core (in-context) | `memory_blocks` + `memory_notes` in cclaw.db, attached to agents by `agent_memory_blocks` | Always in context, bounded by `char_limit`; `placement` picks system prompt or per-turn context block |
+| Core (in-context) | `memory_blocks` + `memory_notes` in cclaw.db, attached to agents by `agent_memory_blocks` | Always in context, bounded by `char_limit`; `placement` picks system prompt or the per-turn user context block |
 | Archival (long-term) | Not yet implemented: `passages` table + embeddings | Semantic search, unlimited |
 | Recall (history) | `entries` table + FTS5 in cclaw.db | Keyword/semantic search over all past turns |
 
@@ -53,7 +53,7 @@ holder that did not create it).
 
 ### Where a block renders: placement
 
-- `context` (default for new blocks): rendered into the `<RELEVANT_CONTEXT>` block (`llm_payload.c`), which rides at the **turn boundary** — a user message right before the newest user_message, never in the system prompt. The block (local wall clock with its timezone + recall + context-placement blocks + running sub-agents + open approvals — pending and approved-but-unconsumed, in `<open_approvals>`) is **materialized once at turn start** (`sessions.turn_context`, `llm_proc.c`) and reused verbatim by every tool-loop iteration, so both its content and position stay stable for the whole turn and each iteration extends the prompt-cache prefix instead of invalidating it. Live state is thus a turn-start snapshot; mid-turn changes reach the model as tool results.
+- `context` (default for new blocks): rendered into the user context block (the `<RELEVANT_CONTEXT>` text, `llm_payload.c`), which rides at the **turn boundary** — a user message right before the first entry of the newest turn, never in the system prompt. The block (local wall clock with its timezone + recall + context-placement blocks + running sub-agents + open approvals — pending and approved-but-unconsumed, in `<open_approvals>`) is **materialized once at turn start** (`sessions.turn_context`, `llm_proc.c`) and reused verbatim by every tool-loop iteration, so both its content and position stay stable for the whole turn and each iteration extends the prompt-cache prefix instead of invalidating it. Live state is thus a turn-start snapshot; mid-turn changes reach the model as tool results.
 - `system`: baked into the system prompt once per session (`agent_config.c`). Reserve for stable identity content — the system prompt stays byte-identical across turns, so provider prompt caching keeps working, but every edit invalidates the whole cached prefix on the next session render. The base Assistant's seeded `AGENT` and `USER` blocks use this placement. A block the agent edits often (running notes) belongs in `context`.
 
 Placement is a property of the block, so a shared block renders in the same
@@ -162,7 +162,7 @@ Not yet implemented:
 - `passages` table (text, embedding BLOB, source_type, source_id) — in cclaw.db
 - Hybrid search: FTS5 + vector similarity (RRF merge)
 - Agent tool: `memory_search(query)` for explicit recall
-- Auto-recall (implemented, FTS5-only today): top hits ride in the `<RELEVANT_CONTEXT>` block at the turn boundary — see Core Memory above
+- Auto-recall (implemented, FTS5-only today): top hits ride in the user context block (`<RELEVANT_CONTEXT>`) at the turn boundary — see Core Memory above
 
 ## Context Window Management
 
@@ -185,7 +185,7 @@ Not yet implemented:
   Still exactly one role-4 entry; empty state appends nothing. A failed
   compaction writes no entry at all (no coda-only rows) — the failure counter
   in `compaction_record_outcome` records it. The read-time sliding window gets
-  no coda: that state is already live in the `<RELEVANT_CONTEXT>` block and
+  no coda: that state is already live in the user context block and
   `check_session`.
 
 ## Letta Patterns NOT Adopted

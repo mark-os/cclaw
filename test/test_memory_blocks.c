@@ -48,7 +48,7 @@ static void test_create_and_get(void) {
     assert(mb->char_limit == 5000);
     assert(mb->read_only == 0);
     /* NULL placement defaults to 'context' — new memory rides in the
-     * per-turn session context block, not the system prompt. */
+     * per-turn user context block, not the system prompt. */
     assert(strcmp(mb->placement, "context") == 0);
     memory_block_free(mb);
 

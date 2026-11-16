@@ -623,8 +623,9 @@ CREATE TABLE IF NOT EXISTS hooks (
 -- addressed by its row id — ids are never reused and never renumbered.
 --
 -- placement: 'system' blocks render into the system prompt once per session
--- (agent_config.c); 'context' blocks render into the <RELEVANT_CONTEXT>
--- block, materialized at each turn start (llm_payload.c session_context_text).
+-- (agent_config.c); 'context' blocks render into the user context block
+-- (<RELEVANT_CONTEXT>), materialized at each turn start (llm_payload.c
+-- user_context_text).
 -- New blocks default to 'context' — the API default in memory_block_create,
 -- which every insert path goes through; the column DEFAULT below is inert.
 --

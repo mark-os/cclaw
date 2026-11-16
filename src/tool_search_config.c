@@ -27,8 +27,9 @@ static const char *PARAMS_JSON =
 /* Open approvals on this session as a JSON array of
  * {id, age_seconds, age, summary} — built once and rendered by BOTH formats,
  * so the two views cannot drift. Pending-only, matching the <open_approvals>
- * context block (src/llm_payload.c): "waiting on a human" is the one approval
- * state the model can act on. Never NULL on success; '[]' when there are none. */
+ * section of the user context block (src/llm_payload.c): "waiting on a human"
+ * is the one approval state the model can act on. Never NULL on success; '[]'
+ * when there are none. */
 static char *pending_approvals_json(sqlite3 *db, int64_t session_id) {
     char *arr = strdup("[]");
     sqlite3_stmt *st;

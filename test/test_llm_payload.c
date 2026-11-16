@@ -207,12 +207,12 @@ static void test_gemini_payload(void) {
     printf("  PASS test_gemini_payload\n");
 }
 
-/* Session context (recall + live state, wrapped in <RELEVANT_CONTEXT>) rides
- * at the TURN BOUNDARY — right before the newest user_message — on both
- * endpoints, never in the system prompt / systemInstruction. The user's
- * actual message stays the true tail of its turn, and the block's position
- * never moves as tool-loop iterations append entries after it. */
-static void test_recall_in_session_context(void) {
+/* The user context block (recall + live state, wrapped in <RELEVANT_CONTEXT>)
+ * rides at the TURN BOUNDARY — right before the first entry of the newest
+ * turn — on both endpoints, never in the system prompt / systemInstruction.
+ * The user's actual message stays the true tail of its turn, and the block's
+ * position never moves as tool-loop iterations append entries after it. */
+static void test_recall_in_user_context(void) {
     sqlite3 *db = open_seeded();
 
     int64_t sid;
@@ -228,7 +228,7 @@ static void test_recall_in_session_context(void) {
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
-    char *context_text = session_context_text(db, sid, recall);
+    char *context_text = user_context_text(db, sid, recall);
     assert(context_text);
     assert(strstr(context_text, "<RELEVANT_CONTEXT>"));
     assert(strstr(context_text, "<recall>"));
@@ -240,8 +240,8 @@ static void test_recall_in_session_context(void) {
     assert(llm_build_payload(db, sid, &cfg, &plan, context_text, "You are helpful.", &payload) == 0);
 
     sqlite3_stmt *s;
-    /* Tail is the real conversation (user then assistant); the context
-     * block rides right BEFORE the newest user message. */
+    /* Tail is the real conversation (user then assistant); the user context
+     * block rides right BEFORE the turn's first entry, the user message. */
     sqlite3_prepare_v2(db,
         "SELECT json_extract(?1,'$.messages[#-1].role'),"
         " json_extract(?1,'$.messages[#-1].content'),"
@@ -285,14 +285,14 @@ static void test_recall_in_session_context(void) {
     free(context_text);
     context_plan_free(&plan);
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_recall_in_session_context\n");
+    printf("  PASS test_recall_in_user_context\n");
 }
 
-/* session_context_text: open approvals and running sub-agents surface in
+/* user_context_text: open approvals and running sub-agents surface in
  * the assembled payload; with nothing pending/running and no recall the block
  * carries the wall clock alone — the zone is stated, since cron expressions
  * evaluate in local time and the model has to translate "9am" into one. */
-static void test_session_context_live_state(void) {
+static void test_user_context_live_state(void) {
     sqlite3 *db = open_seeded();
 
     int64_t sid;
@@ -301,7 +301,7 @@ static void test_session_context_live_state(void) {
     /* Quiet case: clock only, with its zone */
     setenv("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2", 1);
     tzset();
-    char *quiet = session_context_text(db, sid, NULL);
+    char *quiet = user_context_text(db, sid, NULL);
     assert(quiet);
     assert(strstr(quiet, "<current_time>"));
     assert(strstr(quiet, "EST") || strstr(quiet, "EDT"));
@@ -344,7 +344,7 @@ static void test_session_context_live_state(void) {
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
-    char *context_text = session_context_text(db, sid, NULL);
+    char *context_text = user_context_text(db, sid, NULL);
     assert(context_text);
     assert(strstr(context_text, "<open_approvals>"));
     /* pending only: decided rows are history, never advertised */
@@ -368,7 +368,7 @@ static void test_session_context_live_state(void) {
     free(context_text);
     context_plan_free(&plan);
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_session_context_live_state\n");
+    printf("  PASS test_user_context_live_state\n");
 }
 
 /* Turn-boundary placement under a tool loop: the block must never split an
@@ -377,7 +377,7 @@ static void test_session_context_live_state(void) {
  * entries — that position stability is what lets all iterations of a turn
  * share one prompt-cache prefix. Also covers the per-turn freeze store
  * (session_set/get_turn_context). */
-static void test_session_context_tool_loop(void) {
+static void test_user_context_tool_loop(void) {
     sqlite3 *db = open_seeded();
 
     int64_t sid = session_create(db, "test", "default", -1, 0);
@@ -475,7 +475,7 @@ static void test_session_context_tool_loop(void) {
     context_plan_free(&plan);
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_session_context_tool_loop\n");
+    printf("  PASS test_user_context_tool_loop\n");
 }
 
 static void test_payload_with_tools(void) {
@@ -1879,6 +1879,226 @@ static void test_anthropic_thinking_replay(void) {
     printf("  PASS test_anthropic_thinking_replay\n");
 }
 
+/* ── The transcript: anchor, plan scoping, batch pairing ─────────── */
+
+/* A body's message sequence as one line, the same notation for all three
+ * formats: messages joined by '|', each "role:parts" where a part is its
+ * text, "=<id>" for a tool call (Gemini has no ids: the tool name),
+ * "<<id>" for a tool result, and a trailing '*' on an Anthropic block that
+ * carries a cache breakpoint. */
+static char *shape(sqlite3 *db, const char *body, EndpointType ep) {
+    static const char *SQL[] = {
+        [ENDPOINT_OPENAI] =
+        "SELECT group_concat(json_extract(m.value,'$.role') || ':' || concat_ws(',',"
+        "  json_extract(m.value,'$.content'),"
+        "  (SELECT group_concat('=' || json_extract(c.value,'$.id'), ',')"
+        "     FROM json_each(m.value,'$.tool_calls') c),"
+        "  '<' || json_extract(m.value,'$.tool_call_id')), '|')"
+        " FROM json_each(?1,'$.messages') m",
+        [ENDPOINT_GEMINI] =
+        "SELECT group_concat(json_extract(m.value,'$.role') || ':' ||"
+        "  (SELECT group_concat(COALESCE(json_extract(p.value,'$.text'),"
+        "     '=' || json_extract(p.value,'$.functionCall.name'),"
+        "     '<' || json_extract(p.value,'$.functionResponse.name')), ',')"
+        "     FROM json_each(m.value,'$.parts') p), '|')"
+        " FROM json_each(?1,'$.contents') m",
+        [ENDPOINT_ANTHROPIC] =
+        "SELECT group_concat(json_extract(m.value,'$.role') || ':' ||"
+        "  (SELECT group_concat(CASE json_extract(b.value,'$.type')"
+        "       WHEN 'text' THEN json_extract(b.value,'$.text')"
+        "       WHEN 'tool_use' THEN '=' || json_extract(b.value,'$.id')"
+        "       WHEN 'tool_result' THEN '<' || json_extract(b.value,'$.tool_use_id')"
+        "       ELSE json_extract(b.value,'$.type') END ||"
+        "     CASE WHEN json_extract(b.value,'$.cache_control') IS NULL THEN ''"
+        "          ELSE '*' END, ',')"
+        "     FROM json_each(m.value,'$.content') b), '|')"
+        " FROM json_each(?1,'$.messages') m",
+    };
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db, SQL[ep], -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    const char *t = (const char *)sqlite3_column_text(st, 0);
+    char *r = strdup(t ? t : "");
+    sqlite3_finalize(st);
+    return r;
+}
+
+/* Build for one format with no system prompt (so index 0 is the first
+ * message everywhere) and compare the shape. model_id m@p is what the
+ * reasoning rows seeded below are stamped with. */
+static void expect_shape(sqlite3 *db, int64_t sid, EndpointType ep, const char *ctx,
+                         const char *want, LlmPayload *keep) {
+    Config cfg = {0};
+    cfg.provider.model = "m";
+    cfg.provider.model_id = "m@p";
+    cfg.provider.endpoint_type = ep;
+    cfg.context_window = 128000;
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    LlmPayload p;
+    assert(llm_build_payload(db, sid, &cfg, &plan, ctx, NULL, &p) == 0);
+    char *got = shape(db, p.body, ep);
+    if (strcmp(got, want) != 0) {
+        fprintf(stderr, "FAIL shape (endpoint %d):\n  got  %s\n  want %s\n", (int)ep, got, want);
+        abort();
+    }
+    free(got);
+    if (keep) *keep = p; else llm_payload_release(&p);
+    context_plan_free(&plan);
+}
+
+static int64_t add_user(sqlite3 *db, int64_t sid, const char *text) {
+    Message m = {.role = ROLE_USER, .content = (char *)text};
+    int64_t id = entry_append_with_iteration(db, sid, &m, 0);
+    assert(id > 0);
+    return id;
+}
+
+static int64_t add_typed(sqlite3 *db, int64_t sid, int64_t it, const char *type, int part,
+                         const char *content, const char *call_id, const char *tool) {
+    int64_t id = entry_append_typed(db, sid, it, type, part, content, call_id, tool, 0,
+                                    STOP_REASON_NONE, NULL, 0, 0, 0);
+    assert(id > 0);
+    return id;
+}
+
+static void run_sql(sqlite3 *db, const char *fmt, long long a, long long b) {
+    char sql[256];
+    snprintf(sql, sizeof(sql), fmt, a, b);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+}
+
+/* The user context block sits before the FIRST entry of the newest turn: a
+ * turn that opens with several queued user messages gets it before all of
+ * them, it does not move while the turn runs, and the Anthropic cache
+ * breakpoints mark the last message before each of the two newest turns. */
+static void test_user_context_anchor(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = session_create(db, "anchor", "default", -1, 0);
+    const EndpointType O = ENDPOINT_OPENAI, G = ENDPOINT_GEMINI, A = ENDPOINT_ANTHROPIC;
+
+    /* A turn opened by one message. */
+    add_user(db, sid, "u1");
+    add_typed(db, sid, db_next_iteration_id(db, sid), "assistant_message", 0, "a1", NULL, NULL);
+    add_user(db, sid, "u2");
+    expect_shape(db, sid, O, "CTX", "user:u1|assistant:a1|user:CTX|user:u2", NULL);
+    expect_shape(db, sid, G, "CTX", "user:u1|model:a1|user:CTX|user:u2", NULL);
+    expect_shape(db, sid, A, "CTX", "user:u1|assistant:a1*|user:CTX|user:u2", NULL);
+
+    /* Two more queue up before the model runs: same turn, block before all three. */
+    add_user(db, sid, "u3");
+    add_user(db, sid, "u4");
+    expect_shape(db, sid, O, "CTX", "user:u1|assistant:a1|user:CTX|user:u2|user:u3|user:u4", NULL);
+    expect_shape(db, sid, G, "CTX", "user:u1|model:a1|user:CTX|user:u2|user:u3|user:u4", NULL);
+    expect_shape(db, sid, A, "CTX", "user:u1|assistant:a1*|user:CTX|user:u2|user:u3|user:u4", NULL);
+    /* The breakpoints do not depend on a block being sent. */
+    expect_shape(db, sid, A, NULL, "user:u1|assistant:a1*|user:u2|user:u3|user:u4", NULL);
+
+    /* An iteration inside the turn: nothing before the tail moves. */
+    int64_t it = db_next_iteration_id(db, sid);
+    add_typed(db, sid, it, "assistant_message", 0, "a2", NULL, NULL);
+    add_typed(db, sid, it, "tool_call", 1, "{}", "c1", "t1");
+    add_typed(db, sid, it, "tool_result", 0, "r1", "c1", "t1");
+    expect_shape(db, sid, O, "CTX",
+        "user:u1|assistant:a1|user:CTX|user:u2|user:u3|user:u4|assistant:a2,=c1|tool:r1,<c1", NULL);
+    expect_shape(db, sid, G, "CTX",
+        "user:u1|model:a1|user:CTX|user:u2|user:u3|user:u4|model:a2,=t1|user:<t1", NULL);
+    expect_shape(db, sid, A, "CTX",
+        "user:u1|assistant:a1*|user:CTX|user:u2|user:u3|user:u4|assistant:a2,=c1|user:<c1", NULL);
+
+    /* The next turn: the block moves to its start, and the breakpoints to the
+     * last message before this turn and before the one it follows. */
+    add_user(db, sid, "u5");
+    expect_shape(db, sid, O, "CTX",
+        "user:u1|assistant:a1|user:u2|user:u3|user:u4|assistant:a2,=c1|tool:r1,<c1|user:CTX|user:u5", NULL);
+    expect_shape(db, sid, A, "CTX",
+        "user:u1|assistant:a1*|user:u2|user:u3|user:u4|assistant:a2,=c1|user:<c1*|user:CTX|user:u5", NULL);
+
+    /* A cron_result lands in the turn it follows and opens none. */
+    assert(entry_append_cron_result(db, sid, "j", "out", 0) > 0);
+    expect_shape(db, sid, G, "CTX",
+        "user:u1|model:a1|user:u2|user:u3|user:u4|model:a2,=t1|user:<t1|user:CTX|user:u5"
+        "|model:[scheduled script j output]\nout", NULL);
+
+    /* No turn ids at all: before the first entry. */
+    run_sql(db, "UPDATE entries SET turn_id=NULL WHERE session_id=%lld AND %lld", sid, 1);
+    expect_shape(db, sid, O, "CTX",
+        "user:CTX|user:u1|assistant:a1|user:u2|user:u3|user:u4|assistant:a2,=c1|tool:r1,<c1|user:u5"
+        "|assistant:[scheduled script j output]\nout", NULL);
+
+    /* A plan with no user_message: its one turn starts at the first entry. */
+    int64_t s2 = session_create(db, "nouser", "default", -1, 0);
+    Message note = {.role = ROLE_SYSTEM, .content = "woke"};
+    assert(entry_append_with_iteration(db, s2, &note, 0) > 0);
+    add_typed(db, s2, db_next_iteration_id(db, s2), "assistant_message", 0, "a", NULL, NULL);
+    expect_shape(db, s2, O, "CTX", "user:CTX|user:[system] woke|assistant:a", NULL);
+    expect_shape(db, s2, G, "CTX", "user:CTX|user:[system] woke|model:a", NULL);
+    expect_shape(db, s2, A, "CTX", "user:CTX|user:[system] woke|assistant:a", NULL);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_user_context_anchor\n");
+}
+
+/* A parallel batch pairs legally on every format, and a call, a result or a
+ * reasoning entry that is not on the plan reaches none of them — the rows stay
+ * in the table, off the branch. */
+static void test_batch_pairing_and_off_plan_rows(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = session_create(db, "batch", "default", -1, 0);
+    const EndpointType O = ENDPOINT_OPENAI, G = ENDPOINT_GEMINI, A = ENDPOINT_ANTHROPIC;
+
+    int64_t u = add_user(db, sid, "go");
+    int64_t it = db_next_iteration_id(db, sid);
+    int64_t rs = add_typed(db, sid, it, "reasoning", 0, NULL, NULL, NULL);
+    run_sql(db, "UPDATE entries SET reasoning_meta=json_object('provider','openai',"
+                "'model','m@p','format','reasoning_details','blob',json('[{\"text\":\"why\"}]'))"
+                " WHERE id=%lld AND %lld", rs, 1);
+    int64_t as = add_typed(db, sid, it, "assistant_message", 1, "a", NULL, NULL);
+    int64_t c1 = add_typed(db, sid, it, "tool_call", 2, "{\"k\":1}", "c1", "t1");
+    add_typed(db, sid, it, "tool_call", 3, "{\"k\":\"args_off\"}", "c2_off", "t2_off");
+    int64_t c3 = add_typed(db, sid, it, "tool_call", 4, "{\"k\":3}", "c3", "t3");
+    /* Results arrive in completion order, not call order. */
+    add_typed(db, sid, it, "tool_result", 0, "r2_off", "c2_off", "t2_off");
+    int64_t r1 = add_typed(db, sid, it, "tool_result", 0, "r1", "c1", "t1");
+    add_typed(db, sid, it, "tool_result", 0, "r3", "c3", "t3");
+
+    /* Whole batch: one assistant message with every call, every result
+     * answered right after it (Anthropic: all in one user message). */
+    LlmPayload p;
+    expect_shape(db, sid, O, NULL,
+        "user:go|assistant:a,=c1,=c2_off,=c3|tool:r2_off,<c2_off|tool:r1,<c1|tool:r3,<c3", &p);
+    expect_path(db, p.body, "$.messages[1].reasoning_details[0].text", "why");
+    llm_payload_release(&p);
+    expect_shape(db, sid, G, NULL,
+        "user:go|model:a,=t1,=t2_off,=t3|user:<t2_off|user:<t1|user:<t3", NULL);
+    expect_shape(db, sid, A, NULL,
+        "user:go|assistant:a,=c1,=c2_off,=c3|user:<c2_off,<c1,<c3", NULL);
+
+    /* Unlink the middle call and its result from the branch. */
+    run_sql(db, "UPDATE entries SET parent_id=%lld WHERE id=%lld", c1, c3);
+    run_sql(db, "UPDATE entries SET parent_id=%lld WHERE id=%lld", c3, r1);
+    expect_shape(db, sid, O, NULL, "user:go|assistant:a,=c1,=c3|tool:r1,<c1|tool:r3,<c3", &p);
+    assert(!strstr(p.body, "_off"));
+    expect_path(db, p.body, "$.messages[1].reasoning_details[0].text", "why");
+    llm_payload_release(&p);
+    expect_shape(db, sid, G, NULL, "user:go|model:a,=t1,=t3|user:<t1|user:<t3", &p);
+    assert(!strstr(p.body, "_off"));
+    llm_payload_release(&p);
+    expect_shape(db, sid, A, NULL, "user:go|assistant:a,=c1,=c3|user:<c1,<c3", &p);
+    assert(!strstr(p.body, "_off"));
+    llm_payload_release(&p);
+
+    /* Unlink the reasoning entry: the iteration stays, its replay goes. */
+    run_sql(db, "UPDATE entries SET parent_id=%lld WHERE id=%lld", u, as);
+    expect_shape(db, sid, O, NULL, "user:go|assistant:a,=c1,=c3|tool:r1,<c1|tool:r3,<c3", &p);
+    expect_path(db, p.body, "$.messages[1].reasoning_details", NULL);
+    llm_payload_release(&p);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_batch_pairing_and_off_plan_rows\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_llm_payload:\n");
@@ -1889,9 +2109,11 @@ int main(void) {
     test_effort_unset_and_override();
     test_openai_payload_no_stream_omits_nulls();
     test_gemini_payload();
-    test_recall_in_session_context();
-    test_session_context_live_state();
-    test_session_context_tool_loop();
+    test_recall_in_user_context();
+    test_user_context_live_state();
+    test_user_context_tool_loop();
+    test_user_context_anchor();
+    test_batch_pairing_and_off_plan_rows();
     test_payload_with_tools();
     test_compaction_entry_in_payload();
     test_midturn_system_entry_converts_to_user();

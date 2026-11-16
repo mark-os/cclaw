@@ -1002,7 +1002,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
     /* Declared before any goto err so the err: label can safely free it,
      * even on the early context_plan-failure path where it isn't set yet. */
-    char *context_text = NULL;
+    char *user_context = NULL;
 
     /* Resolve effective context window for this agent's model */
     int effective_window = model_context_window(db, agent_name, cfg->context_window);
@@ -1017,7 +1017,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     }
     LOG_DEBUG_("llm_req: %d entries, cut=%d", plan.count, plan.cut);
 
-    /* Session context: recall plus live per-turn state (context-placement
+    /* User context block: recall plus live per-turn state (context-placement
      * memory blocks, running sub-agents, open approvals) — never baked
      * into the system prompt. Materialized ONCE at turn start (recall != 0
      * ⟺ iteration 0) and persisted on the session row; tool-loop iterations
@@ -1042,11 +1042,11 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                 sqlite3_finalize(ust);
             }
         }
-        context_text = session_context_text(db, session_id, recall_text);
+        user_context = user_context_text(db, session_id, recall_text);
         free(recall_text);
-        session_set_turn_context(db, session_id, context_text);
+        session_set_turn_context(db, session_id, user_context);
     } else {
-        context_text = session_get_turn_context(db, session_id);
+        user_context = session_get_turn_context(db, session_id);
     }
 
     /* ── Mock mode ─────────────────────────────────────────────── */
@@ -1072,7 +1072,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                                .stop_reason = STOP_REASON_ERROR, .model = cfg->provider.model};
             entry_append_with_iteration(db, session_id, &err_msg, 0);
         }
-        free(context_text); free(system_prompt); context_plan_free(&plan);
+        free(user_context); free(system_prompt); context_plan_free(&plan);
         config_free(cfg); free(agent_name_alloc);
         return (st == LLM_RESP_OK) ? 0 : -1;
     }
@@ -1189,7 +1189,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
         /* Build payload (zero-copy — holds stmt open) */
         LlmPayload payload;
-        if (llm_build_payload(db, session_id, &route_cfg, &plan, context_text, system_prompt, &payload) != 0) {
+        if (llm_build_payload(db, session_id, &route_cfg, &plan, user_context, system_prompt, &payload) != 0) {
             free(key_buf); continue;
         }
 
@@ -1382,7 +1382,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         }
     }
 
-    free(context_text); context_text = NULL;   /* err: frees again on !llm_ok */
+    free(user_context); user_context = NULL;   /* err: frees again on !llm_ok */
     free(system_prompt); system_prompt = NULL;
     context_plan_free(&plan); memset(&plan, 0, sizeof(plan));
 
@@ -1426,7 +1426,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     return 0;
 
 err:
-    free(context_text);
+    free(user_context);
     free(system_prompt);
     context_plan_free(&plan);
     config_free(cfg);
@@ -1446,7 +1446,7 @@ static char *extract_content(sqlite3 *db, const char *body) {
 
 /* The mechanical carry-over (E2): the commitments a prose summary is most
  * likely to drop, read straight from the DB in one pass. Same three live-state
- * sources (and wording) the turn-fresh <RELEVANT_CONTEXT> block uses
+ * sources (and wording) the turn-fresh user context block uses
  * (llm_payload.c), plus this agent's armed one-shots. Every section
  * COALESCE'd away when empty; all-empty yields '' and no coda at all. */
 static const char SQL_STATE_CODA[] =

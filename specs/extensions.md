@@ -66,7 +66,7 @@ directory.
 |-------|---------|
 | `name` | Extension identity. Primary key in `extensions`. |
 | `version` | Free-form version string (display / update tracking). |
-| `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), hosts?, policy?}`. `hosts?` is the tool's declared egress — see [Declared reach](#declared-reach-hosts). |
+| `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), hosts?, policy?, droppable?}`. `hosts?` is the tool's declared egress — see [Declared reach](#declared-reach-hosts). `droppable?` (boolean, default `false`) says a [turn review](turn-review.md#protected-calls) may take the tool's calls out of context — set it only on a tool that looks something up; leave it off any tool called for its effect. |
 | `hooks[]` | Each: `{event, handler (file)}`. No hook event exists in this build, so validate rejects any non-empty `hooks[]` — see [hooks.md](hooks.md). |
 | `channel` | At most one: `{type, handler (file), transports?}`. Runs as a separate process. `transports?` is an optional advisory array (`poll`/`webhook`/`persistent`) validated at `--check` — see [channel-transports.md](channel-transports.md). |
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |

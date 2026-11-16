@@ -77,6 +77,29 @@ static void test_all_tools_registered(void) {
         FAIL("memory_block_create missing"); agent_setup_destroy(&setup); db_close(db); test_db_clean(dbpath); return;
     }
 
+    /* The sync carried each recipe's droppable flag into the tools table,
+     * where a turn review reads it. This is the whole list of built-in tools
+     * whose calls a review may take out of context; every other one — and any
+     * tool added without the flag — is protected. */
+    char *droppable = db_scalar_text(db,
+        "SELECT group_concat(name, ',' ORDER BY name) FROM tools"
+        " WHERE droppable=1 AND extension_name IS NULL", 0);
+    const char *want = "check_session,cron_list,db_query,extension_list,file_find,"
+                       "file_grep,file_list,file_read,js_eval,search_config,"
+                       "search_models,shell_exec,web_fetch";
+    if (!droppable || strcmp(droppable, want) != 0) {
+        fprintf(stderr, "droppable tools: got %s\n", droppable ? droppable : "(null)");
+        free(droppable);
+        FAIL("droppable set"); agent_setup_destroy(&setup); db_close(db); test_db_clean(dbpath); return;
+    }
+    free(droppable);
+    if (db_scalar_i64(db, "SELECT COUNT(*) FROM tools WHERE droppable=0 AND name IN"
+                          " ('file_write','file_edit','channel_send','launch_agent',"
+                          "  'memory_note_add','request_config','cron_set','secret_create')"
+                          , 0, -1) != 8) {
+        FAIL("effect tools protected"); agent_setup_destroy(&setup); db_close(db); test_db_clean(dbpath); return;
+    }
+
     agent_setup_destroy(&setup);
     db_close(db);
     test_db_clean(dbpath);

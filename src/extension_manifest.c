@@ -288,6 +288,30 @@ static int check_policies(sqlite3 *db, const char *manifest, char **err_out) {
     return rc;
 }
 
+/* $.tools[].droppable says a turn review may take the tool's calls out of
+ * context. It must be a JSON boolean: the ingest stores the value as it
+ * stands, and "yes" or 2 would not mean what the author thought. */
+static int check_tool_droppable(sqlite3 *db, const char *manifest, char **err_out) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COALESCE(json_extract(t.value,'$.name'),'(unnamed)')"
+            " FROM json_each(COALESCE(json_extract(?1,'$.tools'),'[]')) t"
+            " WHERE json_type(t.value,'$.droppable') NOT IN ('true','false')",
+            -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+    int rc = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        char m[160];
+        snprintf(m, sizeof(m), "tool '%s': 'droppable' must be true or false",
+                 (const char *)sqlite3_column_text(st, 0));
+        xerr(err_out, m);
+        rc = -1;
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
 /* Verify every $.tools[].hosts declaration is a list of bare hosts.
  *
  * A declared list REPLACES the agent's host grants for calls of that tool
@@ -658,6 +682,7 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
     if (check_handlers(jdb, manifest, bundle_dir, "'$.scripts'", err_out) != 0) goto out;
     if (check_policies(jdb, manifest, err_out) != 0) goto out;
     if (check_tool_hosts(jdb, manifest, err_out) != 0) goto out;
+    if (check_tool_droppable(jdb, manifest, err_out) != 0) goto out;
     if (check_config(jdb, manifest, err_out) != 0) goto out;
     if (check_skills(jdb, manifest, bundle_dir, err_out) != 0) goto out;
     if (check_agents(jdb, manifest, bundle_dir, err_out) != 0) goto out;
@@ -815,12 +840,14 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
      * which is why it happens only here, behind the promote approval. */
     rc |= run_ingest(db,
         "INSERT INTO tools(name, extension_name, description, parameters_json, path, "
-        "                  agent_name, enabled, policy, egress_hosts) "
+        "                  agent_name, enabled, policy, egress_hosts, droppable) "
         "SELECT json_extract(t.value,'$.name'), :name, json_extract(t.value,'$.description'), "
         "       json_extract(t.value,'$.parameters'), :store || '/' || json_extract(t.value,'$.handler'), "
         "       NULL, 1, json_extract(t.value,'$.policy'), "
         "       (SELECT group_concat(h.value,',') "
-        "          FROM json_each(COALESCE(json_extract(t.value,'$.hosts'),'[]')) h) "
+        "          FROM json_each(COALESCE(json_extract(t.value,'$.hosts'),'[]')) h), "
+        /* Unstated = protected (check_tool_droppable admits booleans only). */
+        "       COALESCE(json_extract(t.value,'$.droppable'), 0) "
         "FROM json_each(COALESCE(json_extract(:m,'$.tools'),'[]')) t "
         "WHERE json_extract(t.value,'$.name') IS NOT NULL",
         manifest, name, store, owner_agent);

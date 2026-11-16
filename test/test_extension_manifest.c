@@ -196,6 +196,43 @@ static void test_install_ingests_rows(void) {
     printf("  PASS test_install_ingests_rows\n");
 }
 
+/* $.tools[].droppable: a tool says its calls may be taken out of context by
+ * a turn review. Unstated means protected; anything but a boolean is refused. */
+static void test_tool_droppable(void) {
+    test_db_clean(TEST_DB);
+    setup_bundle();
+    sqlite3 *db = open_seeded();
+    assert(db);
+    char *err = NULL;
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
+    assert(qint(db, "SELECT droppable FROM tools WHERE name='get_forecast'") == 0);
+
+    static const char *FMT =
+        "{\"name\":\"nws\",\"tools\":[{\"name\":\"get_forecast\",\"description\":\"d\","
+        "\"parameters\":{\"type\":\"object\"},\"handler\":\"forecast.qjs\","
+        "\"droppable\":%s}]}";
+    char m[512];
+    static const char *BAD[] = { "1", "\"yes\"", "null", "[true]" };
+    for (size_t i = 0; i < sizeof(BAD) / sizeof(BAD[0]); i++) {
+        snprintf(m, sizeof(m), FMT, BAD[i]);
+        write_file(BUNDLE "/extension.json", m);
+        assert(extension_manifest_validate(BUNDLE, &err) == -1);
+        assert(err && strstr(err, "'droppable' must be true or false"));
+        free(err); err = NULL;
+    }
+    snprintf(m, sizeof(m), FMT, "true");
+    write_file(BUNDLE "/extension.json", m);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
+    assert(qint(db, "SELECT droppable FROM tools WHERE name='get_forecast'") == 1);
+    snprintf(m, sizeof(m), FMT, "false");
+    write_file(BUNDLE "/extension.json", m);
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
+    assert(qint(db, "SELECT droppable FROM tools WHERE name='get_forecast'") == 0);
+
+    db_close(db);
+    printf("  PASS test_tool_droppable\n");
+}
+
 static void test_reinstall_is_idempotent(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
@@ -800,6 +837,7 @@ int main(void) {
     test_install_ingests_rows();
     test_install_seeds_grants();
     test_reinstall_is_idempotent();
+    test_tool_droppable();
     test_config_lifecycle();
     test_validate_rejects_missing_handler();
     test_validate_rejects_bad_json();

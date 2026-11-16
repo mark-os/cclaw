@@ -5,6 +5,7 @@
 #include "context.h"
 #include "config.h"
 #include "db.h"
+#include "turn_review.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,6 +130,10 @@ static const char SQL_TRANSCRIPT_PARTS[] =
     "    WHEN 'system' THEN '[system] ' || COALESCE(e.content,'')"
     "    WHEN 'compaction' THEN"
     "      '[Summary of earlier conversation]' || char(10) || COALESCE(e.content,'')"
+    /* A turn review's note to the model about what it took out of the turn
+     * (turn_review.c). The entry is a record first: with no note it says
+     * nothing and is not sent — see the WHERE. */
+    "    WHEN 'turn_review' THEN '" TURN_REVIEW_NOTE_PREFIX "' || e.content"
     "    WHEN 'user_message' THEN COALESCE(e.content,'')"
     "    WHEN 'assistant_message' THEN e.content"
     "    WHEN 'cron_result' THEN " SQL_CRON_RESULT_TEXT
@@ -145,7 +150,8 @@ static const char SQL_TRANSCRIPT_PARTS[] =
     "      LIMIT 1) END"
     " FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
     " WHERE e.type IN ('system','compaction','user_message','assistant_message',"
-    "                  'cron_result','tool_call','tool_result');";
+    "                  'cron_result','tool_call','tool_result')"
+    "    OR (e.type = 'turn_review' AND COALESCE(e.content,'') <> '');";
 
 /* The user context block (clock, recall, live state) rides at the turn
  * boundary: right before the first entry of the newest turn on the plan. A

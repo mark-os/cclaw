@@ -377,7 +377,7 @@ int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx) {
     if (rc == 0)  /* sandboxed broker; egress via per-hop proxy decide() */
         tools_set_recipe(reg, "web_fetch",
                          (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_WEB,
-                                      .needs_interp = 1});
+                                      .needs_interp = 1, .droppable = 1});
     return rc;
 }
 

@@ -137,6 +137,7 @@ int tool_db_query_register(ToolRegistry *reg, sqlite3 *db) {
                           DB_QUERY_PARAMS_JSON, tool_db_query_handler, db);
     if (rc == 0)
         tools_set_recipe(reg, "db_query",
-                         (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = db_query_thread_run});
+                         (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = db_query_thread_run,
+                                      .droppable = 1});
     return rc;
 }

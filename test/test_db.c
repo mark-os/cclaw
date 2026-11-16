@@ -245,10 +245,19 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
-/* Turn a fresh (current) database back into the v61 shape: hook_directives
- * exists. unshape_v61 starts here, so every older patch test replays v62
- * over a real v61 shape. */
+/* Turn a fresh (current) database back into the v62 shape: tools has no
+ * droppable column. unshape_v62 starts here, so every older patch test
+ * replays v63 over a real v62 shape. */
+static void unshape_v63(sqlite3 *db) {
+    int rc = sqlite3_exec(db, "ALTER TABLE tools DROP COLUMN droppable;",
+                          NULL, NULL, NULL);
+    assert(rc == SQLITE_OK);
+}
+
+/* On to the v61 shape: hook_directives exists. unshape_v61 starts here, so
+ * every older patch test replays v62 over a real v61 shape. */
 static void unshape_v62(sqlite3 *db) {
+    unshape_v63(db);
     int rc = sqlite3_exec(db,
         "CREATE TABLE hook_directives ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL,"
@@ -1699,6 +1708,7 @@ static void test_schema_patch_v62(void) {
         0, -1) == 1);
 
     /* A v61 database that already lacks the table still upgrades. */
+    unshape_v63(db);
     set_user_version(db, 61);
     assert(db_schema_compat(db) == 1);
     assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
@@ -1706,6 +1716,38 @@ static void test_schema_patch_v62(void) {
     db_close(db);
     test_db_clean(path);
     printf("  PASS test_schema_patch_v62\n");
+}
+
+/* v63: tools.droppable arrives 0 on every existing row — protected until
+ * the code (built-in) or a manifest (extension) says otherwise. */
+static void test_schema_patch_v63(void) {
+    const char *path = "/tmp/test_cclaw_schema_v63.sqlite";
+    test_db_clean(path);
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v63(db);
+    assert(sqlite3_exec(db,
+        "INSERT INTO extensions(name, path, published) VALUES('ext','/e',1);"
+        "INSERT INTO tools(name, description, parameters_json) VALUES('file_read','r','{}');"
+        "INSERT INTO tools(name, extension_name, path) VALUES('ext_tool','ext','/e/t.js');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 62);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM tools WHERE droppable=0;", 0, -1) == 2);
+    /* NOT NULL with a default: a writer that does not name the column still works. */
+    assert(sqlite3_exec(db, "INSERT INTO tools(name) VALUES('later');",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT droppable FROM tools WHERE name='later';", 0, -1) == 0);
+    /* The patched table has the column where a fresh schema puts it. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_table_info('tools')"
+        " WHERE name='droppable' AND \"notnull\"=1 AND dflt_value='0';", 0, -1) == 1);
+
+    db_close(db);
+    test_db_clean(path);
+    printf("  PASS test_schema_patch_v63\n");
 }
 
 static void test_agent_models_capability_gate(void) {
@@ -1789,6 +1831,7 @@ int main(void) {
     test_schema_patch_v61_refuses_dangling();
     test_schema_patch_v61_cursors();
     test_schema_patch_v62();
+    test_schema_patch_v63();
     test_agent_models_capability_gate();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");

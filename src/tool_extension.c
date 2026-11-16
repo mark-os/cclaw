@@ -439,7 +439,8 @@ int tool_extension_register(ToolRegistry *reg, ToolExtensionCtx *ctx) {
                                                             .null_kind = NULL_PARK});
     tools_set_recipe(reg, "extension_publish", (ToolRecipe){.vehicle = EXEC_INLINE});
     tools_set_recipe(reg, "extension_attach",  (ToolRecipe){.vehicle = EXEC_INLINE});
-    tools_set_recipe(reg, "extension_list",    (ToolRecipe){.vehicle = EXEC_INLINE});
+    tools_set_recipe(reg, "extension_list",    (ToolRecipe){.vehicle = EXEC_INLINE,
+                                                            .droppable = 1});
     tools_set_recipe(reg, "extension_fork",    (ToolRecipe){.vehicle = EXEC_INLINE});
     return rc;
 }

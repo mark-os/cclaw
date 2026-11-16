@@ -90,7 +90,7 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
     if (rc == 0)  /* sandboxed broker; qjs runs in-process, egress via proxy */
         tools_set_recipe(reg, "js_eval",
                          (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_JS,
-                                      .needs_interp = 1});
+                                      .needs_interp = 1, .droppable = 1});
     return rc;
 }
 

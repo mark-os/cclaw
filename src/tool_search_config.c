@@ -611,6 +611,7 @@ int tool_search_config_register(ToolRegistry *reg, SearchConfigCtx *ctx) {
         PARAMS_JSON, handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "search_config",
-                         (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = search_config_thread_run});
+                         (ToolRecipe){.vehicle = EXEC_THREAD, .thread_run = search_config_thread_run,
+                                      .droppable = 1});
     return rc;
 }

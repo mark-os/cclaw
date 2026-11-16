@@ -1843,6 +1843,13 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "DROP TABLE IF EXISTS hook_directives;"
       "DELETE FROM hooks;",
       NULL },
+    /* v63: tools.droppable — whether a turn review may take a call of this
+     * tool out of context. Lands 0 (protected) on every row: built-in tools
+     * get their recipe's value at the next tools_sync_to_db, an extension
+     * tool when its manifest is next promoted with "droppable": true. */
+    { 63,
+      "ALTER TABLE tools ADD COLUMN droppable INTEGER NOT NULL DEFAULT 0;",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {

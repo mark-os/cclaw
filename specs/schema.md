@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v62 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v63 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -600,12 +600,12 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `session_id` | INTEGER NOT NULL | |
 | `parent_id` | INTEGER NOT NULL DEFAULT -1 | tree structure (Pi model); -1 = root |
-| `original_parent_id` | INTEGER | set on reparent (compaction) |
+| `original_parent_id` | INTEGER | the parent the entry was written under, set when compaction or a [turn review](turn-review.md) re-points it. A turn review keeps the first value (`COALESCE`); rows it takes off the branch are not touched and still point at their own parent, so the turn as written can be walked back |
 | `turn_id` | INTEGER | the turn this entry belongs to — minted when a user entry follows a non-user one, inherited from the parent thereafter (trigger `entries_turn_ai`). The context cut and compaction snap to it so neither splits a turn. |
 | `iteration_id` | INTEGER | one LLM request/response *inside* a turn (`db_next_iteration_id`); shared by the assistant message, its tool_call parts and their tool results |
 | `type` | TEXT NOT NULL DEFAULT 'user_message' | entry type discriminator |
 | `part_index` | INTEGER NOT NULL DEFAULT 0 | ordering within multi-part entries |
-| `role` | INTEGER NOT NULL DEFAULT 1 | 0=system, 1=user, 2=assistant, 3=tool, 4=compaction |
+| `role` | INTEGER NOT NULL DEFAULT 1 | 0=system, 1=user, 2=assistant, 3=tool, 4=compaction. A `turn_review` entry is role 0 |
 | `content` | TEXT | see below |
 | `tool_calls` | TEXT | JSON array, NULL if none (legacy) |
 | `tool_call_id` | TEXT | for type=tool_call and tool_result |
@@ -637,7 +637,30 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `tool_result` | Tool execution output (text) |
 | `reasoning` | Model reasoning/thinking text |
 | `compaction` | Compressed summary text |
+| `turn_review` | The note a [turn review](turn-review.md) left for the model (at most 600 characters), or NULL. One per reviewed turn, on the branch right before the turn's last iteration, carrying that turn's `turn_id`; `role=0`, `iteration_id=0`. Sent as user text `[Turn review] <note>` only when the note is non-empty. `data` is the record — see [below](#entriesdata-on-a-turn_review-entry) |
 | `cron_result` | A scheduled script's output, posted with no LLM call behind it. `role=2` so ordinary delivery finds it and `iteration_id=0` because it spent no iteration; `data.job` names the job and `is_error` records how the run went. The payload serializer labels it (`[scheduled script <job> output]`) rather than passing it through bare — the model must not read a machine's stdout back as its own words |
+
+### entries.data on a turn_review entry
+
+What the review did to the turn, written in the same transaction as the edit:
+
+```json
+{"dropped": [412, 415, 416],
+ "trimmed": [{"original": 204, "replacement": 431, "lines_kept": 53, "lines_total": 312}],
+ "reviewer_model": "…",
+ "tokens_before": 9120, "tokens_after": 3310}
+```
+
+- `dropped` — ids of the entries taken off the branch, in branch order: each dropped `tool_call` and its `tool_result`, the `reasoning` entry of every iteration that lost a call, and the `assistant_message` of an iteration left with no call. The rows stay in the table.
+- `trimmed` — per replaced result: the original `tool_result` (off the branch, unchanged) and the new one that took its place. The replacement copies `iteration_id`, `turn_id`, `tool_call_id`, `tool_name`, `is_error`, `network_hosts` and `fence_id`; its content is the kept lines with each omitted run replaced by one line of the fixed form
+
+  ```
+  [… 119 lines omitted; full output is entry 204 …]
+  ```
+
+  (`TURN_REVIEW_OMIT_FMT` in `src/turn_review.h` — the count, then the original's entry id, which `db_query` can read back).
+- `reviewer_model` — as passed by the caller; JSON null when not given.
+- `tokens_before` / `tokens_after` — the sum of `token_estimate` over the turn's entries on the branch, before and after (the review entry itself counts in `after`).
 
 ### entries.reasoning_meta
 
@@ -762,6 +785,7 @@ Tool registry. Built-in C tools have NULL `extension_name`/`path`; JS tools poin
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `policy` | TEXT | JSON restrict-only argument policy |
 | `egress_hosts` | TEXT | comma-separated hosts declared by the manifest; non-NULL **replaces** the agent's host grants for calls of this tool. Only a promoted extension tool can carry one — see [extensions.md](extensions.md#declared-reach-hosts) |
+| `droppable` | INTEGER NOT NULL DEFAULT 0 | v63. 1 = a [turn review](turn-review.md#protected-calls) may take a call of this tool out of context; 0 = protected (the call can still be trimmed). Built-in tools: the recipe's `droppable` flag, written by `tools_sync_to_db`. Extension tools: `$.tools[].droppable` in the manifest, 0 when unstated |
 
 ---
 

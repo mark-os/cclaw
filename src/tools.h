@@ -74,6 +74,11 @@ typedef struct {
     unsigned parallel_safe : 1;  /* sibling calls in one batch may run concurrently */
     unsigned needs_interp  : 1;  /* {{SECRET:X}} resolved to real values at exec time */
     unsigned backgroundable: 1;  /* accepts background:true → job delivery */
+    /* A turn review may take this tool's calls out of context (turn_review.c).
+     * Set it only on a tool whose purpose is to look something up: a call
+     * that exists for its effect is the record that the effect happened, and
+     * stays. Synced to tools.droppable, which is what the review reads. */
+    unsigned droppable     : 1;
     ToolNullKind null_kind;      /* EXEC_INLINE NULL-return protocol */
 } ToolRecipe;
 
@@ -112,7 +117,8 @@ void tools_set_recipe(ToolRegistry *reg, const char *name, ToolRecipe recipe);
 /* Sync built-in tool schemas to the DB `tools` table (extension_name=NULL).
  * parameters_json is code-owned: force-overwrite it from
  * the registry. description is DB-editable: fill only if the row is
- * missing/NULL, never clobber. Call with a registry holding only builtins
+ * missing/NULL, never clobber. droppable is code-owned too (the recipe flag).
+ * Call with a registry holding only builtins
  * (before loading extension tools), so extension rows are never clobbered. */
 void tools_sync_to_db(ToolRegistry *reg, sqlite3 *db);
 

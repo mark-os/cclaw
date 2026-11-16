@@ -90,10 +90,12 @@ void tools_sync_to_db(ToolRegistry *reg, sqlite3 *db) {
      * loaded after this call). Write honest provenance — no extension_name, no
      * handler path (that's what distinguishes a C tool from a JS one). */
     static const char *sql =
-        "INSERT INTO tools(name, extension_name, description, parameters_json, path) "
-        "VALUES(?1, NULL, ?2, ?3, NULL) "
+        "INSERT INTO tools(name, extension_name, description, parameters_json, path,"
+        "                  droppable) "
+        "VALUES(?1, NULL, ?2, ?3, NULL, ?4) "
         "ON CONFLICT(name) DO UPDATE SET "
         "parameters_json = excluded.parameters_json, "
+        "droppable = excluded.droppable, "
         /* Code owns builtin schema AND description — the model renders from
          * this table (llm_payload), so a stale seeded description would keep
          * advertising options the code no longer accepts. */
@@ -107,6 +109,7 @@ void tools_sync_to_db(ToolRegistry *reg, sqlite3 *db) {
         sqlite3_bind_text(stmt, 1, e->name, -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 2, e->description, -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 3, e->parameters_json, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 4, e->recipe.droppable);
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
     }

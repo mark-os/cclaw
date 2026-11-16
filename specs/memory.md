@@ -176,6 +176,10 @@ Not yet implemented:
 - Compaction: summarize old entries, reparent tree. Its keep boundary
   (`context_compaction_keep_from`) snaps the same way, so a summary never lands
   inside a turn; a branch that is one giant turn compacts to nothing.
+- Turn review: the turn that just finished can be edited before the next one
+  starts — tool calls dropped, results replaced by excerpts — with the same
+  re-pointing compaction uses, inside one turn. See
+  [turn-review.md](turn-review.md).
 - **Mechanical state coda** (E2): the compaction entry is the model's prose
   plus a `--- carried state ---` section built parent-side *after* the
   compaction call returns (`compaction_state_coda`, `llm_proc.c`) — open

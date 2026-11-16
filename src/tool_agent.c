@@ -542,7 +542,8 @@ int tool_check_session_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
                           "background result is delivered to you on its own.",
                           CHECK_PARAMS_JSON, tool_check_session_handler, ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "check_session", (ToolRecipe){.vehicle = EXEC_INLINE});
+        tools_set_recipe(reg, "check_session", (ToolRecipe){.vehicle = EXEC_INLINE,
+                                                            .droppable = 1});
     return rc;
 }
 

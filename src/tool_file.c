@@ -167,7 +167,8 @@ int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           FILE_READ_PARAMS_JSON, tool_sandboxed_stub,
                           (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_read", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
+        tools_set_recipe(reg, "file_read", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE,
+                                                  .droppable = 1});
     return rc;
 }
 
@@ -340,7 +341,8 @@ int tool_file_list_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "Use this to see what files exist.",
                           FILE_LIST_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_list", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
+        tools_set_recipe(reg, "file_list", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE,
+                                                  .droppable = 1});
     return rc;
 }
 
@@ -470,7 +472,8 @@ int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "(e.g. 'src/**/*.spec.ts'). Skips .git and node_modules.",
                           FIND_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_find", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
+        tools_set_recipe(reg, "file_find", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE,
+                                                  .droppable = 1});
     return rc;
 }
 
@@ -767,7 +770,8 @@ int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "under the given directory. Skips binary files, .git, and node_modules.",
                           GREP_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_grep", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
+        tools_set_recipe(reg, "file_grep", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE,
+                                                  .droppable = 1});
     return rc;
 }
 

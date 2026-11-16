@@ -8,6 +8,7 @@
  */
 
 #include "sqlite3.h"
+#include "turn_edit.h"
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -23,13 +24,15 @@ typedef struct {
     char extension[128];
     char path[PATH_MAX];    /* handler file, absolute, in the extension store */
     int wait;               /* hooks.wait */
+    TurnEditInputSpec input;/* hooks.input with the defaults filled in */
 } HookRef;
 
 /* The agent's next enabled hook for `event`, in (extension, path) order,
  * after `after` (NULL = the first). An agent runs a hook when it has the
  * extension attached and enabled and the extension is published or its own —
  * the rule its tools load by (tools.c). `wait` selects hooks.wait 0 or 1; -1
- * takes either. Read from the tables on every call: nothing is cached, so an
+ * takes either. `input` is what the hook asked to be sent (hooks.input), each
+ * option it did not name at its default. Read from the tables on every call: nothing is cached, so an
  * extension attached a moment ago is found. Returns 1 with *out filled, 0
  * when there is none, -1 on a database error. */
 int hook_next(sqlite3 *db, const char *agent, const char *event, int wait,

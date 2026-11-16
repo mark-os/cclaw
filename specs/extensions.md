@@ -67,7 +67,7 @@ directory.
 | `name` | Extension identity. Primary key in `extensions`. |
 | `version` | Free-form version string (display / update tracking). |
 | `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), hosts?, policy?, droppable?}`. `hosts?` is the tool's declared egress — see [Declared reach](#declared-reach-hosts). `droppable?` (boolean, default `false`) says a [turnSettled hook](turn-edit.md#protected-calls) may take the tool's calls out of context — set it only on a tool that looks something up; leave it off any tool called for its effect. |
-| `hooks[]` | Each: `{event, handler (file), wait?}`. `event` must be `turnSettled` (validate refuses any other name); `wait` is a boolean, default `true` — whether the session is held while the script runs. See [hooks.md](hooks.md). |
+| `hooks[]` | Each: `{event, handler (file), wait?, input?}`. `event` must be `turnSettled` (validate refuses any other name); `wait` is a boolean, default `true` — whether the session is held while the script runs. `input?` says what the script is sent besides the finished turn: `{history?: "none" (default) \| N \| "all", history_results?: boolean (default true), max_bytes?: 1…16777216 (default 1048576)}`; unknown keys and wrong types are refused. See [hooks.md](hooks.md) and [turn-edit.md](turn-edit.md#input). |
 | `channel` | At most one: `{type, handler (file), transports?}`. Runs as a separate process. `transports?` is an optional advisory array (`poll`/`webhook`/`persistent`) validated at `--check` — see [channel-transports.md](channel-transports.md). |
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
 | `skills[]` | Bundle-relative paths, each a directory containing `SKILL.md` or a bare `.md` file ([skills.md](skills.md) format). Validated at promote: path must be bundle-relative and its frontmatter must parse with a `description`. |
@@ -358,6 +358,12 @@ result, `replace` a result's text, add a `note` — and an optional opaque
 ```json
 "hooks": [ { "event": "turnSettled", "handler": "review.qjs", "wait": true } ]
 ```
+
+The finished turn is all a hook is sent unless it says otherwise; `input`
+asks for the conversation before it — `{"history": 5}` (the last five turns),
+`{"history": "all"}`, with `"history_results": false` to leave earlier tool
+output out and `"max_bytes"` to set the size (default 1 MiB, at most 16 MiB;
+the oldest history goes first when it does not fit).
 
 Promote writes one `hooks` row per entry; an agent runs the hooks of the
 extensions attached and enabled for it, resolved from the DB at each event.

@@ -7,6 +7,11 @@
 #include "db.h"
 #include "types.h"
 
+/* hooks.input as JSON json_extract can read: promote stores a validated
+ * object or NULL, and a row edited by hand into something else reads as
+ * "nothing declared" rather than failing every turn. */
+#define HOOK_INPUT "(CASE WHEN json_valid(h.input) THEN h.input ELSE '{}' END)"
+
 int hook_next(sqlite3 *db, const char *agent, const char *event, int wait,
               const HookRef *after, HookRef *out) {
     if (!db || !agent || !event || !out) return -1;
@@ -15,7 +20,13 @@ int hook_next(sqlite3 *db, const char *agent, const char *event, int wait,
      * stable order one hook at a time, with no cursor to keep. */
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "SELECT h.extension_name, h.path, h.wait FROM hooks h"
+            "SELECT h.extension_name, h.path, h.wait,"
+            "       CASE json_extract(" HOOK_INPUT ",'$.history')"
+            "         WHEN 'all' THEN -1 WHEN 'none' THEN 0"
+            "         ELSE COALESCE(json_extract(" HOOK_INPUT ",'$.history'), 0) END,"
+            "       COALESCE(json_extract(" HOOK_INPUT ",'$.history_results'), 1),"
+            "       COALESCE(json_extract(" HOOK_INPUT ",'$.max_bytes'), 0)"
+            "  FROM hooks h"
             " JOIN agent_extensions ae ON ae.extension_name = h.extension_name"
             " JOIN extensions e ON e.name = h.extension_name"
             " WHERE ae.agent_name = ?1 AND ae.enabled = 1 AND h.enabled = 1"
@@ -42,6 +53,13 @@ int hook_next(sqlite3 *db, const char *agent, const char *event, int wait,
         int n1 = snprintf(h.extension, sizeof(h.extension), "%s", ext ? ext : "");
         int n2 = snprintf(h.path, sizeof(h.path), "%s", path ? path : "");
         h.wait = sqlite3_column_int(st, 2);
+        h.input.history = sqlite3_column_int(st, 3);
+        if (h.input.history < 0) h.input.history = TURN_EDIT_HISTORY_ALL;
+        h.input.history_results = sqlite3_column_int(st, 4) != 0;
+        int64_t max = sqlite3_column_int64(st, 5);
+        h.input.max_bytes = max <= 0 ? TURN_EDIT_INPUT_DEFAULT_BYTES
+                          : max > TURN_EDIT_INPUT_MAX_BYTES ? TURN_EDIT_INPUT_MAX_BYTES
+                          : (int)max;
         /* A name or path that does not fit names a different hook once cut. */
         if (n1 > 0 && (size_t)n1 < sizeof(h.extension) &&
             n2 > 0 && (size_t)n2 < sizeof(h.path)) {

@@ -6,6 +6,7 @@
 #include "log.h"
 #include "skills.h"
 #include "templates.h"
+#include "turn_edit.h"
 #include "util.h"
 #include <dirent.h>
 #include <errno.h>
@@ -551,6 +552,55 @@ static int check_hook_events(sqlite3 *db, const char *manifest, char **err_out) 
     return rc;
 }
 
+/* Verify each hook's "input" — what a turnSettled script asks to be sent
+ * (specs/turn-edit.md#input): an object of at most `history` ("none", "all"
+ * or a positive count of turns), `history_results` (boolean) and
+ * `max_bytes` (a positive integer no larger than the hook vehicle carries).
+ * Anything else is refused by name, so a typo cannot read as "use the
+ * default". */
+#define HOOK_IN(path) "json_type(hj.value,'$.input" path "')"
+static int check_hook_input(sqlite3 *db, const char *manifest, char **err_out) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 'hook ' || COALESCE(json_extract(value,'$.handler'),'?') || ': ' || why"
+            " FROM (SELECT hj.value, CASE"
+            "  WHEN " HOOK_IN("") " IS NULL THEN NULL"
+            "  WHEN " HOOK_IN("") " <> 'object' THEN '\"input\" must be an object'"
+            "  WHEN EXISTS (SELECT 1 FROM json_each(hj.value,'$.input') k"
+            "               WHERE k.key NOT IN ('history','history_results','max_bytes'))"
+            "    THEN 'unknown key \"' || (SELECT k.key FROM json_each(hj.value,'$.input') k"
+            "         WHERE k.key NOT IN ('history','history_results','max_bytes') LIMIT 1)"
+            "         || '\" in \"input\" (it takes history, history_results, max_bytes)'"
+            "  WHEN " HOOK_IN(".history") " IS NOT NULL AND NOT ("
+            "       (" HOOK_IN(".history") " = 'text'"
+            "        AND json_extract(hj.value,'$.input.history') IN ('none','all'))"
+            "    OR (" HOOK_IN(".history") " = 'integer'"
+            "        AND json_extract(hj.value,'$.input.history') BETWEEN 1 AND 2147483647))"
+            "    THEN 'input.history must be \"none\", \"all\" or a positive number of turns'"
+            "  WHEN COALESCE(" HOOK_IN(".history_results") ",'true') NOT IN ('true','false')"
+            "    THEN 'input.history_results must be true or false'"
+            "  WHEN " HOOK_IN(".max_bytes") " IS NOT NULL AND NOT ("
+            "       " HOOK_IN(".max_bytes") " = 'integer'"
+            "       AND json_extract(hj.value,'$.input.max_bytes') BETWEEN 1 AND ?2)"
+            "    THEN 'input.max_bytes must be a whole number of bytes from 1 to ' || ?2"
+            "  END AS why FROM json_each(COALESCE(json_extract(?1,'$.hooks'),'[]')) hj)"
+            " WHERE why IS NOT NULL LIMIT 1", -1, &st, NULL) != SQLITE_OK) {
+        xerr(err_out, "hook input check failed");
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 2, TURN_EDIT_INPUT_MAX_BYTES);
+    int rc = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *m = (const char *)sqlite3_column_text(st, 0);
+        xerr(err_out, m ? m : "hook input rejected");
+        rc = -1;
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+#undef HOOK_IN
+
 /* Verify the (at most one) $.channel object: its handler is a .qjs file
  * present in the bundle, and transports[] (if declared) is an array drawn
  * from the known set. transports is advisory — the one thing C validates it
@@ -680,6 +730,7 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
     if (check_handlers(jdb, manifest, bundle_dir, "'$.tools'", err_out) != 0) goto out;
     if (check_handlers(jdb, manifest, bundle_dir, "'$.hooks'", err_out) != 0) goto out;
     if (check_hook_events(jdb, manifest, err_out) != 0) goto out;
+    if (check_hook_input(jdb, manifest, err_out) != 0) goto out;
     if (check_handlers(jdb, manifest, bundle_dir, "'$.scripts'", err_out) != 0) goto out;
     if (check_policies(jdb, manifest, err_out) != 0) goto out;
     if (check_tool_hosts(jdb, manifest, err_out) != 0) goto out;
@@ -855,13 +906,16 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
 
     /* hooks: one row per $.hooks[] entry; an entry that does not say whether
      * the session waits for it does (check_hook_events admits booleans only).
+     * `input` is stored as declared (check_hook_input), NULL when absent —
+     * the defaults are the runtime's, filled in at each run (hook_next).
      * The rows were deleted above, so a re-promote starts the failure count
      * over — new code has not failed yet. */
     rc |= run_ingest(db,
-        "INSERT INTO hooks(extension_name, event, path, enabled, wait) "
+        "INSERT INTO hooks(extension_name, event, path, enabled, wait, input) "
         "SELECT :name, json_extract(value,'$.event'), "
         "       :store || '/' || json_extract(value,'$.handler'), 1, "
-        "       COALESCE(json_extract(value,'$.wait'), 1) "
+        "       COALESCE(json_extract(value,'$.wait'), 1), "
+        "       json_extract(value,'$.input') "
         "FROM json_each(COALESCE(json_extract(:m,'$.hooks'),'[]')) "
         "WHERE json_extract(value,'$.event') IS NOT NULL",
         manifest, name, store, owner_agent);

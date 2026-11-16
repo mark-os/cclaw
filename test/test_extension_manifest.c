@@ -246,13 +246,19 @@ static void test_hook_ingest(void) {
     write_file(BUNDLE "/observe.qjs", "return '{}';");
     write_file(BUNDLE "/extension.json",
         "{\"name\":\"nws\",\"hooks\":["
-        "{\"event\":\"turnSettled\",\"handler\":\"review.qjs\"},"
+        "{\"event\":\"turnSettled\",\"handler\":\"review.qjs\","
+        " \"input\":{\"history\":3, \"max_bytes\":2000}},"
         "{\"event\":\"turnSettled\",\"handler\":\"observe.qjs\",\"wait\":false}]}");
     assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     assert(qint(db, "SELECT count(*) FROM hooks WHERE extension_name='nws'"
                     " AND event='turnSettled' AND enabled=1 AND fail_count=0") == 2);
     assert(qint(db, "SELECT wait FROM hooks WHERE path='" STORE "/review.qjs'") == 1);
     assert(qint(db, "SELECT wait FROM hooks WHERE path='" STORE "/observe.qjs'") == 0);
+    /* `input` is stored as declared; a hook that declares none has NULL —
+     * the runtime's defaults. */
+    assert(qint(db, "SELECT input IS NULL FROM hooks WHERE path='" STORE "/observe.qjs'") == 1);
+    assert(qint(db, "SELECT input = '{\"history\":3,\"max_bytes\":2000}'"
+                    " FROM hooks WHERE path='" STORE "/review.qjs'") == 1);
 
     sqlite3_exec(db, "UPDATE hooks SET fail_count=7", NULL, NULL, NULL);
     write_file(BUNDLE "/extension.json",
@@ -406,6 +412,58 @@ static void test_validate_rejects_bad_sections(void) {
         "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnSettled\",\"handler\":\"nope.qjs\"}]}");
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
     free(err); err = NULL;
+
+    /* `input` — what a turnSettled script asks to be sent. Each option alone
+     * and all together are accepted; anything else is refused, by name, and
+     * max_bytes stops at the most the hook vehicle carries. */
+    static const char *const good_input[] = {
+        "{}", "{\"history\":\"none\"}", "{\"history\":\"all\"}", "{\"history\":1}",
+        "{\"history\":5,\"history_results\":false,\"max_bytes\":2000000}",
+        "{\"history_results\":true}", "{\"max_bytes\":16777216}", "{\"max_bytes\":1}" };
+    for (size_t i = 0; i < sizeof(good_input) / sizeof(good_input[0]); i++) {
+        char mf[300];
+        snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnSettled\","
+                 "\"handler\":\"h.qjs\",\"input\":%s}]}", good_input[i]);
+        write_file("/tmp/test_ext_badsec/extension.json", mf);
+        if (extension_manifest_validate("/tmp/test_ext_badsec", &err) != 0) {
+            fprintf(stderr, "FAIL input %s refused: %s\n", good_input[i], err ? err : "?");
+            abort();
+        }
+        free(err); err = NULL;
+    }
+    static const struct { const char *input, *why; } bad_input[] = {
+        { "[]", "hook h.qjs: \"input\" must be an object" },
+        { "null", "\"input\" must be an object" },
+        { "\"all\"", "\"input\" must be an object" },
+        { "{\"histroy\":\"all\"}", "unknown key \"histroy\" in \"input\"" },
+        { "{\"history\":\"all\",\"extra\":1}", "unknown key \"extra\"" },
+        { "{\"history\":0}", "input.history must be \"none\", \"all\" or a positive number" },
+        { "{\"history\":-3}", "input.history must be" },
+        { "{\"history\":2.5}", "input.history must be" },
+        { "{\"history\":\"5\"}", "input.history must be" },
+        { "{\"history\":\"some\"}", "input.history must be" },
+        { "{\"history\":true}", "input.history must be" },
+        { "{\"history_results\":0}", "input.history_results must be true or false" },
+        { "{\"history_results\":\"no\"}", "input.history_results must be true or false" },
+        { "{\"max_bytes\":0}", "input.max_bytes must be a whole number of bytes from 1 to 16777216" },
+        { "{\"max_bytes\":16777217}", "from 1 to 16777216" },
+        { "{\"max_bytes\":2e6}", "input.max_bytes must be" },
+        { "{\"max_bytes\":\"1MB\"}", "input.max_bytes must be" },
+    };
+    for (size_t i = 0; i < sizeof(bad_input) / sizeof(bad_input[0]); i++) {
+        char mf[300];
+        snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnSettled\","
+                 "\"handler\":\"h.qjs\"},{\"event\":\"turnSettled\",\"handler\":\"h.qjs\","
+                 "\"input\":%s}]}", bad_input[i].input);
+        write_file("/tmp/test_ext_badsec/extension.json", mf);
+        if (extension_manifest_validate("/tmp/test_ext_badsec", &err) != -1 ||
+            !err || !strstr(err, bad_input[i].why)) {
+            fprintf(stderr, "FAIL input %s: got \"%s\", want \"%s\"\n", bad_input[i].input,
+                    err ? err : "(none)", bad_input[i].why);
+            abort();
+        }
+        free(err); err = NULL;
+    }
 
     /* Tool policies are shape-checked at promote: policy_eval fails closed
      * (POLICY_ERROR) on these at runtime, so a bad policy must be rejected

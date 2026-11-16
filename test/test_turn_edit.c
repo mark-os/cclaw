@@ -121,6 +121,24 @@ static void expect_id_at(sqlite3 *db, const char *json, const char *path, int64_
     expect_at(db, json, path, w);
 }
 
+/* The input as a hook that declares nothing gets it: the finished turn. */
+static char *input_turn(sqlite3 *db, int64_t sid) {
+    TurnEditInputSpec spec = TURN_EDIT_INPUT_DEFAULTS;
+    return turn_edit_input(db, sid, &spec, NULL);
+}
+
+/* ...and as one that asked for everything, with room for it. */
+static char *input_all(sqlite3 *db, int64_t sid) {
+    TurnEditInputSpec spec = { TURN_EDIT_HISTORY_ALL, 1, TURN_EDIT_INPUT_MAX_BYTES };
+    return turn_edit_input(db, sid, &spec, NULL);
+}
+
+static char *input_as(sqlite3 *db, int64_t sid, int history, int results, int max_bytes,
+                      int *too_big) {
+    TurnEditInputSpec spec = { history, results, max_bytes };
+    return turn_edit_input(db, sid, &spec, too_big);
+}
+
 static int64_t add_user(sqlite3 *db, int64_t sid, const char *text) {
     Message m = {.role = ROLE_USER, .content = (char *)text};
     int64_t id = entry_append_with_iteration(db, sid, &m, 0);
@@ -445,10 +463,21 @@ static void test_input(void) {
     run(db, "UPDATE entries SET content='oops' WHERE id=%lld", (long long)t.c2);
     run(db, "UPDATE entries SET is_error=1 WHERE id=%lld", (long long)t.r3);
 
-    char *in = turn_edit_input(db, t.sid);
+    char *in = input_turn(db, t.sid);
     assert(in);
     #define IN(path, want) expect_at(db, in, path, want)
     IN("$.event", "turnSettled");
+    /* What it was given, so a script can tell "no history asked for" from "a
+     * first turn": nothing declared is the turn alone. The turn before it
+     * (u0, a0) is not sent and not counted as left out. */
+    char want_echo[128];
+    snprintf(want_echo, sizeof(want_echo),
+             "{\"history\":\"none\",\"history_results\":true,\"max_bytes\":%d}",
+             TURN_EDIT_INPUT_DEFAULT_BYTES);
+    IN("$.input", want_echo);
+    expect_json(db, in, "json_type(?1,'$.history')", "array");
+    expect_json(db, in, "json_array_length(?1,'$.history')", "0");
+    IN("$.history_omitted", "0");
     IN("$.agent", "default");
     expect_id_at(db, in, "$.session_id", t.sid);
     IN("$.turn_id", "2");
@@ -516,7 +545,7 @@ static void test_input(void) {
     run(db, "UPDATE tool_calls SET status='background' WHERE entry_id=%lld", (long long)p.c2);
     run(db, "UPDATE entries SET tool_name='check_session' WHERE id IN (%lld,%lld)",
         (long long)p.c4, (long long)p.r4);
-    in = turn_edit_input(db, p.sid);
+    in = input_turn(db, p.sid);
     assert(in);
     expect_json(db, in,
         "(SELECT json_group_array(json_extract(c.value,'$.protected'))"
@@ -527,7 +556,7 @@ static void test_input(void) {
      * row is protected. */
     run(db, "UPDATE entries SET content='{\"url\":\"u\"}' WHERE id=%lld", (long long)p.c1);
     run(db, "UPDATE entries SET tool_name='unregistered' WHERE id=%lld", (long long)p.c3);
-    in = turn_edit_input(db, p.sid);
+    in = input_turn(db, p.sid);
     assert(in);
     expect_json(db, in,
         "(SELECT json_group_array(json_extract(c.value,'$.protected'))"
@@ -537,13 +566,13 @@ static void test_input(void) {
 
     /* No finished turn: no entry, or the leaf is a tool result. */
     int64_t s2 = session_create(db, "midturn", "default", -1, 0);
-    assert(turn_edit_input(db, s2) == NULL);
+    assert(input_turn(db, s2) == NULL);
     add_user(db, s2, "go");
     int64_t it = db_next_iteration_id(db, s2);
     add_typed(db, s2, it, "assistant_message", "a", NULL, NULL);
     add_call(db, s2, it, "x1", "look", "{}", "done");
     add_typed(db, s2, it, "tool_result", "r", "x1", "look");
-    assert(turn_edit_input(db, s2) == NULL);
+    assert(input_turn(db, s2) == NULL);
 
     db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_input\n");
@@ -1049,7 +1078,7 @@ static void test_record(void) {
                       " WHERE id=%lld", (long long)t.r4, (long long)t.r3, (long long)t.rs3);
 
     /* The next hook sees the turn as the first left it. */
-    char *in = turn_edit_input(db, t.sid);
+    char *in = input_turn(db, t.sid);
     assert(in);
     expect_json(db, in, "json_array_length(?1,'$.iterations')", "1");
     free(in);
@@ -1123,7 +1152,7 @@ static void test_history(void) {
     /* A session's first turn has nothing before it. */
     int64_t one = session_create(db, "one", "default", -1, 0);
     add_plain_turn(db, one, "hi", "hello");
-    char *in = turn_edit_input(db, one);
+    char *in = input_all(db, one);
     assert(in);
     expect_json(db, in, "json_type(?1,'$.history')", "array");
     LEN("$.history", "0");
@@ -1157,7 +1186,7 @@ static void test_history(void) {
     int64_t f3 = add_typed(db, sid, db_next_iteration_id(db, sid), "assistant_message",
                            "answer three", NULL, NULL);
 
-    in = turn_edit_input(db, sid);
+    in = input_all(db, sid);
     assert(in);
     /* The finished turn is at the top level, as it always was. */
     IN("$.turn_id", "3");
@@ -1229,7 +1258,7 @@ static void test_history(void) {
     snprintf(r, sizeof(r), ",%lld,", (long long)new_r);
     assert(!strstr(b, r));
     free(b);
-    in = turn_edit_input(db, sid);
+    in = input_all(db, sid);
     assert(in);
     LEN("$.iterations", "0");
     IN("$.history[0].iterations[0].calls[0].result.text", "OLD");
@@ -1242,7 +1271,7 @@ static void test_history(void) {
         "{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"SHORTER\"},"
         "{\"op\":\"note\",\"text\":\"tidied\"}"));
     int64_t f_next = add_plain_turn(db, t.sid, "next", "sure");
-    in = turn_edit_input(db, t.sid);
+    in = input_all(db, t.sid);
     assert(in);
     IN("$.turn_id", "3");
     expect_id_at(db, in, "$.final.entry_id", f_next);
@@ -1276,7 +1305,7 @@ static void test_history(void) {
     int64_t u_next = db_scalar_i64(db, "SELECT parent_id FROM entries WHERE id=?", f_next, -1);
     int64_t cmp = entry_compact(db, t.sid, t.u0, u_next, "SUMMARY of two turns");
     assert(cmp > 0);
-    in = turn_edit_input(db, t.sid);
+    in = input_all(db, t.sid);
     assert(in);
     IN("$.turn_id", "4");
     expect_id_at(db, in, "$.user_messages[0].entry_id", u_last);
@@ -1311,7 +1340,7 @@ static void test_history(void) {
     int64_t mc = entry_compact(db, mid, m1, m4u, "b and c");
     assert(mc > 0);
     add_plain_turn(db, mid, "e", "E");
-    in = turn_edit_input(db, mid);
+    in = input_all(db, mid);
     assert(in);
     IN("$.final.text", "E");
     LEN("$.history", "3");
@@ -1320,22 +1349,193 @@ static void test_history(void) {
     IN("$.history[2].final.text", "D");
     free(in);
 
-    /* A branch holding more text than a script can be handed is not built:
-     * the walk gives up on entries.content_bytes, before any text is read. */
-    run(db, "UPDATE entries SET content_bytes=%d WHERE id=%lld",
-        TURN_EDIT_INPUT_MAX_BYTES + 1, (long long)m1);
-    assert(turn_edit_input(db, mid) == NULL);
-    run(db, "UPDATE entries SET content_bytes=%d WHERE id=%lld",
-        TURN_EDIT_INPUT_MAX_BYTES - 64, (long long)m1);
-    in = turn_edit_input(db, mid);
-    assert(in);
-    LEN("$.history", "3");
-    free(in);
-
     #undef IN
     #undef LEN
     db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_history\n");
+}
+
+/* `n` copies of `c`, NUL-terminated (caller frees). */
+static char *repeat(char c, int n) {
+    char *t = malloc((size_t)n + 1);
+    assert(t);
+    memset(t, c, (size_t)n);
+    t[n] = '\0';
+    return t;
+}
+
+/* A turn with one call of `look` answered by `result`, then its answer. */
+static void add_call_turn(sqlite3 *db, int64_t sid, const char *ask, const char *result,
+                          const char *answer) {
+    add_user(db, sid, ask);
+    int64_t it = db_next_iteration_id(db, sid);
+    add_typed(db, sid, it, "assistant_message", "looking", NULL, NULL);
+    add_call(db, sid, it, "c1", "look", "{\"q\":1}", "done");
+    add_typed(db, sid, it, "tool_result", result, "c1", "look");
+    add_typed(db, sid, db_next_iteration_id(db, sid), "assistant_message", answer, NULL, NULL);
+}
+
+/* What a hook asks to be sent (hooks.input): how many earlier turns, with or
+ * without their results' text, within max_bytes — the finished turn always
+ * whole, the oldest history left out first, and the input saying what it was
+ * given. */
+static void test_input_options(void) {
+    sqlite3 *db = open_seeded();
+    #define IN(path, want) expect_at(db, in, path, want)
+    #define LEN(path, want) expect_json(db, in, "json_array_length(?1,'" path "')", want)
+    #define TURN_IDS(want) expect_json(db, in, "(SELECT group_concat(COALESCE(" \
+        "json_extract(value,'$.turn_id'), 'S'), ',') FROM json_each(?1,'$.history'))", want)
+
+    int64_t sid = session_create(db, "opts", "default", -1, 0);
+    add_call_turn(db, sid, "q1", "old result 1", "answer 1");
+    add_call_turn(db, sid, "q2", "old result 2", "answer 2");
+    add_call_turn(db, sid, "q3", "old result 3", "answer 3");
+    add_call_turn(db, sid, "q4", "new result", "answer 4");
+
+    /* The last N turns, oldest first; more than there are is all of them. */
+    char *in = input_as(db, sid, 2, 1, TURN_EDIT_INPUT_MAX_BYTES, NULL);
+    assert(in);
+    IN("$.turn_id", "4");
+    TURN_IDS("2,3");
+    IN("$.history_omitted", "0");
+    IN("$.input.history", "2");
+    free(in);
+    in = input_as(db, sid, 1, 1, TURN_EDIT_INPUT_MAX_BYTES, NULL);
+    TURN_IDS("3");
+    free(in);
+    in = input_as(db, sid, 10, 1, TURN_EDIT_INPUT_MAX_BYTES, NULL);
+    TURN_IDS("1,2,3");
+    IN("$.input.history", "10");
+    IN("$.history_omitted", "0");
+    free(in);
+    in = input_all(db, sid);
+    TURN_IDS("1,2,3");
+    IN("$.input.history", "all");
+    free(in);
+
+    /* history_results false: earlier calls keep their arguments and their
+     * result's entry_id and tokens, and the result has no text. The finished
+     * turn's results are always whole. */
+    in = input_as(db, sid, TURN_EDIT_HISTORY_ALL, 0, TURN_EDIT_INPUT_MAX_BYTES, NULL);
+    assert(in);
+    IN("$.input.history_results", "0");
+    expect_json(db, in, "json_type(?1,'$.input.history_results')", "false");
+    expect_json(db, in, "(SELECT group_concat(key, ',') FROM"
+                        " json_each(?1,'$.history[0].iterations[0].calls[0].result'))",
+                "entry_id,tokens");
+    IN("$.history[0].iterations[0].calls[0].args.q", "1");
+    IN("$.history[0].final.text", "answer 1");
+    expect_id_at(db, in, "$.history[0].iterations[0].calls[0].result.tokens",
+                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE content='old result 1'"
+                                   " AND session_id=?", sid, -1));
+    expect_json(db, in, "instr(?1,'old result')", "0");
+    IN("$.iterations[0].calls[0].result.text", "new result");
+    free(in);
+
+    /* Fitting to max_bytes. The branch: what compaction left of turn 1 (one
+     * long user message), the summary, three turns of ~1 KB (turn ids 3-5), the
+     * finished turn. Each row is priced at its stored text + 128, the head at 512. */
+    char *k2 = repeat('k', 2000), *x = repeat('x', 1000), *sum = repeat('s', 300);
+    int64_t cs = session_create(db, "fit", "default", -1, 0);
+    int64_t u0 = add_user(db, cs, k2);
+    add_typed(db, cs, db_next_iteration_id(db, cs), "assistant_message", "a1", NULL, NULL);
+    add_plain_turn(db, cs, "q2", "a2");
+    int64_t u4 = add_user(db, cs, "q4");
+    add_typed(db, cs, db_next_iteration_id(db, cs), "assistant_message", x, NULL, NULL);
+    add_plain_turn(db, cs, "q5", x);
+    add_plain_turn(db, cs, "q6", x);
+    add_plain_turn(db, cs, "go", "done");
+    assert(entry_compact(db, cs, u0, u4, sum) > 0);
+    const int TURN0 = 2 + 4 + 256, TURN = 2 + 1000 + 256, SUMMARY = 300 + 128,
+              HEAD = 512;
+
+    in = input_all(db, cs);
+    TURN_IDS("1,S,3,4,5");
+    free(in);
+    /* Room for the three turns and the summary, not for the long remnant of
+     * turn 1, which is older than the summary: it goes first. */
+    int max = HEAD + TURN0 + 3 * TURN + SUMMARY + 1000;
+    in = input_as(db, cs, TURN_EDIT_HISTORY_ALL, 1, max, NULL);
+    assert(in && (int)strlen(in) <= max);
+    TURN_IDS("S,3,4,5");
+    IN("$.history_omitted", "1");
+    IN("$.input.history", "all");
+    free(in);
+    /* Room for two turns: the summary goes with everything older than them,
+     * and only turns are counted as left out. */
+    max = HEAD + TURN0 + 2 * TURN + 500;
+    in = input_as(db, cs, TURN_EDIT_HISTORY_ALL, 1, max, NULL);
+    assert(in && (int)strlen(in) <= max);
+    TURN_IDS("4,5");
+    IN("$.history_omitted", "2");
+    free(in);
+    /* A count is the most that is sent: within it, the same trimming. */
+    in = input_as(db, cs, 2, 1, max, NULL);
+    TURN_IDS("4,5");
+    IN("$.history_omitted", "0");
+    free(in);
+    in = input_as(db, cs, 3, 1, max, NULL);
+    TURN_IDS("4,5");
+    IN("$.history_omitted", "1");
+    free(in);
+    /* With room, a count reaches a summary only past a turn older than it. */
+    in = input_as(db, cs, 3, 1, TURN_EDIT_INPUT_MAX_BYTES, NULL);
+    TURN_IDS("3,4,5");
+    free(in);
+    in = input_as(db, cs, 4, 1, TURN_EDIT_INPUT_MAX_BYTES, NULL);
+    TURN_IDS("1,S,3,4,5");
+    free(in);
+    /* Leaving results out makes room: here the remnant has none, so the
+     * same budget sends the same history. */
+    in = input_as(db, cs, TURN_EDIT_HISTORY_ALL, 0, max, NULL);
+    TURN_IDS("4,5");
+    free(in);
+    /* No room for any history: the turn alone, every earlier turn counted. */
+    int too_big = -1;
+    in = input_as(db, cs, TURN_EDIT_HISTORY_ALL, 1, 1500, &too_big);
+    assert(in && strlen(in) <= 1500 && too_big == 0);
+    LEN("$.history", "0");
+    IN("$.history_omitted", "4");
+    IN("$.final.text", "done");
+    free(in);
+    /* The finished turn alone over the limit: nothing is built, and the
+     * caller is told why. */
+    assert(input_as(db, cs, 0, 1, 600, &too_big) == NULL && too_big == 1);
+    assert(input_as(db, cs, TURN_EDIT_HISTORY_ALL, 1, 600, &too_big) == NULL && too_big == 1);
+    /* No finished turn is not "too big". */
+    add_user(db, cs, "pending");
+    assert(input_as(db, cs, 0, 1, TURN_EDIT_INPUT_MAX_BYTES, &too_big) == NULL &&
+           too_big == 0);
+    free(k2); free(x); free(sum);
+
+    /* max_bytes bounds the text handed over, not the estimate. Control
+     * characters are written out six bytes each (\u0001): the estimate
+     * admits the earlier turn, the text does not fit, and it is left out. */
+    int64_t es = session_create(db, "escape", "default", -1, 0);
+    int64_t ea = add_plain_turn(db, es, "q1", "a1");
+    run(db, "UPDATE entries SET content=replace(printf('%%.*c',600,'x'),'x',char(1)),"
+            " content_bytes=600 WHERE id=%lld", (long long)ea);
+    int64_t eb = add_plain_turn(db, es, "go", "done");
+    max = HEAD + TURN0 + (2 + 600 + 256) + 200;
+    in = input_as(db, es, TURN_EDIT_HISTORY_ALL, 1, max, &too_big);
+    assert(in && (int)strlen(in) <= max && too_big == 0);
+    LEN("$.history", "0");
+    IN("$.history_omitted", "1");
+    free(in);
+    in = input_all(db, es);
+    assert(strlen(in) > (size_t)max);
+    LEN("$.history", "1");
+    free(in);
+    /* The same in the finished turn: it does not fit, and is not sent. */
+    run(db, "UPDATE entries SET content=replace(printf('%%.*c',600,'x'),'x',char(1)),"
+            " content_bytes=600 WHERE id=%lld", (long long)eb);
+    assert(input_as(db, es, 0, 1, 1500, &too_big) == NULL && too_big == 1);
+
+    #undef IN
+    #undef LEN
+    #undef TURN_IDS
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_input_options\n");
 }
 
 /* Around the edges of a turn: an earlier compaction already re-pointed the
@@ -1356,7 +1556,7 @@ static void test_turn_edges(void) {
               "k1", "look");
     int64_t fin = add_typed(db, sid, db_next_iteration_id(db, sid), "assistant_message",
                             "done", NULL, NULL);
-    char *in = turn_edit_input(db, sid);
+    char *in = input_turn(db, sid);
     assert(in);
     expect_at(db, in, "$.iterations[0].calls[0].result.text", "nothing there");
     free(in);
@@ -1401,6 +1601,7 @@ int main(void) {
     test_notes();
     test_record();
     test_history();
+    test_input_options();
     test_turn_edges();
     printf("All turn edit tests passed.\n");
     return 0;

@@ -47,35 +47,71 @@
 
 /* ── The session as a hook's input ─────────────────────────────────
  *
- * One statement over the active branch. `part` is the branch, leaf (lvl 0)
- * to root; `run` counts the turns walked through, so run 0 is exactly the
- * rows SQL_TURN finds — the turn an edit may touch — and every higher run is
- * an earlier turn. An earlier turn is shown as the next request would send
- * it: an assistant entry that stopped on an error is never sent
- * (context_plan), so it is left out there.
+ * One statement over the active branch, in two passes over it: the first
+ * reads only integers and decides what is sent, the second reads text for
+ * what was chosen and nothing else.
  *
- * `bytes` is the stored text walked so far, and the walk stops at the first
- * row that takes it past ?2: building the document costs several times its
- * size in memory, so a branch too big to hand to a script is found out from
- * a column of integers, before any text is read. ?1 = session id. */
+ * `branch` walks leaf (lvl 0) to root, numbering units as it goes: `run` 0 is
+ * exactly the rows SQL_TURN finds — the turn an edit may touch — and every
+ * higher run is an earlier turn, or a compaction summary, which is a unit of
+ * its own (it carries the turn_id of the entry it follows, and must be kept
+ * or left out apart from that turn). `t` counts the earlier turns walked
+ * through; the walk stops at the first unit past the ?2 asked for, so with no
+ * history asked for it reads the newest turn's rows and no others.
+ *
+ * `priced` prices each row at its stored text (entries.content_bytes) plus a
+ * fixed allowance for the JSON around it, and `fit` keeps the earlier units,
+ * newest first, while the running total still leaves room in ?4 — so the
+ * oldest turns are the ones left out, whole, and a summary goes only after
+ * every turn older than it. An earlier turn is shown as the next request
+ * would send it: an assistant entry that stopped on an error is never sent
+ * (context_plan), so it is left out there and costs nothing.
+ *
+ * ?1 session id, ?2 earlier turns wanted (-1 all, 0 none), ?3 earlier
+ * results with their text (0/1), ?4 max_bytes, ?5 bytes held back from the
+ * history budget (turn_edit_input raises it when the estimate fell short). */
+#define SQL_ROW_OVERHEAD "128"
+#define SQL_HEAD_OVERHEAD "512"
+#define SQL_NEW_UNIT \
+    "(COALESCE(e.turn_id<>b.turn_id, 1)" \
+    " OR (b.run > 0 AND (e.type='compaction' OR b.type='compaction')))"
 #define SQL_BRANCH \
-    "branch(id, parent_id, turn_id, lvl, run, bytes) AS (" \
-    "  SELECT id, parent_id, turn_id, 0, 0, COALESCE(content_bytes,0) FROM entries" \
+    "branch(id, parent_id, turn_id, type, lvl, run, t) AS (" \
+    "  SELECT id, parent_id, turn_id, type, 0, 0, 0 FROM entries" \
     "   WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1) AND session_id=?1" \
     "  UNION ALL" \
-    "  SELECT e.id, e.parent_id, e.turn_id, b.lvl+1," \
-    "         b.run + COALESCE(e.turn_id<>b.turn_id, 1)," \
-    "         b.bytes + COALESCE(e.content_bytes,0)" \
+    "  SELECT e.id, e.parent_id, e.turn_id, e.type, b.lvl+1," \
+    "         b.run + " SQL_NEW_UNIT "," \
+    "         b.t + (" SQL_NEW_UNIT " AND e.type<>'compaction')" \
     "    FROM entries e JOIN branch b ON e.id=b.parent_id" \
-    "   WHERE e.session_id=?1 AND b.bytes <= ?2)," \
+    "   WHERE e.session_id=?1 AND (?2 < 0 OR b.t < ?2 OR NOT " SQL_NEW_UNIT "))," \
+    " priced AS MATERIALIZED (" \
+    "  SELECT b.run, b.lvl, b.id, b.type," \
+    "         b.run=0 OR NOT (e.role=2 AND COALESCE(e.stop_reason,0) IN (4,5)) AS keep," \
+    "         CASE WHEN b.run > 0 AND e.role=2 AND COALESCE(e.stop_reason,0) IN (4,5) THEN 0" \
+    "              WHEN b.run > 0 AND e.type='tool_result' AND NOT ?3 THEN " SQL_ROW_OVERHEAD \
+    "              ELSE COALESCE(e.content_bytes,0) + " SQL_ROW_OVERHEAD " END AS cost" \
+    "    FROM branch b JOIN entries e ON e.id=b.id)," \
+    " units AS MATERIALIZED (" \
+    "  SELECT run, MAX(run > 0 AND type='compaction') AS summary, SUM(cost) AS cost" \
+    "    FROM priced GROUP BY run)," \
+    " fit AS MATERIALIZED (" \
+    "  SELECT run FROM (SELECT run, SUM(cost) OVER (ORDER BY run) AS cum" \
+    "                     FROM units WHERE run > 0)" \
+    "   WHERE cum <= ?4 - ?5 - " SQL_HEAD_OVERHEAD \
+    "              - (SELECT cost FROM units WHERE run=0))," \
+    /* Text is read for the rows that are sent, and only once the finished \
+     * turn is known to fit. */ \
     " part AS MATERIALIZED (" \
-    "  SELECT b.run, b.lvl, e.id, e.type, e.iteration_id, e.turn_id, e.content," \
+    "  SELECT r.run, r.lvl, e.id, e.type, e.iteration_id, e.turn_id," \
+    "         CASE WHEN r.run > 0 AND e.type='tool_result' AND NOT ?3 THEN NULL" \
+    "              ELSE e.content END AS content," \
     "         e.tool_call_id, e.tool_name, e.is_error, e.token_estimate" \
-    "    FROM branch b JOIN entries e ON e.id=b.id" \
-    "   WHERE b.run=0 OR NOT (e.role=2 AND COALESCE(e.stop_reason,0) IN (4,5)))," \
+    "    FROM priced r JOIN entries e ON e.id=r.id" \
+    "   WHERE r.keep AND (r.run=0 OR r.run IN (SELECT run FROM fit))" \
+    "     AND (SELECT cost FROM units WHERE run=0) + " SQL_HEAD_OVERHEAD " <= ?4)," \
     /* One row per turn: where it starts, and its last row. A compaction \
-     * summary carries the turn_id of the entry it follows but is no part of \
-     * that turn. */ \
+     * summary is no part of any turn. */ \
     " turns AS MATERIALIZED (" \
     "  SELECT run, turn_id, MAX(lvl) AS first, MIN(lvl) AS last" \
     "    FROM part WHERE type<>'compaction' GROUP BY run)"
@@ -94,7 +130,8 @@
  * assistant message (the answer, reported apart as `final`), else NULL: an
  * earlier turn that ended on a cutoff has no answer. Every other iteration is
  * in `iterations`; an iteration's entry_id is its first row on the branch —
- * what a note's "before" names. */
+ * what a note's "before" names. An earlier turn's results lose their text
+ * when ?3 says so (the finished turn's never do). */
 #define SQL_TURN_FIELDS \
     "'turn_id',k.turn_id," \
     "'tokens',json_object(" \
@@ -127,10 +164,12 @@
     "          AND " SQL_CALL_UNFINISHED("a") " IS NULL THEN 'false' ELSE 'true' END)," \
     "      'is_error',json(CASE WHEN COALESCE((SELECT r.is_error" SQL_RESULT_OF_A "),0)" \
     "          THEN 'true' ELSE 'false' END)," \
-    "      'result',json((SELECT json_object(" \
+    "      'result',json((SELECT CASE WHEN k.run=0 OR ?3 THEN json_object(" \
     "          'entry_id',r.id," \
     "          'text',COALESCE(r.content,'')," \
-    "          'tokens',r.token_estimate)" SQL_RESULT_OF_A "))" \
+    "          'tokens',r.token_estimate)" \
+    "        ELSE json_object('entry_id',r.id,'tokens',r.token_estimate) END" \
+    "        " SQL_RESULT_OF_A "))" \
     "      )) ORDER BY a.lvl DESC) FILTER (WHERE a.type='tool_call')) AS obj" \
     "  FROM part a WHERE a.run=k.run AND a.type IN ('assistant_message','tool_call')" \
     "   AND a.id IS NOT f.id" \
@@ -141,16 +180,21 @@
 #define SQL_TURN_ANSWER \
     " LEFT JOIN part f ON f.lvl=k.last AND f.type='assistant_message'"
 
-/* ?1 = session id, ?2 = the most stored text a branch may hold. No row when
- * the leaf is not an assistant message, or the branch holds more than that.
- * `history` is the rest of the branch, oldest first: each earlier turn in
- * the finished turn's shape, and each compaction summary where it stands. */
+/* The input, or no row when the session has no leaf. Column 0 is NULL when
+ * the leaf is not an assistant message or the finished turn does not fit;
+ * column 1 says it does not fit; column 2 counts the earlier units sent.
+ * `history` is oldest first: each earlier turn in the finished turn's shape,
+ * and each compaction summary where it stands. */
 static const char SQL_INPUT[] =
     "WITH RECURSIVE " SQL_BRANCH
-    " SELECT json_object("
+    " SELECT CASE WHEN u.cost + " SQL_HEAD_OVERHEAD " <= ?4 THEN (SELECT json_object("
     "  'event','turnSettled',"
     "  'session_id',?1,"
     "  'agent',(SELECT agent_name FROM sessions WHERE id=?1),"
+    "  'input',json_object("
+    "    'history',CASE WHEN ?2 < 0 THEN 'all' WHEN ?2 = 0 THEN 'none' ELSE ?2 END,"
+    "    'history_results',json(CASE WHEN ?3 THEN 'true' ELSE 'false' END),"
+    "    'max_bytes',?4),"
     SQL_TURN_FIELDS ","
     "  'history',(SELECT json_group_array(json(h.obj) ORDER BY h.lvl DESC) FROM ("
     "    SELECT k.first AS lvl, json_object(" SQL_TURN_FIELDS ") AS obj"
@@ -158,28 +202,64 @@ static const char SQL_INPUT[] =
     "    UNION ALL"
     "    SELECT s.lvl, json_object('summary',json_object('entry_id',s.id,"
     "        'text',COALESCE(s.content,''),'tokens',s.token_estimate))"
-    "      FROM part s WHERE s.type='compaction') h))"
+    "      FROM part s WHERE s.type='compaction') h),"
+    "  'history_omitted',(SELECT COUNT(*) FROM units WHERE run > 0 AND NOT summary"
+    "      AND run NOT IN (SELECT run FROM fit)))"
     " FROM turns k" SQL_TURN_ANSWER
-    " WHERE k.run=0 AND f.id IS NOT NULL"
-    "   AND NOT EXISTS (SELECT 1 FROM branch WHERE bytes > ?2);";
+    " WHERE k.run=0 AND f.id IS NOT NULL) END,"
+    " u.cost + " SQL_HEAD_OVERHEAD " > ?4,"
+    " (SELECT COUNT(*) FROM fit)"
+    " FROM units u WHERE u.run=0;";
 
-char *turn_edit_input(sqlite3 *db, int64_t session_id) {
-    if (!db) return NULL;
+/* The allowance per row is generous for keys and ids, but text the JSON
+ * escapes (quotes, newlines, control characters) grows on the way out, so
+ * the estimate can fall short. Then the statement runs again with the
+ * overshoot held back — more of the oldest history goes — and a third and
+ * last time with no history at all. Each run reads text only for what it
+ * sends. */
+char *turn_edit_input(sqlite3 *db, int64_t session_id, const TurnEditInputSpec *spec,
+                      int *too_big) {
+    if (too_big) *too_big = 0;
+    if (!db || !spec || spec->max_bytes <= 0) return NULL;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, SQL_INPUT, -1, &st, NULL) != SQLITE_OK) {
         LOG_ERROR_("turn edit input: %s", sqlite3_errmsg(db));
         return NULL;
     }
-    sqlite3_bind_int64(st, 1, session_id);
-    sqlite3_bind_int64(st, 2, TURN_EDIT_INPUT_MAX_BYTES);
+    int64_t max = spec->max_bytes, slack = 0;
     char *out = NULL;
-    int rc = sqlite3_step(st);
-    if (rc == SQLITE_ROW) {
+    for (int attempt = 0; attempt < 3 && !out; attempt++) {
+        sqlite3_reset(st);
+        sqlite3_bind_int64(st, 1, session_id);
+        sqlite3_bind_int(st, 2, spec->history);
+        sqlite3_bind_int(st, 3, spec->history_results ? 1 : 0);
+        sqlite3_bind_int64(st, 4, max);
+        sqlite3_bind_int64(st, 5, slack);
+        int rc = sqlite3_step(st);
+        if (rc != SQLITE_ROW) {
+            if (rc != SQLITE_DONE)
+                LOG_ERROR_("turn edit input session=%lld: %s", (long long)session_id,
+                           sqlite3_errmsg(db));
+            break;
+        }
         const char *v = (const char *)sqlite3_column_text(st, 0);
-        if (v) out = strdup(v);
-    } else if (rc != SQLITE_DONE) {
-        LOG_ERROR_("turn edit input session=%lld: %s", (long long)session_id,
-                   sqlite3_errmsg(db));
+        int64_t len = sqlite3_column_bytes(st, 0);
+        int big = sqlite3_column_int(st, 1), sent = sqlite3_column_int(st, 2);
+        if (!v) {
+            if (big && too_big) *too_big = 1;
+            break;
+        }
+        if (len <= max) {
+            out = strdup(v);
+            break;
+        }
+        if (sent == 0) {        /* the finished turn alone, as written out */
+            if (too_big) *too_big = 1;
+            break;
+        }
+        LOG_DEBUG_("turn edit input session=%lld: %lld bytes over %lld, trimming history",
+                   (long long)session_id, (long long)(len - max), (long long)max);
+        slack = attempt == 0 ? slack + (len - max) + max / 16 : max;
     }
     sqlite3_finalize(st);
     return out;

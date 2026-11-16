@@ -633,6 +633,11 @@ CREATE TABLE IF NOT EXISTS hooks (
   fail_count INTEGER NOT NULL DEFAULT 0,      -- consecutive failed runs, any session; zeroed by a
                                               -- run that works. At 3 the operator gets one notice
                                               -- (settle.c) — the agent is never told.
+  input TEXT,                                 -- JSON: what a turnSettled script is sent besides the
+                                              -- finished turn — the manifest's $.hooks[].input
+                                              -- ({history, history_results, max_bytes}), validated
+                                              -- at promote. NULL = nothing declared: the turn alone,
+                                              -- at most 1 MB (specs/turn-edit.md#input)
   PRIMARY KEY (extension_name, event, path)
 );
 

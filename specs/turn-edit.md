@@ -1,8 +1,8 @@
 # Turn edit — what a turnSettled script sees and may change
 
 `src/turn_edit.c`. Two functions: `turn_edit_input` builds the finished turn,
-and the conversation that led up to it, as plain data for a
-[turnSettled](hooks.md) script, and `turn_edit_apply` checks the script's
+and as much of the conversation that led up to it as the hook asked for, as
+plain data for a [turnSettled](hooks.md) script, and `turn_edit_apply` checks the script's
 reply and edits the turn. They run no script and change
 no session state; `src/settle.c` calls them.
 
@@ -23,14 +23,100 @@ script supplies passes the secret scanner; all or nothing.
 
 ## Input
 
-`turn_edit_input(db, session_id)` returns the session's active branch as
-JSON: the newest turn at the top level, and the turns before it under
-`history`. It is the script's `args`. NULL when the session's leaf is not an
-`assistant_message` (no finished turn), or the branch is too large to hand
-over ([below](#history)).
+`turn_edit_input(db, session_id, &spec, &too_big)` returns the script's
+`args`: the newest turn of the session's active branch at the top level, and
+under `history` as much of the branch before it as the hook asked for. `spec`
+is the hook's declared input (`TurnEditInputSpec`, read from `hooks.input` by
+`hook_next`).
+
+### What a hook asks for
+
+The manifest entry declares it; the runtime sends exactly that:
 
 ```json
-{"event":"turnSettled","session_id":12,"agent":"alavanca","turn_id":37,
+{"event": "turnSettled", "handler": "review.qjs", "wait": true,
+ "input": {"history": 5, "history_results": false, "max_bytes": 2000000}}
+```
+
+| Option | Values | Default | |
+|---|---|---|---|
+| `history` | `"none"`, a positive integer N, `"all"` | `"none"` | earlier turns sent with the finished one: none, the last N, or the whole active branch including any compaction summary |
+| `history_results` | boolean | `true` | `false`: earlier turns' tool results come without their text |
+| `max_bytes` | integer, 1 … 16777216 | 1048576 (1 MiB) | the most the whole input may be, in bytes of JSON text |
+
+Every option is optional, and so is `input` itself: a hook that declares
+nothing — `extensions/turn-review` is one — is sent the finished turn alone,
+as before history existed. `extension_manifest_validate` refuses anything
+else at promote, naming it: `input` not an object, a key other than these
+three, `history` that is not `"none"`, `"all"` or an integer ≥ 1,
+`history_results` that is not a boolean, `max_bytes` that is not an integer
+from 1 to 16777216. The declaration is stored as given in `hooks.input` (NULL
+when absent); the defaults are the runtime's and are filled in each time the
+hook runs, so they are not frozen into old rows.
+
+**The defaults, and why.** 1 MiB is about the most a script on the default
+QuickJS heap (`js_heap_mb` 8) can parse — the parsed value costs several times
+its text. A script that asks for more history should raise both. The ceiling,
+16 MiB (`TURN_EDIT_INPUT_MAX_BYTES`), is the largest value the hook vehicle
+carries (`RUNTOOL_ARG_FD_MAX`; `settle.c` asserts they are equal): an input
+past it could not be delivered at all.
+
+### The rules
+
+1. **The finished turn is always sent whole**, every result with its text. If
+   it alone does not fit in `max_bytes`, nothing is built: `turn_edit_input`
+   returns NULL with `too_big` set, and the hook is "not started" — one log
+   line (`outcome=not_started reason=the finished turn alone is larger than
+   the hook's max_bytes (N)`), the session never held, and not counted as a
+   failure of the script (the same as any hook that cannot be started,
+   [hooks.md](hooks.md#the-hold-always-ends)).
+2. **`history`** selects the earlier part of the branch. `"none"` sends `[]`,
+   and the statement reads the newest turn's entries and no others — the cost
+   of building the input is that of one turn whatever the session's length. N
+   is the last N turns, oldest first, and any compaction summary with fewer
+   than N turns between it and the finished turn — so a summary older than all
+   N is not sent. `"all"` is the
+   whole branch: what compaction left of the first turn, the summary, every
+   turn since.
+3. **`history_results: false`** keeps every earlier call, its `args`, and its
+   `result` object, but the `result` has no `text` key —
+   `{"entry_id":905,"tokens":2900}` — so a script can still name the entry or
+   weigh it. A call with no result still has `result: null`. The finished
+   turn's results are never cut.
+4. **`max_bytes`** caps the whole input. History that does not fit loses its
+   oldest turns first, whole turns only — never part of a turn, never a gap
+   in the middle. A compaction summary is kept in preference to every turn
+   older than it (in practice, the opening of the first turn that compaction
+   keeps), and goes before any turn newer than it.
+5. **The input says what it was given**: `input` echoes the resolved options
+   (`{"history":"none"|N|"all","history_results":…,"max_bytes":…}`), and
+   `history_omitted` counts the requested earlier turns left out for size (0
+   when nothing was cut; a summary left out is not counted — it goes only with
+   every turn older than it). A script can therefore tell a session's first
+   turn (`history: []`, `input.history` not `"none"`, `history_omitted: 0`)
+   from "not asked for" (`input.history: "none"`) and from "cut for size"
+   (`history_omitted > 0`).
+
+**What `max_bytes` bounds, precisely**: the length in bytes of the JSON text
+handed to the script — the returned string is never longer. Which earlier
+turns fit is decided first from integers alone, before any text is read: each
+entry is priced at its stored text (`entries.content_bytes`) plus a fixed 128
+bytes for the keys and ids around it, the head at 512 bytes, and an earlier
+result whose text is not sent at the 128 alone. That estimate is close for
+ordinary text but runs short where JSON escaping grows text — quotes and
+newlines double, control characters become six bytes. So the built document's
+real length is checked: if it is over, the statement runs again with the
+overshoot held back from history (more of the oldest goes), and a third and
+last time with no history at all; if even the turn alone is over, the hook is
+not started (rule 1). Each run reads text only for the entries it sends; in
+the ordinary case there is one run.
+
+### Shape
+
+```json
+{"event":"turnSettled","session_id":12,"agent":"alavanca",
+ "input":{"history":"all","history_results":true,"max_bytes":1048576},
+ "turn_id":37,
  "tokens":{"turn":9120,"tools":7400},
  "user_messages":[{"entry_id":900,"text":"…"}],
  "notes":[{"entry_id":930,"text":"…","before_iteration":412}],
@@ -46,9 +132,11 @@ over ([below](#history)).
     "final":null},
    {"summary":{"entry_id":880,"text":"…","tokens":1200}},
    {"turn_id":36,"tokens":{…},"user_messages":[…],"notes":[…],
-    "iterations":[…],"final":{"entry_id":899,"iteration_id":410,"text":"…"}}]}
+    "iterations":[…],"final":{"entry_id":899,"iteration_id":410,"text":"…"}}],
+ "history_omitted":0}
 ```
 
+- `input` — the options this input was built with (above).
 - `tokens` — sums of `entries.token_estimate`: the whole turn, and its
   `tool_call` + `tool_result` entries.
 - `user_messages` — the turn's `user_message` entries, in order.
@@ -64,15 +152,15 @@ over ([below](#history)).
   within the turn, not by `iteration_id`: a sub-agent's answer or an approval
   notice is appended under an iteration id of its own.
 - `final` — the turn's last assistant message. It is never edited.
-- `history` — everything else on the branch, oldest first
-  ([below](#history)). `[]` for a session's first turn.
+- `history` — the earlier part of the branch that was asked for and fits,
+  oldest first ([below](#history)). Always an array: `[]` when none was asked
+  for, on a session's first turn, or when none fits.
+- `history_omitted` — earlier turns asked for and left out for size.
 
 ### History
 
-The whole session is part of the contract: every script is handed the
-conversation that led up to the turn, whether or not it reads it
-(`extensions/turn-review` does not). It is for reading only — an edit names
-calls and entries of the newest turn and nothing else.
+It is for reading only — an edit names calls and entries of the newest turn
+and nothing else.
 
 `history` is the active branch as the agent now has it — the entries the next
 request is built from — not the session as first written:
@@ -85,24 +173,25 @@ request is built from — not the session as first written:
 - **A compaction summary** is `{"summary":{"entry_id","text","tokens"}}`, at
   the place it stands on the branch. After an ordinary compaction that is
   second: the branch keeps its first entry, so `history[0]` is what is left
-  of the first turn (its opening user message, `final: null`), then the
-  summary, then whole turns. What a summary replaced is not in `history`. A
-  summary written by `session_condense` stands between the turns on either
-  side of the range it replaced.
+  of the first turn (its opening user message, `final: null`) — a turn, for
+  counting N and for `history_omitted` — then the summary, then whole turns.
+  What a summary replaced is not in `history`. A summary written by
+  `session_condense` stands between the turns on either side of the range it
+  replaced.
 - **An edited turn** shows as edited: dropped calls are absent, a replaced
   result has the replacement's text and entry id, a hook's note is in
   `notes`. The originals are in the table, not on the branch.
 - An assistant entry that stopped on an error is left out of an earlier turn,
-  as it is left out of every request (`context_plan`). The newest turn is
-  reported in full.
+  as it is left out of every request (`context_plan`), and costs nothing
+  against `max_bytes`. The newest turn is reported in full.
 - `protected` is computed for an earlier turn's calls as for the newest
   turn's. It says what kind of call it was; no edit can reach it.
 
-Two ways `history` is more than the next request carries, both because the
-request's cut depends on the model it is built for and this input does not:
-the branch is not trimmed to the context budget (with compaction off or
-failing, the request is a sliding window over the tail and `history` is still
-the whole branch), and the leading system prompt and the per-turn context
+Two ways `history: "all"` can be more than the next request carries, both
+because the request's cut depends on the model it is built for and this input
+does not: the branch is not trimmed to the context budget (with compaction
+off or failing, the request is a sliding window over the tail; here only
+`max_bytes` trims), and the leading system prompt and the per-turn context
 block are not in it — they are not entries.
 
 Call ids are scoped to their turn. Providers reuse them across turns, so a
@@ -110,14 +199,13 @@ call's `result` is looked up among its own turn's entries, and an edit's
 `call_id` among the newest turn's (`turn_load`); a `call_id` or `before` taken
 from `history` is refused like any other id that is not the turn's.
 
-**Size.** The document is built by one statement, and building it costs about
-five times its size in memory for a moment. A session's branch is bounded by
-compaction, so that is normally a few megabytes. A branch whose stored text
-(`entries.content_bytes`) adds up to more than 16 MB
-(`TURN_EDIT_INPUT_MAX_BYTES`, the same figure as the largest input the hook
-vehicle carries) is not built at all: the walk stops on the running total,
-before any text is read, and the function returns NULL — the hook is "not
-started" and the turn left alone.
+**Building it.** One statement, two passes over the branch: a recursive walk
+from the leaf over integer columns (ids, parents, `turn_id`, `content_bytes`)
+numbers the units — the newest turn, each earlier turn, each summary —
+stops at the first unit past the N asked for, prices them and decides which
+fit; then text is read for the chosen entries only. Building the document
+costs about five times its size in memory for a moment, so `max_bytes` also
+bounds what the daemon spends.
 
 ### Protected calls
 

@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v65 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v66 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -804,6 +804,7 @@ Extension-provided hooks. Same provenance model as tools — the DB holds config
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `wait` | INTEGER NOT NULL DEFAULT 1 | v64. 1 = the session is held in `settling` until the script ends and its reply is applied; 0 = started, not awaited, output discarded. From `$.hooks[].wait` |
 | `fail_count` | INTEGER NOT NULL DEFAULT 0 | v64. Consecutive failed runs of this hook, any session; a success zeroes it, re-promote resets it. The 3rd in a row sends one operator notice |
+| `input` | TEXT | v66. JSON: what a `turnSettled` script is sent besides the finished turn — `$.hooks[].input` as declared, `{history, history_results, max_bytes}`, validated at promote. NULL = nothing declared; each option a row does not name takes its default when the hook runs (`hook_next`): the turn alone, results with their text, at most 1 MB. See [turn-edit.md](turn-edit.md#input) |
 | PRIMARY KEY | (extension_name, event, path) | |
 
 ---

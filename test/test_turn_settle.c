@@ -375,7 +375,42 @@ static void test_not_started(void) {
     assert(turn_settle_begin(sid, "Gone") == 0);
     assert(is_state(sid, "idle") && child_count() == 0);
     assert(fail_count("gone") == 0);            /* not a failure of the script */
+
+    /* A finished turn larger than the hook's max_bytes is not handed over:
+     * not started, the session never held, not a failure of the script. */
+    install("big", "Big", DROP_C1);
+    run("UPDATE hooks SET input='{\"max_bytes\":2000}' WHERE extension_name='big';");
+    sid = seed_turn("Big", 400);
+    assert(turn_settle_begin(sid, "Big") == 0);
+    assert(is_state(sid, "idle") && child_count() == 0);
+    assert(count(N_EDITS, sid) == 0 && count(N_CALLS, sid) == 1);
+    assert(fail_count("big") == 0);
     printf("  PASS test_not_started\n");
+}
+
+/* The script is sent what its hooks row asks for: here the conversation
+ * before the turn, the earlier results without their text. */
+static void test_declared_input(void) {
+    install("hist", "Hist",
+        "var c = args.history[0].iterations[0].calls[0];"
+        "return JSON.stringify({edits:[{op:'note',text:'history=' + args.history.length"
+        " + ' asked=' + args.input.history + ' omitted=' + args.history_omitted"
+        " + ' text=' + (c.result.text === undefined ? 'none' : 'some')"
+        " + ' tokens=' + (c.result.tokens > 0)}]});");
+    run("UPDATE hooks SET input='{\"history\":\"all\",\"history_results\":false}'"
+        " WHERE extension_name='hist';");
+    int64_t sid = seed_turn("Hist", 40);
+    Message u = {.role = ROLE_USER, .content = "and then?"};
+    assert(entry_append_with_iteration(g_db, sid, &u, 0) > 0);
+    assert(entry_append_typed(g_db, sid, db_next_iteration_id(g_db, sid), "assistant_message",
+                              0, "nothing more", NULL, NULL, 0, STOP_REASON_NONE, NULL,
+                              0, 0, 0) > 0);
+    assert(turn_settle_begin(sid, "Hist") == 1);
+    pump_until_idle(sid);
+    assert(count("SELECT COUNT(*) FROM entries WHERE session_id=?1 AND type='system'"
+                 " AND content='history=1 asked=all omitted=0 text=none tokens=true'", sid) == 1);
+    assert(fail_count("hist") == 0);
+    printf("  PASS test_declared_input\n");
 }
 
 /* The lost-wake backstop: a session this process holds with no hook child
@@ -407,7 +442,7 @@ int main(int argc, char *argv[]) {
     g_db = test_db_open(DB_PATH);
     assert(g_db);
     static const char *const agents[] = { "Rv", "Junk", "Boom", "Nil", "Slow",
-                                          "Chain", "Obs", "Gone" };
+                                          "Chain", "Obs", "Gone", "Big", "Hist" };
     for (size_t i = 0; i < sizeof(agents) / sizeof(agents[0]); i++)
         db_agent_upsert(g_db, agents[i], NULL, NULL);
     run("INSERT INTO tools(name, droppable) VALUES('look',1);");
@@ -429,6 +464,7 @@ int main(int argc, char *argv[]) {
     test_chain();
     test_not_awaited();
     test_not_started();
+    test_declared_input();
     test_sweep();
 
     agent_setup_destroy(&setup);

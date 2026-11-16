@@ -22,6 +22,7 @@
 #include "qjs_helpers.h"
 #include "test_util.h"
 #include "turn_edit.h"
+#include "util.h"
 
 #define DB_PATH    "/tmp/test_turn_review_ext.db"
 #define BRIDGE_DIR "/tmp/test_turn_review_ext_bridge"
@@ -219,7 +220,20 @@ static char *review(const Turn *t, const char *said, const char *config, int *is
     Mock m;
     pthread_t tid;
     mock_start(&m, &tid, said);
-    char *args = turn_edit_input(g_db, t->sid);
+    /* The shipped manifest declares no "input": the script is sent what the
+     * runtime sends by default, the finished turn alone. */
+    char *manifest = util_read_file("extensions/turn-review/extension.json", NULL);
+    assert(manifest);
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(g_db, "SELECT json_type(?1,'$.hooks[0]')='object'"
+                                    " AND json_type(?1,'$.hooks[0].input') IS NULL",
+                              -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
+    free(manifest);
+    TurnEditInputSpec spec = TURN_EDIT_INPUT_DEFAULTS;
+    char *args = turn_edit_input(g_db, t->sid, &spec, NULL);
     assert(args);
     LlmBridge *b = llm_bridge_start(BRIDGE_DIR, DB_PATH, "t", "hook:turn-review", t->sid, 0);
     assert(b);

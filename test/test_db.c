@@ -246,11 +246,20 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
-/* Turn a fresh (current) database back into the v64 shape: agent_models
- * knows three purposes and its capability triggers guard everything but
- * chat. Utility rows cannot exist there and are not carried. unshape_v64
- * starts here, so every older patch test replays v65 over a real v64 shape. */
+/* Turn a fresh (current) database back into the v65 shape: hooks has no
+ * input column. unshape_v65 starts here, so every older patch test replays
+ * v66 over a real v65 shape. */
+static void unshape_v66(sqlite3 *db) {
+    int rc = sqlite3_exec(db, "ALTER TABLE hooks DROP COLUMN input;", NULL, NULL, NULL);
+    assert(rc == SQLITE_OK);
+}
+
+/* On to the v64 shape: agent_models knows three purposes and its capability
+ * triggers guard everything but chat. Utility rows cannot exist there and are
+ * not carried. unshape_v64 starts here, so every older patch test replays
+ * v65 over a real v64 shape. */
 static void unshape_v65(sqlite3 *db) {
+    unshape_v66(db);
     char *err = NULL;
     int rc = sqlite3_exec(db,
         "CREATE TEMP TABLE u65 AS SELECT * FROM agent_models WHERE purpose <> 'utility';"
@@ -1920,6 +1929,48 @@ static void test_schema_patch_v65(void) {
     printf("  PASS test_schema_patch_v65\n");
 }
 
+/* v66: hooks.input. A hook that was there keeps its row and every other
+ * column, and reads NULL — nothing declared, the finished turn alone, as it
+ * was always sent. The patched table is shaped like a fresh one. */
+static void test_schema_patch_v66(void) {
+    const char *path = "/tmp/test_cclaw_schema_v66.sqlite";
+    const char *fresh_path = "/tmp/test_cclaw_schema_v66_fresh.sqlite";
+    test_db_clean(path);
+    test_db_clean(fresh_path);
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v66(db);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_table_info('hooks')"
+        " WHERE name='input';", 0, -1) == 0);
+    assert(sqlite3_exec(db,
+        "INSERT INTO extensions(name, path, published) VALUES('ext','/e',1);"
+        "INSERT INTO hooks(extension_name, event, path, enabled, wait, fail_count)"
+        " VALUES('ext','turnSettled','/e/r.qjs',1,0,2);",
+        NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 65);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM hooks WHERE extension_name='ext'"
+        " AND event='turnSettled' AND path='/e/r.qjs' AND enabled=1 AND wait=0"
+        " AND fail_count=2 AND input IS NULL;", 0, -1) == 1);
+    assert(sqlite3_exec(db, "UPDATE hooks SET input='{\"history\":\"all\"}';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+
+    sqlite3 *fresh = db_open(fresh_path);
+    assert(fresh != NULL && db_ensure_schema(fresh) == 0);
+    char *got = schema_shape(db), *want = schema_shape(fresh);
+    if (strcmp(got, want) != 0) fprintf(stderr, "v66 shape differs:\n%s\n---\n%s\n", got, want);
+    assert(strcmp(got, want) == 0);
+    free(got); free(want);
+    db_close(fresh);
+    db_close(db);
+    test_db_clean(path);
+    test_db_clean(fresh_path);
+    printf("  PASS test_schema_patch_v66\n");
+}
+
 static void test_agent_models_capability_gate(void) {
     const char *path = "/tmp/test_cclaw_db_capgate.sqlite";
     test_db_clean(path);
@@ -2006,6 +2057,7 @@ int main(void) {
     test_schema_patch_v63();
     test_schema_patch_v64();
     test_schema_patch_v65();
+    test_schema_patch_v66();
     test_agent_models_capability_gate();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");

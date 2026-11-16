@@ -38,9 +38,11 @@ messages — and applies a review whole or not at all
 ([specs/turn-edit.md](../../specs/turn-edit.md)).
 
 It is the reference example for hooks: one file of about 240 lines, with the
-settings at the top. Every hook is also handed the earlier turns of the
-session (`args.history`); this script reviews the finished turn alone and
-does not read them.
+settings at the top. Its manifest entry declares no `input`, so it is sent
+the finished turn alone, up to 1 MiB — the runtime default. A hook that wants
+the conversation before the turn says so in its entry (`"input": {"history":
+5}`, or `"all"`; see [specs/turn-edit.md](../../specs/turn-edit.md#input));
+this one reviews one turn and does not need it.
 
 ## Attach it
 
@@ -54,7 +56,8 @@ cp -r extensions/turn-review ~/.cclaw/agents/<Agent>/workspace/extensions/
 then tell the agent: *promote the extension draft turn-review*. The approval
 reads `promote 'turn-review': adds 0 tools, 1 hooks, … 2 config keys`, then
 `- hook turnSettled review.qjs: runs after every turn, reads it, and may drop
-tool calls, replace results and add notes; the session waits for it`. From
+tool calls, replace results and add notes; the session waits for it. It is
+sent the finished turn`. From
 the agent's next turn the hook runs; no restart. For a second agent, have the
 owner `extension_publish` it and the other agent `extension_attach` it.
 

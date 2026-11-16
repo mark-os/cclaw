@@ -289,10 +289,46 @@ static void test_recovery(void) {
     printf("  PASS test_recovery\n");
 }
 
+/* hooks.input as the hook runs with it: what a row names, each option it
+ * does not name at its default, and a row that is not what promote writes
+ * read as nothing declared. */
+static void test_input(void) {
+    sqlite3 *db = open_seeded();
+    static const struct { const char *input; int history, results, max_bytes; } cases[] = {
+        { NULL, 0, 1, TURN_EDIT_INPUT_DEFAULT_BYTES },
+        { "{}", 0, 1, TURN_EDIT_INPUT_DEFAULT_BYTES },
+        { "{\"history\":\"none\"}", 0, 1, TURN_EDIT_INPUT_DEFAULT_BYTES },
+        { "{\"history\":\"all\"}", TURN_EDIT_HISTORY_ALL, 1, TURN_EDIT_INPUT_DEFAULT_BYTES },
+        { "{\"history\":5,\"history_results\":false,\"max_bytes\":2000000}", 5, 0, 2000000 },
+        { "{\"history_results\":true,\"max_bytes\":99999999}", 0, 1, TURN_EDIT_INPUT_MAX_BYTES },
+        { "not json", 0, 1, TURN_EDIT_INPUT_DEFAULT_BYTES },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        sqlite3_stmt *st;
+        assert(sqlite3_prepare_v2(db, "UPDATE hooks SET input=?1 WHERE extension_name='ext_a';",
+                                  -1, &st, NULL) == SQLITE_OK);
+        if (cases[i].input) sqlite3_bind_text(st, 1, cases[i].input, -1, SQLITE_STATIC);
+        assert(sqlite3_step(st) == SQLITE_DONE);
+        sqlite3_finalize(st);
+        HookRef h;
+        assert(hook_next(db, "Main", EV, 1, NULL, &h) == 1);
+        assert(strcmp(h.extension, "ext_a") == 0);
+        if (h.input.history != cases[i].history || h.input.history_results != cases[i].results ||
+            h.input.max_bytes != cases[i].max_bytes) {
+            fprintf(stderr, "FAIL input %s: got %d/%d/%d\n", cases[i].input ? cases[i].input : "NULL",
+                    h.input.history, h.input.history_results, h.input.max_bytes);
+            abort();
+        }
+    }
+    db_close(db);
+    printf("  PASS test_input\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_hook:\n");
     test_resolution();
+    test_input();
     test_eligibility();
     test_failure_count();
     test_state_guard();

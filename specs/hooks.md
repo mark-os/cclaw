@@ -18,7 +18,8 @@ two calls in `src/settle.c` — `turn_edit_input` to build `args`,
 A `hooks[]` entry in the extension manifest ([extensions.md](extensions.md)):
 
 ```json
-"hooks": [ { "event": "turnSettled", "handler": "review.qjs", "wait": true } ]
+"hooks": [ { "event": "turnSettled", "handler": "review.qjs", "wait": true,
+             "input": { "history": 5, "history_results": false, "max_bytes": 2000000 } } ]
 ```
 
 - `event` — `turnSettled`. `extension_manifest_validate` refuses any other
@@ -27,10 +28,18 @@ A `hooks[]` entry in the extension manifest ([extensions.md](extensions.md)):
 - `handler` — a `.qjs` file in the bundle.
 - `wait` — boolean, default `true`. Whether the session is held until the
   script ends. See [Not waited for](#not-waited-for).
+- `input` — optional: what the script is sent besides the finished turn.
+  `history` (`"none"` — the default —, a positive number of turns, or
+  `"all"`), `history_results` (boolean, default `true`), `max_bytes` (default
+  1 MiB, at most 16 MiB). Unknown keys and wrong types are refused at
+  promote. The rules are in [turn-edit.md](turn-edit.md#input).
 
 Promote writes one `hooks` row per entry ([schema.md](schema.md#hooks)):
-`(extension_name, event, path, enabled, wait, fail_count)`, `path` inside the
-shared store. Re-promoting replaces the rows, so the failure count starts
+`(extension_name, event, path, enabled, wait, fail_count, input)`, `path`
+inside the shared store, `input` the declared object or NULL. The approval
+lists each hook on a line of its own, saying what it does and what it is sent
+("It is sent the finished turn and the last 5 turns before it (their tool
+results without the text), at most 2000000 bytes"). Re-promoting replaces the rows, so the failure count starts
 over with the new code.
 
 **Which hooks an agent runs** is read from the tables when the event happens
@@ -73,19 +82,20 @@ are re-read, the path must be inside the extension store, only the secrets
 the agent is granted ride along, and it runs under the agent's sandbox
 profile.
 
-- **`args`** — the finished turn and, under `history`, the conversation
-  before it: the JSON `turn_edit_input()` builds
-  ([Input and reply](#input-and-reply)). It can be far
-  larger than a tool call's arguments, so it does not travel in the request
-  blob: the parent writes it to an unnamed file and passes the descriptor to
-  the child on the request socket (`TOOL_ARG_JSON_FD`, `run_tool.h`). The
-  script sees an ordinary `args` object. A session whose branch holds more
-  than 16 MB of text (`TURN_EDIT_INPUT_MAX_BYTES`, = `RUNTOOL_ARG_FD_MAX`) is
-  not handed over at all — the hook is "not started" and the turn left alone.
-  In practice the script's heap (`js_heap_mb`, default 8 MB) is the tighter
-  bound: `args` is the whole branch, used or not, and a script that runs out
-  of heap fails like any other. Compaction keeps a branch far below either
-  bound; a session running with compaction off or failing can reach them.
+- **`args`** — the finished turn and, under `history`, as much of the
+  conversation before it as the hook declared (`input`): the JSON
+  `turn_edit_input()` builds ([Input and reply](#input-and-reply)). It can be
+  far larger than a tool call's arguments, so it does not travel in the
+  request blob: the parent writes it to an unnamed file and passes the
+  descriptor to the child on the request socket (`TOOL_ARG_JSON_FD`,
+  `run_tool.h`). The script sees an ordinary `args` object. It is never
+  longer than the hook's `max_bytes` (default 1 MiB, about what the default
+  script heap, `js_heap_mb` 8, can parse; at most 16 MiB =
+  `RUNTOOL_ARG_FD_MAX`): history that does not fit loses its oldest turns, and
+  a finished turn that alone does not fit is not handed over at all — the
+  hook is "not started" and the turn left alone. A script that asks for a
+  lot of history should raise `js_heap_mb` with its `max_bytes`; one that
+  runs out of heap fails like any other.
 - **`getConfig(key)`** — the extension's own settings.
 - **`LLM(prompt, opts)`** — bridged to the parent as for any JS child;
   `llm_responses` rows carry the source `hook:<extension>`.
@@ -101,11 +111,13 @@ the bytes the script wrote are handed to it unmodified.
 
 ### Input and reply
 
-`args` is the turn as plain data, with the earlier turns of the session
-behind it ([turn-edit.md](turn-edit.md#input)):
+`args` is the turn as plain data, with as much of the conversation before it
+as the hook asked for ([turn-edit.md](turn-edit.md#input)):
 
 ```json
-{"event":"turnSettled","session_id":12,"agent":"alavanca","turn_id":37,
+{"event":"turnSettled","session_id":12,"agent":"alavanca",
+ "input":{"history":"all","history_results":true,"max_bytes":1048576},
+ "turn_id":37,
  "tokens":{"turn":9120,"tools":7400},
  "user_messages":[{"entry_id":900,"text":"…"}],
  "notes":[{"entry_id":930,"text":"…","before_iteration":412}],
@@ -117,20 +129,25 @@ behind it ([turn-edit.md](turn-edit.md#input)):
  "history":[{"turn_id":35,"tokens":{},"user_messages":[],"notes":[],
              "iterations":[],"final":{}},
             {"summary":{"entry_id":880,"text":"…","tokens":1200}},
-            {"turn_id":36,"…":"…"}]}
+            {"turn_id":36,"…":"…"}],
+ "history_omitted":0}
 ```
 
 Result text is verbatim. `protected` calls cannot be dropped (effect tools,
 `check_session`, a `save_secret` call, an unfinished call).
 
-`history` is the rest of the session's active branch, oldest first, as the
-agent now has it: each earlier turn in the same shape as the top-level turn
-(`turn_id`, `tokens`, `user_messages`, `notes`, `iterations`, `final`), and
-each compaction summary as `{"summary":{…}}` where it stands. A turn an
-earlier hook edited appears as edited. It is `[]` on a session's first turn.
-History is for reading: edits reach the top-level turn only, and a `call_id`
-or `before` taken from `history` refuses the reply
-([turn-edit.md](turn-edit.md#history)).
+`history` is the earlier part of the session's active branch, oldest first,
+as the agent now has it: each earlier turn in the same shape as the top-level
+turn (`turn_id`, `tokens`, `user_messages`, `notes`, `iterations`, `final`),
+and each compaction summary as `{"summary":{…}}` where it stands. A turn an
+earlier hook edited appears as edited. It is `[]` unless the hook declared
+`history`; `input` echoes what was declared (with the defaults filled in) and
+`history_omitted` counts earlier turns left out to fit `max_bytes`, so a
+script can tell a first turn from history it did not ask for or that did not
+fit. With `history_results: false` an earlier call's `result` is
+`{"entry_id","tokens"}`, no text. History is for reading: edits reach the
+top-level turn only, and a `call_id` or `before` taken from `history` refuses
+the reply ([turn-edit.md](turn-edit.md#history)).
 
 The reply is a list of edits and an optional opaque record
 ([turn-edit.md](turn-edit.md#reply)):
@@ -208,7 +225,7 @@ joining it, and the thread frees the bridge when the provider answers.
 | script returns | reap → apply → release |
 | script throws, exits non-zero, is killed by a signal | reap → failure → release |
 | script overruns | broker timer (reap) or the deadline sweep → failure → release |
-| no child slot, fork fails, script file missing, no workspace | nothing started; the session never left `idle`. One log line, not counted as a failure |
+| no child slot, fork fails, script file missing, no workspace, the finished turn larger than the hook's `max_bytes` | nothing started; the session never left `idle`. One log line, not counted as a failure |
 | the session could not be marked `settling` (another process opened a turn first) | the child is demoted to not-waited-for; its reply is discarded |
 | daemon killed mid-hold | `db_recover_stale_sessions` — `settling` under a dead owner → `idle`, turn and inbox untouched, no resume nudge (no turn was in flight) |
 | the reap never reaches `settle.c` | `turn_settle_sweep`, every periodic tick, in the daemon and the CLI: a session this process holds in `settling` with no hook child is released |
@@ -264,7 +281,9 @@ the network), so it is a setting, not a constant.
 A hook script has exactly what a tool call by the same agent has: the
 agent's sandbox profile, its grants, its granted secrets, egress through the
 proxy. Promoting the extension is the approval. What it is shown is the
-session's own latest turn, already scanned on its way in. What it can change
+session's own latest turn and, when its manifest asks, the earlier part of
+the same session — all of it already scanned on its way in; the approval line
+says how much. What it can change
 is what `turn_edit_apply` allows: drop unprotected calls of that turn, replace
 result text, add notes. All text it supplies is scanned for secrets and
 refused on a hit, never stored masked; its notes are labelled as the

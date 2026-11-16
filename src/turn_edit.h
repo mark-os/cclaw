@@ -23,21 +23,44 @@ typedef enum {
     TURN_EDIT_ERROR    = -2,  /* our side failed (DB, memory); nothing written */
 } TurnEditResult;
 
-/* Most stored text (entries.content_bytes, summed over the active branch) a
- * session may hold and still be handed to a script. The same figure as the
- * largest input the hook vehicle carries (RUNTOOL_ARG_FD_MAX; settle.c
- * asserts they agree): a bigger branch could not be delivered anyway, so it
- * is not built. */
+/* What a turnSettled hook asked to be sent: its manifest's "input" object
+ * (hooks.input), with the defaults filled in (hook_next). The finished turn is
+ * always sent in full; these say how much of the conversation before it. */
+typedef struct {
+    int history;            /* earlier turns: 0 none, N the last N, TURN_EDIT_HISTORY_ALL */
+    int history_results;    /* 0: earlier turns' results come without their text */
+    int max_bytes;          /* the most the whole input may be, in bytes of JSON */
+} TurnEditInputSpec;
+
+#define TURN_EDIT_HISTORY_ALL (-1)
+
+/* max_bytes when the manifest does not say: about what a script on the
+ * default heap (js_heap_mb 8) can JSON-parse — the parsed value costs several
+ * times its text. A script that asks for more raises its heap too. */
+#define TURN_EDIT_INPUT_DEFAULT_BYTES (1024 * 1024)
+
+/* The most max_bytes may be: the largest input the hook vehicle carries
+ * (RUNTOOL_ARG_FD_MAX; settle.c asserts they agree). Promote refuses more. */
 #define TURN_EDIT_INPUT_MAX_BYTES (16 * 1024 * 1024)
+
+/* A manifest that declares no "input": the finished turn alone. */
+#define TURN_EDIT_INPUT_DEFAULTS \
+    ((TurnEditInputSpec){ .history = 0, .history_results = 1, \
+                          .max_bytes = TURN_EDIT_INPUT_DEFAULT_BYTES })
 
 /* The session as a hook's input (JSON text, caller frees), stored text
  * verbatim: the newest turn on the active branch at the top level — the one
- * turn an edit may touch — and under "history" the rest of that branch,
- * oldest first: every earlier turn in the same shape, and each compaction
- * summary where it stands. NULL when the session's leaf is not an assistant
- * message — there is no finished turn — or the branch holds more than
- * TURN_EDIT_INPUT_MAX_BYTES. */
-char *turn_edit_input(sqlite3 *db, int64_t session_id);
+ * turn an edit may touch, always whole — and under "history" as much of the
+ * branch before it as `spec` asks for and max_bytes leaves room for, oldest
+ * first: earlier turns in the same shape, and compaction summaries where they
+ * stand. History that does not fit loses its oldest turns first, whole. The
+ * returned text is never longer than spec->max_bytes.
+ *
+ * NULL when the session's leaf is not an assistant message (no finished
+ * turn), or the finished turn alone is larger than max_bytes — then
+ * *too_big (when given) is set to 1. */
+char *turn_edit_input(sqlite3 *db, int64_t session_id, const TurnEditInputSpec *spec,
+                      int *too_big);
 
 /* Validate a reply against the finished turn and apply it, all or nothing,
  * in one BEGIN IMMEDIATE transaction — so the handle must not have a

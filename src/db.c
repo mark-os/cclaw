@@ -1908,6 +1908,12 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       NULL },
     /* v65: the 'utility' routing purpose — see patch_v65_utility. */
     { 65, NULL, patch_v65_utility },
+    /* v66: hooks.input — what a turnSettled script asked to be sent. NULL on
+     * every existing row, which is the runtime's defaults: the finished turn
+     * alone, as such a script has always been sent it. */
+    { 66,
+      "ALTER TABLE hooks ADD COLUMN input TEXT;",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {

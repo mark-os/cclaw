@@ -73,16 +73,19 @@ are re-read, the path must be inside the extension store, only the secrets
 the agent is granted ride along, and it runs under the agent's sandbox
 profile.
 
-- **`args`** — the finished turn, the JSON `turn_edit_input()` builds
+- **`args`** — the finished turn and, under `history`, the conversation
+  before it: the JSON `turn_edit_input()` builds
   ([Input and reply](#input-and-reply)). It can be far
   larger than a tool call's arguments, so it does not travel in the request
   blob: the parent writes it to an unnamed file and passes the descriptor to
   the child on the request socket (`TOOL_ARG_JSON_FD`, `run_tool.h`). The
-  script sees an ordinary `args` object. A turn whose JSON exceeds 16 MB
-  (`RUNTOOL_ARG_FD_MAX`) is not handed over at all — the hook is "not
-  started" and the turn left alone. In practice the script's heap
-  (`js_heap_mb`, default 8 MB) is the tighter bound on a very large turn; a
-  script that runs out of it fails like any other.
+  script sees an ordinary `args` object. A session whose branch holds more
+  than 16 MB of text (`TURN_EDIT_INPUT_MAX_BYTES`, = `RUNTOOL_ARG_FD_MAX`) is
+  not handed over at all — the hook is "not started" and the turn left alone.
+  In practice the script's heap (`js_heap_mb`, default 8 MB) is the tighter
+  bound: `args` is the whole branch, used or not, and a script that runs out
+  of heap fails like any other. Compaction keeps a branch far below either
+  bound; a session running with compaction off or failing can reach them.
 - **`getConfig(key)`** — the extension's own settings.
 - **`LLM(prompt, opts)`** — bridged to the parent as for any JS child;
   `llm_responses` rows carry the source `hook:<extension>`.
@@ -98,7 +101,8 @@ the bytes the script wrote are handed to it unmodified.
 
 ### Input and reply
 
-`args` is the turn as plain data ([turn-edit.md](turn-edit.md#input)):
+`args` is the turn as plain data, with the earlier turns of the session
+behind it ([turn-edit.md](turn-edit.md#input)):
 
 ```json
 {"event":"turnSettled","session_id":12,"agent":"alavanca","turn_id":37,
@@ -109,11 +113,24 @@ the bytes the script wrote are handed to it unmodified.
    "calls":[{"call_id":"c1","entry_id":903,"tool":"shell_exec","args":{},
              "protected":false,"is_error":false,
              "result":{"entry_id":905,"text":"…","tokens":2900}}]}],
- "final":{"entry_id":960,"iteration_id":413,"text":"…"}}
+ "final":{"entry_id":960,"iteration_id":413,"text":"…"},
+ "history":[{"turn_id":35,"tokens":{},"user_messages":[],"notes":[],
+             "iterations":[],"final":{}},
+            {"summary":{"entry_id":880,"text":"…","tokens":1200}},
+            {"turn_id":36,"…":"…"}]}
 ```
 
 Result text is verbatim. `protected` calls cannot be dropped (effect tools,
 `check_session`, a `save_secret` call, an unfinished call).
+
+`history` is the rest of the session's active branch, oldest first, as the
+agent now has it: each earlier turn in the same shape as the top-level turn
+(`turn_id`, `tokens`, `user_messages`, `notes`, `iterations`, `final`), and
+each compaction summary as `{"summary":{…}}` where it stands. A turn an
+earlier hook edited appears as edited. It is `[]` on a session's first turn.
+History is for reading: edits reach the top-level turn only, and a `call_id`
+or `before` taken from `history` refuses the reply
+([turn-edit.md](turn-edit.md#history)).
 
 The reply is a list of edits and an optional opaque record
 ([turn-edit.md](turn-edit.md#reply)):

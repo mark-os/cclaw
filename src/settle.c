@@ -13,9 +13,13 @@
 #include "log.h"
 #include "loop.h"
 #include "proc.h"
+#include "run_tool.h"
 #include "turn_edit.h"
 
 #define EVENT HOOK_EVENT_TURN_SETTLED
+
+_Static_assert(TURN_EDIT_INPUT_MAX_BYTES == RUNTOOL_ARG_FD_MAX,
+               "a branch turn_edit_input will build is one the hook vehicle carries");
 
 /* Start one hook on the turn as it is now. 0 = a child is running. A hook
  * that cannot be started is one log line and nothing else: no state has
@@ -23,8 +27,9 @@
 static int settle_spawn(int64_t session_id, const char *agent, const HookRef *h) {
     char *input = turn_edit_input(proc_db(), session_id);
     if (!input) {
-        LOG_WARN_("hook " EVENT " ext=%s outcome=not_started reason=no finished turn",
-                  h->extension);
+        LOG_WARN_("hook " EVENT " ext=%s outcome=not_started reason=no finished turn,"
+                  " or the session's branch holds more than %d MB of text",
+                  h->extension, TURN_EDIT_INPUT_MAX_BYTES / (1024 * 1024));
         return -1;
     }
     int timeout = config_get_int(proc_db(), "turn_settled_timeout");

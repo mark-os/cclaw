@@ -38,7 +38,9 @@ messages — and applies a review whole or not at all
 ([specs/turn-edit.md](../../specs/turn-edit.md)).
 
 It is the reference example for hooks: one file of about 240 lines, with the
-settings at the top.
+settings at the top. Every hook is also handed the earlier turns of the
+session (`args.history`); this script reviews the finished turn alone and
+does not read them.
 
 ## Attach it
 

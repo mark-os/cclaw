@@ -1,8 +1,9 @@
 # Turn edit — what a turnSettled script sees and may change
 
-`src/turn_edit.c`. Two functions: `turn_edit_input` builds the finished turn
-as plain data for a [turnSettled](hooks.md) script, and `turn_edit_apply`
-checks the script's reply and edits the turn. They run no script and change
+`src/turn_edit.c`. Two functions: `turn_edit_input` builds the finished turn,
+and the conversation that led up to it, as plain data for a
+[turnSettled](hooks.md) script, and `turn_edit_apply` checks the script's
+reply and edits the turn. They run no script and change
 no session state; `src/settle.c` calls them.
 
 A finished turn can carry material the rest of the session does not need: a
@@ -22,9 +23,11 @@ script supplies passes the secret scanner; all or nothing.
 
 ## Input
 
-`turn_edit_input(db, session_id)` returns the newest turn on the active branch
-as JSON, or NULL when the session's leaf is not an `assistant_message` (no
-finished turn). It is the script's `args`.
+`turn_edit_input(db, session_id)` returns the session's active branch as
+JSON: the newest turn at the top level, and the turns before it under
+`history`. It is the script's `args`. NULL when the session's leaf is not an
+`assistant_message` (no finished turn), or the branch is too large to hand
+over ([below](#history)).
 
 ```json
 {"event":"turnSettled","session_id":12,"agent":"alavanca","turn_id":37,
@@ -36,7 +39,14 @@ finished turn). It is the script's `args`.
     "calls":[{"call_id":"c1","entry_id":903,"tool":"shell_exec",
               "args":{"command":"…"},"protected":false,"is_error":false,
               "result":{"entry_id":905,"text":"…","tokens":2900}}]}],
- "final":{"entry_id":960,"iteration_id":413,"text":"…"}}
+ "final":{"entry_id":960,"iteration_id":413,"text":"…"},
+ "history":[
+   {"turn_id":1,"tokens":{"turn":40,"tools":0},
+    "user_messages":[{"entry_id":3,"text":"…"}],"notes":[],"iterations":[],
+    "final":null},
+   {"summary":{"entry_id":880,"text":"…","tokens":1200}},
+   {"turn_id":36,"tokens":{…},"user_messages":[…],"notes":[…],
+    "iterations":[…],"final":{"entry_id":899,"iteration_id":410,"text":"…"}}]}
 ```
 
 - `tokens` — sums of `entries.token_estimate`: the whole turn, and its
@@ -54,6 +64,60 @@ finished turn). It is the script's `args`.
   within the turn, not by `iteration_id`: a sub-agent's answer or an approval
   notice is appended under an iteration id of its own.
 - `final` — the turn's last assistant message. It is never edited.
+- `history` — everything else on the branch, oldest first
+  ([below](#history)). `[]` for a session's first turn.
+
+### History
+
+The whole session is part of the contract: every script is handed the
+conversation that led up to the turn, whether or not it reads it
+(`extensions/turn-review` does not). It is for reading only — an edit names
+calls and entries of the newest turn and nothing else.
+
+`history` is the active branch as the agent now has it — the entries the next
+request is built from — not the session as first written:
+
+- **An earlier turn** is an object with the newest turn's own fields:
+  `turn_id`, `tokens`, `user_messages`, `notes`, `iterations`, `final`. One
+  serializer writes both (`SQL_TURN_FIELDS`), so a field means the same thing
+  in either place. `final` is `null` for a turn that did not end with an
+  assistant message, or of which only the opening is left.
+- **A compaction summary** is `{"summary":{"entry_id","text","tokens"}}`, at
+  the place it stands on the branch. After an ordinary compaction that is
+  second: the branch keeps its first entry, so `history[0]` is what is left
+  of the first turn (its opening user message, `final: null`), then the
+  summary, then whole turns. What a summary replaced is not in `history`. A
+  summary written by `session_condense` stands between the turns on either
+  side of the range it replaced.
+- **An edited turn** shows as edited: dropped calls are absent, a replaced
+  result has the replacement's text and entry id, a hook's note is in
+  `notes`. The originals are in the table, not on the branch.
+- An assistant entry that stopped on an error is left out of an earlier turn,
+  as it is left out of every request (`context_plan`). The newest turn is
+  reported in full.
+- `protected` is computed for an earlier turn's calls as for the newest
+  turn's. It says what kind of call it was; no edit can reach it.
+
+Two ways `history` is more than the next request carries, both because the
+request's cut depends on the model it is built for and this input does not:
+the branch is not trimmed to the context budget (with compaction off or
+failing, the request is a sliding window over the tail and `history` is still
+the whole branch), and the leading system prompt and the per-turn context
+block are not in it — they are not entries.
+
+Call ids are scoped to their turn. Providers reuse them across turns, so a
+call's `result` is looked up among its own turn's entries, and an edit's
+`call_id` among the newest turn's (`turn_load`); a `call_id` or `before` taken
+from `history` is refused like any other id that is not the turn's.
+
+**Size.** The document is built by one statement, and building it costs about
+five times its size in memory for a moment. A session's branch is bounded by
+compaction, so that is normally a few megabytes. A branch whose stored text
+(`entries.content_bytes`) adds up to more than 16 MB
+(`TURN_EDIT_INPUT_MAX_BYTES`, the same figure as the largest input the hook
+vehicle carries) is not built at all: the walk stops on the running total,
+before any text is read, and the function returns NULL — the hook is "not
+started" and the turn left alone.
 
 ### Protected calls
 

@@ -23,10 +23,20 @@ typedef enum {
     TURN_EDIT_ERROR    = -2,  /* our side failed (DB, memory); nothing written */
 } TurnEditResult;
 
-/* The finished turn as a hook's input (JSON text, caller frees): the entries
- * of the newest turn on the session's active branch, stored text verbatim.
- * NULL when the session's leaf is not an assistant message — there is no
- * finished turn. */
+/* Most stored text (entries.content_bytes, summed over the active branch) a
+ * session may hold and still be handed to a script. The same figure as the
+ * largest input the hook vehicle carries (RUNTOOL_ARG_FD_MAX; settle.c
+ * asserts they agree): a bigger branch could not be delivered anyway, so it
+ * is not built. */
+#define TURN_EDIT_INPUT_MAX_BYTES (16 * 1024 * 1024)
+
+/* The session as a hook's input (JSON text, caller frees), stored text
+ * verbatim: the newest turn on the active branch at the top level — the one
+ * turn an edit may touch — and under "history" the rest of that branch,
+ * oldest first: every earlier turn in the same shape, and each compaction
+ * summary where it stands. NULL when the session's leaf is not an assistant
+ * message — there is no finished turn — or the branch holds more than
+ * TURN_EDIT_INPUT_MAX_BYTES. */
 char *turn_edit_input(sqlite3 *db, int64_t session_id);
 
 /* Validate a reply against the finished turn and apply it, all or nothing,

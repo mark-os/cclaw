@@ -1106,6 +1106,238 @@ static void test_record(void) {
     printf("  PASS test_record\n");
 }
 
+/* One finished turn with no tools: a user message and its answer. */
+static int64_t add_plain_turn(sqlite3 *db, int64_t sid, const char *ask, const char *answer) {
+    add_user(db, sid, ask);
+    return add_typed(db, sid, db_next_iteration_id(db, sid), "assistant_message", answer,
+                     NULL, NULL);
+}
+
+/* `history`: the rest of the active branch, oldest first, each earlier turn
+ * in the finished turn's own shape — and none of it editable. */
+static void test_history(void) {
+    sqlite3 *db = open_seeded();
+    #define IN(path, want) expect_at(db, in, path, want)
+    #define LEN(path, want) expect_json(db, in, "json_array_length(?1,'" path "')", want)
+
+    /* A session's first turn has nothing before it. */
+    int64_t one = session_create(db, "one", "default", -1, 0);
+    add_plain_turn(db, one, "hi", "hello");
+    char *in = turn_edit_input(db, one);
+    assert(in);
+    expect_json(db, in, "json_type(?1,'$.history')", "array");
+    LEN("$.history", "0");
+    IN("$.final.text", "hello");
+    free(in);
+
+    /* Three turns. The first and the third each made a call the provider
+     * named "c1"; the first also made one only it has. */
+    int64_t sid = session_create(db, "three", "default", -1, 0);
+    int64_t u1 = add_user(db, sid, "first");
+    int64_t it1 = db_next_iteration_id(db, sid);
+    int64_t a1 = add_typed(db, sid, it1, "assistant_message", "looking", NULL, NULL);
+    add_call(db, sid, it1, "c1", "look", "{\"n\":1}", "done");
+    add_call(db, sid, it1, "only1", "look", "{}", "done");
+    int64_t old_r = add_typed(db, sid, it1, "tool_result", "OLD", "c1", "look");
+    add_typed(db, sid, it1, "tool_result", "o1", "only1", "look");
+    int64_t f1 = add_typed(db, sid, db_next_iteration_id(db, sid), "assistant_message",
+                           "answer one", NULL, NULL);
+    /* A turn that ended on a provider error: the request never carries that
+     * entry again, so history shows the turn without it and with no answer. */
+    int64_t u2 = add_user(db, sid, "second");
+    int64_t boom = add_typed(db, sid, db_next_iteration_id(db, sid), "assistant_message",
+                             "provider failed [resp #9]", NULL, NULL);
+    run(db, "UPDATE entries SET stop_reason=%d WHERE id=%lld", (int)STOP_REASON_ERROR,
+        (long long)boom);
+    int64_t u3 = add_user(db, sid, "third");
+    int64_t it3 = db_next_iteration_id(db, sid);
+    int64_t a3 = add_typed(db, sid, it3, "assistant_message", "again", NULL, NULL);
+    int64_t c3 = add_call(db, sid, it3, "c1", "look", "{\"n\":3}", "done");
+    int64_t new_r = add_typed(db, sid, it3, "tool_result", "NEW", "c1", "look");
+    int64_t f3 = add_typed(db, sid, db_next_iteration_id(db, sid), "assistant_message",
+                           "answer three", NULL, NULL);
+
+    in = turn_edit_input(db, sid);
+    assert(in);
+    /* The finished turn is at the top level, as it always was. */
+    IN("$.turn_id", "3");
+    expect_id_at(db, in, "$.user_messages[0].entry_id", u3);
+    LEN("$.iterations", "1");
+    expect_id_at(db, in, "$.iterations[0].entry_id", a3);
+    /* A call's result is its own turn's, whatever an earlier turn called its
+     * calls. */
+    expect_id_at(db, in, "$.iterations[0].calls[0].result.entry_id", new_r);
+    IN("$.iterations[0].calls[0].result.text", "NEW");
+    expect_id_at(db, in, "$.final.entry_id", f3);
+    expect_id_at(db, in, "$.tokens.turn", db_scalar_i64(db,
+        "SELECT SUM(token_estimate) FROM entries WHERE session_id=? AND turn_id=3", sid, -1));
+
+    LEN("$.history", "2");
+    expect_json(db, in, "(SELECT group_concat(key, ',') FROM json_each(?1,'$.history[0]'))",
+                "turn_id,tokens,user_messages,notes,iterations,final");
+    IN("$.history[0].turn_id", "1");
+    expect_id_at(db, in, "$.history[0].tokens.turn", db_scalar_i64(db,
+        "SELECT SUM(token_estimate) FROM entries WHERE session_id=? AND turn_id=1", sid, -1));
+    expect_id_at(db, in, "$.history[0].tokens.tools", db_scalar_i64(db,
+        "SELECT SUM(token_estimate) FROM entries WHERE session_id=? AND turn_id=1"
+        " AND type IN ('tool_call','tool_result')", sid, -1));
+    expect_id_at(db, in, "$.history[0].user_messages[0].entry_id", u1);
+    IN("$.history[0].user_messages[0].text", "first");
+    LEN("$.history[0].notes", "0");
+    LEN("$.history[0].iterations", "1");
+    expect_id_at(db, in, "$.history[0].iterations[0].iteration_id", it1);
+    expect_id_at(db, in, "$.history[0].iterations[0].entry_id", a1);
+    IN("$.history[0].iterations[0].text", "looking");
+    LEN("$.history[0].iterations[0].calls", "2");
+    IN("$.history[0].iterations[0].calls[0].call_id", "c1");
+    IN("$.history[0].iterations[0].calls[0].args.n", "1");
+    expect_id_at(db, in, "$.history[0].iterations[0].calls[0].result.entry_id", old_r);
+    IN("$.history[0].iterations[0].calls[0].result.text", "OLD");
+    IN("$.history[0].iterations[0].calls[1].call_id", "only1");
+    expect_id_at(db, in, "$.history[0].final.entry_id", f1);
+    IN("$.history[0].final.text", "answer one");
+    IN("$.history[1].turn_id", "2");
+    expect_id_at(db, in, "$.history[1].user_messages[0].entry_id", u2);
+    LEN("$.history[1].iterations", "0");
+    expect_json(db, in, "json_type(?1,'$.history[1].final')", "null");
+    free(in);
+
+    /* Edits stop at the finished turn. A call only an earlier turn made is
+     * not there to name; an earlier turn's entry is no place for a note. */
+    char r[160];
+    const TurnEditResult NO = TURN_EDIT_REJECTED;
+    expect_untouched(db, sid, E(DROP("only1")), NO,
+                     "drop: \"only1\" is not a tool call of this turn");
+    expect_untouched(db, sid, E("{\"op\":\"replace\",\"call_id\":\"only1\",\"text\":\"x\"}"),
+                     NO, "replace: \"only1\" is not a tool call of this turn");
+    int64_t not_here[] = { a1, f1, u1, u2, boom };
+    for (size_t k = 0; k < sizeof(not_here) / sizeof(not_here[0]); k++) {
+        snprintf(r, sizeof(r), E("{\"op\":\"note\",\"text\":\"n\",\"before\":%lld}"),
+                 (long long)not_here[k]);
+        expect_untouched(db, sid, r, NO, "is not the first entry of an iteration");
+    }
+    /* A call id both turns used names the finished turn's call, and only
+     * that one leaves. */
+    assert(turn_edit_apply(db, sid, E(DROP("c1")), LABEL, NULL) == TURN_EDIT_APPLIED);
+    expect_q(db, "0", "SELECT COUNT(*) FROM entries WHERE turn_id < 3 AND session_id=%lld"
+                      " AND original_parent_id IS NOT NULL", (long long)sid);
+    char *b = branch(db, sid);
+    snprintf(r, sizeof(r), ",%lld,", (long long)old_r);
+    assert(strstr(b, r));
+    snprintf(r, sizeof(r), ",%lld,", (long long)c3);
+    assert(!strstr(b, r));
+    snprintf(r, sizeof(r), ",%lld,", (long long)new_r);
+    assert(!strstr(b, r));
+    free(b);
+    in = turn_edit_input(db, sid);
+    assert(in);
+    LEN("$.iterations", "0");
+    IN("$.history[0].iterations[0].calls[0].result.text", "OLD");
+    free(in);
+
+    /* An edited turn, one turn later: history is the branch — what the agent
+     * now sees — not the entries as first written. */
+    T t = seed_turn(db, "edited", 0);
+    apply_ok(db, &t, E(DROP("c2") ","
+        "{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"SHORTER\"},"
+        "{\"op\":\"note\",\"text\":\"tidied\"}"));
+    int64_t f_next = add_plain_turn(db, t.sid, "next", "sure");
+    in = turn_edit_input(db, t.sid);
+    assert(in);
+    IN("$.turn_id", "3");
+    expect_id_at(db, in, "$.final.entry_id", f_next);
+    LEN("$.history", "2");
+    IN("$.history[0].final.text", "hello");
+    IN("$.history[1].turn_id", "2");
+    expect_json(db, in,
+        "(SELECT group_concat(json_extract(c.value,'$.call_id'), ',')"
+        "  FROM json_each(?1,'$.history[1].iterations') i, json_each(i.value,'$.calls') c)",
+        "c1,c3,c4");
+    IN("$.history[1].iterations[0].calls[0].result.text", "SHORTER");
+    expect_json(db, in, "json_extract(?1,'$.history[1].iterations[0].calls[0].result.entry_id')"
+                        " > json_extract(?1,'$.history[1].final.entry_id')", "1");
+    /* A kept subset of a batch lost its reasoning row: the iteration now
+     * opens at its assistant message. */
+    expect_id_at(db, in, "$.history[1].iterations[0].entry_id", t.a1);
+    LEN("$.history[1].notes", "1");
+    IN("$.history[1].notes[0].text", "tidied");
+    expect_id_at(db, in, "$.history[1].notes[0].before_iteration", t.it3);
+    expect_id_at(db, in, "$.history[1].final.entry_id", t.fin);
+    expect_id_at(db, in, "$.history[1].tokens.turn", turn_tokens(db, &t));
+    free(in);
+
+    /* Compaction, as llm_compaction does it: the branch keeps its first
+     * entry, then the summary, then whole turns. History is that branch —
+     * what is left of the first turn, the summary where it stands, and
+     * nothing of what it replaced. */
+    int64_t u_last = add_user(db, t.sid, "last");
+    int64_t f_last = add_typed(db, t.sid, db_next_iteration_id(db, t.sid),
+                               "assistant_message", "bye", NULL, NULL);
+    int64_t u_next = db_scalar_i64(db, "SELECT parent_id FROM entries WHERE id=?", f_next, -1);
+    int64_t cmp = entry_compact(db, t.sid, t.u0, u_next, "SUMMARY of two turns");
+    assert(cmp > 0);
+    in = turn_edit_input(db, t.sid);
+    assert(in);
+    IN("$.turn_id", "4");
+    expect_id_at(db, in, "$.user_messages[0].entry_id", u_last);
+    expect_id_at(db, in, "$.final.entry_id", f_last);
+    LEN("$.history", "3");
+    IN("$.history[0].turn_id", "1");
+    expect_id_at(db, in, "$.history[0].user_messages[0].entry_id", t.u0);
+    expect_json(db, in, "json_type(?1,'$.history[0].final')", "null");
+    /* The summary carries the turn_id of the entry it follows, and is still
+     * no part of that turn. */
+    expect_id_at(db, in, "$.history[0].tokens.turn",
+                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", t.u0, -1));
+    expect_json(db, in, "(SELECT group_concat(key, ',') FROM json_each(?1,'$.history[1]'))",
+                "summary");
+    expect_id_at(db, in, "$.history[1].summary.entry_id", cmp);
+    IN("$.history[1].summary.text", "SUMMARY of two turns");
+    expect_id_at(db, in, "$.history[1].summary.tokens",
+                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", cmp, -1));
+    IN("$.history[2].turn_id", "3");
+    IN("$.history[2].final.text", "sure");
+    expect_json(db, in, "instr(?1,'SHORTER') + instr(?1,'tidied')", "0");
+    free(in);
+
+    /* A summary in the middle of the branch (session_condense names a range
+     * of turns) stands between the turns on either side of it. */
+    int64_t mid = session_create(db, "mid", "default", -1, 0);
+    int64_t m1 = add_plain_turn(db, mid, "a", "A");
+    add_plain_turn(db, mid, "b", "B");
+    add_plain_turn(db, mid, "c", "C");
+    int64_t m4 = add_plain_turn(db, mid, "d", "D");
+    int64_t m4u = db_scalar_i64(db, "SELECT parent_id FROM entries WHERE id=?", m4, -1);
+    int64_t mc = entry_compact(db, mid, m1, m4u, "b and c");
+    assert(mc > 0);
+    add_plain_turn(db, mid, "e", "E");
+    in = turn_edit_input(db, mid);
+    assert(in);
+    IN("$.final.text", "E");
+    LEN("$.history", "3");
+    IN("$.history[0].final.text", "A");
+    expect_id_at(db, in, "$.history[1].summary.entry_id", mc);
+    IN("$.history[2].final.text", "D");
+    free(in);
+
+    /* A branch holding more text than a script can be handed is not built:
+     * the walk gives up on entries.content_bytes, before any text is read. */
+    run(db, "UPDATE entries SET content_bytes=%d WHERE id=%lld",
+        TURN_EDIT_INPUT_MAX_BYTES + 1, (long long)m1);
+    assert(turn_edit_input(db, mid) == NULL);
+    run(db, "UPDATE entries SET content_bytes=%d WHERE id=%lld",
+        TURN_EDIT_INPUT_MAX_BYTES - 64, (long long)m1);
+    in = turn_edit_input(db, mid);
+    assert(in);
+    LEN("$.history", "3");
+    free(in);
+
+    #undef IN
+    #undef LEN
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_history\n");
+}
+
 /* Around the edges of a turn: an earlier compaction already re-pointed the
  * turn's first entry (its original_parent_id is compaction's to keep), and
  * the result was written under an iteration id of its own, as a sub-agent's
@@ -1168,6 +1400,7 @@ int main(void) {
     test_replace();
     test_notes();
     test_record();
+    test_history();
     test_turn_edges();
     printf("All turn edit tests passed.\n");
     return 0;

@@ -42,69 +42,126 @@
     "(SELECT tc.status FROM tool_calls tc" \
     "  WHERE tc.entry_id=" C ".id AND tc.status<>'done' LIMIT 1)"
 
-/* The result answering call A, among the turn's parts. Paired by call id
- * alone: a result written outside the dispatcher (a sub-agent's answer, an
- * approval notice) is appended under an iteration id of its own, not its
- * call's. */
-#define SQL_RESULT_OF_A \
-    " FROM part r WHERE r.type='tool_result' AND r.tool_call_id=a.tool_call_id" \
-    " ORDER BY r.lvl DESC LIMIT 1"
-
 /* The rows that make an iteration what the model said in one response. */
 #define SQL_ITERATION_TYPES "('reasoning','assistant_message','tool_call')"
 
-/* ?1 = session id. No row when the leaf is not an assistant message. The
- * last iteration is the answer, reported apart as `final`. An iteration's
- * entry_id is its first row on the branch — what a note's "before" names. */
+/* ── The session as a hook's input ─────────────────────────────────
+ *
+ * One statement over the active branch. `part` is the branch, leaf (lvl 0)
+ * to root; `run` counts the turns walked through, so run 0 is exactly the
+ * rows SQL_TURN finds — the turn an edit may touch — and every higher run is
+ * an earlier turn. An earlier turn is shown as the next request would send
+ * it: an assistant entry that stopped on an error is never sent
+ * (context_plan), so it is left out there.
+ *
+ * `bytes` is the stored text walked so far, and the walk stops at the first
+ * row that takes it past ?2: building the document costs several times its
+ * size in memory, so a branch too big to hand to a script is found out from
+ * a column of integers, before any text is read. ?1 = session id. */
+#define SQL_BRANCH \
+    "branch(id, parent_id, turn_id, lvl, run, bytes) AS (" \
+    "  SELECT id, parent_id, turn_id, 0, 0, COALESCE(content_bytes,0) FROM entries" \
+    "   WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1) AND session_id=?1" \
+    "  UNION ALL" \
+    "  SELECT e.id, e.parent_id, e.turn_id, b.lvl+1," \
+    "         b.run + COALESCE(e.turn_id<>b.turn_id, 1)," \
+    "         b.bytes + COALESCE(e.content_bytes,0)" \
+    "    FROM entries e JOIN branch b ON e.id=b.parent_id" \
+    "   WHERE e.session_id=?1 AND b.bytes <= ?2)," \
+    " part AS MATERIALIZED (" \
+    "  SELECT b.run, b.lvl, e.id, e.type, e.iteration_id, e.turn_id, e.content," \
+    "         e.tool_call_id, e.tool_name, e.is_error, e.token_estimate" \
+    "    FROM branch b JOIN entries e ON e.id=b.id" \
+    "   WHERE b.run=0 OR NOT (e.role=2 AND COALESCE(e.stop_reason,0) IN (4,5)))," \
+    /* One row per turn: where it starts, and its last row. A compaction \
+     * summary carries the turn_id of the entry it follows but is no part of \
+     * that turn. */ \
+    " turns AS MATERIALIZED (" \
+    "  SELECT run, turn_id, MAX(lvl) AS first, MIN(lvl) AS last" \
+    "    FROM part WHERE type<>'compaction' GROUP BY run)"
+
+/* The result answering call A, among the parts of turn K. Paired by call id
+ * alone — a result written outside the dispatcher (a sub-agent's answer, an
+ * approval notice) is appended under an iteration id of its own, not its
+ * call's — and only within the turn: providers reuse call ids across turns. */
+#define SQL_RESULT_OF_A \
+    " FROM part r WHERE r.run=k.run AND r.type='tool_result'" \
+    " AND r.tool_call_id=a.tool_call_id ORDER BY r.lvl DESC LIMIT 1"
+
+/* One turn's fields, as json_object arguments: the same text serializes the
+ * finished turn at the top level and every earlier turn in `history`. Reads
+ * `turns` row k and `part` row f — the turn's last row when that is an
+ * assistant message (the answer, reported apart as `final`), else NULL: an
+ * earlier turn that ended on a cutoff has no answer. Every other iteration is
+ * in `iterations`; an iteration's entry_id is its first row on the branch —
+ * what a note's "before" names. */
+#define SQL_TURN_FIELDS \
+    "'turn_id',k.turn_id," \
+    "'tokens',json_object(" \
+    "  'turn',(SELECT COALESCE(SUM(p.token_estimate),0) FROM part p" \
+    "           WHERE p.run=k.run AND p.type<>'compaction')," \
+    "  'tools',(SELECT COALESCE(SUM(p.token_estimate),0) FROM part p" \
+    "            WHERE p.run=k.run AND p.type IN ('tool_call','tool_result')))," \
+    "'user_messages',(SELECT json_group_array(" \
+    "    json_object('entry_id',u.id,'text',COALESCE(u.content,'')) ORDER BY u.lvl DESC)" \
+    "  FROM part u WHERE u.run=k.run AND u.type='user_message')," \
+    "'notes',(SELECT json_group_array(json_object(" \
+    "    'entry_id',n.id,'text',COALESCE(n.content,'')," \
+    "    'before_iteration',(SELECT a.iteration_id FROM part a" \
+    "       WHERE a.run=k.run AND a.lvl < n.lvl AND a.type IN " SQL_ITERATION_TYPES \
+    "       ORDER BY a.lvl DESC LIMIT 1)) ORDER BY n.lvl DESC)" \
+    "  FROM part n WHERE n.run=k.run AND n.type='system')," \
+    "'iterations',(SELECT json_group_array(json(i.obj) ORDER BY i.lvl DESC) FROM (" \
+    "  SELECT MAX(a.lvl) AS lvl, json_object(" \
+    "    'iteration_id',a.iteration_id," \
+    "    'entry_id',(SELECT p.id FROM part p WHERE p.run=k.run" \
+    "       AND p.iteration_id=a.iteration_id" \
+    "       AND p.type IN " SQL_ITERATION_TYPES " ORDER BY p.lvl DESC LIMIT 1)," \
+    "    'text',COALESCE(MAX(CASE WHEN a.type='assistant_message' THEN a.content END),'')," \
+    "    'calls',json_group_array(json(json_object(" \
+    "      'call_id',a.tool_call_id," \
+    "      'entry_id',a.id," \
+    "      'tool',a.tool_name," \
+    "      'args',CASE WHEN json_valid(a.content) THEN json(a.content) ELSE a.content END," \
+    "      'protected',json(CASE WHEN " SQL_CALL_DROPPABLE("a") \
+    "          AND " SQL_CALL_UNFINISHED("a") " IS NULL THEN 'false' ELSE 'true' END)," \
+    "      'is_error',json(CASE WHEN COALESCE((SELECT r.is_error" SQL_RESULT_OF_A "),0)" \
+    "          THEN 'true' ELSE 'false' END)," \
+    "      'result',json((SELECT json_object(" \
+    "          'entry_id',r.id," \
+    "          'text',COALESCE(r.content,'')," \
+    "          'tokens',r.token_estimate)" SQL_RESULT_OF_A "))" \
+    "      )) ORDER BY a.lvl DESC) FILTER (WHERE a.type='tool_call')) AS obj" \
+    "  FROM part a WHERE a.run=k.run AND a.type IN ('assistant_message','tool_call')" \
+    "   AND a.id IS NOT f.id" \
+    "  GROUP BY a.iteration_id) i)," \
+    "'final',json(CASE WHEN f.id IS NOT NULL THEN json_object(" \
+    "    'entry_id',f.id,'iteration_id',f.iteration_id,'text',COALESCE(f.content,'')) END)"
+
+#define SQL_TURN_ANSWER \
+    " LEFT JOIN part f ON f.lvl=k.last AND f.type='assistant_message'"
+
+/* ?1 = session id, ?2 = the most stored text a branch may hold. No row when
+ * the leaf is not an assistant message, or the branch holds more than that.
+ * `history` is the rest of the branch, oldest first: each earlier turn in
+ * the finished turn's shape, and each compaction summary where it stands. */
 static const char SQL_INPUT[] =
-    "WITH RECURSIVE " SQL_TURN ","
-    " part AS MATERIALIZED ("
-    "  SELECT t.lvl, e.id, e.type, e.iteration_id, e.turn_id, e.content,"
-    "         e.tool_call_id, e.tool_name, e.is_error, e.token_estimate"
-    "    FROM turn t JOIN entries e ON e.id=t.id)"
-    "SELECT json_object("
+    "WITH RECURSIVE " SQL_BRANCH
+    " SELECT json_object("
     "  'event','turnSettled',"
     "  'session_id',?1,"
     "  'agent',(SELECT agent_name FROM sessions WHERE id=?1),"
-    "  'turn_id',f.turn_id,"
-    "  'tokens',json_object("
-    "    'turn',(SELECT COALESCE(SUM(token_estimate),0) FROM part),"
-    "    'tools',(SELECT COALESCE(SUM(token_estimate),0) FROM part"
-    "              WHERE type IN ('tool_call','tool_result'))),"
-    "  'user_messages',(SELECT json_group_array("
-    "      json_object('entry_id',u.id,'text',COALESCE(u.content,'')) ORDER BY u.lvl DESC)"
-    "    FROM part u WHERE u.type='user_message'),"
-    "  'notes',(SELECT json_group_array(json_object("
-    "      'entry_id',n.id,'text',COALESCE(n.content,''),"
-    "      'before_iteration',(SELECT a.iteration_id FROM part a"
-    "         WHERE a.lvl < n.lvl AND a.type IN " SQL_ITERATION_TYPES
-    "         ORDER BY a.lvl DESC LIMIT 1)) ORDER BY n.lvl DESC)"
-    "    FROM part n WHERE n.type='system'),"
-    "  'iterations',(SELECT json_group_array(json(i.obj) ORDER BY i.lvl DESC) FROM ("
-    "    SELECT MAX(a.lvl) AS lvl, json_object("
-    "      'iteration_id',a.iteration_id,"
-    "      'entry_id',(SELECT p.id FROM part p WHERE p.iteration_id=a.iteration_id"
-    "         AND p.type IN " SQL_ITERATION_TYPES " ORDER BY p.lvl DESC LIMIT 1),"
-    "      'text',COALESCE(MAX(CASE WHEN a.type='assistant_message' THEN a.content END),''),"
-    "      'calls',json_group_array(json(json_object("
-    "        'call_id',a.tool_call_id,"
-    "        'entry_id',a.id,"
-    "        'tool',a.tool_name,"
-    "        'args',CASE WHEN json_valid(a.content) THEN json(a.content) ELSE a.content END,"
-    "        'protected',json(CASE WHEN " SQL_CALL_DROPPABLE("a")
-    "            AND " SQL_CALL_UNFINISHED("a") " IS NULL THEN 'false' ELSE 'true' END),"
-    "        'is_error',json(CASE WHEN COALESCE((SELECT r.is_error" SQL_RESULT_OF_A "),0)"
-    "            THEN 'true' ELSE 'false' END),"
-    "        'result',json((SELECT json_object("
-    "            'entry_id',r.id,"
-    "            'text',COALESCE(r.content,''),"
-    "            'tokens',r.token_estimate)" SQL_RESULT_OF_A "))"
-    "        )) ORDER BY a.lvl DESC) FILTER (WHERE a.type='tool_call')) AS obj"
-    "    FROM part a WHERE a.type IN ('assistant_message','tool_call') AND a.lvl > 0"
-    "    GROUP BY a.iteration_id) i),"
-    "  'final',json_object('entry_id',f.id,'iteration_id',f.iteration_id,"
-    "                      'text',COALESCE(f.content,'')))"
-    " FROM part f WHERE f.lvl=0 AND f.type='assistant_message';";
+    SQL_TURN_FIELDS ","
+    "  'history',(SELECT json_group_array(json(h.obj) ORDER BY h.lvl DESC) FROM ("
+    "    SELECT k.first AS lvl, json_object(" SQL_TURN_FIELDS ") AS obj"
+    "      FROM turns k" SQL_TURN_ANSWER " WHERE k.run > 0"
+    "    UNION ALL"
+    "    SELECT s.lvl, json_object('summary',json_object('entry_id',s.id,"
+    "        'text',COALESCE(s.content,''),'tokens',s.token_estimate))"
+    "      FROM part s WHERE s.type='compaction') h))"
+    " FROM turns k" SQL_TURN_ANSWER
+    " WHERE k.run=0 AND f.id IS NOT NULL"
+    "   AND NOT EXISTS (SELECT 1 FROM branch WHERE bytes > ?2);";
 
 char *turn_edit_input(sqlite3 *db, int64_t session_id) {
     if (!db) return NULL;
@@ -114,10 +171,15 @@ char *turn_edit_input(sqlite3 *db, int64_t session_id) {
         return NULL;
     }
     sqlite3_bind_int64(st, 1, session_id);
+    sqlite3_bind_int64(st, 2, TURN_EDIT_INPUT_MAX_BYTES);
     char *out = NULL;
-    if (sqlite3_step(st) == SQLITE_ROW) {
+    int rc = sqlite3_step(st);
+    if (rc == SQLITE_ROW) {
         const char *v = (const char *)sqlite3_column_text(st, 0);
         if (v) out = strdup(v);
+    } else if (rc != SQLITE_DONE) {
+        LOG_ERROR_("turn edit input session=%lld: %s", (long long)session_id,
+                   sqlite3_errmsg(db));
     }
     sqlite3_finalize(st);
     return out;

@@ -66,7 +66,11 @@ attached to (`turnSettled`, the only event); it gets the finished turn as
 ```
 
 `args` lists the turn's iterations with each call's `call_id`, `tool`, `args`,
-`protected` flag and verbatim `result.text`. A `protected` call (one made for
+`protected` flag and verbatim `result.text`. `args.history` is the
+conversation before it, oldest first and read-only: each earlier turn in the
+same shape (`turn_id`, `user_messages`, `notes`, `iterations`, `final`,
+`tokens`), and `{"summary":{"entry_id","text"}}` where a compaction summary
+stands; edits may only name calls and entries of the top-level turn. A `protected` call (one made for
 its effect, `check_session`, or one that saved a secret) cannot be dropped;
 its result text can be replaced. A note may name `before` — the `entry_id` of
 an iteration in `args` — and otherwise lands before the answer; the model sees

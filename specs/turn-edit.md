@@ -344,7 +344,9 @@ once — by several hooks in a row — and each apply appends one element.
 - `replaced`, `notes` — in edit order.
 - `tokens` — the turn's size before and after this apply, in estimate units
   (`entries.token_estimate`). The compaction check that follows the apply
-  reads `before − after` back as the shrink since the provider last counted
+  takes `before − after` off the sent body it last measured; the provider's
+  pre-edit counts for the edited turn stop counting, and the turn is
+  estimated until the next request measures it again
   ([memory.md](memory.md#context-window-management)).
 
 ## On the wire

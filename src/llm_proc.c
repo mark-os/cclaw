@@ -1045,7 +1045,8 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         LOG_DEBUG_("llm_req: context_plan failed");
         goto err;
     }
-    LOG_DEBUG_("llm_req: %d entries, cut=%d factor=%.3f", plan.count, plan.cut, plan.factor);
+    LOG_DEBUG_("llm_req: %d entries, cut=%d head=%d (estimate %d)", plan.count, plan.cut,
+               plan.head, tool_overhead);
 
     /* User context block: recall plus live per-turn state (context-placement
      * memory blocks, running sub-agents, open approvals) — never baked

@@ -617,6 +617,8 @@ static void *proxy_loop(void *arg) {
     ProxyContext *ctx = (ProxyContext *)arg;
 
     while (ctx->running) {
+        /* proxy_stop wakes this poll by shutting the listener down; the
+         * timeout is only the backstop for a kernel that does not. */
         struct pollfd pfd = { .fd = ctx->listen_fd, .events = POLLIN };
         int ret = poll(&pfd, 1, 500);
         if (ret <= 0) continue;
@@ -770,6 +772,12 @@ int proxy_serve(ProxyContext *ctx) {
 void proxy_stop(ProxyContext *ctx) {
     ctx->running = 0;
     if (ctx->thread_started) {
+        /* Wake the accept thread now rather than at its next poll timeout —
+         * the broker writes the tool's result frame only after this join, so
+         * waiting the timeout out cost every proxied call up to 500 ms.
+         * Shutdown is sticky: a thread that has not reached poll() yet returns
+         * from it at once, then fails accept() and re-reads `running`. */
+        shutdown(ctx->listen_fd, SHUT_RDWR);
         pthread_join(ctx->thread, NULL);
         ctx->thread_started = 0;
     }

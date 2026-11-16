@@ -336,10 +336,10 @@ int contain_enter(const char *workspace, const char *cwd_path,
      *
      * Placed under the scratch tree's .ns/ (which the parent created) keyed by
      * pid, so the parent can reap abandoned roots without tracking pids: a live
-     * one holds this tmpfs and refuses rmdir, a dead one is empty. The old
-     * mkdtemp in /tmp leaked one empty directory per tool call forever, because
-     * after pivot_root the child cannot reach it and the parent never knew the
-     * generated name. Falls back to mkdtemp when there is no scratch dir. */
+     * one holds this tmpfs and refuses rmdir, a dead one is empty. Falls back
+     * to mkdtemp when there is no scratch dir. Either way the child removes
+     * the directory itself right after pivot_root (below); the parent's sweep
+     * is for a child that died before getting that far. */
     /* Deliberately modest, not PATH_MAX: several buffers below concatenate onto
      * this, and keeping it short keeps those bounded. An over-long scratch path
      * falls back to mkdtemp rather than truncating. */
@@ -483,6 +483,14 @@ int contain_enter(const char *workspace, const char *cwd_path,
         return -1;
 
     chdir("/");
+    /* The directory the root tmpfs was mounted on is, after the pivot, an
+     * ordinary empty directory on the old root: remove it while that is still
+     * reachable. Without this the mkdtemp fallback left one empty directory
+     * in /tmp per call, forever — nobody else knows the generated name.
+     * Best-effort: under .ns/ the parent's sweep covers a miss. */
+    char old_stub[sizeof(newroot) + 16];
+    snprintf(old_stub, sizeof(old_stub), "/.oldroot%s", newroot);
+    rmdir(old_stub);
     umount2("/.oldroot", MNT_DETACH);
     rmdir("/.oldroot");
 
@@ -569,6 +577,7 @@ static void sandbox_setup_proxy(const char *uds_path) {
     ssize_t wr = write(mfd, net_shim_blob, (size_t)net_shim_blob_len);
     if (wr != (ssize_t)net_shim_blob_len) { close(mfd); close(lfd); return; }
 
+    pid_t parent = getpid();
     pid_t shim = fork();
     if (shim < 0) { close(mfd); close(lfd); return; }
     if (shim == 0) {
@@ -579,6 +588,11 @@ static void sandbox_setup_proxy(const char *uds_path) {
          * sandboxed process that forked us (same reasoning as the PID-ns
          * init's re-arm, contain_enter above). */
         prctl(PR_SET_PDEATHSIG, SIGKILL);
+        /* The signal is sent when the parent dies, so arming it after the
+         * parent is already gone arms nothing. A trivial script finishes
+         * before this child is first scheduled on a busy box — every call
+         * then leaked a shim. Re-check after arming closes the window. */
+        if (getppid() != parent) _exit(0);
 
         /* Shim: drop stdout/stderr (they point at the tool result pipe — the
          * shim must not pollute tool output nor hold the pipe open), keep lfd,

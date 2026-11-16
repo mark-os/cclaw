@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include "db.h"
@@ -490,6 +491,36 @@ static void test_images_anthropic_body(void) {
     PASS();
 }
 
+/* llm_bridge_stop runs on the event-loop thread at child reap, so it must
+ * wake the accept thread rather than wait out its 300 ms poll. The thread gets
+ * 30 ms to be inside poll(); a stop that only waits then takes ~270 ms every
+ * time. Best-of-three keeps a busy box from failing a working wake. */
+static void test_bridge_stop_is_prompt(void) {
+    TEST("bridge_stop_is_prompt");
+    mkdir(BRIDGE_DIR, 0755);
+    double best = 1e9;
+    for (int i = 0; i < 3; i++) {
+        LlmBridge *b = llm_bridge_start(BRIDGE_DIR, DB_PATH, "t", "js:test", 7, 42);
+        if (!b) { FAIL("bridge start"); return; }
+        usleep(30 * 1000);
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        llm_bridge_stop(b);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double dt = (double)(t1.tv_sec - t0.tv_sec) * 1e3 +
+                    (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+        if (dt < best) best = dt;
+    }
+    /* Stop racing a thread that may not have reached poll() yet. */
+    for (int i = 0; i < 20; i++) {
+        LlmBridge *b = llm_bridge_start(BRIDGE_DIR, DB_PATH, "t", "js:test", 7, 42);
+        if (!b) { FAIL("bridge start"); return; }
+        llm_bridge_stop(b);
+    }
+    if (best >= 120.0) { FAIL("llm_bridge_stop waited out the poll"); return; }
+    PASS();
+}
+
 /* Refusals: a file that is not an image (child side, by its bytes), and a
  * request whose image fields could not have come from the stub (parent side
  * — the child is sandboxed code, so the parent checks again). */
@@ -547,6 +578,7 @@ int main(void) {
     test_malformed_request();
     test_failure_trail_and_archive();
     test_bridge_roundtrip();
+    test_bridge_stop_is_prompt();
     test_bridge_full_result();
     test_bridge_error_throws();
     test_no_sock_throws();

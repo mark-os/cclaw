@@ -109,6 +109,8 @@ static void *bridge_thread(void *arg) {
     sqlite3 *db = db_open(b->db_path);
     db_set_actor(db, "llm_bridge");
     while (b->running) {
+        /* llm_bridge_stop wakes this by shutting the listener down; the
+         * timeout is only the backstop for a kernel that does not. */
         struct pollfd p = { .fd = b->listen_fd, .events = POLLIN };
         int pr = poll(&p, 1, 300);
         if (pr <= 0) continue;
@@ -182,6 +184,12 @@ LlmBridge *llm_bridge_start(const char *agent_dir, const char *db_path,
 void llm_bridge_stop(LlmBridge *b) {
     if (!b) return;
     b->running = 0;
+    /* Wake the accept thread now rather than at its next poll timeout: this
+     * runs on the event-loop thread (child reap), so the wait stalled the
+     * whole daemon for up to 300 ms per JS tool call. Shutdown is sticky, so
+     * a thread not yet in poll() returns from it at once; one inside
+     * serve_conn finishes that call first, as before. */
+    shutdown(b->listen_fd, SHUT_RDWR);
     if (b->thread_started) pthread_join(b->thread, NULL);
     close(b->listen_fd);
     unlink(b->sock_path);

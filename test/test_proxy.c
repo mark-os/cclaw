@@ -349,6 +349,41 @@ static void test_pending_cap(void) {
     printf("  PASS: pending cap enforced (refuse past PROXY_MAX_PENDING)\n");
 }
 
+static double mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
+}
+
+/* proxy_stop must wake the accept thread, not wait out its 500 ms poll: the
+ * broker holds the tool's result frame until the join returns. The thread is
+ * given 50 ms to be inside poll(), so a stop that only waits takes ~450 ms
+ * every time; best-of-three keeps a busy box from failing a working wake. */
+static void test_stop_is_prompt(void) {
+    double best = 1e9;
+    for (int i = 0; i < 3; i++) {
+        ProxyContext ctx;
+        assert(proxy_start(&ctx, tmpdir, NULL, 0) == 0);
+        nanosleep(&(struct timespec){ .tv_nsec = 50 * 1000 * 1000 }, NULL);
+        double t0 = mono_ms();
+        proxy_stop(&ctx);
+        double dt = mono_ms() - t0;
+        if (dt < best) best = dt;
+    }
+    if (best >= 200.0) {
+        printf("  FAIL: proxy_stop took %.0f ms (best of 3)\n", best);
+        exit(1);
+    }
+    /* Stop racing a thread that may not have reached poll() yet: must neither
+     * hang (alarm) nor lose the wake. */
+    for (int i = 0; i < 20; i++) {
+        ProxyContext ctx;
+        assert(proxy_start(&ctx, tmpdir, NULL, 0) == 0);
+        proxy_stop(&ctx);
+    }
+    printf("  PASS: proxy stop is prompt (%.1f ms)\n", best);
+}
+
 int main(void) {
     TEST_INIT();
     alarm(10);
@@ -356,6 +391,7 @@ int main(void) {
 
     printf("test_proxy:\n");
     test_proxy_start_stop();
+    test_stop_is_prompt();
     test_literal_grant_allowed();
     test_resolve_denied();
     test_resolve_private_rejected();

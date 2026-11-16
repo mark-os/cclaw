@@ -103,9 +103,11 @@ It **persists across tool calls** on purpose: `./configure` in one call and
 tool-call boundary is invisible to the agent, so wiping it presents as "my files
 vanished" rather than anything diagnosable.
 
-The namespace root lives under the same tree (`.ns/<pid>`) so the parent can reap
-abandoned ones without tracking pids: a live one holds a mount and refuses
-`rmdir`, a dead one is empty and goes.
+The namespace root lives under the same tree (`.ns/<pid>`). The child removes
+that directory itself as soon as it has pivoted into it; the parent also sweeps
+`.ns/` for ones a child abandoned before that point, without tracking pids: one
+still being set up holds a mount and refuses `rmdir`, a dead one is empty and
+goes.
 
 **No profile sets `RLIMIT_AS`.** It caps *address space*, not resident memory,
 and every modern runtime reserves VA far beyond its footprint — Go's allocator

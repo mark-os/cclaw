@@ -106,7 +106,8 @@
     "  SELECT r.run, r.lvl, e.id, e.type, e.iteration_id, e.turn_id," \
     "         CASE WHEN r.run > 0 AND e.type='tool_result' AND NOT ?3 THEN NULL" \
     "              ELSE e.content END AS content," \
-    "         e.tool_call_id, e.tool_name, e.is_error, e.token_estimate" \
+    "         e.tool_call_id, e.tool_name, e.is_error," \
+    "         COALESCE(e.tokens, e.token_estimate) AS token_estimate" \
     "    FROM priced r JOIN entries e ON e.id=r.id" \
     "   WHERE r.keep AND (r.run=0 OR r.run IN (SELECT run FROM fit))" \
     "     AND (SELECT cost FROM units WHERE run=0) + " SQL_HEAD_OVERHEAD " <= ?4)," \
@@ -485,7 +486,7 @@ static int turn_load(sqlite3 *db, int64_t session_id, Turn *out) {
     if (sqlite3_prepare_v2(db,
             "WITH RECURSIVE " SQL_TURN
             " SELECT e.id, e.parent_id, COALESCE(e.iteration_id,0), e.type,"
-            "   e.tool_call_id, COALESCE(e.token_estimate,0), e.turn_id,"
+            "   e.tool_call_id, COALESCE(e.tokens, e.token_estimate, 0), e.turn_id,"
             "   CASE WHEN e.type='tool_call' THEN " SQL_CALL_DROPPABLE("e") " END,"
             "   CASE WHEN e.type='tool_call' THEN " SQL_CALL_UNFINISHED("e") " END"
             " FROM turn t JOIN entries e ON e.id=t.id ORDER BY t.lvl DESC;",
@@ -722,9 +723,14 @@ static int64_t insert_text(sqlite3 *db, const char *sql, int64_t ref, int64_t pa
 static const char SQL_INSERT_REPLACEMENT[] =
     "INSERT INTO entries (parent_id, session_id, turn_id, iteration_id, type,"
     "  part_index, role, content, tool_call_id, tool_name, is_error,"
-    "  network_hosts, fence_id, token_estimate, content_bytes)"
+    "  network_hosts, fence_id, token_estimate, content_bytes, tokens)"
     " SELECT ?2, session_id, turn_id, iteration_id, type, part_index, role,"
-    "  ?3, tool_call_id, tool_name, is_error, network_hosts, fence_id, ?4, ?5"
+    "  ?3, tool_call_id, tool_name, is_error, network_hosts, fence_id, ?4, ?5,"
+    /* A measured result keeps its measure, scaled to the new length. A short
+     * one is mostly framing, which does not scale: it goes back to the
+     * estimate, as does one never measured. */
+    "  CASE WHEN tokens IS NOT NULL AND content_bytes >= 256"
+    "       THEN tokens * ?5 / content_bytes END"
     " FROM entries WHERE id=?1;";
 
 /* A note is an ordinary system entry, shaped like every other one written
@@ -794,7 +800,7 @@ static const char SQL_RECORD[] =
     "     json_object('by',?2,'at',unixepoch(),'left_branch',json('[]'),"
     "       'replaced',json('[]'),'notes',json('[]'),"
     "       'tokens',json_object('before',?3,'after',"
-    "         (SELECT COALESCE(SUM(e.token_estimate),0)"
+    "         (SELECT COALESCE(SUM(COALESCE(e.tokens, e.token_estimate)),0)"
     "            FROM turn t JOIN entries e ON e.id=t.id))) AS obj))))"
     " WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1);";
 

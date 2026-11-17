@@ -1,14 +1,15 @@
 /* Context accounting: the compaction trigger must see the whole request —
  * head (system prompt + tools) and provider/sent measures — not just the
- * entries' own estimates; rescaled estimates must err high (chars/3); and the
- * provider's count is the measure — segments between reports are sized by
- * the difference of the provider's counts, the estimate the fallback. */
+ * entries' own estimates; rescaled estimates must err high (chars/3); and an
+ * entry's size is the provider's count, stored once when a response reports
+ * it (db_response.c, usage_attribute), its estimate until then. */
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "context.h"
 #include "db.h"
+#include "db_response.h"
 #include "test_util.h"
 #include "turn_edit.h"
 
@@ -136,7 +137,7 @@ static void test_estimate_divisor(void) {
 }
 
 
-/* ── Measured sizes: the provider's count, the estimate the fallback ── */
+/* ── Stored sizes ─────────────────────────────────────────────────── */
 
 /* The archived request body for one iteration: JSON text of exactly n bytes. */
 static void add_body(sqlite3 *db, int64_t sid, int64_t it, int n) {
@@ -241,158 +242,292 @@ static int64_t new_session(sqlite3 *db) {
     return session_create(db, "s", "default", -1, 0);
 }
 
-/* A segment — one response, its call and result, up to the next report —
- * measures usage_in(next) − usage_in(this) when the two can be compared, and
- * never less than its estimate. */
-static void test_segment_sizing(void) {
-    sqlite3 *db = open_seeded();
+static int tok(sqlite3 *db, int64_t id) {
+    return (int)db_scalar_i64(db, "SELECT COALESCE(tokens,-1) FROM entries WHERE id=?", id, -2);
+}
 
-    /* Reports on both sides, the provider counting twice the estimate. */
+static void set_tok(sqlite3 *db, int64_t id, int tokens) {
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db, "UPDATE entries SET tokens=?2 WHERE id=?1", -1, &s, NULL)
+           == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, id);
+    sqlite3_bind_int(s, 2, tokens);
+    assert(sqlite3_step(s) == SQLITE_DONE);
+    sqlite3_finalize(s);
+}
+
+/* One response through the real ingest, OpenAI-compatible wire: `in`/`out`
+ * as usage, `think` reasoning tokens inside `out` (with a reasoning_details
+ * blob to replay when > 0), `calls` tool calls. Returns the message's entry
+ * id; the calls follow it at +1.., a reasoning entry precedes it at -1. */
+static int64_t ingest_as(sqlite3 *db, int64_t sid, const char *model, int in, int out,
+                         int think, int calls, int64_t *it_out) {
+    char body[2048], tc[1024] = "", rs[256] = "";
+    int64_t it = db_next_iteration_id(db, sid);
+    for (int i = 0, n = 0; i < calls; i++)
+        n += snprintf(tc + n, sizeof(tc) - (size_t)n,
+                      "%s{\"id\":\"c%lld_%d\",\"type\":\"function\",\"function\":"
+                      "{\"name\":\"look\",\"arguments\":\"{\\\"q\\\":\\\"somewhere\\\"}\"}}",
+                      i ? "," : "", (long long)it, i);
+    if (think > 0)
+        snprintf(rs, sizeof(rs), ",\"reasoning_details\":[{\"type\":\"reasoning.encrypted\","
+                                 "\"data\":\"b3BhcXVl\"}]");
+    snprintf(body, sizeof(body),
+             "{\"choices\":[{\"finish_reason\":\"%s\",\"message\":{\"role\":\"assistant\","
+             "\"content\":\"a reply of some ordinary length, forty-odd bytes\"%s%s%s%s}}],"
+             "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
+             "\"completion_tokens_details\":{\"reasoning_tokens\":%d}}}",
+             calls ? "tool_calls" : "stop", rs, calls ? ",\"tool_calls\":[" : "", tc,
+             calls ? "]" : "", in, out, think);
+    TypedIngestResult ir;
+    assert(db_ingest_response(db, sid, it, model, ENDPOINT_OPENAI, body, NULL, 0, &ir)
+           == LLM_RESP_OK);
+    if (it_out) *it_out = it;
+    return ir.assistant_entry_id;
+}
+
+static int64_t ingest(sqlite3 *db, int64_t sid, int in, int out, int think, int calls,
+                      int64_t *it_out) {
+    return ingest_as(db, sid, "m", in, out, think, calls, it_out);
+}
+
+/* The result answering call `k` of iteration `it`. */
+static int64_t result(sqlite3 *db, int64_t sid, int64_t it, int k, int bytes) {
+    char cid[48];
+    snprintf(cid, sizeof(cid), "c%lld_%d", (long long)it, k);
+    char *t = filler(bytes);
+    int64_t id = entry_append_typed(db, sid, it, "tool_result", 10 + k, t, cid, "look", 0,
+                                    STOP_REASON_NONE, NULL, 0, 0, 0);
+    free(t);
+    return id;
+}
+
+static int ctx_tokens(sqlite3 *db, int64_t sid) {
+    return (int)db_scalar_i64(db, "SELECT COALESCE(turn_context_tokens,-1) FROM sessions"
+                                  " WHERE id=?", sid, -2);
+}
+
+/* A response's own entries share its usage_out: the reasoning entry what
+ * the provider says the reasoning was, the message and each call the rest
+ * by length, and the parts add up to the whole. */
+static void test_output_shared(void) {
+    sqlite3 *db = open_seeded();
     int64_t sid = new_session(db);
     user_msg(db, sid, 300);
-    int64_t r1 = respond(db, sid, "m", 5000, 0, 3000);
-    int seg = est_ids(db, sid, r1, r1 + 3);              /* response, call, result */
-    int64_t r2 = respond(db, sid, "m", 5000 + 2 * seg, 0, 0);
-    assert(measured(db, sid, r1, r2, NULL) == 2 * seg);
+    int64_t a = ingest(db, sid, 2000, 90, 30, 2, NULL);
+    assert(tok(db, a - 1) == 30);                        /* reasoning */
+    assert(tok(db, a) > 0 && tok(db, a + 1) > 0 && tok(db, a + 2) > 0);
+    assert(tok(db, a) + tok(db, a + 1) + tok(db, a + 2) == 60);
+    assert(tok(db, a + 1) == tok(db, a + 2));            /* the same call twice */
+    /* No usage reported: nothing is measured. */
+    int64_t b = ingest(db, sid, 0, 0, 0, 0, NULL);
+    assert(tok(db, b) == -1);
+    db_close(db);
+    printf("  PASS test_output_shared\n");
+}
 
-    /* Measured below the estimate: the estimate stands. */
-    sid = new_session(db);
-    user_msg(db, sid, 300);
-    r1 = respond(db, sid, "m", 5000, 0, 3000);
-    int64_t probe = user_msg(db, sid, 30);
-    seg = est_ids(db, sid, r1, probe + 1);
-    r2 = respond(db, sid, "m", 5000 + seg / 2, 0, 0);
-    assert(measured(db, sid, r1, r2, NULL) == seg);
+/* What was appended between two reports shares the growth in usage_in that
+ * the earlier response does not account for — here two results, by length.
+ * The message that opened the session has no report before it: unmeasured. */
+static void test_appended_shared(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = new_session(db);
+    int64_t u = user_msg(db, sid, 300), it;
+    int64_t a = ingest(db, sid, 2000, 60, 0, 2, &it);
+    int64_t r0 = result(db, sid, it, 0, 3000), r1 = result(db, sid, it, 1, 6000);
+    assert(tok(db, r0) == -1);
+    ingest(db, sid, 2000 + 60 + 2700, 20, 0, 0, NULL);
+    assert(tok(db, u) == -1);
+    assert(tok(db, r0) + tok(db, r1) == 2700);
+    assert(tok(db, r0) > 850 && tok(db, r0) < 950);      /* a third of it */
+    assert(tok(db, a) + tok(db, a + 1) + tok(db, a + 2) == 60);   /* untouched */
 
-    /* A response with no report: the segment runs on to the next report. */
-    sid = new_session(db);
-    user_msg(db, sid, 300);
-    r1 = respond(db, sid, "m", 5000, 0, 3000);
-    respond(db, sid, "m", 0, 0, 3000);
-    int64_t r3 = respond(db, sid, "m", 5000 + 9000, 0, 0);
-    assert(measured(db, sid, r1, r3, NULL) == 9000);
-
-    /* A model switch between the reports: another tokenizer, so the
-     * difference measures nothing and the segment is estimated — usage_out
-     * counts only for the newest response, whose segment no report closes. */
-    sid = new_session(db);
-    user_msg(db, sid, 300);
-    r1 = respond(db, sid, "m", 5000, 500, 3000);
-    probe = respond(db, sid, "other", 20000, 0, 0);
-    seg = est_ids(db, sid, r1, probe);
-    assert(measured(db, sid, r1, probe, NULL) == seg);
-
-    /* An errored response between them is never sent and is no report: the
-     * difference across it still measures the segment. */
-    sid = new_session(db);
-    user_msg(db, sid, 300);
-    r1 = respond(db, sid, "m", 5000, 0, 3000);
-    Message err = { .role = ROLE_ASSISTANT, .content = "error: boom", .usage_in = 99999,
+    /* A response that stopped on an error is never sent: it and what follows
+     * it take no share. */
+    int64_t u2 = user_msg(db, sid, 300);
+    Message err = { .role = ROLE_ASSISTANT, .content = "error: boom",
                     .stop_reason = STOP_REASON_ERROR };
-    entry_append_with_iteration(db, sid, &err, 0);
-    r2 = respond(db, sid, "m", 5000 + 6000, 0, 0);
-    assert(measured(db, sid, r1, r2, NULL) == 6000);
+    int64_t e = entry_append_with_iteration(db, sid, &err, 0);
+    ingest(db, sid, 2000 + 60 + 2700 + 20 + 95, 20, 0, 0, NULL);
+    assert(tok(db, u2) == 95 && tok(db, e) == -1);
+    db_close(db);
+    printf("  PASS test_appended_shared\n");
+}
 
-    /* A compaction between the two requests: the second one was sent a
-     * summary in place of the history the first one carried. */
+/* Inside a turn the previous response's reasoning is replayed and counted;
+ * when the growth only fits without it, the provider did not count it and
+ * the entry reads 0 from then on. */
+static void test_reasoning_within_turn(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = new_session(db), it;
+    user_msg(db, sid, 300);
+    int64_t a = ingest(db, sid, 2000, 840, 800, 1, &it);
+    int64_t r = result(db, sid, it, 0, 3000);
+    ingest(db, sid, 2000 + 840 + 900, 20, 0, 0, NULL);
+    assert(tok(db, a - 1) == 800 && tok(db, r) == 900);
+
+    sid = new_session(db);
+    user_msg(db, sid, 300);
+    a = ingest(db, sid, 2000, 840, 800, 1, &it);
+    r = result(db, sid, it, 0, 3000);
+    ingest(db, sid, 2000 + 40 + 900, 20, 0, 0, NULL);
+    assert(tok(db, a - 1) == 0 && tok(db, r) == 900);
+    db_close(db);
+    printf("  PASS test_reasoning_within_turn\n");
+}
+
+/* Across a turn boundary the user context block was rebuilt: the new block
+ * shares the growth with the messages that opened the turn, and the old
+ * block's count is given back — so a block that grows is not booked on any
+ * entry, and one that shrinks takes nothing from them. */
+static void test_context_block_at_boundary(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = new_session(db);
+    char *block = filler(3000);
+    block[600] = 0;
+    session_set_turn_context(db, sid, block);            /* estimate 200 */
+    user_msg(db, sid, 300);
+    ingest(db, sid, 2000, 50, 0, 0, NULL);
+    assert(ctx_tokens(db, sid) == 200);                  /* no report before: estimated */
+
+    block[600] = 'w';
+    session_set_turn_context(db, sid, block);            /* estimate 1000 */
+    int64_t u2 = user_msg(db, sid, 300);                 /* estimate 104 */
+    /* really 80 for the message and 900 for the block, 200 given back */
+    ingest(db, sid, 2000 + 50 + 80 + 900 - 200, 50, 0, 0, NULL);
+    assert(tok(db, u2) + ctx_tokens(db, sid) == 980);
+    assert(ctx_tokens(db, sid) == 980 * 1000 / 1104);
+    int big = ctx_tokens(db, sid), in = 2000 + 50 + 80 + 900 - 200;
+
+    block[600] = 0;
+    session_set_turn_context(db, sid, block);            /* back to 200 */
+    int64_t u3 = user_msg(db, sid, 300);
+    ingest(db, sid, in + 50 + 80 + 180 - big, 50, 0, 0, NULL);
+    assert(tok(db, u3) + ctx_tokens(db, sid) == 260);
+    assert(tok(db, u3) > 60 && tok(db, u3) < 120);
+    assert(tok(db, u2) == 980 - big);                    /* as it was measured */
+    free(block);
+    db_close(db);
+    printf("  PASS test_context_block_at_boundary\n");
+}
+
+/* A provider that is sent the previous turn's reasoning and counts it keeps
+ * it on the books; one that does not count it past the boundary has the
+ * whole turn's reasoning set to 0, and the opening message still measured. */
+static void test_reasoning_across_boundary(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = new_session(db), it;
+    user_msg(db, sid, 300);
+    int64_t a = ingest(db, sid, 2000, 832, 793, 0, NULL);
+    int64_t u = user_msg(db, sid, 300);
+    ingest(db, sid, 2000 + 832 + 90, 20, 0, 0, NULL);
+    assert(tok(db, a - 1) == 793 && tok(db, u) == 90);
+
+    sid = new_session(db);
+    user_msg(db, sid, 300);
+    a = ingest(db, sid, 2000, 340, 300, 1, &it);
+    int64_t r = result(db, sid, it, 0, 3000);
+    int64_t b = ingest(db, sid, 2000 + 340 + 900, 700, 660, 0, NULL);
+    assert(tok(db, a - 1) == 300 && tok(db, b - 1) == 660);
+    u = user_msg(db, sid, 300);
+    /* neither response's reasoning is in this request's count */
+    ingest(db, sid, 2000 + 340 + 900 - 300 + 40 + 90, 20, 0, 0, NULL);
+    assert(tok(db, a - 1) == 0 && tok(db, b - 1) == 0);
+    assert(tok(db, u) == 90 && tok(db, r) == 900);
+    db_close(db);
+    printf("  PASS test_reasoning_across_boundary\n");
+}
+
+/* A difference is only trusted when the two requests can be compared: not
+ * across a model switch (whose reasoning is stripped, and reads 0), not
+ * across a compaction, not when what is left is nowhere near the size of
+ * what was appended. Then the entries keep their estimate. */
+static void test_untrusted_difference(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = new_session(db), it;
+    user_msg(db, sid, 300);
+    int64_t a = ingest(db, sid, 2000, 540, 500, 1, &it);
+    int64_t r = result(db, sid, it, 0, 3000);
+    int64_t b = ingest_as(db, sid, "other", 9000, 30, 0, 0, NULL);
+    assert(tok(db, r) == -1 && tok(db, a - 1) == 0);
+    assert(tok(db, b) == 30);                            /* its own output still is */
+
     sid = new_session(db);
     int64_t u0 = user_msg(db, sid, 300);
-    respond(db, sid, "m", 5000, 0, 0);
+    ingest(db, sid, 2000, 50, 0, 0, NULL);
     int64_t u1 = user_msg(db, sid, 300);
-    r1 = respond(db, sid, "m", 7000, 0, 3000);
-    seg = est_ids(db, sid, r1, r1 + 3);
+    ingest(db, sid, 2000 + 50 + 90, 50, 0, 0, NULL);
+    assert(tok(db, u1) == 90);
     assert(entry_compact(db, sid, u0, u1, "summary") > 0);
-    probe = user_msg(db, sid, 30);
-    seg += est_ids(db, sid, probe, probe + 1);
-    r2 = respond(db, sid, "m", 1000, 0, 0);
-    assert(measured(db, sid, r1, r2, NULL) == seg);
-    exec_id(db, "UPDATE entries SET usage_in=7000+20000 WHERE id=?", r2);
-    assert(measured(db, sid, r1, r2, NULL) == seg);       /* even when larger */
+    int64_t u2 = user_msg(db, sid, 300);
+    ingest(db, sid, 900, 50, 0, 0, NULL);
+    assert(tok(db, u2) == -1);
+
+    sid = new_session(db);
+    user_msg(db, sid, 300);
+    ingest(db, sid, 2000, 50, 0, 0, NULL);
+    u1 = user_msg(db, sid, 300);
+    ingest(db, sid, 2000 + 50 + 40000, 50, 0, 0, NULL);  /* the head changed under it */
+    assert(tok(db, u1) == -1);
+    u2 = user_msg(db, sid, 300);
+    ingest(db, sid, 2000 + 50 + 40000 + 50 + 90, 50, 0, 0, NULL);
+    assert(tok(db, u2) == 90);                           /* and the next one is fine */
     db_close(db);
-    printf("  PASS test_segment_sizing\n");
+    printf("  PASS test_untrusted_difference\n");
 }
 
-/* A turn's size is the sum of its segments: three iterations measured at
- * the provider's count, the last one's results (not yet sent) estimated,
- * the opening user message estimated. The head is the first report less
- * what it was sent with. */
-static void test_turn_size_over_iterations(void) {
+/* The plan reads each entry at its stored count and its estimate until it
+ * has one, and the head is the newest report less what it was sent with. */
+static void test_plan_reads_stored(void) {
     sqlite3 *db = open_seeded();
-    int64_t sid = new_session(db);
-    int64_t u = user_msg(db, sid, 900);                   /* 304 */
-    int64_t r1 = respond(db, sid, "m", 2000 + 304, 0, 3000);
-    int64_t r2 = respond(db, sid, "m", 2000 + 304 + 4000, 0, 3000);
-    int64_t r3 = respond(db, sid, "m", 2000 + 304 + 4000 + 5000, 0, 3000);
-    int tail = est_ids(db, sid, r3, r3 + 10);
+    int64_t sid = new_session(db), it;
+    int64_t u = user_msg(db, sid, 900);                  /* 304 */
+    int64_t a = ingest(db, sid, 2000 + 304, 440, 400, 1, &it);
+    int64_t r = result(db, sid, it, 0, 3000);
+    int64_t b = ingest(db, sid, 2000 + 304 + 440 + 900, 30, 0, 1, &it);
+    int64_t r2 = result(db, sid, it, 0, 3000);           /* not yet sent: 1004 */
     int head = 0;
-    assert(measured(db, sid, u, 0, &head) == 304 + 4000 + 5000 + tail);
+    assert(measured(db, sid, u, 0, &head) == 304 + 440 + 900 + 30 + 1004);
     assert(head == 2000);
-    assert(measured(db, sid, r1, r2, NULL) == 4000);
-    /* usage_out on the newest response counts what the model wrote. */
-    int out_est = est_ids(db, sid, r3, r3 + 2);
-    exec_id(db, "UPDATE entries SET usage_out=900 WHERE id=?", r3);
-    assert(measured(db, sid, r3, 0, NULL) == tail - out_est + 900);
+    assert(measured(db, sid, a - 1, a, NULL) == 400);    /* reasoning, replayed */
+    assert(measured(db, sid, r, b, NULL) == 900);
+    int turn = 0;
+    assert(context_turn_overflows(db, sid, 2000 + 304 + 440 + 900 + 30 + 1004, 0, &turn) == 0);
+    assert(turn == 304 + 440 + 900 + 30 + 1004);
+    assert(context_turn_overflows(db, sid, 2000 + turn - 1, 0, NULL) == 1);
+    (void)r2;
     db_close(db);
-    printf("  PASS test_turn_size_over_iterations\n");
+    printf("  PASS test_plan_reads_stored\n");
 }
 
-/* Six turns of ~1008 estimated tokens fit a 7200-token budget; once the
- * provider has counted every turn at twice that, they do not. */
+/* Six turns fit a 7200-token budget by estimate; once each turn's result
+ * has been measured at twice its estimate, three do — and the cut, landing
+ * inside the fourth, snaps back to keep that one whole. */
 static void test_cut_keeps_fewer_turns(void) {
     sqlite3 *db = open_seeded();
     Config cfg = {0};
     cfg.context_window = 12000;                          /* budget 7200 */
     for (int reported = 0; reported <= 1; reported++) {
         int64_t sid = new_session(db);
-        int pos = 0;
+        int turn = 0;
         for (int i = 0; i < 6; i++) {
-            int64_t u = user_msg(db, sid, 3000);         /* 1004 */
-            pos += 2 * est_ids(db, sid, u, u + 1) + (i ? 2 * 4 : 0);   /* + "ok" */
-            respond(db, sid, "m", reported ? pos : 0, 0, 0);
+            int64_t u = user_msg(db, sid, 300);
+            int64_t r1 = respond(db, sid, "m", 0, 0, 3000);
+            int64_t r2 = respond(db, sid, "m", 0, 0, 0);
+            int res = est_ids(db, sid, r1 + 2, r1 + 3);
+            if (reported) set_tok(db, r1 + 2, 2 * res);
+            turn = est_ids(db, sid, u, r2 + 1) + (reported ? res : 0);
         }
+        if (reported) assert(3 * turn <= 7200 && 4 * turn > 7200);
+        else assert(6 * turn <= 7200);
         ContextPlan plan = {0};
         assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
-        assert(plan.count == 12);
-        if (!reported) {
-            assert(plan.cut == 0 && plan.head == 0);
-        } else {
-            /* Turn 1's message was counted at 2x, estimated at 1x: the
-             * head carries the difference (1004). Turns 1-5 measure 2016,
-             * turn 6 (not yet followed by a report) 1008: 7200 - 1004 holds
-             * turns 6 to 4 and the response of turn 3, so the cut snaps
-             * back to keep turn 3 whole — four of six turns. */
-            assert(plan.head == 1004);
-            assert(plan.cut == 4);
-        }
+        assert(plan.count == 30 && plan.head == 0);
+        assert(plan.cut == (reported ? 10 : 0));
         context_plan_free(&plan);
     }
     db_close(db);
     printf("  PASS test_cut_keeps_fewer_turns\n");
-}
-
-/* The probe holds the turn's measured size against the window: reported
- * segments at the provider's count, the results since the newest request
- * by estimate. */
-static void test_probe_trips_earlier(void) {
-    sqlite3 *db = open_seeded();
-    for (int reported = 0; reported <= 1; reported++) {
-        int64_t sid = new_session(db);
-        int64_t u = user_msg(db, sid, 7000);
-        int ask = est_ids(db, sid, u, u + 1);
-        int64_t r1 = respond(db, sid, "m", reported ? ask : 0, 0, 12000);
-        int seg = est_ids(db, sid, r1, r1 + 3);
-        int64_t r2 = respond(db, sid, "m", reported ? ask + 2 * seg : 0, 0, 6000);
-        int tail = est_ids(db, sid, r2, r2 + 3);         /* never sent yet */
-        int turn = 0;
-        int over = context_turn_overflows(db, sid, 10000, 0, &turn);
-        if (!reported) {
-            assert(turn == ask + seg + tail && over == 0);
-        } else {
-            assert(turn == ask + 2 * seg + tail && over == 1);
-        }
-    }
-    db_close(db);
-    printf("  PASS test_probe_trips_earlier\n");
 }
 
 /* What the trigger measured before the provider's count was the measure
@@ -446,94 +581,56 @@ static void test_trigger_not_lower_without_edit(void) {
     printf("  PASS test_trigger_not_lower_without_edit\n");
 }
 
-/* A turn edit that drops the turn's big tool output: the trigger that
- * follows sees the shrink, though the newest provider count predates it. */
-static void test_trigger_sees_turn_edit(void) {
+/* A turn edit that drops the turn's big tool output takes its stored count
+ * with it: the trigger that follows sees the shrink at once, with no
+ * request in between. A replaced result keeps its measure, scaled. */
+static void test_edit_changes_sizes(void) {
     sqlite3 *db = open_seeded();
     assert(sqlite3_exec(db, "INSERT INTO tools(name, droppable) VALUES ('look',1);",
                         NULL, NULL, NULL) == SQLITE_OK);
-    int64_t sid = new_session(db);
+    int64_t sid = new_session(db), it;
     Config cfg = {0};
     cfg.compaction = 1;
     int head = context_head_estimate(db, "default", sid, &cfg, NULL);
 
     user_msg(db, sid, 30);
-    respond(db, sid, "m", head + 20, 0, 0);
+    ingest(db, sid, head + 20, 20, 0, 0, NULL);
     int64_t u = user_msg(db, sid, 30);
-    int64_t r1 = respond(db, sid, "m", 0, 0, 0);
-    /* The droppable call, as the edit expects it: a tool_calls row too. */
-    int64_t it1 = db_scalar_i64(db, "SELECT iteration_id FROM entries WHERE id=?", r1, 0);
-    int64_t c1 = entry_append_typed(db, sid, it1, "tool_call", 1, "{}", "c1", "look", 0,
-                                    STOP_REASON_NONE, NULL, 0, 0, 0);
-    exec_id(db, "INSERT INTO tool_calls(session_id, entry_id, call_id, name, status)"
-                " SELECT session_id, id, 'c1', 'look', 'done' FROM entries WHERE id=?", c1);
-    char *out = filler(24000);                           /* ~8000 estimated */
-    entry_append_typed(db, sid, it1, "tool_result", 2, out, "c1", "look", 0,
-                       STOP_REASON_NONE, NULL, 0, 0, 0);
-    free(out);
-    /* The provider counted the turn's output at twice the estimate. */
-    int before = est_ids(db, sid, u, c1 + 2);
-    int64_t fin = respond(db, sid, "m", head + 20 + 2 * before, 0, 0);
-    assert(fin > 0);
+    int64_t a = ingest(db, sid, head + 20 + 20 + 15, 40, 0, 2, &it);
+    exec_id(db, "UPDATE tool_calls SET status='done' WHERE session_id=?", sid);
+    int64_t big = result(db, sid, it, 0, 24000), small = result(db, sid, it, 1, 3000);
+    /* the provider counts the big result at twice its estimate */
+    ingest(db, sid, head + 20 + 20 + 15 + 40 + 16000 + 1000, 30, 0, 0, NULL);
+    assert(tok(db, big) + tok(db, small) == 17000 && tok(db, big) > 15000);
+    int was_small = tok(db, small);
 
-    /* Limit sits between the measured size (~16k) and what is left after
-     * the edit; the estimate alone (~8k) was always under it. */
-    cfg.context_window = (int)((head + 12000) / 0.6f);
+    /* Limit sits between the measured size (~17k) and what is left after
+     * the drop; the estimate alone (~9k) was always under it. */
+    cfg.context_window = (int)((head + 13000) / 0.6f);
     assert(session_needs_compaction(db, sid, &cfg) == 1);
 
-    char *err = NULL;
-    assert(turn_edit_apply(db, sid, "{\"edits\":[{\"op\":\"drop\",\"call_id\":\"c1\"}]}",
-                           "hook:t", &err) == TURN_EDIT_APPLIED);
+    char edits[1024], *err = NULL;
+    snprintf(edits, sizeof(edits),
+             "{\"edits\":[{\"op\":\"drop\",\"call_id\":\"c%lld_0\"},"
+             "{\"op\":\"replace\",\"call_id\":\"c%lld_1\",\"text\":\"%0600d\"}]}",
+             (long long)it, (long long)it, 7);
+    assert(turn_edit_apply(db, sid, edits, "hook:t", &err) == TURN_EDIT_APPLIED);
     assert(session_needs_compaction(db, sid, &cfg) == 0);
+    int64_t repl = db_scalar_i64(db, "SELECT id FROM entries WHERE session_id=?1"
+                                     " AND type='tool_result' ORDER BY id DESC LIMIT 1", sid, 0);
+    assert(repl > small && tok(db, repl) == was_small * 600 / 3000);
+    /* What is left of the turn: the question, the message, one call, the
+     * replacement, the answer. */
+    assert(measured(db, sid, u, 0, NULL) < 15 + 40 + tok(db, repl) + 30 + 1);
+
+    /* The next turn's first request is not compared with the edited turn's
+     * last one: its opening message keeps its estimate. */
+    int64_t u3 = user_msg(db, sid, 300);
+    ingest(db, sid, head + 500, 30, 0, 0, NULL);
+    assert(tok(db, u3) == -1);
+    (void)a;
     db_close(db);
-    printf("  PASS test_trigger_sees_turn_edit\n");
-}
-
-/* After a turn edit the reports the edit invalidated are passed over: the
- * edited turn is estimated until the next request, which measures it again
- * against the report that opened it. */
-static void test_edited_turn_remeasured(void) {
-    sqlite3 *db = open_seeded();
-    assert(sqlite3_exec(db, "INSERT INTO tools(name, droppable) VALUES ('look',1);",
-                        NULL, NULL, NULL) == SQLITE_OK);
-    int64_t sid = new_session(db);
-    int64_t u = user_msg(db, sid, 300);
-    int64_t r1 = respond(db, sid, "m", 2000, 0, 0);
-    int64_t it1 = db_scalar_i64(db, "SELECT iteration_id FROM entries WHERE id=?", r1, 0);
-    int64_t c1 = entry_append_typed(db, sid, it1, "tool_call", 1, "{}", "c1", "look", 0,
-                                    STOP_REASON_NONE, NULL, 0, 0, 0);
-    exec_id(db, "INSERT INTO tool_calls(session_id, entry_id, call_id, name, status)"
-                " SELECT session_id, id, 'c1', 'look', 'done' FROM entries WHERE id=?", c1);
-    /* A second call that stays keeps the iteration (and r1) on the branch. */
-    entry_append_typed(db, sid, it1, "tool_call", 2, "{}", "c2", "look", 0,
-                       STOP_REASON_NONE, NULL, 0, 0, 0);
-    char *out = filler(24000);
-    entry_append_typed(db, sid, it1, "tool_result", 3, out, "c1", "look", 0,
-                       STOP_REASON_NONE, NULL, 0, 0, 0);
-    free(out);
-    int64_t res2 = entry_append_typed(db, sid, it1, "tool_result", 4, "small", "c2", "look",
-                                      0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int seg = est_ids(db, sid, r1, res2 + 1);
-    respond(db, sid, "m", 2000 + 2 * seg, 0, 0);          /* the answer */
-    assert(measured(db, sid, u, 0, NULL) > 2 * seg);
-
-    char *err = NULL;
-    assert(turn_edit_apply(db, sid, "{\"edits\":[{\"op\":\"drop\",\"call_id\":\"c1\"}]}",
-                           "hook:t", &err) == TURN_EDIT_APPLIED);
-    int left = measured(db, sid, u, 0, NULL);             /* estimate: no report since */
-    int est = (int)db_scalar_i64(db,
-        "WITH RECURSIVE b(id) AS (SELECT leaf_id FROM sessions WHERE id=?1"
-        " UNION ALL SELECT e.parent_id FROM entries e JOIN b ON e.id=b.id WHERE e.parent_id>0)"
-        " SELECT SUM(token_estimate) FROM entries WHERE id IN (SELECT id FROM b)", sid, 0);
-    assert(left == est && left < 200);
-
-    /* The next turn's request counts the edited turn at 3x what is left. */
-    int64_t u2 = user_msg(db, sid, 30);
-    int after = left - est_ids(db, sid, u, u + 1) + est_ids(db, sid, u2, u2 + 1);
-    int64_t r3 = respond(db, sid, "m", 2000 + 3 * after, 0, 0);
-    assert(measured(db, sid, r1, r3, NULL) == 3 * after);
-    db_close(db);
-    printf("  PASS test_edited_turn_remeasured\n");
+    printf("  PASS test_edit_changes_sizes\n");
 }
 
 /* No report anywhere: every size is the estimate and the head the estimate
@@ -552,18 +649,17 @@ static void test_no_reports_unchanged(void) {
     assert(context_plan(db, sid, &cfg, 700, &p) == 0);
     int total = 0;
     for (int i = 0; i < p.count; i++) {
-        assert(p.entries[i].tokens == p.entries[i].token_estimate);
+        assert(p.entries[i].tokens == (int)db_scalar_i64(db,
+                   "SELECT token_estimate FROM entries WHERE id=?", p.entries[i].id, -1));
         total += p.entries[i].tokens;
     }
     assert(p.head == 700);
     context_plan_free(&p);
-    int est = (int)db_scalar_i64(db, "SELECT SUM(token_estimate) FROM entries"
-                                     " WHERE session_id=?", sid, 0);
-    assert(total == est);
     int last = (int)db_scalar_i64(db,
         "SELECT SUM(token_estimate) FROM entries WHERE session_id=?1 AND turn_id="
         "(SELECT MAX(turn_id) FROM entries WHERE session_id=?1)", sid, 0);
     int turn = 0;
+    assert(total > last);
     assert(context_turn_overflows(db, sid, last + 700, 700, &turn) == 0 && turn == last);
     assert(context_turn_overflows(db, sid, last + 699, 700, &turn) == 1);
     db_close(db);
@@ -577,13 +673,16 @@ int main(void) {
     test_provider_floor_and_staleness();
     test_sent_payload_floor();
     test_estimate_divisor();
-    test_segment_sizing();
-    test_turn_size_over_iterations();
+    test_output_shared();
+    test_appended_shared();
+    test_reasoning_within_turn();
+    test_context_block_at_boundary();
+    test_reasoning_across_boundary();
+    test_untrusted_difference();
+    test_plan_reads_stored();
     test_cut_keeps_fewer_turns();
-    test_probe_trips_earlier();
     test_trigger_not_lower_without_edit();
-    test_trigger_sees_turn_edit();
-    test_edited_turn_remeasured();
+    test_edit_changes_sizes();
     test_no_reports_unchanged();
     printf("All context accounting tests passed.\n");
     return 0;

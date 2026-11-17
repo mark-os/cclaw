@@ -246,10 +246,20 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
-/* Turn a fresh (current) database back into the v65 shape: hooks has no
- * input column. unshape_v65 starts here, so every older patch test replays
- * v66 over a real v65 shape. */
+/* Turn a fresh (current) database back into the v66 shape: no stored
+ * measure on entries or for the context block. unshape_v66 starts here, so
+ * every older patch test replays v67 over a real v66 shape. */
+static void unshape_v67(sqlite3 *db) {
+    int rc = sqlite3_exec(db, "ALTER TABLE entries DROP COLUMN tokens;"
+                              "ALTER TABLE sessions DROP COLUMN turn_context_tokens;",
+                          NULL, NULL, NULL);
+    assert(rc == SQLITE_OK);
+}
+
+/* On to the v65 shape: hooks has no input column. unshape_v65 starts here,
+ * so every older patch test replays v66 over a real v65 shape. */
 static void unshape_v66(sqlite3 *db) {
+    unshape_v67(db);
     int rc = sqlite3_exec(db, "ALTER TABLE hooks DROP COLUMN input;", NULL, NULL, NULL);
     assert(rc == SQLITE_OK);
 }
@@ -1971,6 +1981,45 @@ static void test_schema_patch_v66(void) {
     printf("  PASS test_schema_patch_v66\n");
 }
 
+/* v67: entries.tokens and sessions.turn_context_tokens. Rows that were
+ * there keep everything and read NULL — not measured, sized by their
+ * estimate as before. The patched tables are shaped like fresh ones. */
+static void test_schema_patch_v67(void) {
+    const char *path = "/tmp/test_cclaw_schema_v67.sqlite";
+    const char *fresh_path = "/tmp/test_cclaw_schema_v67_fresh.sqlite";
+    test_db_clean(path);
+    test_db_clean(fresh_path);
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v67(db);
+    test_seed_agent(db, "Keep");
+    int64_t sid = session_create(db, "s", "Keep", -1, 0);
+    Message m = { .role = ROLE_USER, .content = "twelve bytes" };
+    int64_t id = entry_append_with_iteration(db, sid, &m, 0);
+    assert(sid > 0 && id > 0);
+    set_user_version(db, 66);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
+    assert(db_scalar_i64(db, "SELECT tokens IS NULL AND token_estimate = 8 FROM entries"
+        " WHERE id=?;", id, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT turn_context_tokens IS NULL FROM sessions"
+        " WHERE id=?;", sid, -1) == 1);
+
+    sqlite3 *fresh = db_open(fresh_path);
+    assert(fresh != NULL && db_ensure_schema(fresh) == 0);
+    char *got = schema_shape(db), *want = schema_shape(fresh);
+    if (strcmp(got, want) != 0) fprintf(stderr, "v67 shape differs:\n%s\n---\n%s\n", got, want);
+    assert(strcmp(got, want) == 0);
+    free(got); free(want);
+    db_close(fresh);
+    db_close(db);
+    test_db_clean(path);
+    test_db_clean(fresh_path);
+    printf("  PASS test_schema_patch_v67\n");
+}
+
 static void test_agent_models_capability_gate(void) {
     const char *path = "/tmp/test_cclaw_db_capgate.sqlite";
     test_db_clean(path);
@@ -2058,6 +2107,7 @@ int main(void) {
     test_schema_patch_v64();
     test_schema_patch_v65();
     test_schema_patch_v66();
+    test_schema_patch_v67();
     test_agent_models_capability_gate();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");

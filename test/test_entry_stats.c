@@ -70,8 +70,8 @@ static void test_context_plan_uses_stored_stats(void) {
     int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan failed");
     if (plan.count != 2) FAIL("wrong count");
-    if (plan.entries[0].token_estimate <= 0) FAIL("entry 0 token_estimate <= 0");
-    if (plan.entries[1].token_estimate <= 0) FAIL("entry 1 token_estimate <= 0");
+    if (plan.entries[0].tokens <= 0) FAIL("entry 0 token_estimate <= 0");
+    if (plan.entries[1].tokens <= 0) FAIL("entry 1 token_estimate <= 0");
 
     context_plan_free(&plan);
     db_close(db);

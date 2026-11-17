@@ -18,20 +18,13 @@ typedef struct {
     int64_t iteration_id;
     Role role;
     StopReason stop_reason;
-    int token_estimate;     /* TOKEN_ESTIMATE of the stored text (chars/3 + 4) */
     int tool_call_count;    /* number of tool_calls in assistant msg (0 otherwise) */
     int usage_in;           /* provider's prompt count, on a reported response only */
-    int usage_out;          /* less the reasoning tokens reported inside it */
-    int epoch;              /* reports: compactions on the branch older than it */
-    int model;              /* reports: model run — bumps when a report's model
-                             * differs from the previous report's */
     unsigned char fresh;    /* written after the newest compaction on the branch */
     unsigned char turn_edited; /* its turn carries a turn-edit record */
-    unsigned char repointed;   /* original_parent_id set: compaction or an edit
-                                * changed what precedes it */
-    int tokens;             /* measured size: the estimate, plus — on a reported
-                             * response — what the provider counted above the
-                             * estimate for its segment (context.c, plan_measure) */
+    int tokens;             /* its size: the provider's count once a report has
+                             * measured it (entries.tokens), the estimate until
+                             * then (token_estimate, chars/3 + 4) */
 } PlanEntry;
 
 /* Result of context_plan() — ordered entry IDs + cut point. */
@@ -97,8 +90,8 @@ void session_tmp_dir(sqlite3 *db, int64_t session_id, char *buf, size_t bufsz);
 int context_head_estimate(sqlite3 *db, const char *agent_name, int64_t session_id,
                           const Config *cfg, const char *system_prompt);
 
-/* Compaction trigger: the context's measured size (head + entries, the
- * provider's count where it reported, the estimate elsewhere), or the sent
+/* Compaction trigger: the context's size (head + entries, each at the
+ * provider's count once measured and its estimate until then), or the sent
  * payload /3, exceeds context_threshold x window less the last turn. */
 int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg);
 

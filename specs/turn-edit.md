@@ -137,10 +137,11 @@ the ordinary case there is one run.
 ```
 
 - `input` — the options this input was built with (above).
-- `tokens` — sums of `entries.token_estimate`: the whole turn, and its
-  `tool_call` + `tool_result` entries. These are the runtime's estimates
-  (chars/3), not the provider's count, which can be higher; thresholds a
-  script compares them with are in the same estimate units.
+- `tokens` — the whole turn's size, and its `tool_call` + `tool_result`
+  entries': each entry at the provider's count once a report has measured
+  it (`entries.tokens`) and at the runtime's estimate (chars/3) until then
+  ([memory.md](memory.md#context-window-management)). A finished turn's
+  entries are measured except what its last request never carried.
 - `user_messages` — the turn's `user_message` entries, in order.
 - `notes` — `system` entries already in the turn (runtime notices, notes an
   earlier hook left), with the id of the iteration each precedes (the
@@ -342,11 +343,11 @@ once — by several hooks in a row — and each apply appends one element.
 - `left_branch` — every entry that left the branch, in chain order, replaced
   originals included.
 - `replaced`, `notes` — in edit order.
-- `tokens` — the turn's size before and after this apply, in estimate units
-  (`entries.token_estimate`). The compaction check that follows the apply
-  takes `before − after` off the sent body it last measured; the provider's
-  pre-edit counts for the edited turn stop counting, and the turn is
-  estimated until the next request measures it again
+- `tokens` — the turn's size before and after this apply, each entry at
+  its stored count or its estimate. The compaction check that follows the
+  apply takes `before − after` off the sent body it last measured. Nothing
+  is measured again: what left the branch took its count with it, and a
+  replaced result keeps its measure scaled to the new length
   ([memory.md](memory.md#context-window-management)).
 
 ## On the wire

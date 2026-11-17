@@ -1914,6 +1914,14 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
     { 66,
       "ALTER TABLE hooks ADD COLUMN input TEXT;",
       NULL },
+    /* v67: measured sizes are stored, not re-derived. entries.tokens — the
+     * provider's count for one entry, NULL until a response reports it;
+     * sessions.turn_context_tokens — the same for the user context block.
+     * Existing rows stay NULL and read as their estimate. */
+    { 67,
+      "ALTER TABLE entries ADD COLUMN tokens INTEGER;"
+      "ALTER TABLE sessions ADD COLUMN turn_context_tokens INTEGER;",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {

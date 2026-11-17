@@ -167,37 +167,57 @@ Not yet implemented:
 ## Context Window Management
 
 **Measure.** The provider reports usage on every response; that is the
-measure. Our character estimate (`entries.token_estimate`, chars/3 + 4) is
-the fallback, used only where there is no report or where the provider's
-figure is lower. Every size below is read from the DB at the time it is
-needed (`branch_load` / `plan_measure`, `context.c`) — nothing is stored or
-rescaled:
+measure, and it is written down once per entry when it arrives
+(`entries.tokens`, by `usage_attribute` in `db_response.c`). Our character
+estimate (`entries.token_estimate`, chars/3 + 4) is the size of an entry no
+report has measured yet. Everything that sizes a context — the cut, the
+overflow probe, the compaction trigger, a hook's `tokens` — reads
+`COALESCE(tokens, token_estimate)` and adds; nothing is re-derived.
 
-- A response's `usage_in` counts the whole request that produced it: head,
-  user context block and every entry sent before it. The entries between two
-  reported responses — a **segment**: one response with its tool calls and
-  results, plus the user entries that opened the next turn — measure
-  `usage_in(next) − usage_in(this)`, and count the larger of that and their
-  estimate. The provider's excess lands on the response entry that opens the
-  segment, so a turn, the kept tail and the whole branch all sum measured
-  sizes.
-- The difference measures nothing — the segment is estimated — across a
-  model switch (another tokenizer) or a compaction. The newest response's
-  segment, which no report closes yet, counts `usage_out` (less the
-  reasoning tokens the provider reports inside it, which are not sent back)
-  for what the model wrote and the estimate for the rest.
-- A report whose turn was edited after it was sent, where the edit reached
-  into what that request carried, no longer describes the branch before it
-  and is passed over like a response with no report. The edited turn is
-  estimated until the next request, which measures it again against the
-  report before it. Entries written after the report that closes their
-  segment (a hook's note) add their estimate on top. An errored response is
-  never sent and is no report.
-- The **head** (tools + system prompt) is not reported on its own. It is the
-  larger of its estimate (`context_head_estimate`) and the newest intact
-  report since the last compaction less the measured entries it was sent
-  with — which also takes in the user context block and the JSON framing.
-  When that request had been cut it reads low and the estimate stands.
+The rule, checked against the Anthropic, Gemini-native and OpenAI-compatible
+wire formats: a request's `usage_in` is the previous request's, plus the
+previous response's `usage_out`, plus whatever was appended in between, to
+within a few tokens of framing. The one variable is reasoning, which costs
+its full reported count while it is replayed and nothing once it is not —
+encrypted or not.
+
+- **What the model wrote** shares the response's `usage_out` as soon as it is
+  ingested: the reasoning entry gets the reasoning tokens the provider
+  reports (0 when there is nothing to replay), the message and each tool
+  call share the rest by length.
+- **What was appended** — tool results, user messages, notes — is measured
+  by the next report: the growth in `usage_in` that the previous response's
+  entries do not account for, shared by length among the entries appended
+  since.
+- **The user context block** is rebuilt at every turn boundary, so the
+  first report of a turn also holds the change in its size. The new block is
+  one of the sharers there, and the previous block's count
+  (`sessions.turn_context_tokens`) is given back first — a block that grows
+  is not booked on any entry.
+- **Reasoning** stays at its count while it is still sent and counted.
+  Inside a turn the previous response's reasoning is expected to be; across
+  a boundary the Anthropic format drops the whole previous turn's
+  (`llm_payload.c`), and some upstreams stop counting what they are sent.
+  The expected account is tried first, the alternatives after it, and
+  reasoning found dropped is set to 0. A model switch strips another
+  model's reasoning from every request, and sets it to 0.
+- **A difference is trusted** only when the two requests can be compared —
+  same model, no compaction and no turn edit between them — and when what
+  is left for the appended entries is within sight of their estimate
+  (between a third and three times it, plus framing): a moved cut or a
+  changed system prompt shows up there. Otherwise nothing is written and
+  those entries keep their estimate. An entry is measured once or not at
+  all; an errored response is never sent, is no report and takes no share.
+- **A turn edit** needs nothing measured again: a dropped call leaves the
+  branch with its count, and a replaced result keeps its measure scaled to
+  the new length (a short one, mostly framing, goes back to the estimate).
+- The **head** (tools, system prompt, user context block, JSON framing) is
+  not an entry. It is the larger of its estimate (`context_head_estimate`)
+  and one report's `usage_in` less the entries that request was sent with —
+  the newest report written after every compaction whose turn has not been
+  edited since. When that request had been cut it reads low and the estimate
+  stands. Because it is anchored on a whole reported request, head + entries
+  is that request plus what came after it, however the shares fell.
 
 Budgets and windows are in the provider's tokens, and so are the sizes
 compared against them at every site below. With no report at all every size
@@ -214,8 +234,8 @@ is the estimate and every site reads as it always has.
 - Cutoff notice prepended when truncated
 - Mid-turn overflow probe (`context_turn_overflows`, run before each
   iteration ≥ 1): the cut cannot split the current turn, so once the turn's
-  measured size — reported segments at the provider's count, the results
-  since the newest request by estimate — exceeds the window less the head,
+  size — each entry at its stored count, the results since the newest
+  request by estimate — exceeds the window less the head,
   the turn stops with the context-budget notice instead of sending a request
   the provider would refuse (E5).
 - Compaction trigger (`session_needs_compaction`, after each turn): the

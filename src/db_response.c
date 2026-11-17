@@ -4,6 +4,7 @@
 #include "config_registry.h"
 #include "db.h"
 #include "llm.h"
+#include "log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -341,6 +342,317 @@ static int reasoning_has_tool_markup(const char *r) {
     return 0;
 }
 
+/* ── Attributing the provider's counts to entries ───────────────────
+ *
+ * Every response reports two numbers: usage_in, the whole request that
+ * produced it, and usage_out, what the model wrote. Measured across three
+ * wire formats (2026-11), the next request's usage_in is this one's, plus
+ * this usage_out, plus whatever was appended in between — to within a few
+ * tokens of framing — with one variable: reasoning costs its full reported
+ * count while it is replayed and nothing once it is not.
+ *
+ * So each entry's size is written once, here, when the report that measures
+ * it arrives (entries.tokens), and everything that sizes a context reads the
+ * stored number (context.c):
+ *
+ *   1. this response's own entries share usage_out: the reasoning entry gets
+ *      the reasoning tokens the provider reports (0 when there is nothing to
+ *      replay), the message and its tool calls share the rest by length;
+ *   2. the entries appended since the previous report — tool results, user
+ *      messages, notes — share the growth in usage_in that the previous
+ *      response's entries do not account for, by length. At a turn boundary
+ *      the user context block was rebuilt, so the new block is one of the
+ *      sharers and the old block's count (sessions.turn_context_tokens) is
+ *      given back first.
+ *
+ * Reasoning is the one thing that leaves a request without an edit. Inside a
+ * turn the previous response's reasoning is replayed; across a boundary the
+ * Anthropic format drops the whole previous turn's (llm_payload.c), and some
+ * providers stop counting what they are sent. The expected case is tried
+ * first and the alternatives after it; reasoning found dropped is set to 0.
+ *
+ * A difference is only trusted when the two requests can be compared — same
+ * model, no compaction and no turn edit between them — and when what is left
+ * for the appended entries is within sight of their estimate (a moved cut or
+ * a changed system prompt shows up there). Otherwise nothing is written and
+ * those entries keep their estimate: measured once, or not at all. */
+typedef struct {
+    int64_t id, turn_id, iteration_id;
+    int role, stop, usage_in, tokens, est;      /* tokens < 0: not measured */
+    char kind;                                  /* r)easoning a)ssistant_message o)ther */
+    char same_model, anthropic, skip;
+} AttrRow;
+
+#define ATTR_MAX_ROWS 1024
+
+/* Run one statement of up to three integer parameters (binding one the
+ * statement does not have is a no-op). */
+static void attr_exec(sqlite3 *db, const char *sql, int64_t a, int64_t b, int64_t c) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+        LOG_WARN_("usage attribution: %s", sqlite3_errmsg(db));
+        return;
+    }
+    sqlite3_bind_int64(st, 1, a);
+    sqlite3_bind_int64(st, 2, b);
+    sqlite3_bind_int64(st, 3, c);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+/* Step 1: usage_out over the response's own entries. reasoning < 0 = the
+ * provider did not say: the reasoning entry stays unmeasured. */
+static void attr_own(sqlite3 *db, int64_t session_id, int64_t iteration_id,
+                     int out, int reasoning) {
+    if (out <= 0) return;
+    if (reasoning > out) reasoning = out;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE entries SET tokens = CASE type WHEN 'reasoning' THEN"
+            "    CASE WHEN ?3 < 0 THEN NULL"
+            "         WHEN json_extract(reasoning_meta,'$.blob') IS NULL THEN 0 ELSE ?3 END"
+            "  ELSE ?4 * token_estimate / (SELECT SUM(v.token_estimate) FROM entries v"
+            "    WHERE v.session_id=?1 AND v.iteration_id=?2"
+            "      AND v.type IN ('assistant_message','tool_call')) END"
+            " WHERE session_id=?1 AND iteration_id=?2"
+            "   AND type IN ('reasoning','assistant_message','tool_call');",
+            -1, &st, NULL) != SQLITE_OK) {
+        LOG_WARN_("usage attribution: %s", sqlite3_errmsg(db));
+        return;
+    }
+    int visible = out - (reasoning > 0 ? reasoning : 0);
+    sqlite3_bind_int64(st, 1, session_id);
+    sqlite3_bind_int64(st, 2, iteration_id);
+    sqlite3_bind_int(st, 3, reasoning);
+    sqlite3_bind_int(st, 4, visible);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+    /* Integer division leaves a few tokens over: the message takes them. */
+    attr_exec(db,
+        "UPDATE entries SET tokens = tokens + ?3 - (SELECT SUM(v.tokens) FROM entries v"
+        "   WHERE v.session_id=?1 AND v.iteration_id=?2"
+        "     AND v.type IN ('assistant_message','tool_call'))"
+        " WHERE id=(SELECT id FROM entries WHERE session_id=?1 AND iteration_id=?2"
+        "            AND type='assistant_message' ORDER BY id DESC LIMIT 1);",
+        session_id, iteration_id, visible);
+}
+
+/* The branch from the response upward, newest first, until the previous
+ * report and the reasoning entry that opens its response. Returns the row
+ * count and sets *prev to the previous report's index, -1 when there is none
+ * to compare with (first report, a compaction in between, too far back). */
+static int attr_walk(sqlite3 *db, int64_t asst_id, int64_t iteration_id,
+                     const char *model, AttrRow *rows, int *prev) {
+    *prev = -1;
+    sqlite3_stmt *st;
+    /* No ORDER BY: a recursive CTE yields rows as it generates them, so
+     * stepping stops at the previous report without reading the branch. */
+    if (sqlite3_prepare_v2(db,
+            "WITH RECURSIVE up(id, parent_id, turn_id, iteration_id, role, type, stop,"
+            "                  usage_in, tokens, est, same_model, anthropic) AS ("
+            "  SELECT id, parent_id, turn_id, iteration_id, role, type, stop_reason,"
+            "         usage_in, tokens, token_estimate, model IS ?2,"
+            "         json_extract(reasoning_meta,'$.format') IS 'anthropic_content'"
+            "    FROM entries WHERE id=?1"
+            "  UNION ALL"
+            "  SELECT e.id, e.parent_id, e.turn_id, e.iteration_id, e.role, e.type,"
+            "         e.stop_reason, e.usage_in, e.tokens, e.token_estimate, e.model IS ?2,"
+            "         json_extract(e.reasoning_meta,'$.format') IS 'anthropic_content'"
+            "    FROM entries e JOIN up ON e.id=up.parent_id"
+            ") SELECT id, turn_id, iteration_id, role, type, stop, usage_in, tokens, est,"
+            "         same_model, anthropic FROM up;",
+            -1, &st, NULL) != SQLITE_OK) {
+        LOG_WARN_("usage attribution: %s", sqlite3_errmsg(db));
+        return 0;
+    }
+    sqlite3_bind_int64(st, 1, asst_id);
+    sqlite3_bind_text(st, 2, model, -1, SQLITE_STATIC);
+    int n = 0;
+    while (n < ATTR_MAX_ROWS && sqlite3_step(st) == SQLITE_ROW) {
+        AttrRow *r = &rows[n];
+        const char *type = (const char *)sqlite3_column_text(st, 4);
+        r->id = sqlite3_column_int64(st, 0);
+        r->turn_id = sqlite3_column_int64(st, 1);
+        r->iteration_id = sqlite3_column_int64(st, 2);
+        r->role = sqlite3_column_int(st, 3);
+        r->kind = !type ? 'o' : !strcmp(type, "reasoning") ? 'r'
+                : !strcmp(type, "assistant_message") ? 'a' : 'o';
+        r->stop = sqlite3_column_int(st, 5);
+        r->usage_in = sqlite3_column_int(st, 6);
+        r->tokens = sqlite3_column_type(st, 7) == SQLITE_NULL ? -1 : sqlite3_column_int(st, 7);
+        r->est = sqlite3_column_int(st, 8);
+        if (r->est <= 0) r->est = 4;
+        r->same_model = (char)sqlite3_column_int(st, 9);
+        r->anthropic = (char)sqlite3_column_int(st, 10);
+        r->skip = 0;
+        if (*prev >= 0) {
+            /* One row past the report: its reasoning entry, or not ours. */
+            if (r->kind == 'r' && r->iteration_id == rows[*prev].iteration_id) n++;
+            break;
+        }
+        n++;
+        if (r->iteration_id == iteration_id && r->role == 2) continue;  /* this response */
+        if (r->role == 4) break;                                        /* compaction */
+        if (r->kind == 'a' && r->usage_in > 0 && r->stop != 4 && r->stop != 5)
+            *prev = n - 1;
+    }
+    sqlite3_finalize(st);
+    return n;
+}
+
+/* Is what is left for the appended entries plausibly their size? */
+static int attr_fits(int rest, int est, int n) {
+    return rest >= est / 3 - 16 && rest <= 3 * est + 48 * n + 16;
+}
+
+static void usage_attribute(sqlite3 *db, int64_t session_id, int64_t iteration_id,
+                            int64_t asst_id, const char *model,
+                            int in, int out, int reasoning) {
+    attr_own(db, session_id, iteration_id, out, reasoning);
+    if (in <= 0) return;
+
+    AttrRow *rows = malloc(ATTR_MAX_ROWS * sizeof(AttrRow));
+    if (!rows) return;
+    int prev, n = attr_walk(db, asst_id, iteration_id, model ? model : "", rows, &prev);
+
+    /* The context block this request carried, by estimate: what the session
+     * holds whenever the measurement below does not replace it. */
+    int ctx_est = (int)db_scalar_i64(db,
+        "SELECT COALESCE(length(CAST(turn_context AS BLOB)),0)/3 FROM sessions WHERE id=?1;",
+        session_id, 0);
+    int ctx_old = (int)db_scalar_i64(db,
+        "SELECT COALESCE(turn_context_tokens,-1) FROM sessions WHERE id=?1;", session_id, -1);
+    int boundary = prev < 0 || rows[prev].turn_id != rows[0].turn_id;
+    int ctx_new = boundary ? ctx_est : ctx_old;    /* inside a turn the block is frozen */
+    const char *why = NULL;
+
+    if (prev < 0) { why = "no earlier report to compare with"; goto done; }
+    const AttrRow *p = &rows[prev];
+    if (!p->same_model) {
+        /* Another model's reasoning is stripped from every request to this
+         * one (SQL_REPLAY_JOIN), and its counts are in another tokenizer. */
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "UPDATE entries SET tokens=0 WHERE session_id=?1 AND type='reasoning'"
+                " AND tokens > 0 AND json_extract(reasoning_meta,'$.model') IS NOT ?2;",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(st, 1, session_id);
+            sqlite3_bind_text(st, 2, model ? model : "", -1, SQLITE_STATIC);
+            sqlite3_step(st);
+            sqlite3_finalize(st);
+        }
+        why = "model changed";
+        goto done;
+    }
+    if (boundary) {
+        /* Turn ids are minted per session. */
+        sqlite3_stmt *st;
+        int edited = 0;
+        if (sqlite3_prepare_v2(db,
+                "SELECT EXISTS(SELECT 1 FROM entries WHERE session_id=?1 AND turn_id=?2"
+                "  AND json_valid(data) AND json_type(data,'$.turn_edits')='array');",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(st, 1, session_id);
+            sqlite3_bind_int64(st, 2, p->turn_id);
+            if (sqlite3_step(st) == SQLITE_ROW) edited = sqlite3_column_int(st, 0);
+            sqlite3_finalize(st);
+        }
+        if (edited) { why = "the turn before was edited"; goto done; }
+    }
+
+    /* Rows the request did not carry: a response that stopped on an error
+     * and the results under it (context.c filters the same way). */
+    for (int i = prev - 1; i >= 1; i--) {
+        if (rows[i].kind != 'a' || (rows[i].stop != 4 && rows[i].stop != 5)) continue;
+        rows[i].skip = 1;
+        for (int j = i - 1; j >= 1 && rows[j].role == 3; j--) rows[j].skip = 1;
+    }
+
+    /* Between the two reports: what is already counted, what is not. */
+    int known = 0, est = 0, unknown = 0;
+    for (int i = prev; i >= 1; i--) {
+        const AttrRow *r = &rows[i];
+        if (r->skip || (r->iteration_id == iteration_id && r->role == 2)) continue;
+        if (r->tokens >= 0) known += r->tokens;
+        else { est += r->est; unknown++; }
+    }
+    /* The previous response's reasoning, and (across a boundary) the rest of
+     * its turn's, which that request carried and this one may not. */
+    const AttrRow *pr = prev + 1 < n ? &rows[prev + 1] : NULL;
+    int own = pr && pr->tokens > 0 ? pr->tokens : 0, earlier = 0, anthropic = pr && pr->anthropic;
+    if (boundary) {
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT COALESCE(SUM(tokens),0),"
+                "       COALESCE(MAX(json_extract(reasoning_meta,'$.format')"
+                "                    IS 'anthropic_content'),0)"
+                "  FROM entries WHERE session_id=?1 AND turn_id=?2 AND type='reasoning'"
+                "   AND tokens > 0 AND iteration_id IS NOT ?3;", -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(st, 1, session_id);
+            sqlite3_bind_int64(st, 2, p->turn_id);
+            sqlite3_bind_int64(st, 3, p->iteration_id);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                earlier = sqlite3_column_int(st, 0);
+                anthropic |= sqlite3_column_int(st, 1);
+            }
+            sqlite3_finalize(st);
+        }
+    }
+    int share_ctx = boundary && ctx_old >= 0;
+    if (share_ctx) { est += ctx_est; unknown++; }
+
+    /* What is left for the appended entries, under each account of the
+     * reasoning: kept (the expected one wherever we replay it), the whole
+     * previous turn's dropped, the previous response's alone not counted. */
+    int grew = in - p->usage_in - known + (share_ctx ? ctx_old : 0);
+    enum { KEEP, DROP_TURN, DROP_OWN, NONE } how = NONE;
+    int rest = 0;
+    struct { int how, rest, try; } h[3] = {
+        { KEEP,      grew - own,     !(boundary && anthropic) },
+        { DROP_TURN, grew + earlier, boundary && (own || earlier) },
+        { DROP_OWN,  grew,           own > 0 && !(boundary && anthropic) },
+    };
+    for (int i = 0; i < 3 && how == NONE; i++)
+        if (h[i].try && attr_fits(h[i].rest, est, unknown)) { how = h[i].how; rest = h[i].rest; }
+    if (how == NONE) { why = "the growth in usage_in does not fit what was appended"; goto done; }
+    if (rest < 0) rest = 0;
+
+    if (how == DROP_TURN)
+        attr_exec(db, "UPDATE entries SET tokens=0 WHERE session_id=?1 AND turn_id=?2"
+                      " AND type='reasoning' AND tokens > 0;",
+                  session_id, p->turn_id, 0);
+    else if (how == DROP_OWN)
+        attr_exec(db, "UPDATE entries SET tokens=0 WHERE id=?1;", pr->id, 0, 0);
+
+    /* Shares by length; the last sharer takes what integer division left. */
+    int left = rest, seen = 0;
+    if (share_ctx) {
+        ctx_new = ++seen == unknown ? left : (int)((int64_t)rest * ctx_est / est);
+        left -= ctx_new;
+    }
+    for (int i = prev; i >= 1; i--) {
+        const AttrRow *r = &rows[i];
+        if (r->skip || r->tokens >= 0 || (r->iteration_id == iteration_id && r->role == 2))
+            continue;
+        int share = ++seen == unknown ? left : (int)((int64_t)rest * r->est / est);
+        left -= share;
+        attr_exec(db, "UPDATE entries SET tokens=?2 WHERE id=?1;",
+                  r->id, share, 0);
+    }
+    LOG_DEBUG_("usage attribution session=%lld iteration=%lld: %d tokens over %d appended"
+               " entries (estimate %d)%s", (long long)session_id, (long long)iteration_id,
+               rest, unknown, est, how == KEEP ? "" : ", reasoning no longer counted");
+
+done:
+    if (why)
+        LOG_DEBUG_("usage attribution session=%lld iteration=%lld: appended entries keep"
+                   " their estimate (%s)", (long long)session_id, (long long)iteration_id, why);
+    if (ctx_new != ctx_old)
+        attr_exec(db, "UPDATE sessions SET turn_context_tokens=?2 WHERE id=?1;",
+                  session_id, ctx_new, 0);
+    free(rows);
+}
+
 LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iteration_id,
                                  const char *model, EndpointType ep,
                                  const char *body, const char *request_body,
@@ -578,6 +890,9 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
     }
     if (tc) sqlite3_finalize(tc);
     sqlite3_finalize(j);   /* blob no longer needed */
+
+    usage_attribute(db, session_id, iteration_id, asst_id, model, prompt_tokens,
+                    completion_tokens, usage.reasoning_tokens);
 
     if (out) {
         out->assistant_entry_id = asst_id;

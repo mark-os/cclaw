@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v66 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v67 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -532,6 +532,7 @@ in the comment on `patch_v61_chats()` (`src/db.c`).
 | `owner_instance` | TEXT | FK to `processes.instance_id`; NULL ⟺ idle |
 | `turn_iteration` | INTEGER NOT NULL DEFAULT 0 | iteration within current turn |
 | `turn_context` | TEXT | The user context block (`<RELEVANT_CONTEXT>` text), materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; always present (it carries `<current_time>` even when nothing else is live) |
+| `turn_context_tokens` | INTEGER | v67. The provider's count for the context block the newest measured request carried; the next turn's first report gives it back before sharing the growth in `usage_in` (`usage_attribute`). The block's estimate when that report could not be compared; NULL = no report yet |
 | `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
 | `compaction_fail_count` | INTEGER NOT NULL DEFAULT 0 | consecutive failed compaction attempts; zeroed on success. At 3 (`COMPACTION_FAIL_NOTIFY`, `llm_proc.c`) the session's channel gets one operator notice per streak — the agent is never told; the session keeps running on the read-time context window (`plan_find_cut`), nothing is deleted |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
@@ -627,6 +628,7 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `cached_tokens` | INTEGER | cache-read subset of `usage_in`; NULL when the provider doesn't report it. Discounted to 0.25 weight by `rate_limit_check` |
 | `cost_nano` | INTEGER | nanodollars |
 | `token_estimate` | INTEGER | chars/3 + 4 heuristic (`TOKEN_ESTIMATE`, errs high; v52 rescaled old rows from `content_bytes`) |
+| `tokens` | INTEGER | v67. The provider's count for this entry, written once when a response reports it (`usage_attribute`, `db_response.c`): its share of `usage_out` for what the model wrote, its share of the growth in `usage_in` for what was appended. NULL = not measured, read as `token_estimate`. A reasoning entry holds what its replay costs — 0 once it is no longer sent or counted. See [memory.md](memory.md#context-window-management) |
 | `content_bytes` | INTEGER | byte length of content + tool_calls |
 | `tool_call_count` | INTEGER NOT NULL DEFAULT 0 | denormalized for plan pass |
 | `data` | TEXT | JSON side-channel, merged not overwritten (`json_patch`), nullable. `$.source` / `$.source_ref` — provenance stamped by the inbox drain (the cron auto-pause streak reads it), and on a `system` entry who wrote it (`hook:<extension>` for a hook's note); `$.job` on a `cron_result` — the job that produced it; `$.turn_edits` on a turn's final `assistant_message` — see [below](#entriesdata-turn_edits) |
@@ -663,7 +665,7 @@ On a turn's final assistant entry: one element per applied [turn edit](turn-edit
 
 - `left_branch` — every entry taken off the branch, in chain order (replaced originals included). The rows stay in the table.
 - `replaced` — per replaced result, the original `tool_result` and the new one in its place; `notes` — the `system` entries the edit inserted. Both in edit order.
-- `tokens` — sum of `token_estimate` over the turn's entries on the branch, before and after.
+- `tokens` — the turn's size on the branch before and after: each entry at `tokens`, or `token_estimate` where unmeasured.
 
 ### entries.reasoning_meta
 

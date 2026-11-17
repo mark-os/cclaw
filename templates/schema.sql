@@ -343,6 +343,9 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- start (llm_proc.c) and reused verbatim by every
                                             -- tool-loop iteration so the request prefix stays
                                             -- byte-stable for prompt caching. NULL = no block.
+  turn_context_tokens INTEGER,              -- the provider's count for the block the newest
+                                            -- measured request carried (usage_attribute); the
+                                            -- next turn's first report subtracts it. NULL = none yet.
   leaf_id INTEGER DEFAULT -1,                 -- the newest entry of the active branch; -1 = none
   compaction_fail_count INTEGER NOT NULL DEFAULT 0,  -- consecutive failed compaction attempts;
                                             -- zeroed on success. At 3 the operator channel gets
@@ -422,7 +425,13 @@ CREATE TABLE IF NOT EXISTS entries (
   cached_tokens INTEGER,   -- subset of usage_in the provider served from cache
                            -- (NULL when the provider doesn't report it)
   cost_nano INTEGER,                          -- cost in billionths of a dollar
-  token_estimate INTEGER,
+  token_estimate INTEGER,                     -- content_bytes/3 + 4: the size until the provider measures it
+  tokens INTEGER,           -- the provider's count for this entry, written once when a
+                            -- response reports it (db_response.c, usage_attribute): its
+                            -- share of usage_out for what the model wrote, its share of
+                            -- the growth in usage_in for what was appended. NULL = not
+                            -- measured, read as token_estimate. A reasoning entry holds
+                            -- what its replay costs: 0 once it is no longer counted.
   content_bytes INTEGER,
   tool_call_count INTEGER NOT NULL DEFAULT 0,
   data TEXT,

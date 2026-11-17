@@ -230,8 +230,8 @@ static void test_plan_no_content_access(void) {
     if (rc != 0) FAIL("context_plan returned error");
     if (plan.count != 2) FAIL("wrong count");
     /* Verify token_estimate reflects the large content (not zero/default) */
-    if (plan.entries[0].token_estimate < 100) FAIL("entry 0 token_estimate too small for 8KB content");
-    if (plan.entries[1].token_estimate < 100) FAIL("entry 1 token_estimate too small for 8KB content");
+    if (plan.entries[0].tokens < 100) FAIL("entry 0 token_estimate too small for 8KB content");
+    if (plan.entries[1].tokens < 100) FAIL("entry 1 token_estimate too small for 8KB content");
 
     /* Verify query plan has no redundant JOIN back to entries table.
      * The CTE carries all needed columns inline — final SELECT reads from CTE only. */

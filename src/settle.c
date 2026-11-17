@@ -53,13 +53,17 @@ static int settle_spawn(int64_t session_id, const char *agent, const HookRef *h)
 }
 
 /* Start the agent's next awaited hook after `after` (NULL = the first).
- * Returns 1 when one is now running. A hook that will not start ends the
- * chain: the ones behind it would have seen a turn it was meant to edit. */
+ * Returns 1 when one is now running. A hook that will not start (its script
+ * is gone, the turn is over its max_bytes) is passed over: that is a fact
+ * about that hook, and the ones behind it still have a turn to look at. */
 static int settle_next(int64_t session_id, const char *agent,
                        const HookRef *after) {
     HookRef h;
-    if (hook_next(proc_db(), agent, EVENT, 1, after, &h) != 1) return 0;
-    return settle_spawn(session_id, agent, &h) == 0;
+    while (hook_next(proc_db(), agent, EVENT, 1, after, &h) == 1) {
+        if (settle_spawn(session_id, agent, &h) == 0) return 1;
+        after = &h;
+    }
+    return 0;
 }
 
 /* End the hold the way a finished compaction ends: the session goes idle,

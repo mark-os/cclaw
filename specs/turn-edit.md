@@ -42,7 +42,7 @@ The manifest entry declares it; the runtime sends exactly that:
 |---|---|---|---|
 | `history` | `"none"`, a positive integer N, `"all"` | `"none"` | earlier turns sent with the finished one: none, the last N, or the whole active branch including any compaction summary |
 | `history_results` | boolean | `true` | `false`: earlier turns' tool results come without their text |
-| `max_bytes` | integer, 1 … 16777216 | 1048576 (1 MiB) | the most the whole input may be, in bytes of JSON text |
+| `max_bytes` | integer, 1024 … 16777216 | 1048576 (1 MiB) | the most the whole input may be, in bytes of JSON text |
 
 Every option is optional, and so is `input` itself: a hook that declares
 nothing — `extensions/turn-review` is one — is sent the finished turn alone,

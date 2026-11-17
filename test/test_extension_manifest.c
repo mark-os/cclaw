@@ -419,7 +419,7 @@ static void test_validate_rejects_bad_sections(void) {
     static const char *const good_input[] = {
         "{}", "{\"history\":\"none\"}", "{\"history\":\"all\"}", "{\"history\":1}",
         "{\"history\":5,\"history_results\":false,\"max_bytes\":2000000}",
-        "{\"history_results\":true}", "{\"max_bytes\":16777216}", "{\"max_bytes\":1}" };
+        "{\"history_results\":true}", "{\"max_bytes\":16777216}", "{\"max_bytes\":1024}" };
     for (size_t i = 0; i < sizeof(good_input) / sizeof(good_input[0]); i++) {
         char mf[300];
         snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnSettled\","
@@ -445,8 +445,9 @@ static void test_validate_rejects_bad_sections(void) {
         { "{\"history\":true}", "input.history must be" },
         { "{\"history_results\":0}", "input.history_results must be true or false" },
         { "{\"history_results\":\"no\"}", "input.history_results must be true or false" },
-        { "{\"max_bytes\":0}", "input.max_bytes must be a whole number of bytes from 1 to 16777216" },
-        { "{\"max_bytes\":16777217}", "from 1 to 16777216" },
+        { "{\"max_bytes\":0}", "input.max_bytes must be a whole number of bytes from 1024 to 16777216" },
+        { "{\"max_bytes\":1023}", "from 1024 to 16777216" },
+        { "{\"max_bytes\":16777217}", "from 1024 to 16777216" },
         { "{\"max_bytes\":2e6}", "input.max_bytes must be" },
         { "{\"max_bytes\":\"1MB\"}", "input.max_bytes must be" },
     };

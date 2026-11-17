@@ -39,6 +39,11 @@ typedef struct {
  * times its text. A script that asks for more raises its heap too. */
 #define TURN_EDIT_INPUT_DEFAULT_BYTES (1024 * 1024)
 
+/* The least max_bytes may be: below this the fixed JSON around the smallest
+ * turn (one question, one answer) already does not fit, so the hook could
+ * never be started. Promote refuses less. */
+#define TURN_EDIT_INPUT_MIN_BYTES 1024
+
 /* The most max_bytes may be: the largest input the hook vehicle carries
  * (RUNTOOL_ARG_FD_MAX; settle.c asserts they agree). Promote refuses more. */
 #define TURN_EDIT_INPUT_MAX_BYTES (16 * 1024 * 1024)

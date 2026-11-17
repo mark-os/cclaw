@@ -555,7 +555,8 @@ static int check_hook_events(sqlite3 *db, const char *manifest, char **err_out) 
 /* Verify each hook's "input" — what a turnSettled script asks to be sent
  * (specs/turn-edit.md#input): an object of at most `history` ("none", "all"
  * or a positive count of turns), `history_results` (boolean) and
- * `max_bytes` (a positive integer no larger than the hook vehicle carries).
+ * `max_bytes` (an integer from TURN_EDIT_INPUT_MIN_BYTES to what the hook
+ * vehicle carries).
  * Anything else is refused by name, so a typo cannot read as "use the
  * default". */
 #define HOOK_IN(path) "json_type(hj.value,'$.input" path "')"
@@ -581,8 +582,8 @@ static int check_hook_input(sqlite3 *db, const char *manifest, char **err_out) {
             "    THEN 'input.history_results must be true or false'"
             "  WHEN " HOOK_IN(".max_bytes") " IS NOT NULL AND NOT ("
             "       " HOOK_IN(".max_bytes") " = 'integer'"
-            "       AND json_extract(hj.value,'$.input.max_bytes') BETWEEN 1 AND ?2)"
-            "    THEN 'input.max_bytes must be a whole number of bytes from 1 to ' || ?2"
+            "       AND json_extract(hj.value,'$.input.max_bytes') BETWEEN ?3 AND ?2)"
+            "    THEN 'input.max_bytes must be a whole number of bytes from ' || ?3 || ' to ' || ?2"
             "  END AS why FROM json_each(COALESCE(json_extract(?1,'$.hooks'),'[]')) hj)"
             " WHERE why IS NOT NULL LIMIT 1", -1, &st, NULL) != SQLITE_OK) {
         xerr(err_out, "hook input check failed");
@@ -590,6 +591,7 @@ static int check_hook_input(sqlite3 *db, const char *manifest, char **err_out) {
     }
     sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
     sqlite3_bind_int(st, 2, TURN_EDIT_INPUT_MAX_BYTES);
+    sqlite3_bind_int(st, 3, TURN_EDIT_INPUT_MIN_BYTES);
     int rc = 0;
     if (sqlite3_step(st) == SQLITE_ROW) {
         const char *m = (const char *)sqlite3_column_text(st, 0);

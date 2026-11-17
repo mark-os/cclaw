@@ -338,6 +338,26 @@ static void test_chain(void) {
     printf("  PASS test_chain\n");
 }
 
+/* An awaited hook that cannot be started is passed over, not the end of
+ * the chain: the first here is refused the turn (over its max_bytes), the
+ * second has lost its script, and the third still runs and edits. */
+static void test_passed_over(void) {
+    install("po_a", "Pass", DROP_C1);
+    run("UPDATE hooks SET input='{\"max_bytes\":2000}' WHERE extension_name='po_a';");
+    install("po_b", "Pass", DROP_C1);
+    assert(unlink(ROOT "/extensions/po_b/h.qjs") == 0);
+    install("po_c", "Pass", "return JSON.stringify({edits:[{op:'note',text:'still here'}]});");
+    int64_t sid = seed_turn("Pass", 400);
+    assert(turn_settle_begin(sid, "Pass") == 1);
+    assert(is_state(sid, "settling") && child_count() == 1);
+    pump_until_idle(sid);
+    assert(count(N_EDITS, sid) == 1 && count(N_CALLS, sid) == 1);
+    assert(count("SELECT json_extract(data,'$.source') = 'hook:po_c' FROM entries"
+                 " WHERE session_id=?1 AND type='system'", sid) == 1);
+    assert(fail_count("po_a") == 0 && fail_count("po_b") == 0 && fail_count("po_c") == 0);
+    printf("  PASS test_passed_over\n");
+}
+
 /* wait:false — started, never held for, and its reply goes nowhere. */
 static void test_not_awaited(void) {
     install_as("obs", "Obs", 0, DROP_C1);
@@ -442,7 +462,7 @@ int main(int argc, char *argv[]) {
     g_db = test_db_open(DB_PATH);
     assert(g_db);
     static const char *const agents[] = { "Rv", "Junk", "Boom", "Nil", "Slow",
-                                          "Chain", "Obs", "Gone", "Big", "Hist" };
+                                          "Chain", "Obs", "Gone", "Big", "Hist", "Pass" };
     for (size_t i = 0; i < sizeof(agents) / sizeof(agents[0]); i++)
         db_agent_upsert(g_db, agents[i], NULL, NULL);
     run("INSERT INTO tools(name, droppable) VALUES('look',1);");
@@ -464,6 +484,7 @@ int main(int argc, char *argv[]) {
     test_chain();
     test_not_awaited();
     test_not_started();
+    test_passed_over();
     test_declared_input();
     test_sweep();
 

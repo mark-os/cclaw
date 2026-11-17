@@ -93,7 +93,8 @@ profile.
   script heap, `js_heap_mb` 8, can parse; at most 16 MiB =
   `RUNTOOL_ARG_FD_MAX`): history that does not fit loses its oldest turns, and
   a finished turn that alone does not fit is not handed over at all — the
-  hook is "not started" and the turn left alone. A script that asks for a
+  hook is "not started" and the turn left alone (a hook that is not started
+  is passed over: the awaited hooks after it still run). A script that asks for a
   lot of history should raise `js_heap_mb` with its `max_bytes`; one that
   runs out of heap fails like any other.
 - **`getConfig(key)`** — the extension's own settings.

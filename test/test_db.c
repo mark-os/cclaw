@@ -249,7 +249,7 @@ static void set_user_version(sqlite3 *db, int v) {
 /* Turn a fresh (current) database back into the v67 shape: agent_models
  * has no trim numbers and no window triggers, hooks no pos, timeout or
  * disabled and `wait` for `async`; llm_jobs has its job_type and sessions
- * its compaction_fail_count back. unshape_v67 starts here, so every older patch test replays v68
+ * its compaction_fail_count back; entries has no request_cut. unshape_v67 starts here, so every older patch test replays v68
  * over a real v67 shape. */
 static void unshape_v68(sqlite3 *db) {
     char *err = NULL;
@@ -277,7 +277,8 @@ static void unshape_v68(sqlite3 *db) {
                               "ALTER TABLE llm_jobs ADD COLUMN job_type INTEGER NOT NULL"
                               "  DEFAULT 0;"
                               "ALTER TABLE sessions ADD COLUMN compaction_fail_count INTEGER"
-                              "  NOT NULL DEFAULT 0;",
+                              "  NOT NULL DEFAULT 0;"
+                              "ALTER TABLE entries DROP COLUMN request_cut;",
                           NULL, NULL, &err);
     if (rc != SQLITE_OK) fprintf(stderr, "unshape_v68: %s\n", err ? err : "?");
     assert(rc == SQLITE_OK);
@@ -2099,7 +2100,14 @@ static void test_schema_patch_v68(void) {
         "                     compaction_fail_count)"
         " VALUES (7,'Keep','compacting','dead-1',3,2), (8,'Keep','llm_running','dead-1',1,0);"
         "INSERT INTO llm_jobs(session_id, agent_name, job_type) VALUES (7,'Keep',1),"
-        " (8,'Keep',0);", NULL, NULL, NULL) == SQLITE_OK);
+        " (8,'Keep',0);"
+        /* Estimates stored at 3 bytes per token: a message (content_bytes
+         * 300), a reasoning entry with text, a row with no content_bytes. */
+        "INSERT INTO entries(id, session_id, type, role, content, token_estimate,"
+        "                    content_bytes)"
+        " VALUES (901, 8, 'user_message', 1, 'x', 104, 300),"
+        "        (902, 8, 'reasoning', 2, 'thought', 404, 1200),"
+        "        (903, 8, 'system', 0, 'y', 77, NULL);", NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 67);
 
     assert(db_schema_compat(db) == 1);
@@ -2126,6 +2134,15 @@ static void test_schema_patch_v68(void) {
     assert(db_scalar_i64(db, "SELECT state='llm_running' AND owner_instance='dead-1'"
         " FROM sessions WHERE id=8", 0, -1) == 1);
     assert(db_scalar_i64(db, "SELECT group_concat(session_id) FROM llm_jobs", 0, -1) == 8);
+    /* Estimates recomputed as the write paths store them now; a report's
+     * request was sent whole. */
+    assert(db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=901", 0, -1)
+           == TOKEN_ESTIMATE(300));
+    assert(db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=902", 0, -1)
+           == TOKEN_ESTIMATE(0));
+    assert(db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=903", 0, -1) == 77);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM entries WHERE request_cut IS NOT NULL",
+                         0, -1) == 0);
     assert(sqlite3_exec(db, "UPDATE hooks SET timeout=0;", NULL, NULL, NULL) != SQLITE_OK);
     assert(sqlite3_exec(db, "UPDATE hooks SET timeout=3601;", NULL, NULL, NULL) != SQLITE_OK);
     assert(sqlite3_exec(db, "UPDATE hooks SET timeout=3600;", NULL, NULL, NULL) == SQLITE_OK);

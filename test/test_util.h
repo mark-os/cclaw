@@ -116,7 +116,8 @@ static inline int64_t test_legacy_compact(sqlite3 *db, int64_t session_id,
     if (sqlite3_prepare_v2(db,
             "INSERT INTO entries (parent_id, session_id, type, role, content, stop_reason,"
             " token_estimate, content_bytes, tool_call_count)"
-            " VALUES (?1, ?2, 'compaction', 4, ?3, 0, octet_length(?3)/3 + 4, octet_length(?3), 0);",
+            " VALUES (?1, ?2, 'compaction', 4, ?3, 0, " SQL_TOKEN_ESTIMATE("octet_length(?3)")
+            ", octet_length(?3), 0);",
             -1, &s, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_int64(s, 1, last_kept_id);
     sqlite3_bind_int64(s, 2, session_id);

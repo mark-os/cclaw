@@ -1516,7 +1516,10 @@ static int patch_v65_utility(sqlite3 *db) {
  * compaction job row has no worker to finish it; sessions.compaction_fail_count
  * and llm_jobs.job_type (1 was compaction, 0 the only value left) have no
  * reader. The change_log triggers name every logged column, so they are
- * rebuilt. */
+ * rebuilt.
+ *
+ * Accounting: entries.token_estimate is recomputed at 2.5 bytes per token,
+ * and entries.request_cut records that a report's request had been cut. */
 static int patch_v68_hooks(sqlite3 *db) {
     static const char sql[] =
         "ALTER TABLE agent_models ADD COLUMN trim_threshold INTEGER"
@@ -1592,7 +1595,19 @@ static int patch_v68_hooks(sqlite3 *db) {
         "  updated_at=unixepoch() WHERE state='compacting';"
         "DELETE FROM llm_jobs WHERE job_type <> 0;"
         "ALTER TABLE llm_jobs DROP COLUMN job_type;"
-        "ALTER TABLE sessions DROP COLUMN compaction_fail_count;";
+        "ALTER TABLE sessions DROP COLUMN compaction_fail_count;"
+        /* Accounting. The estimate is 2.5 bytes per token (types.h): every
+         * stored estimate is recomputed by the rule the write paths now use
+         * — TOKEN_ESTIMATE(content_bytes), and a reasoning entry the
+         * estimate of an entry with no text (its cost is its replay, which
+         * a report measures). A row with no content_bytes cannot be
+         * recomputed and keeps what it has. A report's request_cut is NULL
+         * on every existing row — sent whole as far as anyone recorded. */
+        "UPDATE entries SET token_estimate = CASE type"
+        "  WHEN 'reasoning' THEN " SQL_TOKEN_ESTIMATE("0")
+        "  ELSE " SQL_TOKEN_ESTIMATE("content_bytes") " END"
+        " WHERE content_bytes IS NOT NULL;"
+        "ALTER TABLE entries ADD COLUMN request_cut INTEGER;";
     char *err = NULL;
     if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
         LOG_ERROR_("schema v68: %s", err ? err : "?");

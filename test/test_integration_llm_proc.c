@@ -344,6 +344,54 @@ static void test_llm_req_error(void) {
     PASS();
 }
 
+/* A report whose request had been cut says so (entries.request_cut): its
+ * usage_in was not sent the entries the head measure would subtract. A
+ * request sent whole leaves the column NULL. */
+static void test_llm_req_stamps_cut(void) {
+    TEST(llm_req_stamps_cut);
+
+    const char *db_path = "/tmp/cclaw_llm_req_cut_test.db";
+    test_db_clean(db_path);
+    mock_server_reset();
+    mock_server_enqueue(200, STOP_RESPONSE);
+    mock_server_enqueue(200, STOP_RESPONSE);
+
+    sqlite3 *db = test_db_open(db_path);
+    assert(db);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    char big[2001];
+    memset(big, 'w', 2000); big[2000] = 0;
+    for (int i = 0; i < 3; i++) {
+        Message user = {.role = ROLE_USER, .content = big};
+        entry_append_with_iteration(db, sid, &user, 0);
+        Message asst = {.role = ROLE_ASSISTANT, .content = "ok",
+                        .stop_reason = STOP_REASON_STOP};
+        entry_append_with_iteration(db, sid, &asst, 0);
+    }
+    Message user = {.role = ROLE_USER, .content = "and now?"};
+    entry_append_with_iteration(db, sid, &user, 0);
+
+    set_test_env(db_path);
+    setenv("CCLAW_MAX_HISTORY_TOKENS", "1000", 1);    /* three 2000-byte turns do not fit */
+    int rc = llm_req(db, NULL, sid, 0);
+    int64_t cut = db_scalar_i64(db, "SELECT COALESCE(request_cut,0) FROM entries"
+                                    " WHERE session_id=?1 AND type='assistant_message'"
+                                    " ORDER BY id DESC LIMIT 1", sid, -1);
+    setenv("CCLAW_MAX_HISTORY_TOKENS", "1000000", 1);
+    Message more = {.role = ROLE_USER, .content = "again"};
+    entry_append_with_iteration(db, sid, &more, 0);
+    int rc2 = llm_req(db, NULL, sid, 0);
+    int64_t whole = db_scalar_i64(db, "SELECT request_cut IS NULL FROM entries"
+                                      " WHERE session_id=?1 AND type='assistant_message'"
+                                      " ORDER BY id DESC LIMIT 1", sid, -1);
+    unsetenv("CCLAW_MAX_HISTORY_TOKENS");
+    db_close(db); test_db_clean(db_path);
+    if (rc != 0 || rc2 != 0) FAIL("expected rc==0");
+    if (cut != 1) FAIL("a cut request's report should carry request_cut=1");
+    if (whole != 1) FAIL("a request sent whole should leave request_cut NULL");
+    PASS();
+}
+
 int main(void) {
     TEST_INIT();
     s_port = mock_server_start();
@@ -358,6 +406,7 @@ int main(void) {
     test_dropped_candidate_degrades_and_recovers();
     test_llm_req_tool_calls();
     test_llm_req_error();
+    test_llm_req_stamps_cut();
 
     mock_server_stop();
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);

@@ -1020,6 +1020,18 @@ char *llm_request(sqlite3 *db, const char *agent_name,
 
 /* ── llm_req: single LLM call with DB-driven routing ──────────── */
 
+/* A report whose request had been cut was not sent the entries the head
+ * measure subtracts (context.c, plan_head): say so on the report itself. */
+static void mark_request_cut(sqlite3 *db, const ContextPlan *plan, int64_t asst_id) {
+    if (plan->cut <= 0 || asst_id <= 0) return;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "UPDATE entries SET request_cut=1 WHERE id=?1;",
+                           -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(st, 1, asst_id);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
 int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     Config *cfg = config_load(db);
     if (!cfg) { LOG_ERROR_("llm_req: config load failed"); return -1; }
@@ -1096,6 +1108,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                                cfg->provider.model, cfg->provider.endpoint_type,
                                mock_data, NULL, llm_keep_reasoning_text(&cfg->provider), &ir);
         free(mock_data);
+        if (st == LLM_RESP_OK) mark_request_cut(db, &plan, ir.assistant_entry_id);
 
         if (st != LLM_RESP_OK) {
             Message err_msg = {.role = ROLE_ASSISTANT, .content = "error: malformed LLM response",
@@ -1353,6 +1366,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             http_response_free(&resp);
 
             if (st == LLM_RESP_OK) {
+                mark_request_cut(db, &plan, ir.assistant_entry_id);
                 model_stat_success(db, m->id, ir.prompt_tokens, ir.completion_tokens, ir.cost_nano);
                 /* CacheExpiring counts from the start of the last request
                  * that was answered (cache_expiring.h). */

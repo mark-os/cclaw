@@ -5,6 +5,7 @@
 #include "db.h"
 #include "http.h"
 #include "llm.h"
+#include "llm_payload.h"
 #include "agent_config.h"
 #include "log.h"
 #include <fcntl.h>
@@ -95,19 +96,22 @@ static int plan_find_cut(const PlanEntry *entries, int count, int budget) {
  *
  * An entry's size is entries.tokens — the provider's count, written once
  * when the report that measures it arrives (db_response.c, usage_attribute)
- * — and its estimate (token_estimate, chars/3) until then. Sums over any
- * run of entries — a turn, the kept tail, the whole branch — are sums of
+ * — and its estimate (token_estimate, TOKEN_ESTIMATE) until then. Sums over
+ * any run of entries — a turn, the kept tail, the whole branch — are sums of
  * those.
  *
  * What is not an entry is the head: tools, system prompt, the user context
  * block and the JSON around everything. It is measured from one report
- * alone, never a difference of two: the newest usable report's usage_in,
- * less the entries that request was sent with. A report is usable when it
- * was written after every edit on the branch — every summary, and every
- * entry carrying an edit's record, which turn_edit.c always puts on an entry
- * at least as new as the newest report it changed the ground under (each
- * edit changes what "the entries before it" are). If that request had been
- * cut it reads low, and the estimate passed in stands. */
+ * alone, never a difference of two: the newest report's usage_in, less the
+ * entries that request was sent with. That measure is the head whenever it
+ * is usable, larger or smaller than the estimate. It is usable when the
+ * report was written after every edit on the branch — every summary, and
+ * every entry carrying an edit's record, which turn_edit.c always puts on an
+ * entry at least as new as the newest report it changed the ground under
+ * (each edit changes what "the entries before it" are) — and its request
+ * was sent whole: a request that had been cut (entries.request_cut, stamped
+ * by llm_req) was not sent the entries subtracted here. Otherwise, and when
+ * there is no report, the estimate passed in stands. */
 static int segment_start(const PlanEntry *e, int a) {
     /* The response begins at its first part (a reasoning entry precedes the
      * assistant_message): that is where the request that produced it ended. */
@@ -117,16 +121,21 @@ static int segment_start(const PlanEntry *e, int a) {
     return a;
 }
 
-static int plan_head(const PlanEntry *e, int n, int head) {
+static int plan_head(const PlanEntry *e, int n, int head, int *measured_out) {
     int r = -1;
+    *measured_out = 0;
     for (int i = n - 1; i >= 0 && r < 0; i--)
-        if (e[i].usage_in > 0 && e[i].fresh) r = i;
-    if (r < 0) return head;
+        if (e[i].usage_in > 0) r = i;
+    if (r < 0 || !e[r].fresh || e[r].cut) return head;
     int sent = 0, start = segment_start(e, r);
     for (int j = 0; j < start; j++)
         if (e[j].id < e[r].id) sent += e[j].tokens;
     int measured = e[r].usage_in - sent;
-    return measured > head ? measured : head;
+    /* Nothing but a broken report (counts attributed past what was sent)
+     * reads at or below zero: that is no measure. */
+    if (measured <= 0) return head;
+    *measured_out = 1;
+    return measured;
 }
 
 /* What the per-row query leaves to a pass over the branch: fresh, written
@@ -156,7 +165,8 @@ static int branch_load(sqlite3 *db, int64_t session_id, int head, ContextPlan *o
         "         e.tool_call_count, e.turn_id, e.iteration_id,"
         "         CASE WHEN e.role=2 AND e.stop_reason NOT IN (4,5) THEN e.usage_in END,"
         "         e.role=4 OR CASE WHEN json_valid(e.data)"
-        "           THEN json_type(e.data,'$.turn_edits') END IS 'array'"
+        "           THEN json_type(e.data,'$.turn_edits') END IS 'array',"
+        "         COALESCE(e.request_cut,0)"
         "    FROM branch b JOIN entries e ON e.id=b.id ORDER BY b.lvl DESC;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -192,6 +202,7 @@ static int branch_load(sqlite3 *db, int64_t session_id, int head, ContextPlan *o
         pe->iteration_id = sqlite3_column_int64(stmt, 6);
         pe->usage_in = sqlite3_column_int(stmt, 7);
         pe->reset = (unsigned char)sqlite3_column_int(stmt, 8);
+        pe->cut = (unsigned char)(sqlite3_column_int(stmt, 9) != 0);
         raw_count++;
     }
     sqlite3_finalize(stmt);
@@ -219,7 +230,7 @@ static int branch_load(sqlite3 *db, int64_t session_id, int head, ContextPlan *o
 
     out->entries = filtered;
     out->count = fcount;
-    out->head = plan_head(filtered, fcount, head);
+    out->head = plan_head(filtered, fcount, head, &out->head_measured);
     return 0;
 }
 
@@ -532,7 +543,7 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
 
     /* Build output: search-result list, one line per hit, tagged with the
      * source session so the agent can expand via db_query on entries. */
-    int max_chars = max_tokens * 4;
+    int max_chars = BYTES_OF_TOKENS(max_tokens);
     size_t cap = (size_t)max_chars + 512;
     char *out = malloc(cap);
     if (!out) { sqlite3_finalize(stmt); return NULL; }
@@ -608,29 +619,27 @@ void context_limits(sqlite3 *db, const char *agent_name, int default_window,
     if (out->target <= 0) out->target = out->threshold / 2;
 }
 
-/* Head of a request: the tools array plus the system prompt, neither of
- * which is an entry. The cut budgets for it (llm_req passes it as
- * `overhead`), and the trim must see the same number, or the two disagree
- * on what history may occupy. system_prompt may be NULL — then it is built
- * and freed here (the trim check); llm_req passes the one it already holds. */
+/* Head of a request, estimated: the tools it carries (llm_tools_sent — the
+ * payload's own selection, so the two cannot drift), the system prompt and
+ * the user context block the session holds, none of which is an entry. It
+ * stands wherever no usable report measures the head (plan_head); the cut
+ * (llm_req passes it as `overhead`) and the trim pass the same number.
+ * system_prompt may be NULL — then it is built and freed here (the trim
+ * check); llm_req passes the one it already holds. At a turn's first request
+ * the block counted is the previous turn's, which the new one replaces. */
 int context_head_estimate(sqlite3 *db, const char *agent_name, int64_t session_id,
                           const Config *cfg, const char *system_prompt) {
-    int head = 0;
-    sqlite3_stmt *ts;
-    if (sqlite3_prepare_v2(db,
-            "SELECT COALESCE(SUM(length(name)+length(description)+length(parameters_json)),0)/3"
-            " FROM tools WHERE enabled=1 AND (agent_name IS NULL OR agent_name=?)",
-            -1, &ts, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(ts, 1, agent_name, -1, SQLITE_STATIC);
-        if (sqlite3_step(ts) == SQLITE_ROW) head = sqlite3_column_int(ts, 0);
-        sqlite3_finalize(ts);
-    }
+    int tools = 0;
+    llm_tools_sent(db, session_id, agent_name, &tools, NULL);
+    int64_t block = db_scalar_i64(db,
+        "SELECT COALESCE(length(CAST(turn_context AS BLOB)),0) FROM sessions WHERE id=?1;",
+        session_id, 0);
     char *built = NULL;
     if (!system_prompt) {
         built = agent_build_system_prompt(db, agent_name, session_id, "agents", cfg);
         system_prompt = built;
     }
-    if (system_prompt) head += (int)strlen(system_prompt) / CHARS_PER_TOKEN;
+    int64_t bytes = (int64_t)tools + block + (system_prompt ? (int64_t)strlen(system_prompt) : 0);
     free(built);
-    return head;
+    return TOKENS_OF_BYTES(bytes);
 }

@@ -76,7 +76,8 @@ when its `event` happens in a session of an agent the extension is attached to:
   answer's `cache_read_tokens` / `cache_write_tokens` (null when not
   reported). Nothing follows it: no edits or a failed run leave the session
   as it was. The bundled `compaction` subscribes too: top-level sessions
-  only, down to half the prune target.
+  only, down to half the session's size or the prune target, whichever is
+  lower.
 
 The entry takes `event`, `handler`, `input` (below), `async` and `timeout`,
 nothing else. The session waits for the script (at most `timeout` seconds,

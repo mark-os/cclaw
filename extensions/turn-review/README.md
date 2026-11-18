@@ -91,7 +91,7 @@ and costs more.
 | `turn-review.max_turn_tokens` | 60000 | A turn bigger than this is not reviewed; compaction deals with it. |
 | `hook_timeout` | 60 | The runtime's deadline for any hook script, in seconds (a manifest entry's own `"timeout"` overrides it). The review asks its model with a 45 s limit. |
 
-Token counts are the provider's, where a usage report has measured the entry (`entries.tokens`), and the runtime's estimate (chars/3) where not. The prompt, the note length and the
+Token counts are the provider's, where a usage report has measured the entry (`entries.tokens`), and the runtime's estimate (2.5 bytes per token) where not. The prompt, the note length and the
 marker wording are constants at the top of `review.qjs`: edit the draft and
 promote again.
 

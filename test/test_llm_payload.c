@@ -8,6 +8,8 @@
 #include "config_registry.h"
 #include "context.h"
 #include "turn_edit.h"
+#include "agent_config.h"
+#include "agent_setup.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1105,6 +1107,114 @@ static void test_chat_tool_filter_live(void) {
 
     db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_chat_tool_filter_live\n");
+}
+
+/* Names in one build's tools array as a sorted JSON array, whatever the
+ * wire format spells the list as. Heap. */
+static char *sent_names(sqlite3 *db, int64_t sid, EndpointType ep) {
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ep;
+    cfg.context_window = 128000;
+    ContextPlan plan = {0};
+    LlmPayload payload;
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "sys", &payload) == 0);
+    const char *path = ep == ENDPOINT_GEMINI ? "$.tools[0].functionDeclarations" : "$.tools";
+    const char *name = ep == ENDPOINT_OPENAI ? "$.function.name" : "$.name";
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT json_group_array(n ORDER BY n) FROM (SELECT json_extract(value, ?3) AS n"
+        " FROM json_each(json_extract(?1, ?2)))", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, path, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, name, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    char *r = test_strdup_((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+    return r;
+}
+
+/* The tools the head estimate counts (llm_tools_sent) are the tools every
+ * wire format sends — on a DB seeded the way startup seeds it (every builtin
+ * registered, the default grants: fewer granted than enabled), and with a
+ * chat's and a session's tool filter in force. */
+static void assert_estimate_matches_payload(sqlite3 *db, int64_t sid, int *n_out) {
+    char *est = NULL;
+    int bytes = 0;
+    assert(llm_tools_sent(db, sid, "default", &bytes, &est) == 0 && est);
+    const EndpointType eps[] = { ENDPOINT_OPENAI, ENDPOINT_ANTHROPIC, ENDPOINT_GEMINI };
+    for (int i = 0; i < 3; i++) {
+        char *got = sent_names(db, sid, eps[i]);
+        if (strcmp(got, est) != 0)
+            fprintf(stderr, "estimate %s\npayload  %s\n", est, got);
+        assert(strcmp(got, est) == 0);
+        free(got);
+    }
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db, "SELECT json_array_length(?1)", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_text(s, 1, est, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    *n_out = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    assert(*n_out == 0 || bytes > 0);
+    free(est);
+}
+
+static void test_head_tools_are_the_sent_tools(void) {
+    sqlite3 *db = open_seeded();
+    system("rm -rf /tmp/test_cclaw_payload_ws && mkdir -p /tmp/test_cclaw_payload_ws");
+    int64_t sid;
+    setup_session(db, &sid);
+    Config scfg = {0};
+    scfg.workspace = "/tmp/test_cclaw_payload_ws";
+    scfg.db_path = (char *)DB_PATH;
+    scfg.shell_timeout = 30;
+    AgentSetup setup;
+    assert(agent_setup_init(&setup, db, sid, &scfg, "default") == 0);
+    agent_setup_destroy(&setup);
+    agent_grant_defaults(db, "default", GRANT_ORIGIN("seed", 0));
+
+    int enabled = (int)db_scalar_i64(db, "SELECT COUNT(*) FROM tools WHERE enabled=1", 0, -1);
+    int n = 0;
+    assert_estimate_matches_payload(db, sid, &n);
+    assert(n > 0 && n < enabled);              /* the grant filter is applied */
+
+    /* A chat's filter, then a session's on top of it. */
+    test_seed_chat(db, "discord", "c9");
+    assert(channel_pin_session(db, "discord", "c9", sid) == 0);
+    assert(sqlite3_exec(db, "UPDATE channel_chats SET tool_filter="
+                            "'[\"file_read\",\"file_write\",\"memory_note_add\"]'"
+                            " WHERE chat_id='c9';", NULL, NULL, NULL) == SQLITE_OK);
+    int chat_n = 0;
+    assert_estimate_matches_payload(db, sid, &chat_n);
+    assert(chat_n > 0 && chat_n < n);
+    char sql[128];
+    snprintf(sql, sizeof(sql), "UPDATE sessions SET tool_filter='[\"file_read\"]'"
+             " WHERE id=%lld;", (long long)sid);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+    int both = 0;
+    assert_estimate_matches_payload(db, sid, &both);
+    assert(both == 1);
+
+    /* launch_agent's description is counted as sent: with its live roster. */
+    assert(sqlite3_exec(db, "UPDATE sessions SET tool_filter=NULL;"
+                            "UPDATE channel_chats SET tool_filter=NULL;",
+                            NULL, NULL, NULL) == SQLITE_OK);
+    int before = 0, after = 0;
+    assert(llm_tools_sent(db, sid, "default", &before, NULL) == 0);
+    assert(sqlite3_exec(db, "INSERT INTO agents(name, description) VALUES"
+                            " ('Roster', 'an agent whose description is forty bytes')",
+                            NULL, NULL, NULL) == SQLITE_OK);
+    assert(llm_tools_sent(db, sid, "default", &after, NULL) == 0);
+    assert(after - before >= 40);
+
+    db_close(db); test_db_clean(DB_PATH);
+    system("rm -rf /tmp/test_cclaw_payload_ws");
+    printf("  PASS test_head_tools_are_the_sent_tools\n");
 }
 
 /* ── Reasoning replay (provider-wire-format M2) ─────────────────── */
@@ -2545,6 +2655,7 @@ int main(void) {
     test_launch_agent_description_embeds_roster_and_worker_tools();
     test_chat_prompt_suffix();
     test_chat_tool_filter_live();
+    test_head_tools_are_the_sent_tools();
     test_reasoning_details_replay();
     test_reasoning_content_replay();
     test_gemini_thought_signature_replay();

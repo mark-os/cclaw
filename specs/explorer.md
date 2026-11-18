@@ -388,9 +388,11 @@ A session's size, its limits and every edit made to it (`explore_session`,
   entry itself says (`threshold_set`, `target_set`; null = the default) and
   its `cache_lifetime`. `tokens` is the branch the next request would carry
   (`context_measure`) plus the head; the head is the provider's measure when
-  a report since the last edit gives one (`head_measured` true), else 0 —
-  building the system prompt is not a read — so `tokens` can read lower
-  than the size the C check compares.
+  a usable report gives one — written since the last edit, its request not
+  cut (`head_measured` true), the same number the C check uses — else 0:
+  the estimate the C check falls back to means building the system prompt,
+  which is not a read, so then `tokens` reads lower than the size the C
+  check compares.
 - `cache_armed_at` — `sessions.cache_armed_at`: when the session's
   `CacheExpiring` timer was armed, or null.
 - `edits` — every record in `$.turn_edits` on any entry of the session,

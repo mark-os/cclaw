@@ -11,18 +11,36 @@
 #include <time.h>
 
 /* Token estimate for a byte length — the fallback, not the measure. The
- * provider reports usage on every response, and that is the measure: the
- * entries between two reported requests are sized by the difference of the
- * two counts (plan_measure, src/context.c), and this estimate is used only
- * where there is no report, or where the provider's figure is lower. The
- * divisor is 3, measured against real payloads on 2026-08-13 (100-107% of
- * Claude's count then, ~130% of DeepSeek's); on 2026-11-16 Claude counted
- * ~1.9x it on dense tool output. Where it stands alone it errs high by
- * policy: an over-estimate compacts a little early, an under-estimate is an
- * outage. Stored entries.token_estimate stays in these units. Every C and
- * SQL site must agree (plan/projects/context-accounting.md). */
-#define CHARS_PER_TOKEN 3
-#define TOKEN_ESTIMATE(len) ((int)((len) / CHARS_PER_TOKEN) + 4)
+ * provider's report is the measure: an entry's count is stored when a report
+ * measures it (entries.tokens, db_response.c), the head is read off the
+ * newest usable report (context.c), and this estimate stands only where no
+ * report says. 2.5 bytes per token: across Claude, Gemini, DeepSeek and GPT
+ * models the measured range is 1.05 (random base64 on Claude) to 6.9
+ * (Cyrillic on Gemini); 2.5 reads ordinary text, code and JSON high on every
+ * model but Claude, where it is close (plan/reference-reviews/token-estimate-
+ * measurements-2026-11-18.md). Where it stands alone it errs high by policy:
+ * an over-estimate compacts a little early, an under-estimate is an outage.
+ *
+ * This is the one definition. Kept as the integer ratio TOKEN_EST_NUM /
+ * TOKEN_EST_DEN tokens per byte; C uses the macros below, SQL that needs the
+ * number spells it with SQL_TOKEN_ESTIMATE, and the bundled compaction
+ * script states the same 2.5. TOKEN_FRAMING is what one entry costs beyond
+ * its text; the head has none (it is not an entry). Stored
+ * entries.token_estimate is TOKEN_ESTIMATE(content_bytes), and
+ * TOKEN_ESTIMATE(0) on a reasoning entry (its cost is its replay). */
+#define TOKEN_EST_NUM 2
+#define TOKEN_EST_DEN 5
+#define TOKEN_FRAMING 4
+#define TOKENS_OF_BYTES(len) ((int)((int64_t)(len) * TOKEN_EST_NUM / TOKEN_EST_DEN))
+#define TOKEN_ESTIMATE(len) (TOKENS_OF_BYTES(len) + TOKEN_FRAMING)
+/* The inverse, for a budget given in tokens and spent in bytes. */
+#define BYTES_OF_TOKENS(t) ((int)((int64_t)(t) * TOKEN_EST_DEN / TOKEN_EST_NUM))
+#define CCLAW_STR_(x) #x
+#define CCLAW_STR(x) CCLAW_STR_(x)
+/* The same rule over a SQL integer expression (a column, a length()). */
+#define SQL_TOKEN_ESTIMATE(expr) \
+    "((" expr ")*" CCLAW_STR(TOKEN_EST_NUM) "/" CCLAW_STR(TOKEN_EST_DEN) \
+    "+" CCLAW_STR(TOKEN_FRAMING) ")"
 
 /* Message roles */
 typedef enum {

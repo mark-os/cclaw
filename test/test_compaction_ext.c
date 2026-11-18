@@ -609,11 +609,13 @@ static void test_hopeless(void) {
 }
 
 /* CacheExpiring on an idle top-level session above its prune target: down
- * to half the target — the whole of the last turn's steps may go, its
- * answer stays — so the next firing needs the session to double. */
-static void test_cache_expiring_halves(void) {
-    TEST("cache_expiring_summarises_to_half_the_prune_target");
-    int64_t sid = session_create(g_db, "idle", "t", -1, 0);
+ * to half of what is there, and never left above the prune target — the
+ * whole of the last turn's steps may go, its answer stays. `num`/`den` set
+ * the prune target as a share of the session: just under it (9/10) the goal
+ * is half the session; under half of it (9/20) the goal is the target itself. */
+static void cache_expiring_case(const char *name, const char *agent_sid, int num, int den) {
+    tests_run++; printf("  %s... ", name);
+    int64_t sid = session_create(g_db, agent_sid, "t", -1, 0);
     /* Enough earlier turns that they alone cover what has to go: one
      * summary, one model call (the mock answers once). */
     const char *tags[] = { "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9" };
@@ -628,7 +630,8 @@ static void test_cache_expiring_halves(void) {
     free(probe);
     /* Above the target, and under the threshold: only CacheExpiring could
      * fire here. */
-    int target = total * 9 / 10;
+    int target = total * num / den;
+    int goal = target < total / 2 ? target : total / 2;
     char *args = cache_args(sid, total + 1000, target, 0, NULL);
     if (!args) FAIL("not above its prune target");
     if (qn("SELECT json_extract(?1,'$.event')='CacheExpiring'"
@@ -647,9 +650,9 @@ static void test_cache_expiring_halves(void) {
     free(out); free(args);
     ContextLimits lim;
     int after = turn_edit_measure(g_db, sid, "t", &lim);
-    if (after > target / 2) {
-        printf("(%d > %d, from %d) ", after, target / 2, total);
-        FAIL("the session is not at half its prune target");
+    if (after > goal) {
+        printf("(%d > %d, from %d) ", after, goal, total);
+        FAIL("the session is not at half its size or its prune target, whichever is lower");
     }
     /* The answer and the request it answered stay; the oldest turn left. */
     if (on_branch(sid, "All fixed.") != 1 || on_branch(sid, "please fix c1") != 0)
@@ -658,6 +661,11 @@ static void test_cache_expiring_halves(void) {
     args = cache_args(sid, total + 1000, target, 0, NULL);
     if (args) FAIL("still above the prune target");
     PASS();
+}
+
+static void test_cache_expiring_halves(void) {
+    cache_expiring_case("cache_expiring_summarises_to_half_the_session", "idle", 9, 10);
+    cache_expiring_case("cache_expiring_never_leaves_it_above_the_prune_target", "idle-low", 9, 20);
 }
 
 /* A sub-agent's session is left alone, without a model call. */
@@ -676,8 +684,8 @@ static void test_cache_expiring_subagent(void) {
     PASS();
 }
 
-/* Nothing it may take would bring the session under its prune target (the
- * answer alone is bigger): "{}" without a model call — and nothing follows. */
+/* Nothing it may take would remove a quarter of the session (the answer
+ * alone is most of it): "{}" without a model call — and nothing follows. */
 static void test_cache_expiring_hopeless(void) {
     TEST("cache_expiring_hopeless_returns_no_edits_without_a_model_call");
     int64_t sid = session_create(g_db, "idle-hopeless", "t", -1, 0);

@@ -1,8 +1,9 @@
 /* Context accounting: the size the trim reads must see the whole request —
  * head (system prompt + tools) and the provider's measures — not just the
- * entries' own estimates; rescaled estimates must err high (chars/3); and an
- * entry's size is the provider's count, stored once when a response reports
- * it (db_response.c, usage_attribute), its estimate until then. */
+ * entries' own estimates; rescaled estimates must err high (2.5 bytes a
+ * token); and an entry's size is the provider's count, stored once when a
+ * response reports it (db_response.c, usage_attribute), its estimate until
+ * then. */
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,7 +68,12 @@ static void test_large_head_counts(void) {
     int head = context_head_estimate(db, "default", sid, &cfg, "");
     assert(turn_edit_trim(db, sid, head, &lim, &r) == TRIM_UNDER);
 
-    add_tool(db, "fat", 30000);      /* ~10000 head tokens */
+    add_tool(db, "fat", 30000);      /* ~12000 head tokens once granted */
+    head = context_head_estimate(db, "default", sid, &cfg, "");
+    assert(head < 100);              /* not granted: not sent, not counted */
+    assert(sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value,source)"
+                            " VALUES('default','tool','fat','operator')",
+                            NULL, NULL, NULL) == SQLITE_OK);
     head = context_head_estimate(db, "default", sid, &cfg, "");
     assert(head >= 10000);
     assert(size_of(db, sid, head, NULL) > 6000);
@@ -76,9 +82,9 @@ static void test_large_head_counts(void) {
     printf("  PASS test_large_head_counts\n");
 }
 
-/* The provider's prompt_tokens measures the head when fresh — it lifts it
- * above our estimate — and is ignored once a compaction post-dates it: that
- * request was sent entries the branch no longer has. */
+/* The provider's prompt_tokens measures the head when fresh, and is ignored
+ * once a compaction post-dates it: that request was sent entries the branch
+ * no longer has. */
 static void test_provider_floor_and_staleness(void) {
     sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "s", "default", -1, 0);
@@ -104,8 +110,9 @@ static void test_provider_floor_and_staleness(void) {
     printf("  PASS test_provider_floor_and_staleness\n");
 }
 
-/* Estimates use chars/3 + 4, and the stored content_bytes lets a schema
- * patch rescale historical rows to the same rule. */
+/* Estimates are 2.5 bytes per token + 4, and the stored content_bytes lets a
+ * schema patch rescale historical rows to the same rule, spelled in SQL from
+ * the same definition. */
 static void test_estimate_divisor(void) {
     sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "s", "default", -1, 0);
@@ -113,8 +120,11 @@ static void test_estimate_divisor(void) {
     int64_t id = append(db, sid, ROLE_USER, "0123456789ab", 0, it);   /* 12 bytes */
     assert(db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", id, -1)
            == TOKEN_ESTIMATE(12));
-    assert(db_scalar_i64(db, "SELECT content_bytes/3 + 4 FROM entries WHERE id=?", id, -1)
-           == TOKEN_ESTIMATE(12));
+    assert(db_scalar_i64(db, "SELECT " SQL_TOKEN_ESTIMATE("content_bytes")
+                             " FROM entries WHERE id=?", id, -1) == TOKEN_ESTIMATE(12));
+    assert(TOKEN_ESTIMATE(12) == 12 * 2 / 5 + 4 && TOKEN_ESTIMATE(1000) == 404);
+    /* Large lengths do not overflow on the way. */
+    assert(TOKENS_OF_BYTES(2000000000) == 800000000);
     db_close(db);
     printf("  PASS test_estimate_divisor\n");
 }
@@ -350,22 +360,22 @@ static void test_context_block_at_boundary(void) {
     int64_t sid = new_session(db);
     char *block = filler(3000);
     block[600] = 0;
-    session_set_turn_context(db, sid, block);            /* estimate 200 */
+    session_set_turn_context(db, sid, block);            /* estimate 240 */
     user_msg(db, sid, 300);
     ingest(db, sid, 2000, 50, 0, 0, NULL);
-    assert(ctx_tokens(db, sid) == 200);                  /* no report before: estimated */
+    assert(ctx_tokens(db, sid) == TOKENS_OF_BYTES(600)); /* no report before: estimated */
 
     block[600] = 'w';
-    session_set_turn_context(db, sid, block);            /* estimate 1000 */
-    int64_t u2 = user_msg(db, sid, 300);                 /* estimate 104 */
-    /* really 80 for the message and 900 for the block, 200 given back */
-    ingest(db, sid, 2000 + 50 + 80 + 900 - 200, 50, 0, 0, NULL);
+    session_set_turn_context(db, sid, block);            /* estimate 1200 */
+    int64_t u2 = user_msg(db, sid, 300);                 /* estimate 124 */
+    /* really 80 for the message and 900 for the block, 240 given back */
+    ingest(db, sid, 2000 + 50 + 80 + 900 - 240, 50, 0, 0, NULL);
     assert(tok(db, u2) + ctx_tokens(db, sid) == 980);
-    assert(ctx_tokens(db, sid) == 980 * 1000 / 1104);
-    int big = ctx_tokens(db, sid), in = 2000 + 50 + 80 + 900 - 200;
+    assert(ctx_tokens(db, sid) == 980 * 1200 / (1200 + TOKEN_ESTIMATE(300)));
+    int big = ctx_tokens(db, sid), in = 2000 + 50 + 80 + 900 - 240;
 
     block[600] = 0;
-    session_set_turn_context(db, sid, block);            /* back to 200 */
+    session_set_turn_context(db, sid, block);            /* back to 240 */
     int64_t u3 = user_msg(db, sid, 300);
     ingest(db, sid, in + 50 + 80 + 180 - big, 50, 0, 0, NULL);
     assert(tok(db, u3) + ctx_tokens(db, sid) == 260);
@@ -446,29 +456,30 @@ static void test_untrusted_difference(void) {
 static void test_plan_reads_stored(void) {
     sqlite3 *db = open_seeded();
     int64_t sid = new_session(db), it;
-    int64_t u = user_msg(db, sid, 900);                  /* 304 */
-    int64_t a = ingest(db, sid, 2000 + 304, 440, 400, 1, &it);
+    const int U = TOKEN_ESTIMATE(900), R = TOKEN_ESTIMATE(3000);
+    int64_t u = user_msg(db, sid, 900);                  /* first: keeps U */
+    int64_t a = ingest(db, sid, 2000 + U, 440, 400, 1, &it);
     int64_t r = result(db, sid, it, 0, 3000);
-    int64_t b = ingest(db, sid, 2000 + 304 + 440 + 900, 30, 0, 1, &it);
-    int64_t r2 = result(db, sid, it, 0, 3000);           /* not yet sent: 1004 */
+    int64_t b = ingest(db, sid, 2000 + U + 440 + 900, 30, 0, 1, &it);
+    int64_t r2 = result(db, sid, it, 0, 3000);           /* not yet sent: R */
     int head = 0;
-    assert(measured(db, sid, u, 0, &head) == 304 + 440 + 900 + 30 + 1004);
+    assert(measured(db, sid, u, 0, &head) == U + 440 + 900 + 30 + R);
     assert(head == 2000);
     assert(measured(db, sid, a - 1, a, NULL) == 400);    /* reasoning, replayed */
     assert(measured(db, sid, r, b, NULL) == 900);
-    assert(size_of(db, sid, 0, NULL) == 2000 + 304 + 440 + 900 + 30 + 1004);
+    assert(size_of(db, sid, 0, NULL) == 2000 + U + 440 + 900 + 30 + R);
     (void)r2;
     db_close(db);
     printf("  PASS test_plan_reads_stored\n");
 }
 
-/* Six turns fit a 7200-token budget by estimate; once each turn's result
+/* Six turns fit an 8400-token budget by estimate; once each turn's result
  * has been measured at twice its estimate, three do — and the cut, landing
  * inside the fourth, snaps back to keep that one whole. */
 static void test_cut_keeps_fewer_turns(void) {
     sqlite3 *db = open_seeded();
     Config cfg = {0};
-    cfg.context_window = 14400;                          /* budget: half, 7200 */
+    cfg.context_window = 16800;                          /* budget: half, 8400 */
     for (int reported = 0; reported <= 1; reported++) {
         int64_t sid = new_session(db);
         int turn = 0;
@@ -480,8 +491,8 @@ static void test_cut_keeps_fewer_turns(void) {
             if (reported) set_tok(db, r1 + 2, 2 * res);
             turn = est_ids(db, sid, u, r2 + 1) + (reported ? res : 0);
         }
-        if (reported) assert(3 * turn <= 7200 && 4 * turn > 7200);
-        else assert(6 * turn <= 7200);
+        if (reported) assert(3 * turn <= 8400 && 4 * turn > 8400);
+        else assert(6 * turn <= 8400);
         ContextPlan plan = {0};
         assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
         assert(plan.count == 30 && plan.head == 0);
@@ -542,6 +553,51 @@ static void test_edit_changes_sizes(void) {
     printf("  PASS test_edit_changes_sizes\n");
 }
 
+/* The head is the newest report's measure whenever that report is usable —
+ * even below the estimate — and the estimate when there is none, when the
+ * report predates an edit, or when its request had been cut; the next report
+ * from a request sent whole is the measure again. */
+static void test_measured_head_wins(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = new_session(db);
+    int64_t u = user_msg(db, sid, 300);
+    int ue = est_ids(db, sid, u, u + 1);
+    int head = 0;
+    size_of(db, sid, 5000, &head);
+    assert(head == 5000);                            /* no report */
+
+    int64_t a = ingest(db, sid, 1200 + ue, 20, 0, 0, NULL);
+    size_of(db, sid, 5000, &head);
+    assert(head == 1200);                            /* smaller than the estimate */
+
+    exec_id(db, "UPDATE entries SET request_cut=1 WHERE id=?", a);
+    size_of(db, sid, 5000, &head);
+    assert(head == 5000);                            /* its request had been cut */
+    ContextPlan p = {0};
+    assert(context_measure(db, sid, 5000, &p) == 0 && !p.head_measured);
+    context_plan_free(&p);
+
+    int64_t u2 = user_msg(db, sid, 600);
+    int ue2 = est_ids(db, sid, u2, u2 + 1);
+    ingest(db, sid, 1200 + ue + 20 + ue2, 20, 0, 0, NULL);
+    size_of(db, sid, 5000, &head);
+    assert(head == 1200);                            /* sent whole: the measure */
+    assert(context_measure(db, sid, 5000, &p) == 0 && p.head_measured);
+    context_plan_free(&p);
+
+    /* An edit after the newest report: that request was sent another branch. */
+    int64_t u3 = user_msg(db, sid, 30);
+    exec_id(db, "UPDATE entries SET data='{\"turn_edits\":[{}]}' WHERE id=?", u3);
+    size_of(db, sid, 5000, &head);
+    assert(head == 5000);
+    int sent = measured(db, sid, u, 0, NULL);
+    ingest(db, sid, 900 + sent, 20, 0, 0, NULL);
+    size_of(db, sid, 5000, &head);
+    assert(head == 900);
+    db_close(db);
+    printf("  PASS test_measured_head_wins\n");
+}
+
 /* No report anywhere: every size is the estimate and the head the estimate
  * passed in. */
 static void test_no_reports_unchanged(void) {
@@ -585,6 +641,7 @@ int main(void) {
     test_cut_keeps_fewer_turns();
     test_edit_changes_sizes();
     test_no_reports_unchanged();
+    test_measured_head_wins();
     printf("All context accounting tests passed.\n");
     return 0;
 }

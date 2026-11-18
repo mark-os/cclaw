@@ -38,13 +38,15 @@ the whole session anyway: the cheapest moment to summarise it. Then:
 
 - a sub-agent's session (`args.context.depth` above 0) is left alone — it is
   short-lived, and its parent reads its result, not its history;
-- a top-level session is summarised down to **half** the prune target, the
-  same way as above (oldest turns first; on an idle session every step of
-  the last turn may go, never its answer). Each run removes at least half of
-  what is there, so it cannot fire again until the session has doubled.
+- a top-level session is summarised down to **half of what it is**, and never
+  left above the prune target (a 150k session with a 100k target goes to
+  75k; a 300k one goes to 100k), the same way as above (oldest turns first;
+  on an idle session every step of the last turn may go, never its answer).
+  Each run removes at least half of what is there, so it cannot fire again
+  until the session has doubled.
 
-If nothing it may take would bring the session under its prune target, it
-returns no edits. On this event nothing follows the script: no edits, a
+If nothing it may take would remove a quarter of the session, it returns no
+edits. On this event nothing follows the script: no edits, a
 failed run or no script at all leave the session exactly as it was — the
 runtime never trims an idle session. An entry with no `cache_lifetime` never
 fires it.

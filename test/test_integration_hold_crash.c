@@ -51,9 +51,11 @@
 
 #define STEP_BYTES 6000
 
+/* No prompt count: a mock's would be fiction, and a usable report's count
+ * is the head (context.c, plan_head). */
 static const char *RESP_FINAL =
     "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"all done\"},"
-    "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
+    "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":5}}";
 
 /* One iteration: STEP_BYTES of text and a call to a tool that does not exist
  * (answered inline with an error — no grant, no fork). */
@@ -68,7 +70,7 @@ static char *step_response(void) {
              "{\"name\":\"no_such_tool\",\"arguments\":\"{}\"}}]},"
              "\"finish_reason\":\"tool_calls\"}],"
              "\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":%d}}", text,
-             STEP_BYTES / 3);
+             TOKENS_OF_BYTES(STEP_BYTES));
     free(text);
     return body;
 }

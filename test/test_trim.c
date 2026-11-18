@@ -2,7 +2,7 @@
  * under its trim threshold with no model call — each of its four steps, the
  * rules every edit obeys (pairing, unfinished calls, the record, originals
  * untouched), the governing limits and the schema's refusals. Sizes here are
- * estimates (no reports): an entry of n bytes costs n/3 + 4 tokens. */
+ * estimates (no reports): an entry of n bytes costs TOKEN_ESTIMATE(n) tokens. */
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -24,9 +24,11 @@ typedef struct {
     unsigned char reset;    /* a summary, or an entry carrying an edit's record
                              * ($.turn_edits): a report older than it was sent
                              * another branch */
+    unsigned char cut;      /* a report whose request had been cut
+                             * (entries.request_cut): it does not measure the head */
     int tokens;             /* its size: the provider's count once a report has
                              * measured it (entries.tokens), the estimate until
-                             * then (token_estimate, chars/3 + 4) */
+                             * then (token_estimate, TOKEN_ESTIMATE) */
 } PlanEntry;
 
 /* Result of context_plan() — ordered entry IDs + cut point. */
@@ -35,8 +37,10 @@ typedef struct {
     int count;              /* total entries after filtering */
     int cut;               /* index of first included entry (skip entries[0..cut-1]) */
     int budget;            /* token budget used for planning */
-    int head;              /* head the cut reserved: the estimate passed in, or
-                            * the provider's measure of it when that is larger */
+    int head;              /* head the cut reserved: the provider's measure of
+                            * it when a usable report gives one, else the
+                            * estimate passed in */
+    int head_measured;     /* 1 when head is the provider's measure */
 } ContextPlan;
 
 /* Trim notes carry data.source = TRIM_SOURCE (turn_edit.c, the trim). */
@@ -53,8 +57,9 @@ typedef struct {
 
 /* Plan which entries to include in LLM request (pass 1).
  * Queries SQLite for branch metadata without loading content.
- * overhead: estimated head (tool definitions + system prompt); the provider's
- *           measure replaces it when larger (out->head).
+ * overhead: estimated head (tools, system prompt, context block); the
+ *           provider's measure replaces it whenever a usable report gives
+ *           one (out->head).
  * The budget is cfg->max_history_tokens when set, else the session's agent's
  * trim_threshold (context_limits, cfg->context_window as the default window).
  * Returns 0 on success, -1 on error. Caller frees with context_plan_free(). */
@@ -100,9 +105,10 @@ void session_tmp_dir(sqlite3 *db, int64_t session_id, char *buf, size_t bufsz);
 
 /* Auto-recall — FTS5 search across sessions for relevant context.
  * Returns heap-allocated text (caller frees) or NULL if nothing recalled. */
-/* Estimated tokens of the request head (tools array + system prompt) for
- * this agent — the part of a request that is never an entry. Pass the
- * system prompt when already built, NULL to build it here. */
+/* Estimated tokens of the request head — the tools the request carries
+ * (llm_tools_sent), the system prompt and the session's user context block,
+ * the part of a request that is never an entry. Pass the system prompt when
+ * already built, NULL to build it here. */
 int context_head_estimate(sqlite3 *db, const char *agent_name, int64_t session_id,
                           const Config *cfg, const char *system_prompt);
 

@@ -35,11 +35,13 @@
 #define FAIL(m) do { fprintf(stderr, "FAIL: %s\n", m); return 1; } while (0)
 
 #define STEPS      12
-#define STEP_BYTES 6000          /* ~2000 tokens of assistant text per iteration */
+#define STEP_BYTES 6000          /* ~2400 tokens of assistant text per iteration */
 
+/* No prompt count: a mock's would be fiction, and a usable report's count
+ * is the head (context.c, plan_head). */
 static const char *RESP_FINAL =
     "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"all done\"},"
-    "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
+    "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":5}}";
 
 /* Iteration i: STEP_BYTES of text tagged MARK<i>, and a call to a tool that
  * does not exist (answered inline with an error — no grant, no fork). The
@@ -59,7 +61,7 @@ static char *step_response(int i) {
              "{\"name\":\"no_such_tool\",\"arguments\":\"{}\"}}]},"
              "\"finish_reason\":\"tool_calls\"}],"
              "\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":%d}}", text, i,
-             STEP_BYTES / 3);
+             TOKENS_OF_BYTES(STEP_BYTES));
     free(text);
     return body;
 }
@@ -157,7 +159,7 @@ static int set_limits(int64_t sid, int *threshold_out) {
     Config *cfg = config_load(db);
     int head = cfg && agent ? context_head_estimate(db, agent, sid, cfg, NULL) : -1;
     config_free(cfg);
-    int step = STEP_BYTES / 3;
+    int step = TOKENS_OF_BYTES(STEP_BYTES);
     char sql[512];
     snprintf(sql, sizeof(sql),
              "UPDATE agent_models SET trim_threshold=%d, prune_target=%d"

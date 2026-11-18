@@ -27,7 +27,7 @@
 // cheaper, but only safe when its window is as large as the chat model's.
 var PURPOSE         = "chat";
 var PROMPT_SHARE    = 0.5;    // of the window, for what the summariser is shown
-var CHARS_PER_TOKEN = 3;      // the runtime's own estimate (types.h)
+var CHARS_PER_TOKEN = 2.5;    // the runtime's own estimate (types.h: 2.5 bytes a token)
 var SUMMARY_SHARE   = 0.1;    // of the target, for the summary itself…
 var SUMMARY_MIN     = 800;    // …in tokens, at least…
 var SUMMARY_MAX     = 6000;   // …and at most
@@ -69,14 +69,19 @@ var INSTRUCTIONS = [
 // The cache about to lapse on an idle session (CacheExpiring): the next
 // request will pay full price for everything anyway, so this is the cheap
 // moment to summarise. Only top-level sessions — a sub-agent's session is
-// short-lived and its parent reads its result, not its history. Down to half
-// the prune target, so each run removes at least half of what is there and
-// cannot fire again until the session has doubled; a run that cannot get it
-// under the prune target is not worth a model call. Nothing follows this
-// event: returning "{}" leaves the session as it is.
+// short-lived and its parent reads its result, not its history. The runtime
+// fires this only above the prune target, which is the "worth doing" line.
+// Down to half of what is there, and never left above the prune target: a
+// run removes at least half, so it cannot fire again until the session has
+// doubled. A run that cannot remove a quarter (most of the session is the
+// fixed prompt and tools, or steps that must stay) is not worth a model
+// call. Nothing follows this event: returning "{}" leaves the session as it
+// is.
 if (args.event === "CacheExpiring") {
   if (args.context.depth > 0) return "{}";
-  return compact(Math.floor(args.context.prune_target / 2), args.context.prune_target);
+  var size = args.context.tokens;
+  return compact(Math.min(args.context.prune_target, Math.floor(size / 2)),
+                 Math.floor(size * 3 / 4));
 }
 return compact(args.context.prune_target, args.context.trim_threshold);
 
@@ -101,7 +106,7 @@ function compact(target, ceiling) {
     return "{}";
 
   var edits = [], record = { model: null, turns: null, iterations: null, actions: 0 };
-  var budget = Math.floor(ctx.window * PROMPT_SHARE) * CHARS_PER_TOKEN;
+  var budget = Math.floor(ctx.window * PROMPT_SHARE * CHARS_PER_TOKEN);
   var words = Math.round(summaryTokens * CHARS_PER_TOKEN / 6);
   if (hist.turns.length) {
     var t = summarise(hist.folded, hist.turns.map(turnLines), null, hist.calls,
@@ -230,7 +235,7 @@ function summarise(folded, parts, opening, calls, budget, words, summaryTokens) 
   var prose = (answer.text || "").trim();
   if (!prose) throw new Error("the model returned an empty summary");
   // A summary far longer than asked for would undo the work.
-  var cap = summaryTokens * CHARS_PER_TOKEN * 2;
+  var cap = Math.floor(summaryTokens * CHARS_PER_TOKEN * 2);
   if (prose.length > cap) prose = prose.slice(0, cap) + " …";
 
   var lines = carried.concat(calls.filter(isEffect).map(effectLine));

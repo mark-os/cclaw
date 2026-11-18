@@ -370,9 +370,11 @@ No model call; it reads no policy but the two numbers and works whatever
 they are (a `prune_target` at or above the threshold cuts to the threshold).
 
 The size is what the next request would carry (`context_measure`): the
-head — the provider's measure where a usable report gives one, else the
-estimate — plus every entry at its stored count or estimate, 0 for a
-response that stopped on an error and its results. Under the threshold it
+head — the provider's measure whenever a usable report gives one (written
+after every edit, its request not cut), larger or smaller than the estimate;
+the estimate otherwise ([memory.md](memory.md#context-window-management)) —
+plus every entry at its stored count or estimate, 0 for a response that
+stopped on an error and its results. Under the threshold it
 returns without a transaction.
 
 1. **Turns.** Drop the oldest whole turns before the newest, down to

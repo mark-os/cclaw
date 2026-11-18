@@ -168,9 +168,14 @@ Not yet implemented:
 
 **Measure.** The provider reports usage on every response; that is the
 measure, and it is written down once per entry when it arrives
-(`entries.tokens`, by `usage_attribute` in `db_response.c`). Our character
-estimate (`entries.token_estimate`, chars/3 + 4) is the size of an entry no
-report has measured yet. Everything that sizes a context — the request cut,
+(`entries.tokens`, by `usage_attribute` in `db_response.c`). Our byte
+estimate (`entries.token_estimate`: 2.5 bytes per token plus 4 for the
+entry's framing, `TOKEN_ESTIMATE` in `types.h`, the one definition C, SQL and
+the bundled compaction script share) is the size of an entry no report has
+measured yet. 2.5 reads ordinary text, code and JSON close to Claude's count
+and high on Gemini, DeepSeek and GPT models; dense tool output (listings,
+logs, random blobs) still reads low on every model, which is the report's
+job to correct. Everything that sizes a context — the request cut,
 the trigger, C's trim, a hook's `tokens` — reads
 `COALESCE(tokens, token_estimate)` and adds; nothing is re-derived.
 
@@ -205,7 +210,9 @@ encrypted or not.
   same model, and no session edit since the previous report (a summary, or
   an entry carrying an edit's record, at least as new as that report) — and
   when what is left for the appended entries is within sight of their
-  estimate (between a third and three times it, plus framing): a moved cut
+  estimate (between a third and three times it, plus framing — the measured
+  range of 1.05 to 6.9 bytes per token puts a real count at 0.36 to 2.4
+  times the estimate): a moved cut
   or a changed system prompt shows up there. Otherwise nothing is written
   and those entries keep their estimate. An entry is measured once or not
   at all; an errored response is never sent, is no report and takes no
@@ -216,15 +223,37 @@ encrypted or not.
   note or summary an edit wrote keeps its estimate
   ([turn-edit.md](turn-edit.md#accounting-of-written-entries)).
 - The **head** (tools, system prompt, user context block, JSON framing) is
-  not an entry. It is the larger of its estimate (`context_head_estimate`)
-  and the newest usable report's `usage_in` less the entries that request
-  was sent with — usable meaning written after every edit on the branch.
-  When that request had been cut it reads low and the estimate stands.
-  Because it is anchored on a whole reported request, head + entries is that
-  request plus what came after it, however the shares fell.
+  not an entry. When the newest report is usable, the head is its `usage_in`
+  less the entries that request was sent with — larger or smaller than the
+  estimate. Usable means written after every edit on the branch, and from a
+  request that was sent whole: `llm_req` stamps `entries.request_cut` on a
+  report whose request had been cut, since that request was not sent the
+  entries subtracted. With no report, a report older than an edit, or a
+  report from a cut request, the head is its estimate
+  (`context_head_estimate`): the tools the request carries — the payload's
+  own selection, grants intersected with the session's and the chat's tool
+  filters, `launch_agent`'s live roster included (`llm_tools_sent`) — plus
+  the system prompt and the session's user context block, at 2.5 bytes per
+  token. Because a measured head is anchored on a whole reported request,
+  head + entries is that request plus what came after it, however the shares
+  fell.
 
 Budgets and windows are in the provider's tokens, and so are the sizes
 compared against them. With no report at all every size is the estimate.
+
+Known limits:
+
+- The first message of a session is never measured: there is no earlier
+  report to difference against, so it keeps its estimate.
+- When more than one account of reasoning fits what is left, the expected
+  one wins. Only the split among entries can be off; the total is fixed by
+  `usage_in`.
+- Upstreams differ. DeepSeek through OpenRouter has counted replayed
+  reasoning across a turn boundary in a live session and not in a direct
+  probe, which is why reasoning is settled by trying accounts and not from a
+  per-provider table.
+- A cut that moves between two reports is caught by the plausibility band,
+  not detected directly: `request_cut` says a request was cut, not where.
 
 ### The thresholds
 
@@ -277,7 +306,8 @@ the oldest iterations of the running turn. The actions already taken (every
 protected call) are listed under the summary by the script, from the calls
 themselves. An idle session above `prune_target` whose prompt cache is about
 to lapse fires `CacheExpiring`, on which the same extension summarises a
-top-level session down to half its prune target. See
+top-level session down to half its size, or to the prune target if that is
+lower. See
 `extensions/compaction/README.md`.
 
 What C keeps is the mechanism and one backstop:

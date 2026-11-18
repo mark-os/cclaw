@@ -215,7 +215,7 @@ running (`final` null).
 
 | Field | `ContextThreshold` | `CacheExpiring` | Meaning |
 |---|---|---|---|
-| `tokens` | yes | yes | the session's size as the C check measures it: head + every entry the next request would carry |
+| `tokens` | yes | yes | the session's size as the C check measures it: head (the provider's measure when a usable report gives one, else the estimate — [memory.md](memory.md#context-window-management)) + every entry the next request would carry |
 | `window` | yes | yes | the governing model's context window |
 | `trim_threshold` | yes | yes | resolved (defaults filled in) |
 | `prune_target` | yes | yes | resolved |

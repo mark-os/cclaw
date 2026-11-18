@@ -1167,8 +1167,9 @@ int explore_cache(sqlite3 *db, int days, char **out) {
  * numbers the C check reads), with what the entry itself says beside them,
  * so a page can tell a set value from a default. The size is the branch the
  * next request would carry (context_measure); the head is the provider's
- * measure when a report since the last edit gives one, else 0 — counting the
- * system prompt here would mean building it, and that is not a read.
+ * measure when a usable report gives one (written since the last edit, its
+ * request not cut), else 0 — the estimate the C check uses instead means
+ * building the system prompt, and that is not a read.
  *
  * The edits are every record in $.turn_edits on any entry of the session —
  * the answer at a turn's end, a tool result or note mid-turn, the trim's

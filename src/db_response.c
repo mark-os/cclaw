@@ -511,7 +511,11 @@ static int attr_walk(sqlite3 *db, int64_t asst_id, int64_t iteration_id,
     return n;
 }
 
-/* Is what is left for the appended entries plausibly their size? */
+/* Is what is left for the appended entries plausibly their size? Between a
+ * third and three times the estimate: at 2.5 bytes per token the measured
+ * range (1.05 to 6.9 bytes per token) puts a real count at 0.36 to 2.4 times
+ * its estimate, so a real measurement passes and a moved cut or a changed
+ * system prompt (whole turns, thousands of tokens) does not. */
 static int attr_fits(int rest, int est, int n) {
     return rest >= est / 3 - 16 && rest <= 3 * est + 48 * n + 16;
 }
@@ -528,9 +532,9 @@ static void usage_attribute(sqlite3 *db, int64_t session_id, int64_t iteration_i
 
     /* The context block this request carried, by estimate: what the session
      * holds whenever the measurement below does not replace it. */
-    int ctx_est = (int)db_scalar_i64(db,
-        "SELECT COALESCE(length(CAST(turn_context AS BLOB)),0)/3 FROM sessions WHERE id=?1;",
-        session_id, 0);
+    int ctx_est = TOKENS_OF_BYTES(db_scalar_i64(db,
+        "SELECT COALESCE(length(CAST(turn_context AS BLOB)),0) FROM sessions WHERE id=?1;",
+        session_id, 0));
     int ctx_old = (int)db_scalar_i64(db,
         "SELECT COALESCE(turn_context_tokens,-1) FROM sessions WHERE id=?1;", session_id, -1);
     int boundary = prev < 0 || rows[prev].turn_id != rows[0].turn_id;

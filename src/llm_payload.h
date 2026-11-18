@@ -36,6 +36,15 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
  * query failure. Caller frees. */
 char *user_context_text(sqlite3 *db, int64_t session_id, const char *recall_text);
 
+/* The tools a request for this session carries — the selection the tools
+ * array is built from (grants ∩ session and chat tool filters), not a copy
+ * of it. *bytes: their size as the head estimate counts it (name, description
+ * as sent with launch_agent's live roster, parameters); *names (may be NULL;
+ * caller frees): a JSON array of their names, sorted. Returns 0, -1 on a
+ * query failure. */
+int llm_tools_sent(sqlite3 *db, int64_t session_id, const char *agent_name,
+                   int *bytes, char **names);
+
 /* Release payload resources (finalize stmt, drop temp tables). */
 void llm_payload_release(LlmPayload *p);
 

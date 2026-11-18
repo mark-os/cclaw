@@ -321,18 +321,24 @@ static const char SQL_OPENAI_MESSAGES[] =
     "       || ?3 || '.', '')" \
     " ELSE t.description END"
 
+/* The tools a request carries — one predicate for every wire format and for
+ * the head estimate (llm_tools_sent), so what is counted is what is sent.
+ * ?1 = agent, ?2 = the request's tool scope (tool_scope; NULL = unrestricted).
+ * Shown ≡ granted: grants are the single authorization currency (D1) —
+ * extension_install seeds the owner's tool grants, so no attachment
+ * OR-branch is needed here. */
+#define SQL_TOOLS_SENT \
+    " FROM tools t" \
+    " WHERE t.enabled=1" \
+    "   AND (t.agent_name IS NULL OR t.agent_name=?1)" \
+    "   AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2)))"
+
 static const char SQL_OPENAI_TOOLS[] =
     "SELECT json_group_array("
     "  json_object('type','function','function',"
     "    json_object('name',t.name,'description'," SQL_TOOL_DESCRIPTION ","
     "      'parameters',json(t.parameters_json)))"
-    ") FROM tools t"
-    " WHERE t.enabled=1"
-    "   AND (t.agent_name IS NULL OR t.agent_name=?1)"
-    /* Shown ≡ granted: grants are the single authorization currency (D1) —
-     * extension_install seeds the owner's tool grants, so no attachment
-     * OR-branch is needed here. */
-    "   AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2)));";
+    ")" SQL_TOOLS_SENT ";";
 
 /* Provider escape hatch: providers.request_extra (JSON) is merged into the
  * finished body as the very last step, so it can override anything cclaw
@@ -418,13 +424,7 @@ static const char SQL_GEMINI_TOOLS[] =
     "  (SELECT json_group_array("
     "    json_object('name',t.name,'description'," SQL_TOOL_DESCRIPTION ","
     "      'parameters',json(t.parameters_json))"
-    "  ) FROM tools t"
-    "   WHERE t.enabled=1"
-    "     AND (t.agent_name IS NULL OR t.agent_name=?1)"
-    /* Same predicate as SQL_OPENAI_TOOLS — shown ≡ granted. (This query kept
-     * an "or the extension is attached" branch after the OpenAI one dropped
-     * it, so on Gemini an agent was shown tools it could not call.) */
-    "     AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2))))"
+    "  )" SQL_TOOLS_SENT ")"
     "));";
 
 /* :reasoning_display is the routing entry's agent_models.reasoning_display
@@ -554,10 +554,7 @@ static const char SQL_ANTHROPIC_TOOLS[] =
     "  json_object('name',t.name,'description'," SQL_TOOL_DESCRIPTION ","
     "    'input_schema',json_patch('{\"type\":\"object\"}',"
     "                              COALESCE(t.parameters_json,'{}')))"
-    ") FROM tools t"
-    " WHERE t.enabled=1"
-    "   AND (t.agent_name IS NULL OR t.agent_name=?1)"
-    "   AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2)));";
+    ")" SQL_TOOLS_SENT ";";
 
 /* Same parameters as SQL_OPENAI_FULL, plus ?9 = the routed models.id.
  *
@@ -815,6 +812,23 @@ static char *worker_tools_list(sqlite3 *db) {
     return r;
 }
 
+/* Effective tool scope = grants ∩ session tool_filter ∩ the pinned chat's
+ * tool_filter as it is now, as a JSON array of names. An agent with an empty
+ * grant set keeps "[]" (sees zero tools) — only a NULL agent is unrestricted
+ * (NULL). The filters (the session's frozen at spawn for workers, the chat's
+ * read live) can only narrow; dispatch_tool re-checks all three, so this is
+ * advisory for the model. Caller frees. */
+static char *tool_scope(sqlite3 *db, int64_t session_id, const char *agent_name) {
+    char *allowed = agent_name ? grants_json(db, agent_name, "tool") : NULL;
+    char *filter = session_effective_tool_filter(db, session_id);
+    if (!filter) return allowed;
+    if (!allowed) return filter;
+    char *isect = json_intersect(db, allowed, filter);
+    free(allowed);
+    free(filter);
+    return isect;
+}
+
 static char *query_tools(sqlite3 *db, const char *sql, const char *agent_name,
                          const char *allowed_tools, const char *worker_tools) {
     sqlite3_stmt *s;
@@ -936,28 +950,10 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     int gemini = (cfg->provider.endpoint_type == ENDPOINT_GEMINI);
     if (build_transcript(db, session_id, plan, user_context) != 0) return -1;
 
-    /* Effective tool scope = grants ∩ session tool_filter ∩ the pinned chat's
-     * tool_filter as it is now. An agent with an empty grant set keeps "[]"
-     * (sees zero tools) — only a NULL agent is unrestricted. The filters (the
-     * session's frozen at spawn for workers, the chat's read live) can only
-     * narrow; dispatch_tool re-checks all three, so this is advisory for the
-     * model. */
     char *agent_name = session_get_agent_name(db, session_id);
-    char *allowed_tools = agent_name ? grants_json(db, agent_name, "tool") : NULL;
-    char *tool_filter = session_effective_tool_filter(db, session_id);
+    char *allowed_tools = tool_scope(db, session_id, agent_name);
     char *worker_tools = worker_tools_list(db);
     char *effort = llm_effort_fragment(db, &cfg->provider);
-    if (tool_filter) {
-        if (allowed_tools) {
-            char *isect = json_intersect(db, allowed_tools, tool_filter);
-            free(allowed_tools);
-            allowed_tools = isect;
-            free(tool_filter);
-        } else {
-            allowed_tools = tool_filter;
-        }
-        tool_filter = NULL;
-    }
     char *suffix = chat_prompt_suffix(db, session_id, allowed_tools);
 
     /* Reasoning replay matches on the model that produced it. Ingest stamps
@@ -1053,6 +1049,41 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
 
     free(agent_name); free(allowed_tools); free(suffix); free(worker_tools); free(effort);
     return 0;
+}
+
+/* The same selection the tools array is built from (SQL_TOOLS_SENT over
+ * tool_scope), sized as the estimate sizes it: name, description as sent
+ * (launch_agent's live roster included) and parameters, in bytes. */
+int llm_tools_sent(sqlite3 *db, int64_t session_id, const char *agent_name,
+                   int *bytes, char **names) {
+    if (bytes) *bytes = 0;
+    if (names) *names = NULL;
+    if (!db) return -1;
+    static const char sql[] =
+        "SELECT COALESCE(SUM(length(CAST(t.name AS BLOB))"
+        "     + COALESCE(length(CAST(" SQL_TOOL_DESCRIPTION " AS BLOB)),0)"
+        "     + COALESCE(length(CAST(t.parameters_json AS BLOB)),0)),0),"
+        "       json_group_array(t.name ORDER BY t.name)"
+        SQL_TOOLS_SENT ";";
+    char *allowed = tool_scope(db, session_id, agent_name);
+    char *worker_tools = worker_tools_list(db);
+    sqlite3_stmt *s;
+    int rc = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
+        if (agent_name) sqlite3_bind_text(s, 1, agent_name, -1, SQLITE_STATIC);
+        if (allowed) sqlite3_bind_text(s, 2, allowed, -1, SQLITE_STATIC);
+        if (worker_tools) sqlite3_bind_text(s, 3, worker_tools, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            if (bytes) *bytes = sqlite3_column_int(s, 0);
+            const char *n = (const char *)sqlite3_column_text(s, 1);
+            if (names && n) *names = strdup(n);
+            rc = 0;
+        }
+        sqlite3_finalize(s);
+    }
+    free(allowed);
+    free(worker_tools);
+    return rc;
 }
 
 void llm_payload_release(LlmPayload *p) {

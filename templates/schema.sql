@@ -504,13 +504,18 @@ CREATE TABLE IF NOT EXISTS entries (
   cached_tokens INTEGER,   -- subset of usage_in the provider served from cache
                            -- (NULL when the provider doesn't report it)
   cost_nano INTEGER,                          -- cost in billionths of a dollar
-  token_estimate INTEGER,                     -- content_bytes/3 + 4: the size until the provider measures it
+  token_estimate INTEGER,                     -- content_bytes*2/5 + 4 (2.5 bytes per token, TOKEN_ESTIMATE
+                                              -- in types.h): the size until the provider measures it
   tokens INTEGER,           -- the provider's count for this entry, written once when a
                             -- response reports it (db_response.c, usage_attribute): its
                             -- share of usage_out for what the model wrote, its share of
                             -- the growth in usage_in for what was appended. NULL = not
                             -- measured, read as token_estimate. A reasoning entry holds
                             -- what its replay costs: 0 once it is no longer counted.
+  request_cut INTEGER,      -- on a reported assistant_message: 1 when the request that
+                            -- produced it had been cut (its oldest turns left out to fit
+                            -- the budget, context_plan), so its usage_in does not measure
+                            -- the head. NULL = sent whole. Stamped by llm_req.
   content_bytes INTEGER,
   tool_call_count INTEGER NOT NULL DEFAULT 0,
   data TEXT,

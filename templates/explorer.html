@@ -370,6 +370,7 @@ function parseRoute(hash) {
   if (params.get("f")) { try { filter = JSON.parse(params.get("f")); } catch (e) { filter = "bad"; } }
   if (segs[0] === "tables") return { kind: "tables" };
   if (segs[0] === "add-provider") return { kind: "add-provider" };
+  if (segs[0] === "cache") return { kind: "cache", days: Number(params.get("days")) || 0 };
   if (segs[0] === "t" && segs[1]) return { kind: "list", table: segs[1], filter: filter };
   if (segs[0] === "r" && segs[1] && segs.length > 2) return { kind: "row", table: segs[1], segs: segs.slice(2) };
   return { kind: "home" };
@@ -389,6 +390,7 @@ function naturalTrail(route) {
     t.push({ hash: listHash("providers"), label: "Providers" });
     t.push({ hash: "#/add-provider", label: "New provider" });
   }
+  if (route.kind === "cache") t.push({ hash: location.hash, label: "Prompt cache" });
   if (route.kind === "list") t.push({ hash: location.hash, label: listLabel(route.table, route.filter) });
   if (route.kind === "row") {
     t.push({ hash: listHash(route.table), label: title(route.table) });
@@ -503,6 +505,8 @@ function renderHome() {
   out.push(section("Main data", list));
   out.push(h("p", { class: "note" }, link("#/tables", "All " + META.tables.length + " tables"),
     " — everything else, including queues, logs and conversation history."));
+  out.push(h("p", { class: "note" }, link("#/cache", "Prompt cache"),
+    " — how much of each model's input was served from cache, by time since the previous request."));
   setPage(out, null);
 }
 function homeExtra(t, a) {
@@ -525,6 +529,43 @@ function renderTables() {
   setPage([h("h1", { text: "All tables" }),
     h("p", { class: "lede", text: "Every table in the database, with what it holds. Counts are rows right now." }),
     section("Tables", list)], "All tables");
+}
+
+/* ── prompt cache: /admin/api/cache, a fixed view over entries ── */
+function renderCache(route, seq) {
+  loading();
+  var spans = [[0, "all time"], [30, "30 days"], [7, "7 days"], [1, "1 day"]];
+  var chips = h("div", { class: "chips" }, spans.map(function (s) {
+    var label = s[1];
+    return s[0] === route.days ? h("span", { class: "chip", text: label + " ✓" })
+      : h("span", { class: "chip" }, link(s[0] ? "#/cache?days=" + s[0] : "#/cache", label, "Prompt cache, " + label));
+  }));
+  api("cache", { days: route.days || null }).then(function (res) {
+    if (!page(seq)) return;
+    var labels = {};
+    res.buckets.forEach(function (b) { labels[b.key] = b.label; });
+    var out = [h("h1", { text: "Prompt cache" }),
+      h("p", { class: "lede", text: "Per model, the share of prompt tokens the provider served from cache, by time since the same session's previous request. Hits are requests with any cached tokens. \"Not reported\" means the provider gave no cached-token figure; those requests are left out of the share." }),
+      chips];
+    if (!res.models.length) out.push(h("p", { class: "muted", text: "No requests with token counts in this period." }));
+    var cols = ["Since previous", "Requests", "Cached share", "Hits", "Reported zero", "Not reported"];
+    res.models.forEach(function (m) {
+      var tbody = h("tbody");
+      m.buckets.forEach(function (b) {
+        tbody.appendChild(h("tr", null, h("td", { text: labels[b.key] || b.key }),
+          [fmtNum(b.requests), b.share === null ? "—" : (b.share * 100).toFixed(1) + "%",
+           fmtNum(b.hits), fmtNum(b.reported_zero), fmtNum(b.not_reported)].map(function (v) {
+            return h("td", { class: "num", text: v });
+          })));
+      });
+      out.push(section([h("span", { class: "mono", text: m.model || "unknown model" }), " ",
+          h("span", { class: "muted", text: fmtNum(m.requests) + " requests" })],
+        h("div", { class: "tw" }, h("table", { class: "list" },
+          h("thead", null, h("tr", null, cols.map(function (c) { return h("th", { scope: "col", text: c }); }))),
+          tbody))));
+    });
+    setPage(out, "Prompt cache");
+  }, function (err) { if (page(seq)) failure(err, "the cache statistics"); });
 }
 
 /* ── list page (any table) ── */
@@ -1975,6 +2016,7 @@ function render() {
   else if (route.kind === "tables") renderTables();
   else if (route.kind === "list") renderList(route, seq);
   else if (route.kind === "add-provider") addProviderPage();
+  else if (route.kind === "cache") renderCache(route, seq);
   else renderRow(route, seq);
   window.scrollTo(0, 0);
   if (document.activeElement && document.activeElement.closest && document.activeElement.closest("#main, #crumbs"))

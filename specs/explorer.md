@@ -159,6 +159,31 @@ provider's offered models (`models_cache`, hundreds of rows):
 approval card an approver sees on a channel (`approval_format_summary`), as
 text, never the raw `args_json`.
 
+### `GET /admin/api/cache[?days=N]`
+
+Prompt-cache statistics, the one fixed view (not generic over tables),
+computed by query from `entries` alone — no table or counter of its own. A
+request is an `assistant_message` with a `usage_in`; its gap is the time
+since the same session's previous request, both taken at ingest
+(`created_at`, so a gap includes the request's own latency). Per model,
+busiest first, five buckets: `first` (no previous request), `lt1m`, `1to5m`,
+`5to60m`, `gt60m`. Each has `requests`, `not_reported` (`cached_tokens` NULL:
+the provider gave no figure), `reported_zero`, `hits` (cached > 0),
+`prompt_tokens` and `cached_tokens` summed over the requests that reported,
+and `share` = cached ÷ prompt tokens over those (null when none reported).
+`days` keeps requests of the last N days; gaps are still measured against
+full history. Ingestion (`db_response.c`) writes `entries.cached_tokens`
+only when the count is above zero, so today a reported zero arrives as NULL
+and is counted as not reported.
+
+```json
+{"days": null, "buckets": [{"key": "first", "label": "first request"}, …],
+ "models": [{"model": "claude-sonnet-5-5", "requests": 15,
+             "buckets": [{"key": "lt1m", "requests": 6, "not_reported": 0,
+                          "reported_zero": 1, "hits": 5, "prompt_tokens": 210000,
+                          "cached_tokens": 168000, "share": 0.8}, …]}]}
+```
+
 ### `GET /admin/api/row?table=T&key=K`
 
 One row by key (`K` is a JSON array in `meta`'s key order — text, integer
@@ -288,6 +313,7 @@ Letting an agent use a secret is `grant_add` with kind `secret`.
 | `#/t/<table>[?f=<filter JSON>]` | List: key and a few identifying columns, long text previewed, filter chips, "Load more" |
 | `#/r/<table>/<key parts…>` | Row: fields grouped "What you configured" / "What cclaw observed" where the column class is known (else one group), each with its explanation; links from this row; rows that point here, with counts, opening the filtered list |
 | `#/add-provider` | New provider: name, endpoint, wire format, key |
+| `#/cache[?days=N]` | Prompt cache: per model, a table of the `cache` buckets (requests, cached share, hits, reported zero, not reported), with all time / 30 / 7 / 1 day; linked from home |
 
 Agents, providers, channels, models, memory blocks, chats, approvals,
 secrets and entries add sections (and their actions) above the fields: an

@@ -1110,6 +1110,59 @@ int explore_row(sqlite3 *db, const ExploreQuery *q, char **out) {
     return status;
 }
 
+/* ── cache: prompt-cache statistics, a fixed view over entries ─────────────
+ * A request is an assistant_message with a usage_in (one per response; the
+ * column is NULL when the provider reported none). Its gap is the time since
+ * the same session's previous request, both measured at ingest (created_at),
+ * so it includes the request's own latency. The window function runs over
+ * all history and the days filter applies after it, so the first request in
+ * the window keeps its true gap. cached_tokens NULL is "not reported", kept
+ * apart from a reported 0; share is cached ÷ prompt tokens over the requests
+ * that reported. */
+static const char CACHE_SQL[] =
+    "WITH req AS ("
+    "  SELECT model, usage_in, cached_tokens AS ct, created_at,"
+    "         created_at - LAG(created_at) OVER (PARTITION BY session_id ORDER BY id) AS gap"
+    "    FROM entries WHERE type = 'assistant_message' AND usage_in > 0"
+    "), b(k, label, ord) AS (VALUES ('first','first request',0), ('lt1m','under 1 min',1),"
+    "  ('1to5m','1 to 5 min',2), ('5to60m','5 to 60 min',3), ('gt60m','over 60 min',4)"
+    "), tagged AS ("
+    "  SELECT COALESCE(model, '') AS model, usage_in, ct,"
+    "         CASE WHEN gap IS NULL THEN 'first' WHEN gap < 60 THEN 'lt1m'"
+    "              WHEN gap < 300 THEN '1to5m' WHEN gap < 3600 THEN '5to60m' ELSE 'gt60m' END AS k"
+    "    FROM req WHERE ?1 IS NULL OR created_at >= unixepoch() - ?1 * 86400"
+    "), agg AS ("
+    "  SELECT model, k, count(*) AS n, count(ct) AS reported, sum(ct = 0) AS zero,"
+    "         sum(ct > 0) AS hits, sum(CASE WHEN ct IS NOT NULL THEN usage_in END) AS rin,"
+    "         sum(ct) AS cached"
+    "    FROM tagged GROUP BY model, k"
+    "), m AS (SELECT model, sum(n) AS total FROM agg GROUP BY model)"
+    " SELECT json_object('days', ?1,"
+    "  'buckets', json((SELECT json_group_array(json_object('key', k, 'label', label) ORDER BY ord)"
+    "                     FROM b)),"
+    "  'models', json((SELECT json_group_array(json(mj) ORDER BY total DESC, model) FROM ("
+    "    SELECT m.model, m.total, json_object('model', m.model, 'requests', m.total,"
+    "      'buckets', json((SELECT json_group_array(json_object('key', b.k,"
+    "          'requests', COALESCE(a.n, 0), 'not_reported', COALESCE(a.n - a.reported, 0),"
+    "          'reported_zero', COALESCE(a.zero, 0), 'hits', COALESCE(a.hits, 0),"
+    "          'prompt_tokens', COALESCE(a.rin, 0), 'cached_tokens', COALESCE(a.cached, 0),"
+    "          'share', CASE WHEN a.rin > 0 THEN round(1.0 * a.cached / a.rin, 4) END)"
+    "          ORDER BY b.ord)"
+    "        FROM b LEFT JOIN agg a ON a.model = m.model AND a.k = b.k))) AS mj"
+    "    FROM m))))";
+
+int explore_cache(sqlite3 *db, int days, char **out) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, CACHE_SQL, -1, &st, NULL) != SQLITE_OK) {
+        char *err = strdup(sqlite3_errmsg(db));
+        int s = fail(db, 500, "query failed", err, out);
+        free(err);
+        return s;
+    }
+    if (days > 0) sqlite3_bind_int(st, 1, days);
+    return take_json(db, st, out);
+}
+
 /* ── HTTP ────────────────────────────────────────────────────────────────── */
 
 static const char *status_text(int s) {
@@ -1222,6 +1275,12 @@ static int api_dispatch(sqlite3 *db, const char *what, const char *qs, char **ou
         char *id = param(qs, "id");
         int s = explore_approval_card(db, id, out);
         free(id);
+        return s;
+    }
+    if (strcmp(what, "cache") == 0) {
+        char *days = param(qs, "days");
+        int s = explore_cache(db, days ? atoi(days) : 0, out);
+        free(days);
         return s;
     }
     int is_rows = strcmp(what, "rows") == 0;

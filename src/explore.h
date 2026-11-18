@@ -34,13 +34,17 @@ typedef struct {
 int explore_meta(sqlite3 *db, char **out);
 int explore_rows(sqlite3 *db, const ExploreQuery *q, char **out);
 int explore_row(sqlite3 *db, const ExploreQuery *q, char **out);
+/* Prompt-cache statistics from entries: per model, cache share and request
+ * counts by gap since the session's previous request. days > 0 limits it to
+ * requests of the last that many days; 0 = all history. */
+int explore_cache(sqlite3 *db, int days, char **out);
 
 /* 1 when table.column's value is never shown in any row (0 = shown, 2 =
  * hidden in some rows). Shared with the tests' secret walk. */
 int explore_hidden(const char *table, const char *column);
 
 /* Everything under /admin: the page (GET /admin), the read API (GET
- * /admin/api/{meta,rows,row,approval}) and the actions (POST /admin/api/act,
+ * /admin/api/{meta,rows,row,approval,cache}) and the actions (POST /admin/api/act,
  * explore_act.h). db is the web server's handle; this takes web_db_lock()
  * itself, for the database work only. */
 int explore_handle(struct mg_connection *conn, sqlite3 *db);

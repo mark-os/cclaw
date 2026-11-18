@@ -90,7 +90,6 @@ static void test_under_cap_untouched(void) {
 
 static void test_over_cap_spilled(void) {
     setenv("CCLAW_WORKSPACE", WS_DIR, 1);
-    mkdir(WS_DIR, 0700);   /* a real workspace always exists */
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "cap_over", NULL, -1, 0);

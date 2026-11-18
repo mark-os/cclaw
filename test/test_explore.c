@@ -417,6 +417,81 @@ static void test_edited_turn(void) {
     printf("PASS: test_edited_turn\n");
 }
 
+/* ── prompt-cache statistics (explore_cache) ───────────────────────────── */
+
+/* One field of one model's bucket in a cache response. */
+static long long cache_cell(const char *out, const char *model, const char *key, const char *field) {
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "SELECT b.value ->> '$.%s' FROM json_each(?1, '$.models') m,"
+             " json_each(m.value, '$.buckets') b"
+             " WHERE m.value ->> '$.model' = '%s' AND b.value ->> '$.key' = '%s'",
+             field, model, key);
+    return qi(sql, out);
+}
+
+/* Gaps are per session (another session's request in between changes
+ * nothing), only assistant messages with a usage_in are requests, and a NULL
+ * cached_tokens is "not reported", never a zero and never in the share. */
+static void test_cache(void) {
+    exec("INSERT INTO sessions(id, name, agent_name) VALUES (10,'c1','alpha'), (11,'c2','alpha'),"
+         " (12,'c3','alpha');"
+         "WITH t0(t) AS (SELECT unixepoch() - 5 * 3600), v(s, ty, r, m, u, c, dt) AS (VALUES"
+         "  (10, 'assistant_message', 2, 'cm-a', 1000, NULL,    0),"   /* first, not reported */
+         "  (11, 'assistant_message', 2, 'cm-a',  400,  100,   20),"   /* first, hit */
+         "  (10, 'assistant_message', 2, 'cm-a', 1000,  900,   30),"   /* 30 s: hit */
+         "  (10, 'tool_result',       3, NULL,   NULL, NULL,   40),"   /* not a request */
+         "  (10, 'assistant_message', 2, 'cm-a', NULL, NULL,  100),"   /* no usage: not a request */
+         "  (10, 'assistant_message', 2, 'cm-a', 1000,    0,  150),"   /* 2 min: reported zero */
+         "  (10, 'assistant_message', 2, 'cm-a', 2000, NULL,  750),"   /* 10 min: not reported */
+         "  (10, 'assistant_message', 2, 'cm-a', 2000,  500, 4750),"   /* 66 min: hit */
+         "  (12, 'assistant_message', 2, 'cm-old', 100,  50, -100 * 86400)"
+         " ) INSERT INTO entries(session_id, type, role, model, usage_in, cached_tokens, created_at)"
+         " SELECT s, ty, r, m, u, c, t + dt FROM v, t0 ORDER BY dt;");
+    char *out = NULL;
+    assert(explore_cache(g_db, 0, &out) == 200 && out);
+    assert(qi("SELECT json_array_length(?1, '$.buckets') = 5 AND ?1 ->> '$.buckets[0].key' = 'first'"
+              " AND ?1 ->> '$.buckets[4].key' = 'gt60m' AND ?1 ->> '$.days' IS NULL", out) == 1);
+    assert(qi("SELECT m.value ->> '$.requests' FROM json_each(?1, '$.models') m"
+              " WHERE m.value ->> '$.model' = 'cm-a'", out) == 6);
+    assert(cache_cell(out, "cm-a", "first", "requests") == 2);
+    assert(cache_cell(out, "cm-a", "first", "not_reported") == 1);
+    assert(cache_cell(out, "cm-a", "first", "hits") == 1);
+    assert(cache_cell(out, "cm-a", "first", "prompt_tokens") == 400);
+    assert(cache_cell(out, "cm-a", "lt1m", "requests") == 1);
+    assert(cache_cell(out, "cm-a", "lt1m", "cached_tokens") == 900);
+    assert(cache_cell(out, "cm-a", "1to5m", "requests") == 1);
+    assert(cache_cell(out, "cm-a", "1to5m", "reported_zero") == 1);
+    assert(cache_cell(out, "cm-a", "1to5m", "not_reported") == 0);
+    assert(cache_cell(out, "cm-a", "1to5m", "hits") == 0);
+    assert(cache_cell(out, "cm-a", "5to60m", "requests") == 1);
+    assert(cache_cell(out, "cm-a", "5to60m", "not_reported") == 1);
+    assert(cache_cell(out, "cm-a", "5to60m", "reported_zero") == 0);
+    assert(cache_cell(out, "cm-a", "gt60m", "hits") == 1);
+    /* Shares: over reporting requests only; none reported is null, not 0. */
+    assert(qi("SELECT b.value ->> '$.share' = 0.9 FROM json_each(?1, '$.models') m,"
+              " json_each(m.value, '$.buckets') b WHERE m.value ->> '$.model' = 'cm-a'"
+              " AND b.value ->> '$.key' = 'lt1m'", out) == 1);
+    assert(qi("SELECT b.value ->> '$.share' = 0.25 FROM json_each(?1, '$.models') m,"
+              " json_each(m.value, '$.buckets') b WHERE m.value ->> '$.model' = 'cm-a'"
+              " AND b.value ->> '$.key' = 'first'", out) == 1);
+    assert(qi("SELECT b.value ->> '$.share' = 0 FROM json_each(?1, '$.models') m,"
+              " json_each(m.value, '$.buckets') b WHERE m.value ->> '$.model' = 'cm-a'"
+              " AND b.value ->> '$.key' = '1to5m'", out) == 1);
+    assert(qi("SELECT json_type(b.value, '$.share') = 'null' FROM json_each(?1, '$.models') m,"
+              " json_each(m.value, '$.buckets') b WHERE m.value ->> '$.model' = 'cm-a'"
+              " AND b.value ->> '$.key' = '5to60m'", out) == 1);
+    assert(cache_cell(out, "cm-old", "first", "hits") == 1);
+    free(out);
+    /* A window keeps recent requests, with the gaps they had in full history. */
+    assert(explore_cache(g_db, 7, &out) == 200 && out);
+    assert(qi("SELECT ?1 ->> '$.days' = 7 AND NOT EXISTS (SELECT 1 FROM json_each(?1, '$.models') m"
+              " WHERE m.value ->> '$.model' = 'cm-old')", out) == 1);
+    assert(cache_cell(out, "cm-a", "gt60m", "hits") == 1);
+    free(out);
+    printf("PASS: test_cache\n");
+}
+
 /* ── identifiers and values from the request never become SQL ──────────── */
 
 static void test_injection(void) {
@@ -621,6 +696,7 @@ static void test_http(void) {
     static const char *const API[] = {
         "/admin/api/meta", "/admin/api/rows?table=agents",
         "/admin/api/row?table=agents&key=%5B%22alpha%22%5D", "/admin/api/nope",
+        "/admin/api/cache",
     };
     /* Not signed in: every path is refused, with a way in. */
     for (size_t i = 0; i < sizeof(API) / sizeof(API[0]); i++) {
@@ -662,6 +738,8 @@ static void test_http(void) {
     free(next);
     assert(http(c, "/admin/api/row?table=agents&key=%5B%22alpha%22%5D", NULL, &b, &h) == 200);
     assert(qi("SELECT ?1 ->> '$.row.values.name' = 'alpha'", b.d) == 1);
+    assert(http(c, "/admin/api/cache?days=7", NULL, &b, &h) == 200);
+    assert(qi("SELECT ?1 ->> '$.days' = 7 AND json_type(?1, '$.models') = 'array'", b.d) == 1);
     assert(http(c, "/admin/api/row?table=nosuch&key=%5B1%5D", NULL, &b, &h) == 404);
     assert(http(c, "/admin/api/rows", NULL, &b, &h) == 400);
     assert(http(c, "/admin/api/nope", NULL, &b, &h) == 404);
@@ -692,6 +770,7 @@ int main(void) {
     test_row_keys();
     test_injection();
     test_edited_turn();
+    test_cache();
     test_page_source();
     test_secret_walk();
     test_http();

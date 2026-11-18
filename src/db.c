@@ -14,6 +14,7 @@
 #include "templates.h"
 #include "monocypher.h"
 #include "util.h"
+#include "inbox_cap.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -3221,6 +3222,9 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
         const char *content_val = tagged ? tagged : "";
         int content_len = (int)strlen(content_val);
         const char *data_json = (const char *)sqlite3_column_text(sel, 2);
+        /* Over 64 KB: cut, full text spilled to the workspace (inbox_cap.c). */
+        char *capped = inbox_cap_text(db, session_id, inbox_id, content_val);
+        if (capped) { content_val = capped; content_len = (int)strlen(capped); }
 
         /* Insert entry with split columns (role=1 = user) */
         sqlite3_stmt *ins;
@@ -3229,12 +3233,14 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
             " content_bytes, data)"
             " VALUES (?,?,1,?,?,?,?)",
             -1, &ins, NULL) != SQLITE_OK) {
+            free(capped);
             sqlite3_finalize(sel);
             return -1;
         }
         sqlite3_bind_int64(ins, 1, parent_id);
         sqlite3_bind_int64(ins, 2, session_id);
         sqlite3_bind_text(ins, 3, content_val, content_len, SQLITE_TRANSIENT);
+        free(capped);
         sqlite3_bind_int(ins, 4, TOKEN_ESTIMATE(content_len));
         sqlite3_bind_int(ins, 5, content_len);
         if (data_json) sqlite3_bind_text(ins, 6, data_json, -1, SQLITE_TRANSIENT);

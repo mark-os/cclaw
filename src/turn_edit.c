@@ -55,11 +55,13 @@
 /* The rows that make an iteration what the model said in one response. */
 #define SQL_ITERATION_TYPES "('reasoning','assistant_message','tool_call')"
 
-/* The rows the input writes out text for. A reasoning row is never sent (a
- * script never sees thinking); it is still read, because an iteration that
- * opens with one is named by it. */
+/* The rows the input writes out text for. A reasoning row's text is the
+ * readable summary the model was asked for (agent_models.reasoning_display),
+ * sent as its iteration's `reasoning`; the signature and the replay blob
+ * (reasoning_meta) never are — a script never sees thinking itself. */
 #define SQL_SENT_TYPES \
-    "('user_message','system','assistant_message','tool_call','tool_result','compaction')"
+    "('user_message','system','assistant_message','tool_call','tool_result','compaction'," \
+    "'reasoning')"
 
 /* ── The session as a hook's input ─────────────────────────────────
  *
@@ -76,9 +78,10 @@
  * Which earlier units are sent is decided on the text as written out, not on
  * an estimate. First a cheap pass on integers: `priced` takes each row's
  * stored length for what will be written out of it (0 for a row that is not:
- * a reasoning row, an earlier result without its text, an assistant entry
- * that stopped on an error, which the next request never sends either —
- * context_plan), and `pick` keeps the earlier units, newest first, whose
+ * an earlier result without its text, an assistant entry that stopped on an
+ * error, which the next request never sends either — context_plan — and that
+ * response's reasoning; a reasoning row is its kept summary, empty when none
+ * was), and `pick` keeps the earlier units, newest first, whose
  * stored text alone could still fit beside the newest turn. Text is read for
  * those and nothing older, each unit is serialised once, and `fit` keeps
  * them, newest first, while the bytes written out still fit — so the oldest
@@ -104,6 +107,12 @@
 #define SQL_SEP "(e.type='compaction' AND e.turn_id IS NOT b.turn_id)"
 #define SQL_NEW_UNIT "(COALESCE(NOT " SQL_SAME_TURN("e", "b") ", 1) OR b.sep)"
 #define SQL_ROW_ERRORED "(e.role=2 AND COALESCE(e.stop_reason,0) IN (4,5))"
+/* A reasoning row goes with its response: left out of an earlier turn when
+ * the response's message stopped on an error, like the message. */
+#define SQL_RESPONSE_ERRORED \
+    "(" SQL_ROW_ERRORED " OR (e.type='reasoning' AND EXISTS(SELECT 1 FROM entries m" \
+    "  WHERE m.session_id=?1 AND m.iteration_id=e.iteration_id" \
+    "    AND m.type='assistant_message' AND COALESCE(m.stop_reason,0) IN (4,5))))"
 /* Room kept for what is spliced in after the newest turn is measured:
  * ',"history":[', '],"history_omitted":' and a count. */
 #define SQL_SPLICE_ROOM "64"
@@ -120,8 +129,8 @@ static const char SQL_INPUT[] =
     "   WHERE e.session_id=?1 AND (?2 < 0 OR b.t < ?2 OR NOT " SQL_NEW_UNIT ")),"
     " priced AS MATERIALIZED ("
     "  SELECT b.run, b.lvl, b.id, b.type, b.sep,"
-    "         b.run=0 OR NOT " SQL_ROW_ERRORED " AS keep,"
-    "         CASE WHEN b.run > 0 AND " SQL_ROW_ERRORED " THEN 0"
+    "         b.run=0 OR NOT " SQL_RESPONSE_ERRORED " AS keep,"
+    "         CASE WHEN b.run > 0 AND " SQL_RESPONSE_ERRORED " THEN 0"
     "              WHEN b.type NOT IN " SQL_SENT_TYPES " THEN 0"
     "              WHEN b.run > 0 AND b.type='tool_result' AND NOT ?3 THEN 0"
     "              ELSE COALESCE(e.content_bytes,0) END AS bytes"
@@ -137,8 +146,7 @@ static const char SQL_INPUT[] =
      * alone does not already rule it out. */
     " part AS MATERIALIZED ("
     "  SELECT r.run, r.lvl, r.sep, e.id, e.type, e.iteration_id, e.turn_id,"
-    "         CASE WHEN e.type='reasoning' THEN NULL"
-    "              WHEN r.run > 0 AND e.type='tool_result' AND NOT ?3 THEN NULL"
+    "         CASE WHEN r.run > 0 AND e.type='tool_result' AND NOT ?3 THEN NULL"
     "              ELSE e.content END AS content,"
     "         e.tool_call_id, e.tool_name, e.is_error,"
     "         COALESCE(e.tokens, e.token_estimate) AS tokens,"
@@ -203,6 +211,10 @@ static const char SQL_INPUT[] =
     "    SELECT run, iteration_id, id, ROW_NUMBER() OVER ("
     "             PARTITION BY run, iteration_id ORDER BY lvl DESC) AS rn"
     "      FROM part WHERE type IN " SQL_ITERATION_TYPES ") WHERE rn=1),"
+    /* Each response's reasoning summary, where one was kept. */
+    " rsn AS MATERIALIZED ("
+    "  SELECT run, iteration_id, MAX(content) AS content FROM part"
+    "   WHERE type='reasoning' AND COALESCE(content,'')<>'' GROUP BY run, iteration_id),"
     /* An earlier turn's results lose their text when ?3 says so (the newest
      * turn's never do). */
     " calls AS MATERIALIZED ("
@@ -224,8 +236,9 @@ static const char SQL_INPUT[] =
     "   WHERE a.type='tool_call' GROUP BY a.run, a.iteration_id),"
     /* Every iteration but the answer's. */
     " iters AS MATERIALIZED ("
-    "  SELECT i.run, json_group_array(json(i.obj) ORDER BY i.lvl DESC) AS arr FROM ("
-    "    SELECT a.run, MAX(a.lvl) AS lvl, json_object("
+    "  SELECT i.run, json_group_array(json(CASE WHEN i.reasoning IS NULL THEN i.obj"
+    "      ELSE json_set(i.obj,'$.reasoning',i.reasoning) END) ORDER BY i.lvl DESC) AS arr FROM ("
+    "    SELECT a.run, MAX(a.lvl) AS lvl, MAX(rs.content) AS reasoning, json_object("
     "      'iteration_id',a.iteration_id,"
     "      'entry_id',o.id,"
     "      'message_id',MIN(CASE WHEN a.type='assistant_message' THEN a.id END),"
@@ -236,6 +249,7 @@ static const char SQL_INPUT[] =
     "      LEFT JOIN fin f ON f.run=a.run"
     "      LEFT JOIN opener o ON o.run=a.run AND o.iteration_id=a.iteration_id"
     "      LEFT JOIN calls c ON c.run=a.run AND c.iteration_id=a.iteration_id"
+    "      LEFT JOIN rsn rs ON rs.run=a.run AND rs.iteration_id=a.iteration_id"
     "     WHERE a.type IN ('assistant_message','tool_call') AND a.id IS NOT f.id"
     "     GROUP BY a.run, a.iteration_id) i GROUP BY i.run),"
     /* One turn's fields: the same object is the newest turn at the top level
@@ -247,13 +261,16 @@ static const char SQL_INPUT[] =
     "    'user_messages',json(COALESCE(u.arr,'[]')),"
     "    'notes',json(COALESCE(n.arr,'[]')),"
     "    'iterations',json(COALESCE(i.arr,'[]')),"
-    "    'final',json(CASE WHEN f.id IS NOT NULL THEN json_object('entry_id',f.id,"
+    "    'final',json(CASE WHEN f.id IS NOT NULL THEN json_patch(json_object('entry_id',f.id,"
     "        'iteration_id',f.iteration_id,'text',COALESCE(f.content,''),"
-    "        'tokens',f.tokens) END)) AS obj"
+    "        'tokens',f.tokens),"
+    "        CASE WHEN fr.content IS NULL THEN '{}'"
+    "             ELSE json_object('reasoning',fr.content) END) END)) AS obj"
     "    FROM turns k"
     "    LEFT JOIN tok t ON t.run=k.run LEFT JOIN ums u ON u.run=k.run"
     "    LEFT JOIN notes n ON n.run=k.run LEFT JOIN iters i ON i.run=k.run"
-    "    LEFT JOIN fin f ON f.run=k.run),"
+    "    LEFT JOIN fin f ON f.run=k.run"
+    "    LEFT JOIN rsn fr ON fr.run=k.run AND fr.iteration_id=f.iteration_id),"
     /* The top level: what the script is told about itself, then the newest
      * turn's fields. No row when the turn has no answer and needs one. */
     " head AS MATERIALIZED ("

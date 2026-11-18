@@ -145,6 +145,11 @@ typedef struct {
      * On the Anthropic wire 3600 sends the 1-hour cache marker, anything
      * else the plain 5-minute one. */
     int cache_lifetime;
+    /* The routing entry's agent_models.reasoning_display: "summary" or
+     * "none"; NULL reads as "summary" (the column's default). Asks for the
+     * provider's reasoning summary where the wire format can (llm_payload.c)
+     * and decides whether its text is kept on the reasoning entry. */
+    const char *reasoning_display;
 } ProviderConfig;
 
 /* Top-level config */
@@ -167,7 +172,6 @@ typedef struct {
     int token_rate_limit;   /* max tokens/hr (default 1000000, 0=unlimited) */
     int64_t daily_cost_limit_nano; /* max spend/24h in nanodollars (0=unlimited) */
     LogLevel log_level;     /* error|warn|info|debug|trace */
-    int save_reasoning;     /* store reasoning text as entries (default 0 = discard) */
     int auto_recall;        /* FTS5 auto-recall (default 1) */
     int recall_max_tokens;  /* max tokens for recalled context (default 500) */
 } Config;

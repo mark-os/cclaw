@@ -63,9 +63,13 @@ one approval covers the whole document:
   ids this same document's `models` section registers; first entry is primary;
   bare model names are refused with the id you probably meant; an entry may
   be an object `{"id", "effort", "trim_threshold", "prune_target",
-  "cache_lifetime"}` — effort level, when your session is trimmed and how
-  far in tokens, and how long the provider keeps its prompt cache in
-  seconds, 300 or 3600 on an Anthropic model, 3600 when omitted there),
+  "cache_lifetime", "reasoning_display"}` — effort level, when your session
+  is trimmed and how far in tokens, how long the provider keeps its prompt
+  cache in seconds, 300 or 3600 on an Anthropic model, 3600 when omitted
+  there, and `"summary"` (the default) or `"none"`: whether the model is
+  asked for a readable summary of its reasoning, kept with the reasoning
+  entry and shown to hooks — an OpenAI-compatible provider is asked nothing
+  either way, and `"none"` only stops keeping what it returns),
   `max_iterations`, `shell_timeout`.
 - `routes`: `"channel:chat_id"` strings authorizing `channel_send` to that
   chat. First-come: a chat routed to another agent is refused. Wildcards are

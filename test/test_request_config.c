@@ -1170,6 +1170,36 @@ static void test_agent_models_trim(void) {
     free(args);
     assert(db_scalar_i64(db, "SELECT cache_lifetime FROM agent_models"
                              " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 3600);
+
+    /* reasoning_display: summary or none, applied; left out is the default. */
+    assert(db_scalar_i64(db, "SELECT reasoning_display='summary' FROM agent_models"
+                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 1);
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"anthx/c\",\"reasoning_display\":\"full\"}]}}}");
+    assert(r && strstr(r, "reasoning_display is 'summary'"));
+    free(r);
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"anthx/c\",\"reasoning_display\":true}]}}}");
+    assert(r && strstr(r, "reasoning_display is 'summary'"));
+    free(r);
+    ctx.current_tool_call_id = "tr5";
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"anthx/c\",\"reasoning_display\":\"none\"}]}}}");
+    assert(r == NULL);
+    args = last_args(db, sid);
+    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, NULL) == 0);
+    free(args);
+    assert(db_scalar_i64(db, "SELECT reasoning_display='none' FROM agent_models"
+                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 1);
+    ctx.current_tool_call_id = "tr6";
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"anthx/c\",\"effort\":\"low\"}]}}}");
+    assert(r == NULL);
+    args = last_args(db, sid);
+    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, NULL) == 0);
+    free(args);
+    assert(db_scalar_i64(db, "SELECT reasoning_display='summary' FROM agent_models"
+                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 1);
     tools_free(&reg);
     db_close(db);
     printf("  PASS test_agent_models_trim\n");

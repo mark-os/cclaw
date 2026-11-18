@@ -509,9 +509,10 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
              * a clone is a copy of the whole routing setup (a clone sub-agent
              * inherits its parent's cache marker, accepted — decision 25). */
             ("INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort,"
-             " trim_threshold, prune_target, cache_lifetime)"
+             " trim_threshold, prune_target, cache_lifetime, reasoning_display)"
              " SELECT ?1, purpose, model_id, pos, reasoning_effort, trim_threshold,"
-             " prune_target, cache_lifetime FROM agent_models WHERE agent_name=?2"),
+             " prune_target, cache_lifetime, reasoning_display FROM agent_models"
+             " WHERE agent_name=?2"),
         };
         for (size_t i = 0; rc == 0 && i < 4; i++) {
             if (sqlite3_prepare_v2(db, copies[i], -1, &st, NULL) != SQLITE_OK) { rc = -1; break; }

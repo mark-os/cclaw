@@ -679,7 +679,7 @@ static const char *SQL_CHANGES_AGENT_SETTINGS =
     "        THEN '   (now: '||cur||')' ELSE '' END)"
     " FROM (SELECT j.key AS key,"
     /* models entries may be bare id strings or {id, effort, trim_threshold,
-     * prune_target, cache_lifetime} objects — render the object form as id(effort)[trim…]
+     * prune_target, cache_lifetime, reasoning_display} objects — render the object form as id(effort)[trim…]
      * so the approver sees the ask, and
      * mirror the spelling on the current side so an effort-only change diffs
      * as a change instead of a no-op. */
@@ -691,6 +691,8 @@ static const char *SQL_CHANGES_AGENT_SETTINGS =
     "                   ||COALESCE('[trim at '||json_extract(value,'$.trim_threshold')||']','')"
     "                   ||COALESCE('[prune to '||json_extract(value,'$.prune_target')||']','')"
     "                   ||COALESCE('[cache '||json_extract(value,'$.cache_lifetime')||'s]','')"
+    "                   ||CASE WHEN json_extract(value,'$.reasoning_display')='none'"
+    "                       THEN '[reasoning not shown]' ELSE '' END"
     "              ELSE atom END, ', ') FROM json_each(j.value)),"
     "                   '(empty)')"
     "     ELSE COALESCE(j.atom,'(empty)') END AS req,"
@@ -700,7 +702,9 @@ static const char *SQL_CHANGES_AGENT_SETTINGS =
     "               ||COALESCE('('||reasoning_effort||')','')"
     "               ||COALESCE('[trim at '||trim_threshold||']','')"
     "               ||COALESCE('[prune to '||prune_target||']','')"
-    "               ||COALESCE('[cache '||cache_lifetime||'s]','') m"
+    "               ||COALESCE('[cache '||cache_lifetime||'s]','')"
+    "               ||CASE WHEN reasoning_display='none'"
+    "                   THEN '[reasoning not shown]' ELSE '' END m"
     "             FROM agent_models"
     "              WHERE agent_name=" SQL_CUR_AGENT " AND purpose='chat'"
     "              ORDER BY pos))"

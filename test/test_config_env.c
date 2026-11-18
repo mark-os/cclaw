@@ -23,7 +23,6 @@ static void clear_env(void) {
     unsetenv("CCLAW_MAX_HISTORY_TOKENS");
     unsetenv("CCLAW_SHELL_TIMEOUT");
     unsetenv("CCLAW_TOKEN_RATE_LIMIT");
-    unsetenv("CCLAW_SAVE_REASONING");
     unsetenv("CCLAW_LOG_LEVEL");
 }
 
@@ -66,7 +65,6 @@ static void test_env_all_overrides(void) {
     setenv("CCLAW_MAX_HISTORY_TOKENS", "10000", 1);
     setenv("CCLAW_SHELL_TIMEOUT", "60", 1);
     setenv("CCLAW_TOKEN_RATE_LIMIT", "500000", 1);
-    setenv("CCLAW_SAVE_REASONING", "1", 1);
     setenv("CCLAW_LOG_LEVEL", "trace", 1);
 
     sqlite3 *db = fresh_db();
@@ -81,7 +79,6 @@ static void test_env_all_overrides(void) {
     assert(cfg->max_history_tokens == 10000);
     assert(cfg->shell_timeout == 60);
     assert(cfg->token_rate_limit == 500000);
-    assert(cfg->save_reasoning == 1);
     assert(cfg->log_level == LOG_LEVEL_TRACE);
     config_free(cfg);
     db_close(db);

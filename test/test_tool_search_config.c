@@ -252,6 +252,16 @@ static void test_format_json(void) {
     assert(v && strcmp(v, "900") == 0); free(v);
     v = doc_get(db, doc, "$.agent.models[0].id");
     assert(v && strcmp(v, "claude-opus-4.5@gw") == 0); free(v);
+    v = doc_get(db, doc, "$.agent.models[0].reasoning_display");
+    assert(v == NULL);                              /* the default is not spelled */
+    free(doc);
+    /* A display other than the default is, so the doc round-trips. */
+    assert(sqlite3_exec(db, "UPDATE agent_models SET cache_lifetime=NULL,"
+                            " reasoning_display='none' WHERE agent_name='default';",
+                            NULL, NULL, NULL) == SQLITE_OK);
+    doc = call_handler(&reg, "{\"format\":\"json\"}");
+    v = doc_get(db, doc, "$.agent.models[0].reasoning_display");
+    assert(v && strcmp(v, "none") == 0); free(v);
     free(doc);
 
     /* An unknown format is refused rather than silently rendered as prose. */

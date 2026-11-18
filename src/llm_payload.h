@@ -44,4 +44,8 @@ void llm_payload_release(LlmPayload *p);
  * should be sent. Caller frees. Shared with the js-tier llm() wire builder. */
 char *llm_effort_fragment(sqlite3 *db, const ProviderConfig *prov);
 
+/* Whether the reasoning text a response carries is kept on its reasoning
+ * entry: false only when the route's reasoning_display is 'none'. */
+int llm_keep_reasoning_text(const ProviderConfig *prov);
+
 #endif

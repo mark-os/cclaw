@@ -38,7 +38,7 @@ typedef struct {
 /* Parse an LLM response body (OpenAI or Gemini, selected by ep) straight into
  * entries + tool_calls rows. Zero-copy: the JSON body is bound once and the
  * extracted column pointers bind directly into the inserts — no intermediate
- * heap copies. Creates: reasoning (text only if save_reasoning; the entry itself
+ * heap copies. Creates: reasoning (text only if keep_reasoning_text; the entry itself
  * whenever the response carries a replayable reasoning blob) + assistant_message
  * + N tool_call entries, all sharing iteration_id. On LLM_RESP_OK, *out carries
  * usage/cost. request_body (may be NULL) is archived alongside the body on the
@@ -47,7 +47,7 @@ typedef struct {
 LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iteration_id,
                                  const char *model, EndpointType ep,
                                  const char *body, const char *request_body,
-                                 int save_reasoning, TypedIngestResult *out);
+                                 int keep_reasoning_text, TypedIngestResult *out);
 
 /* Archive a raw response body for forensics regardless of HTTP outcome. Parses
  * to JSONB when valid, stores raw text otherwise. status is a free-form label

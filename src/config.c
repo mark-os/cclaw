@@ -331,7 +331,6 @@ Config *config_load(sqlite3 *db) {
     cfg->max_history_tokens = config_get_int(db, "max_history_tokens");
     cfg->shell_timeout = config_get_int(db, "shell_timeout");
     cfg->token_rate_limit = config_get_int(db, "token_rate_limit");
-    cfg->save_reasoning = config_get_int(db, "save_reasoning");
     /* config_get_double reads the env layer too, so no separate override */
     cfg->daily_cost_limit_nano =
         (int64_t)(config_get_double(db, "daily_cost_limit") * 1e9 + 0.5);

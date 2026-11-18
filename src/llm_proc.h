@@ -28,6 +28,9 @@ typedef struct {
     /* agent_models.cache_lifetime for this routing entry, seconds; 0 = unknown.
      * On Anthropic it selects the cache marker (llm_payload.c). */
     int cache_lifetime;
+    /* agent_models.reasoning_display for this routing entry: "summary" or
+     * "none". */
+    char reasoning_display[8];
     /* Set only on the synthetic candidate llm_req() builds when the models
      * table yields nothing — that one carries no api_key_env because its key
      * is already resolved in cfg->provider. A real DB row must NEVER borrow

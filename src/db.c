@@ -1501,7 +1501,10 @@ static int patch_v65_utility(sqlite3 *db) {
  * turn_settled_timeout, now hook_timeout). And hooks.pos / timeout /
  * disabled, for the events of stage 1: an existing hook runs first in its
  * extension, on the default deadline, enabled; hooks.wait becomes hooks.async,
- * its inverse, the manifest's own word.
+ * its inverse, the manifest's own word. agent_models.reasoning_display
+ * (stage R): every existing entry asks for the summary, the default, which
+ * also replaces the global save_reasoning key (it leaves the config table
+ * the same way).
  *
  * The C compaction is gone (the bundled extension `compaction` replaces it,
  * installed and attached to every agent at startup by
@@ -1567,6 +1570,8 @@ static int patch_v68_hooks(sqlite3 *db) {
         " BEGIN"
         "   UPDATE agent_models SET cache_lifetime = 3600 WHERE rowid = NEW.rowid;"
         " END;"
+        "ALTER TABLE agent_models ADD COLUMN reasoning_display TEXT NOT NULL"
+        "  DEFAULT 'summary' CHECK (reasoning_display IN ('summary','none'));"
         "ALTER TABLE sessions ADD COLUMN cache_armed_at INTEGER;"
         "CREATE INDEX idx_sessions_cache_armed ON sessions(cache_armed_at)"
         "  WHERE cache_armed_at IS NOT NULL;"

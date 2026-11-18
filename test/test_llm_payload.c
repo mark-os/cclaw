@@ -1592,7 +1592,7 @@ static void test_effort_clamp(void) {
                         "$.reasoning_effort") == NULL);
     put_effort_map(db, "m-none-g", "{\"format\":\"gemini-level\",\"levels\":{}}");
     assert(effort_probe(db, sid, &plan, ENDPOINT_GEMINI, "m-none-g", "high",
-                        "$.generationConfig.thinkingConfig") == NULL);
+                        "$.generationConfig.thinkingConfig.thinkingLevel") == NULL);
 
     context_plan_free(&plan);
     db_close(db);
@@ -2005,6 +2005,88 @@ static void test_cache_marker_lifetime(void) {
     }
     db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_cache_marker_lifetime\n");
+}
+
+/* reasoning_display per format. Anthropic: thinking.display summarized
+ * (the default, also when unset) or omitted, beside the fixed drop_block;
+ * Gemini: includeThoughts, merged beside an effort level; OpenAI-compatible:
+ * not one byte different. Nothing else in a body moves — the replayed
+ * thinking included. */
+static char *build_with_display(sqlite3 *db, int64_t sid, EndpointType ep,
+                                const char *display, const char *effort) {
+    Config cfg = {0};
+    cfg.provider.model = (char *)"claude-sonnet-5-5";
+    cfg.provider.model_id = (char *)"claude@anthropic";
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ep;
+    cfg.provider.reasoning_display = display;
+    cfg.provider.reasoning_effort = (char *)effort;
+    cfg.context_window = 128000;
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    LlmPayload p;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &p) == 0);
+    context_plan_free(&plan);
+    char *body = strdup(p.body);
+    llm_payload_release(&p);
+    return body;
+}
+
+static char *without(sqlite3 *db, const char *body, const char *path) {
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db, "SELECT json_remove(?1, ?2)", -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, body, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, path, -1, SQLITE_STATIC);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    char *r = strdup((const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    return r;
+}
+
+static void test_reasoning_display(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = seed_tool_iteration(db, (char *)"claude@anthropic", ENDPOINT_ANTHROPIC,
+                                      ANTHROPIC_TOOL_RESPONSE);
+
+    char *unset = build_with_display(db, sid, ENDPOINT_ANTHROPIC, NULL, NULL);
+    char *sum = build_with_display(db, sid, ENDPOINT_ANTHROPIC, "summary", NULL);
+    char *none = build_with_display(db, sid, ENDPOINT_ANTHROPIC, "none", NULL);
+    assert(strcmp(unset, sum) == 0);
+    expect_path(db, sum, "$.thinking.display", "summarized");
+    expect_path(db, none, "$.thinking.display", "omitted");
+    expect_path(db, none, "$.thinking.type", "adaptive");
+    expect_path(db, none, "$.thinking.block_binding.prefix_mismatch_behavior", "drop_block");
+    expect_path(db, sum, "$.thinking.block_binding.prefix_mismatch_behavior", "drop_block");
+    /* The thinking block still goes back, signature and all. */
+    expect_path(db, sum, "$.messages[1].content[0].type", "thinking");
+    char *a = without(db, sum, "$.thinking.display"), *b = without(db, none, "$.thinking.display");
+    assert(strcmp(a, b) == 0);
+    free(a); free(b); free(unset); free(sum); free(none);
+
+    unset = build_with_display(db, sid, ENDPOINT_GEMINI, NULL, NULL);
+    sum = build_with_display(db, sid, ENDPOINT_GEMINI, "summary", NULL);
+    none = build_with_display(db, sid, ENDPOINT_GEMINI, "none", NULL);
+    assert(strcmp(unset, sum) == 0);
+    expect_path(db, sum, "$.generationConfig.thinkingConfig.includeThoughts", "1");
+    expect_path(db, sum, "$.generationConfig.maxOutputTokens", "1024");
+    expect_path(db, none, "$.generationConfig", "{\"maxOutputTokens\":1024}");
+    a = without(db, sum, "$.generationConfig.thinkingConfig");
+    assert(strcmp(a, none) == 0);
+    free(a); free(unset); free(sum); free(none);
+    /* An effort level's thinkingConfig merges beside it. */
+    sum = build_with_display(db, sid, ENDPOINT_GEMINI, "summary", "high");
+    expect_path(db, sum, "$.generationConfig.thinkingConfig.includeThoughts", "1");
+    expect_path(db, sum, "$.generationConfig.thinkingConfig.thinkingLevel", "HIGH");
+    free(sum);
+
+    unset = build_with_display(db, sid, ENDPOINT_OPENAI, NULL, NULL);
+    sum = build_with_display(db, sid, ENDPOINT_OPENAI, "summary", NULL);
+    none = build_with_display(db, sid, ENDPOINT_OPENAI, "none", NULL);
+    assert(strcmp(unset, sum) == 0 && strcmp(sum, none) == 0);
+    free(unset); free(sum); free(none);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_reasoning_display\n");
 }
 
 /* ── The transcript: anchor, plan scoping, batch pairing ─────────── */
@@ -2455,6 +2537,7 @@ int main(void) {
     test_midturn_system_entry_converts_to_user();
     test_anthropic_payload();
     test_cache_marker_lifetime();
+    test_reasoning_display();
     test_anthropic_thinking_replay();
     test_cron_result_in_payload();
     test_network_hosts_query_time_wrap();

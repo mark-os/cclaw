@@ -89,19 +89,22 @@ static const char SQL_CONFIG_DOC[] =
     " 'agent', json_object("
     "   'name', ?1,"
     "   'sandbox_profile', (SELECT sandbox_profile FROM agents WHERE name=?1),"
-    /* An entry with a reasoning effort, trim numbers or a cache lifetime
-     * shows as an object {id, effort?, trim_threshold?, prune_target?,
-     * cache_lifetime?} — the same union shape request_config accepts, so the
-     * doc round-trips as a patch base. */
+    /* An entry with a reasoning effort, trim numbers, a cache lifetime or a
+     * reasoning display other than the default shows as an object {id,
+     * effort?, trim_threshold?, prune_target?, cache_lifetime?,
+     * reasoning_display?} — the same union shape request_config accepts, so
+     * the doc round-trips as a patch base. */
     "   'models', json((SELECT json_group_array(json("
     "     CASE WHEN reasoning_effort IS NULL AND trim_threshold IS NULL"
     "               AND prune_target IS NULL AND cache_lifetime IS NULL"
+    "               AND reasoning_display = 'summary'"
     "          THEN json_quote(model_id)"
     "          ELSE json_patch(json_object('id', model_id), json_object("
     "            'effort', reasoning_effort, 'trim_threshold', trim_threshold,"
-    "            'prune_target', prune_target, 'cache_lifetime', cache_lifetime))"
+    "            'prune_target', prune_target, 'cache_lifetime', cache_lifetime,"
+    "            'reasoning_display', NULLIF(reasoning_display, 'summary')))"
     "     END)) FROM (SELECT model_id, reasoning_effort, trim_threshold, prune_target,"
-    "                        cache_lifetime"
+    "                        cache_lifetime, reasoning_display"
     "                  FROM agent_models"
     "                  WHERE agent_name=?1 AND purpose='chat' ORDER BY pos))),"
     "   'max_iterations', (SELECT max_iterations FROM agents WHERE name=?1),"
@@ -242,7 +245,9 @@ static char *render_text(SearchConfigCtx *ctx, const char *query,
         "                         ||COALESCE(' (effort '||reasoning_effort||')','')"
         "                         ||COALESCE(' (trim at '||trim_threshold||')','')"
         "                         ||COALESCE(' (prune to '||prune_target||')','')"
-        "                         ||COALESCE(' (cache '||cache_lifetime||'s)','') m"
+        "                         ||COALESCE(' (cache '||cache_lifetime||'s)','')"
+        "                         ||CASE WHEN reasoning_display='none'"
+        "                             THEN ' (reasoning not shown)' ELSE '' END m"
         "                       FROM agent_models"
         "                       WHERE agent_name=?1 AND purpose='chat'"
         "                       ORDER BY pos)),"

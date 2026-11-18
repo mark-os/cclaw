@@ -199,7 +199,7 @@ static void test_ingest_typed(void) {
     assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "call_2") == 0);
     sqlite3_finalize(stmt);
 
-    /* save_reasoning=0 discards the reasoning *text*, not the replay blob:
+    /* reasoning_display 'none' discards the reasoning *text*, not the replay blob:
      * the provider requires its artifact back either way, so the entry still
      * lands — with NULL content and a tagged reasoning_meta. */
     int64_t turn2 = db_next_iteration_id(db, sid);

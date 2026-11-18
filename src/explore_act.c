@@ -504,7 +504,8 @@ static int act_models_set(Act *a) {
         return refuse(a, 400, "The purpose must be chat, image, audio or utility.");
     if (!list || qi(a, "SELECT json_type(?1) = 'array'", list, NULL, NULL) != 1)
         return refuse(a, 400, "models must be a list of {model_id, reasoning_effort,"
-                              " trim_threshold, prune_target, cache_lifetime} in order.");
+                              " trim_threshold, prune_target, cache_lifetime,"
+                              " reasoning_display} in order.");
     /* Media lists (image, audio) take only models with that capability and
      * no effort; chat and utility take any model, with an effort level. */
     int is_chat = strcmp(purpose, "chat") == 0;
@@ -516,10 +517,11 @@ static int act_models_set(Act *a) {
               " OR json_type(value, '$.model_id') IS NOT 'text'"
               " OR EXISTS (SELECT 1 FROM json_each(value) k WHERE k.key NOT IN"
               "            ('model_id', 'reasoning_effort', 'trim_threshold', 'prune_target',"
-              "             'cache_lifetime'))",
+              "             'cache_lifetime', 'reasoning_display'))",
               list, NULL, NULL) == 1)
         return refuse(a, 400, "Each entry needs a model_id, and may have a reasoning_effort,"
-                              " a trim_threshold, a prune_target and a cache_lifetime.");
+                              " a trim_threshold, a prune_target, a cache_lifetime and a"
+                              " reasoning_display.");
     /* The trim numbers: tokens, or null for the default. An entry that does
      * not name one keeps what that model's row has now, so a list saved by a
      * page that does not show them does not reset them. */
@@ -533,10 +535,20 @@ static int act_models_set(Act *a) {
               "   AND (k.type <> 'integer' OR k.value < 1)", list, NULL, NULL) == 1)
         return refuse(a, 400, "cache_lifetime is a number of seconds (a whole number above 0),"
                               " or empty for the default.");
+    /* The reasoning display: like the trim numbers, left out keeps what the
+     * row has, null goes back to the default. */
+    if (qi(a, "SELECT 1 FROM json_each(?1) j, json_each(j.value) k"
+              " WHERE k.key = 'reasoning_display' AND k.type <> 'null'"
+              "   AND (k.type <> 'text' OR k.atom NOT IN ('summary', 'none'))",
+           list, NULL, NULL) == 1)
+        return refuse(a, 400, "reasoning_display is summary (keep a readable summary of the"
+                              " model's reasoning) or none, or empty for the default (summary).");
     if (!is_chat && qi(a, "SELECT 1 FROM json_each(?1) j, json_each(j.value) k"
-                          " WHERE k.key IN ('trim_threshold', 'prune_target', 'cache_lifetime')"
+                          " WHERE k.key IN ('trim_threshold', 'prune_target', 'cache_lifetime',"
+                          "                 'reasoning_display')"
                           "   AND k.type <> 'null'", list, NULL, NULL) == 1)
-        return refuse(a, 400, "Trim numbers and the cache lifetime apply to the chat list only.");
+        return refuse(a, 400, "Trim numbers, the cache lifetime and the reasoning display apply to"
+                              " the chat list only.");
     char *dup = qs(a, "SELECT value ->> 'model_id' FROM json_each(?1) GROUP BY value ->> 'model_id'"
                       " HAVING count(*) > 1", list, NULL, NULL);
     if (dup) return refuse(a, 400, "%s is in the list twice. Keep one.", dup);
@@ -571,14 +583,18 @@ static int act_models_set(Act *a) {
                  " 'prune_target', CASE WHEN json_type(j.value, '$.prune_target') IS NULL"
                  "   THEN c.prune_target ELSE j.value ->> 'prune_target' END,"
                  " 'cache_lifetime', CASE WHEN json_type(j.value, '$.cache_lifetime') IS NULL"
-                 "   THEN c.cache_lifetime ELSE j.value ->> 'cache_lifetime' END) ORDER BY j.key)"
+                 "   THEN c.cache_lifetime ELSE j.value ->> 'cache_lifetime' END,"
+                 " 'reasoning_display', COALESCE(CASE"
+                 "   WHEN json_type(j.value, '$.reasoning_display') IS NULL THEN c.reasoning_display"
+                 "   ELSE j.value ->> 'reasoning_display' END, 'summary')) ORDER BY j.key)"
                  " FROM json_each(?1) j LEFT JOIN agent_models c ON c.agent_name=?2"
                  "  AND c.purpose=?3 AND c.model_id = j.value ->> 'model_id'",
               list, agent, purpose);
     if (!list) { tx_end(a, 0); return refuse(a, 500, "The list could not be saved."); }
     char *cur = qs(a, "SELECT json_group_array(json_object('model_id', model_id, 'reasoning_effort',"
                       " reasoning_effort, 'trim_threshold', trim_threshold, 'prune_target',"
-                      " prune_target, 'cache_lifetime', cache_lifetime))"
+                      " prune_target, 'cache_lifetime', cache_lifetime,"
+                      " 'reasoning_display', reasoning_display))"
                       " FROM (SELECT * FROM agent_models WHERE agent_name=?1"
                       " AND purpose=?2 ORDER BY pos)", agent, purpose, NULL);
     char *want = list;
@@ -591,9 +607,10 @@ static int act_models_set(Act *a) {
     if (ok) {
         sqlite3_stmt *st = prep(a,
             "INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort,"
-            " trim_threshold, prune_target, cache_lifetime)"
+            " trim_threshold, prune_target, cache_lifetime, reasoning_display)"
             " SELECT ?1, ?2, value ->> 'model_id', key, value ->> 'reasoning_effort',"
-            " value ->> 'trim_threshold', value ->> 'prune_target', value ->> 'cache_lifetime'"
+            " value ->> 'trim_threshold', value ->> 'prune_target', value ->> 'cache_lifetime',"
+            " value ->> 'reasoning_display'"
             " FROM json_each(?3)", agent, purpose, list, NULL);
         ok = st && sqlite3_step(st) == SQLITE_DONE;
         char err[256] = "";

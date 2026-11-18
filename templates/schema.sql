@@ -114,6 +114,14 @@ CREATE TABLE IF NOT EXISTS agent_models (
   -- clearing it afterwards. For other providers it is the documented figure,
   -- entered by the operator.
   cache_lifetime INTEGER CHECK (cache_lifetime IS NULL OR cache_lifetime > 0),
+  -- Whether the model is asked for a readable summary of its reasoning, kept
+  -- as the text of the reasoning entry (summary), or not (none). Mapped per
+  -- wire format in llm_payload.c (Anthropic thinking.display, Gemini
+  -- includeThoughts); an OpenAI-compatible provider is asked nothing either
+  -- way and returns what it returns, which none leaves unstored. The replay
+  -- blob is captured regardless (db_response.c).
+  reasoning_display TEXT NOT NULL DEFAULT 'summary'
+    CHECK (reasoning_display IN ('summary','none')),
   PRIMARY KEY (agent_name, purpose, pos)
 );
 -- Every write path goes through these, so the rule cannot be skipped by a
@@ -510,8 +518,9 @@ CREATE TABLE IF NOT EXISTS entries (
   -- Gemini thoughtSignature round-trips on the OpenAI-compat path),
   -- 'reasoning_content' (DeepSeek-style bare string), or 'gemini_parts'
   -- ([{fn,sig}] — native thoughtSignature, per functionCall). Replay always
-  -- reads $.blob, never entries.content: save_reasoning governs the display
-  -- text only, while the wire requirement holds either way.
+  -- reads $.blob, never entries.content: the routing entry's
+  -- reasoning_display governs the display text only, while the wire
+  -- requirement holds either way.
   reasoning_meta TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );

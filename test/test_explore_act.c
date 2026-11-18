@@ -415,6 +415,26 @@ static void test_models(void) {
                "300"));
     act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
              "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\"}]}");
+    /* The reasoning display: summary by default, set, kept when left out,
+     * back to summary on null; two values; the chat list only. */
+    assert(qeq("SELECT reasoning_display FROM agent_models WHERE agent_name='Beta' AND model_id='mock/a'",
+               "summary"));
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/a\",\"reasoning_display\":\"none\"},{\"model_id\":\"mock/c\"}]}");
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\"}]}");
+    assert(qeq("SELECT reasoning_display FROM agent_models WHERE agent_name='Beta' AND model_id='mock/a'",
+               "none"));
+    assert(qeq("SELECT reasoning_display FROM agent_models WHERE agent_name='Beta' AND model_id='mock/c'",
+               "summary"));
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\",\"reasoning_display\":null}]}");
+    assert(qeq("SELECT reasoning_display FROM agent_models WHERE agent_name='Beta' AND model_id='mock/a'",
+               "summary"));
+    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+                 "{\"model_id\":\"mock/a\",\"reasoning_display\":\"full\"}]}"), "summary");
+    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"utility\",\"models\":["
+                 "{\"model_id\":\"mock/a\",\"reasoning_display\":\"none\"}]}"), "chat list only");
     printf("PASS: test_models\n");
 }
 

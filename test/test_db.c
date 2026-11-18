@@ -261,6 +261,7 @@ static void unshape_v68(sqlite3 *db) {
                               "DROP TRIGGER agent_models_lifetime_bi;"
                               "DROP TRIGGER agent_models_lifetime_bu;"
                               "DROP TRIGGER agent_models_lifetime_ai;"
+                              "ALTER TABLE agent_models DROP COLUMN reasoning_display;"
                               "ALTER TABLE agent_models DROP COLUMN cache_lifetime;"
                               "DROP INDEX idx_sessions_cache_armed;"
                               "ALTER TABLE sessions DROP COLUMN cache_armed_at;"
@@ -2138,6 +2139,13 @@ static void test_schema_patch_v68(void) {
                         NULL, NULL, NULL) == SQLITE_OK);
     assert(sqlite3_exec(db, "UPDATE agent_models SET cache_lifetime=600 WHERE model_id='p/m';",
                         NULL, NULL, NULL) == SQLITE_OK);
+    /* Every existing entry asks for the summary; the column refuses others. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_models"
+        " WHERE reasoning_display IS NOT 'summary'", 0, -1) == 0);
+    assert(sqlite3_exec(db, "UPDATE agent_models SET reasoning_display='full';",
+                        NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE agent_models SET reasoning_display='none'"
+                        " WHERE model_id='p/m';", NULL, NULL, NULL) == SQLITE_OK);
 
     sqlite3 *fresh = db_open(fresh_path);
     assert(fresh != NULL && db_ensure_schema(fresh) == 0);
@@ -2210,6 +2218,39 @@ static void test_agent_models_cache_lifetime(void) {
     db_close(db);
     test_db_clean(path);
     printf("  PASS test_agent_models_cache_lifetime\n");
+}
+
+/* reasoning_display: 'summary' unless said otherwise, 'none' allowed,
+ * nothing else — NULL included — and the change log records it. */
+static void test_agent_models_reasoning_display(void) {
+    const char *path = "/tmp/test_cclaw_db_display.sqlite";
+    test_db_clean(path);
+    sqlite3 *db = test_db_open(path);
+    assert(db != NULL);
+    assert(sqlite3_exec(db,
+        "INSERT INTO agents(name) VALUES('A');"
+        "INSERT INTO providers(name, base_url) VALUES ('p','http://p');"
+        "INSERT INTO models(id, provider_name, model) VALUES ('m@p','p','m');",
+        NULL, NULL, NULL) == SQLITE_OK);
+#define RD(sql) sqlite3_exec(db, sql, NULL, NULL, NULL)
+    assert(RD("INSERT INTO agent_models(agent_name, model_id, pos) VALUES('A','m@p',0);")
+           == SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT reasoning_display='summary' FROM agent_models"
+                             " WHERE pos=0", 0, -1) == 1);
+    assert(RD("INSERT INTO agent_models(agent_name, model_id, pos, reasoning_display)"
+              " VALUES('A','m@p',1,'none');") == SQLITE_OK);
+    assert(RD("INSERT INTO agent_models(agent_name, model_id, pos, reasoning_display)"
+              " VALUES('A','m@p',2,'full');") != SQLITE_OK);
+    assert(RD("INSERT INTO agent_models(agent_name, model_id, pos, reasoning_display)"
+              " VALUES('A','m@p',2,NULL);") != SQLITE_OK);
+    assert(RD("UPDATE agent_models SET reasoning_display='Summary' WHERE pos=0;") != SQLITE_OK);
+    assert(RD("UPDATE agent_models SET reasoning_display='none' WHERE pos=0;") == SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM change_log WHERE table_name='agent_models'"
+                             " AND new_values ->> 'reasoning_display' = 'none'", 0, -1) >= 1);
+#undef RD
+    db_close(db);
+    test_db_clean(path);
+    printf("  PASS test_agent_models_reasoning_display\n");
 }
 
 static void test_agent_models_capability_gate(void) {
@@ -2303,6 +2344,7 @@ int main(void) {
     test_schema_patch_v68();
     test_agent_models_capability_gate();
     test_agent_models_cache_lifetime();
+    test_agent_models_reasoning_display();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");
     return 0;

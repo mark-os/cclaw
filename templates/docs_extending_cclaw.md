@@ -108,10 +108,14 @@ clears `hooks.disabled`). The reply:
 A `call_id` is looked up in the newest turn unless `turn_id` names another
 (providers reuse call ids across turns). `args` lists the newest turn's
 iterations (`iteration_id`, `entry_id` = its first entry, `message_id` = its
-assistant message, `text`, `calls`) with each call's `call_id`, `entry_id`,
+assistant message, `text`, `calls`, and `reasoning` — the model's summary of
+its reasoning for that response, present only when one was kept: see
+`reasoning_display` on the routing entry; never the raw thinking or its
+signature) with each call's `call_id`, `entry_id`,
 `tool`, `args`, `protected` flag and verbatim `result.text`; `user_messages`
 and `notes` (a summary among them has `"summary": true`) with their
-`entry_id`; the answer as `final` (null while the turn is still running); and
+`entry_id`; the answer as `final` (null while the turn is still running; it
+carries `reasoning` the same way); and
 every entry its `tokens`. By default that is all: the newest turn. To read the
 conversation before it, the entry declares
 `"input": {"history": 5}` (the last five turns) or `{"history": "all"}`; add

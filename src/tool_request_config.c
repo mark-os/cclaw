@@ -37,7 +37,8 @@ static const char *PARAMS_JSON =
     "secrets:[SECRET_NAME],"
     "remove:{tools:[],hosts:[],read_paths:[],write_paths:[],secrets:[]}}, "
     "agent:{models?:[canonical model id or {id,effort?:off|minimal|low|medium|high,"
-    "trim_threshold?:tokens,prune_target?:tokens,cache_lifetime?:seconds}, "
+    "trim_threshold?:tokens,prune_target?:tokens,cache_lifetime?:seconds,"
+    "reasoning_display?:summary|none}, "
     "in routing order],max_iterations?,shell_timeout?}, "
     "routes:['channel:chat_id',...], "
     "config:{key:value-string,...}, provider:{provider,base_url?,api_key_env?}, "
@@ -541,11 +542,12 @@ static char *validate_agent(sqlite3 *db, const char *changes,
         "SELECT k.key FROM json_each(?1,'$.agent.models') e, json_each(e.value) k"
         " WHERE e.type='object'"
         "   AND k.key NOT IN ('id','effort','trim_threshold','prune_target',"
-        "                     'cache_lifetime') LIMIT 1",
+        "                     'cache_lifetime','reasoning_display') LIMIT 1",
         changes);
     if (bad) {
         char *m = errf("error: unknown agent.models key '%s' (use id, effort, "
-                       "trim_threshold, prune_target, cache_lifetime)", bad);
+                       "trim_threshold, prune_target, cache_lifetime, "
+                       "reasoning_display)", bad);
         free(bad);
         return m;
     }
@@ -587,6 +589,13 @@ static char *validate_agent(sqlite3 *db, const char *changes,
         free(bad);
         return m;
     }
+    if (q1_true(db, "SELECT 1 FROM json_each(?1,'$.agent.models') e, json_each(e.value) k"
+                    " WHERE e.type='object' AND k.key='reasoning_display'"
+                    "   AND (k.type <> 'text' OR k.atom NOT IN ('summary','none'))",
+                changes))
+        return strdup("error: agent.models reasoning_display is 'summary' (keep "
+                      "a readable summary of the model's reasoning, the default) "
+                      "or 'none'");
     bad = q1_text(db,
         "SELECT json_extract(e.value,'$.effort')"
         " FROM json_each(?1,'$.agent.models') e"
@@ -1506,7 +1515,9 @@ static const char *RECEIPT_SQL =
     "                   ||COALESCE(' (effort '||reasoning_effort||')','')"
     "                   ||COALESCE(' (trim at '||trim_threshold||')','')"
     "                   ||COALESCE(' (prune to '||prune_target||')','')"
-    "                   ||COALESCE(' (cache '||cache_lifetime||'s)','') m"
+    "                   ||COALESCE(' (cache '||cache_lifetime||'s)','')"
+    "                   ||CASE WHEN reasoning_display='none'"
+    "                       THEN ' (reasoning not shown)' ELSE '' END m"
     "                   FROM agent_models"
     "                   WHERE agent_name=?2 AND purpose='chat'"
     "                   ORDER BY pos)),'(none)')"
@@ -1699,7 +1710,7 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                 if (sqlite3_prepare_v2(db,
                         "INSERT INTO agent_models(agent_name, model_id, pos,"
                         " reasoning_effort, trim_threshold, prune_target,"
-                        " cache_lifetime)"
+                        " cache_lifetime, reasoning_display)"
                         " SELECT ?1, " AM_ENTRY_ID("") ", key,"
                         " CASE WHEN type='object'"
                         " THEN json_extract(value,'$.effort') END,"
@@ -1708,7 +1719,12 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                         " CASE WHEN type='object'"
                         " THEN json_extract(value,'$.prune_target') END,"
                         " CASE WHEN type='object'"
-                        " THEN json_extract(value,'$.cache_lifetime') END"
+                        " THEN json_extract(value,'$.cache_lifetime') END,"
+                        /* Absent = the column's default: the list is a
+                         * whole replacement, like every other field. */
+                        " COALESCE(CASE WHEN type='object'"
+                        " THEN json_extract(value,'$.reasoning_display') END,"
+                        " 'summary')"
                         " FROM json_each(?2,'$.changes.agent.models')",
                         -1, &ms, NULL) == SQLITE_OK) {
                     sqlite3_bind_text(ms, 1, agent, -1, SQLITE_STATIC);
@@ -1902,7 +1918,9 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
         "first entry to set when your session is trimmed and how far (omit for "
         "50% of the window / 50% of the threshold) and cache_lifetime in seconds "
         "(how long the provider keeps the prompt cache; on an Anthropic model "
-        "300 or 3600, default 3600) — max_iterations/shell_timeout), "
+        "300 or 3600, default 3600) and reasoning_display (summary keeps a "
+        "readable summary of the model's reasoning, the default; none asks for "
+        "none) — max_iterations/shell_timeout), "
         "channel send routes (routes: ['channel:chat_id']), config values "
         "(registered keys — discover with search_config), and/or an LLM "
         "provider definition (openrouter, gemini, anthropic, openai, deepseek, groq, "

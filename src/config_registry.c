@@ -51,9 +51,6 @@ static const ConfigDef s_defs[] = {
     { "llm_max_calls_per_tool", "25",
       "Max LLM() completions one JS tool call / cron fire may make"
       " (0 = unlimited; the global ceilings still apply behind it)" },
-    { "save_reasoning",     "0",
-      "Store model reasoning text as entries (0 = discard). Display only:"
-      " the provider-required replay blob is captured either way." },
     { "daily_cost_limit",   "5.00",
       "Max LLM spend in USD over a rolling 24h window (0 = unlimited;"
       " unpriced models cost 0 — token_rate_limit is the universal brake)" },

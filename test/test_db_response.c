@@ -223,7 +223,7 @@ static const char *meta_str(sqlite3 *db, const char *path, sqlite3_stmt **out) {
 }
 
 /* Capture: OpenRouter reasoning_details is stored verbatim and tagged with the
- * producing provider+model — even with save_reasoning off, because the replay
+ * producing provider+model — even with reasoning_display 'none', because the replay
  * requirement is the provider's, not the operator's. */
 static void test_capture_reasoning_details(void) {
     printf("  test_capture_reasoning_details...");
@@ -249,7 +249,7 @@ static void test_capture_reasoning_details(void) {
     sqlite3_finalize(s);
     assert(strcmp(meta_str(db, "$.blob[0].signature", &s), "SIG123") == 0);
     sqlite3_finalize(s);
-    /* save_reasoning=0: the text is discarded, the blob is not. */
+    /* Text not kept ('none'): the text is discarded, the blob is not. */
     assert(count_rows(db,
         "SELECT COUNT(*) FROM entries WHERE type='reasoning' AND content IS NULL") == 1);
 
@@ -264,6 +264,72 @@ static void test_capture_reasoning_details(void) {
     sqlite3_finalize(s);
     assert(strcmp(meta_str(db, "$.blob", &s), "deep thought") == 0);
     sqlite3_finalize(s);
+
+    db_close(db);
+    printf(" OK\n");
+}
+
+/* The summary a route asks for (reasoning_display) is the reasoning entry's
+ * text, in every format, and nowhere else: Gemini's thought parts leave the
+ * answer, Anthropic's summarized thinking is the text while the content array
+ * stays the blob. Not kept, the entry still carries the blob. Either way the
+ * entry's size is its replay — the provider's reasoning count — never the
+ * text's length. */
+static void test_reasoning_summary_stored(void) {
+    printf("  test_reasoning_summary_stored...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    const char *gem =
+        "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":["
+        "{\"text\":\"**Plan**\\nCount the primes.\",\"thought\":true},"
+        "{\"text\":\"Calling now.\"},"
+        "{\"functionCall\":{\"name\":\"shell_exec\",\"args\":{}},"
+        " \"thoughtSignature\":\"GSIG\"}]},\"finishReason\":\"STOP\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5,"
+        " \"thoughtsTokenCount\":40,\"totalTokenCount\":55}}";
+    assert(db_ingest_response(db, sid, 1, "g@gemini", ENDPOINT_GEMINI,
+                              gem, NULL, 1, NULL) == LLM_RESP_OK);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE iteration_id=1"
+                          " AND type='reasoning' AND content='**Plan**' || char(10) ||"
+                          " 'Count the primes.'") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE iteration_id=1"
+                          " AND type='assistant_message' AND content='Calling now.'") == 1);
+    sqlite3_stmt *s;
+    assert(strcmp(meta_str(db, "$.blob[0].sig", &s), "GSIG") == 0);
+    sqlite3_finalize(s);
+    assert(count_rows(db, "SELECT tokens FROM entries WHERE iteration_id=1"
+                          " AND type='reasoning'") == 40);
+    assert(count_rows(db, "SELECT token_estimate FROM entries WHERE iteration_id=1"
+                          " AND type='reasoning'") == TOKEN_ESTIMATE(0));
+
+    const char *anth =
+        "{\"type\":\"message\",\"content\":["
+        "{\"type\":\"thinking\",\"thinking\":\"I list the primes: 17.\",\"signature\":\"ASIG\"},"
+        "{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"shell_exec\",\"input\":{}}],"
+        "\"stop_reason\":\"tool_use\",\"usage\":{\"input_tokens\":5,\"output_tokens\":30,"
+        " \"output_tokens_details\":{\"thinking_tokens\":20}}}";
+    assert(db_ingest_response(db, sid, 2, "c@anthropic", ENDPOINT_ANTHROPIC,
+                              anth, NULL, 1, NULL) == LLM_RESP_OK);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE iteration_id=2"
+                          " AND type='reasoning' AND content='I list the primes: 17.'") == 1);
+    assert(strcmp(meta_str(db, "$.blob[0].signature", &s), "ASIG") == 0);
+    sqlite3_finalize(s);
+    assert(count_rows(db, "SELECT token_estimate FROM entries WHERE iteration_id=2"
+                          " AND type='reasoning'") == TOKEN_ESTIMATE(0));
+
+    /* Not kept: the same responses leave no text, and the blob stays. */
+    assert(db_ingest_response(db, sid, 3, "c@anthropic", ENDPOINT_ANTHROPIC,
+                              anth, NULL, 0, NULL) == LLM_RESP_OK);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE iteration_id=3"
+                          " AND type='reasoning' AND content IS NULL"
+                          " AND json_extract(reasoning_meta,'$.blob[0].signature')='ASIG'") == 1);
+    assert(db_ingest_response(db, sid, 4, "g@gemini", ENDPOINT_GEMINI,
+                              gem, NULL, 0, NULL) == LLM_RESP_OK);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE iteration_id=4"
+                          " AND type='reasoning' AND content IS NULL") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE iteration_id=4"
+                          " AND type='assistant_message' AND content='Calling now.'") == 1);
 
     db_close(db);
     printf(" OK\n");
@@ -561,6 +627,7 @@ int main(void) {
     test_archive_retention();
     test_capture_reasoning_details();
     test_capture_gemini_signature();
+    test_reasoning_summary_stored();
     test_usage_openrouter();
     test_usage_bare_block();
     test_usage_deepseek_spelling();

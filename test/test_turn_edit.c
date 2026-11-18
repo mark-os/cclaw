@@ -1379,6 +1379,71 @@ static void add_call_turn(sqlite3 *db, int64_t sid, const char *ask, const char 
     add_typed(db, sid, db_next_iteration_id(db, sid), "assistant_message", answer, NULL, NULL);
 }
 
+/* A response that kept a reasoning summary (agent_models.reasoning_display)
+ * sends it as its iteration's `reasoning` — the answer's too — and never the
+ * replay blob or signature. It is priced as written: an earlier turn whose
+ * summary does not fit is left out whole, and the summary of a response that
+ * stopped on an error, which is not sent, costs nothing. */
+static void test_input_reasoning(void) {
+    sqlite3 *db = open_seeded();
+    #define IN(path, want) expect_at(db, in, path, want)
+    T t = seed_turn(db, "reasoning", 0);
+    run(db, "UPDATE entries SET content='I check /a first.' WHERE id=%lld", (long long)t.rs1);
+    run(db, "UPDATE entries SET content='All three agree.' WHERE id=%lld", (long long)t.rs3);
+    char *in = input_turn(db, t.sid);
+    assert(in);
+    IN("$.iterations[0].reasoning", "I check /a first.");
+    expect_json(db, in, "json_type(?1,'$.iterations[1].reasoning')", NULL);   /* none kept */
+    IN("$.final.reasoning", "All three agree.");
+    IN("$.final.text", "done");
+    expect_json(db, in, "instr(?1,'why1') + instr(?1,'why3') + instr(?1,'reasoning_meta')", "0");
+    /* The tokens are the entries' as before: the summary's text changes no count. */
+    expect_id_at(db, in, "$.tokens.turn", db_scalar_i64(db,
+        "SELECT SUM(token_estimate) FROM entries WHERE session_id=? AND turn_id=2", t.sid, -1));
+    free(in);
+
+    /* Earlier turns: one whose answer carries a long summary, then one whose
+     * response stopped on an error with a longer one, then the newest. */
+    int64_t sid = session_create(db, "reasoning-history", "default", -1, 0);
+    char *big = repeat('s', 3000), *bigger = repeat('e', 6000);
+    add_user(db, sid, "q1");
+    int64_t it = db_next_iteration_id(db, sid);
+    add_typed(db, sid, it, "reasoning", big, NULL, NULL);
+    add_typed(db, sid, it, "assistant_message", "answer 1", NULL, NULL);
+    add_user(db, sid, "q2");
+    it = db_next_iteration_id(db, sid);
+    add_typed(db, sid, it, "reasoning", bigger, NULL, NULL);
+    int64_t err = add_typed(db, sid, it, "assistant_message", "partial", NULL, NULL);
+    run(db, "UPDATE entries SET stop_reason=4 WHERE id=%lld", (long long)err);
+    add_plain_turn(db, sid, "q3", "answer 3");
+
+    in = input_as(db, sid, TURN_EDIT_HISTORY_ALL, 1, TURN_EDIT_INPUT_MAX_BYTES, NULL);
+    assert(in);
+    IN("$.history[0].final.reasoning", big);
+    IN("$.history_omitted", "0");
+    expect_json(db, in, "instr(?1,'eeee')", "0");     /* the errored response's: not sent */
+    int whole = (int)strlen(in);
+    free(in);
+    /* Its size, plus the room kept for the splice: everything, though the
+     * unsent summary alone would not have fitted. Less than the sent one's
+     * size: the oldest turn, summary and all, goes. */
+    in = input_as(db, sid, TURN_EDIT_HISTORY_ALL, 1, whole + 64, NULL);
+    assert(in);
+    IN("$.history_omitted", "0");
+    expect_json(db, in, "json_array_length(?1,'$.history')", "2");
+    free(in);
+    in = input_as(db, sid, TURN_EDIT_HISTORY_ALL, 1, whole - 100, NULL);
+    assert(in);
+    IN("$.history_omitted", "1");
+    expect_json(db, in, "instr(?1,'ssss')", "0");
+    expect_json(db, in, "json_array_length(?1,'$.history')", "1");
+    free(in);
+    free(big); free(bigger);
+    #undef IN
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_input_reasoning\n");
+}
+
 /* What a hook asks to be sent (hooks.input): how many earlier turns, with or
  * without their results' text, within max_bytes — the finished turn always
  * whole, the oldest history left out first, and the input saying what it was
@@ -2174,6 +2239,7 @@ int main(void) {
     test_record();
     test_history();
     test_input_options();
+    test_input_reasoning();
     test_turn_edges();
     test_past_turn();
     test_whole_turns();

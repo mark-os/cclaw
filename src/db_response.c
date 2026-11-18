@@ -67,16 +67,22 @@ static const char SCALAR_OPENAI[] =
     " json_extract(?1,'$.usage.prompt_tokens_details.cache_write_tokens'),"
     " json_extract(?1,'$.usage.completion_tokens_details.reasoning_tokens')";
 
+/* A text part marked thought:true is a thought summary (asked for with
+ * includeThoughts, llm_payload.c): it is the reasoning, not the answer. */
 static const char SCALAR_GEMINI[] =
     "SELECT"
     " (SELECT group_concat(json_extract(value,'$.text'), char(10))"
     "    FROM json_each(?1,'$.candidates[0].content.parts')"
-    "    WHERE json_extract(value,'$.text') IS NOT NULL),"
+    "    WHERE json_extract(value,'$.text') IS NOT NULL"
+    "      AND json_extract(value,'$.thought') IS NOT 1),"
     " CASE json_extract(?1,'$.candidates[0].finishReason')"
     "   WHEN 'STOP' THEN 'stop' WHEN 'MAX_TOKENS' THEN 'length'"
     "   WHEN 'SAFETY' THEN 'content_filter' WHEN 'RECITATION' THEN 'content_filter'"
     "   ELSE json_extract(?1,'$.candidates[0].finishReason') END,"
-    " NULL,"
+    " (SELECT group_concat(json_extract(value,'$.text'), char(10))"
+    "    FROM json_each(?1,'$.candidates[0].content.parts')"
+    "    WHERE json_extract(value,'$.thought') = 1"
+    "      AND json_extract(value,'$.text') != ''),"
     " json_extract(?1,'$.usageMetadata.promptTokenCount'),"
     /* thoughtsTokenCount is a sibling of candidatesTokenCount, not a part of
      * it — summing them is what makes Gemini's completion count comparable to
@@ -116,8 +122,8 @@ static const char SCALAR_ANTHROPIC[] =
     "   WHEN 'model_context_window_exceeded' THEN 'length'"
     "   WHEN 'tool_use' THEN 'tool_calls' WHEN 'refusal' THEN 'content_filter'"
     "   ELSE json_extract(?1,'$.stop_reason') END,"
-    /* Display text only — empty unless the request asked for summaries
-     * (thinking.display); replay reads column 8, never this. */
+    /* Display text only — the summary thinking.display "summarized" asks
+     * for, empty under "omitted"; replay reads column 8, never this. */
     " (SELECT group_concat(json_extract(value,'$.thinking'), char(10))"
     "    FROM json_each(?1,'$.content')"
     "    WHERE json_extract(value,'$.type') = 'thinking'"
@@ -171,8 +177,8 @@ static const char TC_ANTHROPIC[] =
  * who produced it (provider+model — a model switch strips the replay, pi's
  * rule) and the verbatim wire artifact under $.blob. The blob is always where
  * replay reads from, never entries.content: the content half is display-only
- * and the save_reasoning config discards it by default, while the wire
- * requirement holds regardless of what an operator wants to *see*.
+ * and the routing entry's reasoning_display 'none' leaves it out, while the
+ * wire requirement holds regardless of what an operator wants to *see*.
  *   gemini_parts      blob = [{fn, sig}, …]  (native thoughtSignature)
  *   reasoning_details blob = the provider's array, byte-for-byte
  *   reasoning_content blob = the bare string (DeepSeek-style)
@@ -663,7 +669,7 @@ done:
 LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iteration_id,
                                  const char *model, EndpointType ep,
                                  const char *body, const char *request_body,
-                                 int save_reasoning, TypedIngestResult *out) {
+                                 int keep_reasoning_text, TypedIngestResult *out) {
     if (out) memset(out, 0, sizeof(*out));
     if (!db || !body) return LLM_RESP_MALFORMED;
 
@@ -778,22 +784,33 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
     int part = 0;
 
     /* Reasoning entry (scalar pointers still valid — s untouched). Two things
-     * live here: the display text (kept only when save_reasoning, as before)
-     * and the replay blob, which is captured unconditionally — the provider
-     * requires it back verbatim on the next request, so dropping it because
-     * an operator turned off reasoning *display* would break the wire (a
-     * Gemini 400 / a silently invalidated prompt-cache prefix). The entry is
-     * created whenever either half has something to say. */
+     * live here: the display text — the provider's summary, or on an
+     * OpenAI-compatible provider whatever reasoning text it returned — kept
+     * unless the route's reasoning_display is 'none', and the replay blob,
+     * which is captured unconditionally — the provider requires it back
+     * verbatim on the next request, so dropping it because an operator
+     * turned off reasoning *display* would break the wire (a Gemini 400 / a
+     * silently invalidated prompt-cache prefix). The entry is created
+     * whenever either half has something to say.
+     *
+     * The text is for reading, not a measure of the entry: what a reasoning
+     * entry costs is its replay, which the provider's reasoning count
+     * measures (usage_attribute). So its estimate stays the one an entry
+     * without text has, whatever the summary's length — keeping the text
+     * changes no accounting. */
     const char *replay_blob = (sqlite3_column_type(s, 8) != SQLITE_NULL)
                                   ? (const char *)sqlite3_column_text(s, 8) : NULL;
     const char *replay_text = (reasoning && reasoning[0]) ? reasoning : NULL;
     if (replay_blob || replay_text) {
         int64_t r_id = entry_append_typed(db, session_id, iteration_id, "reasoning", part++,
-                                          save_reasoning ? replay_text : NULL,
+                                          keep_reasoning_text ? replay_text : NULL,
                                           NULL, NULL, 0,
                                           STOP_REASON_NONE, model, 0, 0, 0);
-        if (r_id > 0)
+        if (r_id > 0) {
             reasoning_meta_set(db, r_id, ep, model, replay_blob, replay_text);
+            attr_exec(db, "UPDATE entries SET token_estimate=?2 WHERE id=?1;",
+                      r_id, TOKEN_ESTIMATE(0), 0);
+        }
     }
 
     int64_t asst_id = entry_append_typed(db, session_id, iteration_id, "assistant_message", part++,

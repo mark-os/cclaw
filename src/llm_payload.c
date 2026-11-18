@@ -427,8 +427,22 @@ static const char SQL_GEMINI_TOOLS[] =
     "     AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2))))"
     "));";
 
+/* :reasoning_display is the routing entry's agent_models.reasoning_display
+ * (unbound reads as the default, 'summary'). On Gemini, 'summary' asks for
+ * thought summaries (thinkingConfig.includeThoughts): they come back as text
+ * parts marked thought:true, which ingest keeps as the reasoning entry's text
+ * and never replays (db_response.c). The signature a replayed functionCall
+ * needs is unaffected: it rides on the call part either way (measured
+ * 2026-11-18). A model that does not think accepts the field and returns no
+ * thoughts. It is its own patch, before the effort fragment, so an effort
+ * level's thinkingConfig merges beside it and request_extra still has the
+ * last word. */
+#define SQL_GEMINI_DISPLAY \
+    "CASE WHEN :reasoning_display IS 'none' THEN '{}'" \
+    " ELSE '{\"generationConfig\":{\"thinkingConfig\":{\"includeThoughts\":true}}}' END"
+
 static const char SQL_GEMINI_FULL[] =
-    "SELECT json_patch(json_patch(json_patch('{}', json_object("
+    "SELECT json_patch(json_patch(json_patch(json_patch('{}', json_object("
     /* ?5 = this session's prompt suffix — see SQL_OPENAI_FULL. */
     "  'systemInstruction', CASE WHEN COALESCE(?1,'') ||"
     "      COALESCE(char(10) || char(10) || ?5, '') != ''"
@@ -444,7 +458,7 @@ static const char SQL_GEMINI_FULL[] =
     "    THEN json_object('maxOutputTokens',?4) ELSE NULL END"
     /* ?7 = the reasoning-effort fragment — its own generationConfig subtree,
      * which RFC 7386 merges into the one above rather than replacing it. */
-    ")), json(?7)), " SQL_REQUEST_EXTRA("?6") ");";
+    ")), " SQL_GEMINI_DISPLAY "), json(?7)), " SQL_REQUEST_EXTRA("?6") ");";
 
 /* ── Anthropic Messages ────────────────────────────────────────────
  *
@@ -557,7 +571,17 @@ static const char SQL_ANTHROPIC_TOOLS[] =
  * can still edit the prefix, and losing one block's
  * reasoning beats losing the turn. Every drop is reported in the response's
  * input_transformations, archived in llm_responses. A model that predates
- * adaptive thinking needs request_extra {"thinking":null}. */
+ * adaptive thinking needs request_extra {"thinking":null}.
+ *
+ * thinking.display follows :reasoning_display (see SQL_GEMINI_DISPLAY):
+ * 'summary' (the default, also when unbound) asks for "summarized", a
+ * readable summary in each thinking block's text, which ingest keeps on the
+ * reasoning entry; 'none' asks for "omitted", the empty text current models
+ * return by default. Both are explicit because Opus/Sonnet 4.6 default to
+ * summarized. Display changes visibility only: the signature, the billing
+ * and the replay are the same, and a summarized block replays verbatim in
+ * the content array without a transformation (measured 2026-11-18, Haiku
+ * 5.5 and Sonnet 4.6, under drop_block). */
 static const char SQL_ANTHROPIC_FULL[] =
     "SELECT json_patch(json_patch(json_patch('{}', json_object("
     "  'model', ?1,"
@@ -570,8 +594,10 @@ static const char SQL_ANTHROPIC_FULL[] =
     "      'cache_control'," SQL_CACHE_MARK ")) END,"
     "  'messages', json(?3),"
     "  'tools', CASE WHEN json_array_length(?5) > 0 THEN json(?5) ELSE NULL END,"
-    "  'thinking', json('{\"type\":\"adaptive\",\"block_binding\":"
-    "                     {\"prefix_mismatch_behavior\":\"drop_block\"}}'),"
+    "  'thinking', json_object('type','adaptive',"
+    "    'display', CASE WHEN :reasoning_display IS 'none' THEN 'omitted'"
+    "                    ELSE 'summarized' END,"
+    "    'block_binding', json('{\"prefix_mismatch_behavior\":\"drop_block\"}')),"
     "  'cache_control'," SQL_CACHE_MARK
     ")), json(?8)), " SQL_REQUEST_EXTRA("?7") ");";
 
@@ -738,6 +764,17 @@ static char *json_intersect(sqlite3 *db, const char *a, const char *b) {
 static void bind_cache_lifetime(sqlite3_stmt *s, int lifetime) {
     int i = sqlite3_bind_parameter_index(s, ":cache_lifetime");
     if (i > 0 && lifetime > 0) sqlite3_bind_int(s, i, lifetime);
+}
+
+/* The routing entry's reasoning display, where the statement maps it;
+ * unbound, it reads NULL — the default, 'summary'. */
+static void bind_reasoning_display(sqlite3_stmt *s, const char *display) {
+    int i = sqlite3_bind_parameter_index(s, ":reasoning_display");
+    if (i > 0 && display) sqlite3_bind_text(s, i, display, -1, SQLITE_STATIC);
+}
+
+int llm_keep_reasoning_text(const ProviderConfig *prov) {
+    return !prov || !prov->reasoning_display || strcmp(prov->reasoning_display, "none") != 0;
 }
 
 /* One of the wire projections of _transcript. model (?1) is the requesting
@@ -954,6 +991,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         if (cfg->provider.name) sqlite3_bind_text(full, 6, cfg->provider.name, -1, SQLITE_TRANSIENT);
         else sqlite3_bind_null(full, 6);
         sqlite3_bind_text(full, 7, effort ? effort : "{}", -1, SQLITE_TRANSIENT);
+        bind_reasoning_display(full, cfg->provider.reasoning_display);
 
         free(contents); free(tools_json);
 
@@ -999,6 +1037,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         if (anthropic && cfg->provider.model_id)
             sqlite3_bind_text(full, 9, cfg->provider.model_id, -1, SQLITE_STATIC);
         bind_cache_lifetime(full, cfg->provider.cache_lifetime);
+        bind_reasoning_display(full, cfg->provider.reasoning_display);
 
         free(messages); free(tools_json);
 

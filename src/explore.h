@@ -12,6 +12,7 @@
  * SQL text are the schema's own, quoted. Values are bound parameters. */
 
 #include "sqlite3.h"
+#include <stdint.h>
 
 struct mg_connection;
 
@@ -38,13 +39,19 @@ int explore_row(sqlite3 *db, const ExploreQuery *q, char **out);
  * counts by gap since the session's previous request. days > 0 limits it to
  * requests of the last that many days; 0 = all history. */
 int explore_cache(sqlite3 *db, int days, char **out);
+/* One session's context and edits: its size (head + entries, in tokens, as
+ * the next request would carry it) against the governing routing entry's
+ * window, trim threshold and prune target — with what the entry itself sets,
+ * NULL where the default applies — and every edit record on any of its
+ * entries ($.turn_edits), newest first. 404 when there is no such session. */
+int explore_session(sqlite3 *db, int64_t session_id, char **out);
 
 /* 1 when table.column's value is never shown in any row (0 = shown, 2 =
  * hidden in some rows). Shared with the tests' secret walk. */
 int explore_hidden(const char *table, const char *column);
 
 /* Everything under /admin: the page (GET /admin), the read API (GET
- * /admin/api/{meta,rows,row,approval,cache}) and the actions (POST /admin/api/act,
+ * /admin/api/{meta,rows,row,approval,cache,session}) and the actions (POST /admin/api/act,
  * explore_act.h). db is the web server's handle; this takes web_db_lock()
  * itself, for the database work only. */
 int explore_handle(struct mg_connection *conn, sqlite3 *db);

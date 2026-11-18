@@ -1112,6 +1112,15 @@ static void test_agent_models_trim(void) {
         "\"prune_target\":5000}]}}}");
     assert(r && strstr(r, "prune_target must be below its trim_threshold"));
     free(r);
+    /* No threshold is half the window (100000): a target at it is refused in
+     * the explorer's words; one below it passes the check. */
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"prune_target\":50000}]}}}");
+    assert(r && strstr(r, "error: The prune target for openrouter/deepseek/deepseek-v4-flash"
+                          " (50000 tokens) must be below its trim threshold, which is empty"
+                          " and so half the model's window (50000 tokens). Lower the target,"
+                          " or set a threshold above it."));
+    free(r);
 
     r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
         "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"trim_threshold\":60000,"

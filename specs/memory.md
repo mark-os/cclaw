@@ -170,8 +170,8 @@ Not yet implemented:
 measure, and it is written down once per entry when it arrives
 (`entries.tokens`, by `usage_attribute` in `db_response.c`). Our character
 estimate (`entries.token_estimate`, chars/3 + 4) is the size of an entry no
-report has measured yet. Everything that sizes a context — the cut, the
-overflow probe, the compaction trigger, a hook's `tokens` — reads
+report has measured yet. Everything that sizes a context — the request cut,
+the trigger, C's trim, a hook's `tokens` — reads
 `COALESCE(tokens, token_estimate)` and adds; nothing is re-derived.
 
 The rule, checked against the Anthropic, Gemini-native and OpenAI-compatible
@@ -202,70 +202,129 @@ encrypted or not.
   reasoning found dropped is set to 0. A model switch strips another
   model's reasoning from every request, and sets it to 0.
 - **A difference is trusted** only when the two requests can be compared —
-  same model, no compaction and no turn edit between them — and when what
-  is left for the appended entries is within sight of their estimate
-  (between a third and three times it, plus framing): a moved cut or a
-  changed system prompt shows up there. Otherwise nothing is written and
-  those entries keep their estimate. An entry is measured once or not at
-  all; an errored response is never sent, is no report and takes no share.
-- **A turn edit** needs nothing measured again: a dropped call leaves the
-  branch with its count, and a replaced result keeps its measure scaled to
-  the new length (a short one, mostly framing, goes back to the estimate).
+  same model, and no session edit since the previous report (a summary, or
+  an entry carrying an edit's record, at least as new as that report) — and
+  when what is left for the appended entries is within sight of their
+  estimate (between a third and three times it, plus framing): a moved cut
+  or a changed system prompt shows up there. Otherwise nothing is written
+  and those entries keep their estimate. An entry is measured once or not
+  at all; an errored response is never sent, is no report and takes no
+  share.
+- **An edit** needs nothing measured again: what left the branch took its
+  count with it, a stand-in keeps the original's measure scaled to its
+  length (a short one, mostly framing, goes back to the estimate), and a
+  note or summary an edit wrote keeps its estimate
+  ([turn-edit.md](turn-edit.md#accounting-of-written-entries)).
 - The **head** (tools, system prompt, user context block, JSON framing) is
   not an entry. It is the larger of its estimate (`context_head_estimate`)
-  and one report's `usage_in` less the entries that request was sent with —
-  the newest report written after every compaction whose turn has not been
-  edited since. When that request had been cut it reads low and the estimate
-  stands. Because it is anchored on a whole reported request, head + entries
-  is that request plus what came after it, however the shares fell.
+  and the newest usable report's `usage_in` less the entries that request
+  was sent with — usable meaning written after every edit on the branch.
+  When that request had been cut it reads low and the estimate stands.
+  Because it is anchored on a whole reported request, head + entries is that
+  request plus what came after it, however the shares fell.
 
 Budgets and windows are in the provider's tokens, and so are the sizes
-compared against them at every site below. With no report at all every size
-is the estimate and every site reads as it always has.
+compared against them. With no report at all every size is the estimate.
 
-- Load ≤ `context_threshold` × context_window tokens of most recent turns:
-  the cut keeps the newest turns whose measured size fits budget − head
-  (`context_plan`)
-- Never cut mid-tool-call; the cut snaps **backwards to the start of the turn it
-  lands in** (`entries.turn_id`, `plan_find_cut` in `context.c`) — not to "the
+### The thresholds
+
+Two numbers decide when a session is cut and how far, both on the routing
+entry (`agent_models`), read off the agent's governing entry — its first
+chat model that is not `disabled` (`context_limits`, `src/context.c`). A
+smaller fallback further down the list is never trimmed for: it is sent the
+request and may refuse it.
+
+| Column | Unit | Empty means |
+|---|---|---|
+| `trim_threshold` | tokens | half the model's `context_window` |
+| `prune_target` | tokens | half the threshold |
+| `cache_lifetime` | seconds | unknown: no `CacheExpiring` (on an Anthropic chat entry it defaults to 3600 — [providers.md](providers.md#anthropic-messages)) |
+
+`context_limits` holds the only copy of the two 50% defaults. The schema
+refuses a `prune_target` at or above `trim_threshold` (a column check) and a
+`trim_threshold` above the model's window (triggers `agent_models_window_bi`
+/ `_bu`); nothing in C relies on either. Opting out of trimming is
+`trim_threshold` set to the window. Set through the config document
+(`agent.models`, [config-doc.md](config-doc.md)) or the explorer's model
+list.
+
+### The request cut
+
+`context_plan` keeps the newest turns whose measured size fits the budget
+less the head. The budget is `trim_threshold`, or `max_history_tokens` when
+that is set. Between iterations the trim has already brought the session
+under the threshold, so in practice the cut acts only on a turn's first
+request, when the messages that opened it pushed the session over; the trim
+at the end of that iteration makes the stored branch agree.
+
+- The cut never splits a turn; it snaps **backwards to the start of the
+  turn it lands in** (`entries.turn_id`, `plan_find_cut`) — not to "the
   previous user message", which would split a turn that opened with several
-  inbox-drained user entries, and not forwards, which could drop the very turn
-  being answered. Keeping a whole turn can overshoot the budget by one turn.
-- Cutoff notice prepended when truncated
-- Mid-turn overflow probe (`context_turn_overflows`, run before each
-  iteration ≥ 1): the cut cannot split the current turn, so once the turn's
-  size — each entry at its stored count, the results since the newest
-  request by estimate — exceeds the window less the head,
-  the turn stops with the context-budget notice instead of sending a request
-  the provider would refuse (E5).
-- Compaction trigger (`session_needs_compaction`, after each turn): the
-  context size is the larger of head + the measured branch and the sent
-  body / 3 less what a turn edit removed since (estimate units, from the
-  answer's `$.turn_edits` record); it fires above `context_threshold` ×
-  window less the just-finished turn's measured size. Without an edit since
-  the newest request this is at least that request's count plus what came
-  after it, so never lower than the plain floors; after one, the edited turn
-  is no longer read at its pre-edit count, so the shrink is seen at the
-  check that follows the edit.
-- Compaction: summarize old entries, reparent tree. Its keep boundary
-  (`context_compaction_keep_from`) keeps `compaction_target` × window of
-  measured size and snaps the same way, so a summary never lands inside a
-  turn; a branch that is one giant turn compacts to nothing.
-- Turn edit: a turnSettled hook script can edit the turn that just finished
-  before the next one starts — tool calls dropped, result text replaced,
-  notes added — with the same re-pointing compaction uses, inside one turn.
-  See [turn-edit.md](turn-edit.md).
-- **Mechanical state coda** (E2): the compaction entry is the model's prose
-  plus a `--- carried state ---` section built parent-side *after* the
-  compaction call returns (`compaction_state_coda`, `llm_proc.c`) — open
-  approvals (pending and approved-but-unconsumed tickets), running sub-agent
-  sessions, armed cron one-shots, queried live in one SQL pass. It is never
-  sent to the compaction model, so the summary cannot drop or paraphrase it.
-  Still exactly one role-4 entry; empty state appends nothing. A failed
-  compaction writes no entry at all (no coda-only rows) — the failure counter
-  in `compaction_record_outcome` records it. The read-time sliding window gets
-  no coda: that state is already live in the user context block and
-  `check_session`.
+  inbox-drained user entries, and not forwards, which could drop the very
+  turn being answered. Keeping a whole turn can overshoot the budget by one
+  turn.
+- A cutoff notice is prepended when the request was cut.
+
+### Compaction
+
+Compaction is a hook. At the end of every iteration — between two
+iterations of a running turn as at turn end — a session over its
+`trim_threshold` fires `ContextThreshold` ([hooks.md](hooks.md)); the
+bundled extension `compaction`, attached to every agent, answers it by
+summarising the oldest part of the session with the agent's own model, down
+to `prune_target`: whole earlier turns first, then, if that is not enough,
+the oldest iterations of the running turn. The actions already taken (every
+protected call) are listed under the summary by the script, from the calls
+themselves. An idle session above `prune_target` whose prompt cache is about
+to lapse fires `CacheExpiring`, on which the same extension summarises a
+top-level session down to half its prune target. See
+`extensions/compaction/README.md`.
+
+What C keeps is the mechanism and one backstop:
+
+- **The C check.** After the hooks, a session still over `trim_threshold`
+  is trimmed by C to `prune_target` — oldest turns, then oldest iterations
+  of the running turn, one note where they went, no model call — and a turn
+  that still does not fit is stopped
+  ([turn-edit.md](turn-edit.md#cs-trim)). This is all an agent gets with the
+  extension switched off, disabled after three failures, or replaced by a
+  script that under-trims.
+- **No idle trim.** C never trims an idle session; `CacheExpiring` is a
+  hook only.
+- **One vocabulary.** A script's edits, C's trim and the agent's own
+  `session_condense` (a summary of a range of its past turns, which it
+  writes itself) all go through `turn_edit_apply`'s checks and writing: a
+  call never leaves without its result, an unfinished call never leaves,
+  originals are never deleted, every edit is recorded.
+
+### The mid-turn rule
+
+Three kinds of writes reach `entries` mid-turn:
+
+1. LLM output.
+2. Tool results answering this turn's calls.
+3. A session edit applied between iterations, by a hook or C's trim.
+
+Everything else (channel messages, cron fires, sub-agent and background
+results) queues in the inbox and enters at a turn boundary as user entries.
+A hook holds the session while it runs, so nothing is appended under it.
+
+| The rule bought | Now |
+|---|---|
+| provider adjacency legality | kept by the pairing check: a call and its result leave together, and an iteration left with no call leaves whole |
+| turn atomicity | kept: an edit is one transaction, and the inbox still enters only at a turn boundary |
+| a byte-stable prefix for prompt caching | broken at the edit point, on purpose. The next request pays full price from the earliest changed entry, and Anthropic thinking after that point is not replayed. The threshold is the only guard against doing it often |
+
+### Inbox items
+
+An inbox item larger than 64 KB (`RUNTOOL_RESULT_MAX`) is cut when it
+becomes a user entry: the entry keeps the first 64 KB (at a character
+boundary) and a line saying where the full text is,
+`<workspace>/.tool_results/<session>/inbox-<id>.out` — the same home as a
+spilled tool result, readable by the agent's file tools under every sandbox
+profile (`src/inbox_cap.c`). The text was already through the secret
+scanner at insert. If the file cannot be written the entry says so.
+Attachments and images are not touched.
 
 ## Letta Patterns NOT Adopted
 

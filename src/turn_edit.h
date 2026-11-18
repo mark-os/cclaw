@@ -24,11 +24,14 @@
 
 /* What an edit leaves in entries (P4, for anyone showing a session):
  *   - every entry an edit wrote — a note, a summary, a stand-in — has
- *     data.source = the edit's label ('fallback' for the trim, 'hook:<ext>',
- *     'tool:session_condense');
- *   - a stand-in (a replaced result, a rewritten message or call) also has
- *     data.replaces = the id of the first original it stands for, through
- *     any chain of rewrites: "edited" is TURN_EDIT_SQL_STANDS_IN(data);
+ *     data.edited_by = the edit's label ('fallback' for the trim,
+ *     'hook:<ext>', 'tool:session_condense');
+ *   - a note or a summary has data.source = the same label: the edit is
+ *     where its words came from;
+ *   - a stand-in (a replaced result, a rewritten message or call) keeps the
+ *     original's data.source — a rewritten cron prompt is still the cron's —
+ *     and has data.replaces = the id of the first original it stands for,
+ *     through any chain of rewrites: "edited" is TURN_EDIT_SQL_STANDS_IN(data);
  *   - an original re-pointed past removed rows has original_parent_id;
  *   - each edit appends its record to $.turn_edits on one entry (the leaf
  *     after a script's edit, the trim's note): by, at, left_branch,
@@ -108,7 +111,7 @@ char *turn_edit_input(sqlite3 *db, int64_t session_id, const TurnEditInputSpec *
  * before COMMIT — so the handle must not have a transaction open.
  * source_label names who sent the reply ("hook:<ext>",
  * "tool:session_condense") in the record and on every entry written
- * (data.source). On REJECTED or ERROR *err_out (when given) gets a one-line
+ * (data.edited_by; data.source on a note or summary). On REJECTED or ERROR *err_out (when given) gets a one-line
  * reason the caller frees; it is NULL otherwise. */
 TurnEditResult turn_edit_apply(sqlite3 *db, int64_t session_id,
                                const char *reply_json,

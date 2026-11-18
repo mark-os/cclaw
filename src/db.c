@@ -1496,7 +1496,8 @@ static int patch_v65_utility(sqlite3 *db) {
  * session and how far — NULL on every existing row, which is the 50%
  * defaults; agent_models.cache_lifetime (3600 on existing Anthropic chat
  * entries, unknown elsewhere) and sessions.cache_armed_at, for
- * CacheExpiring; the global context_threshold / compaction_target keys they
+ * CacheExpiring; sessions.settle_event, the event a held session's hook
+ * began with; the global context_threshold / compaction_target keys they
  * replace leave the config table at the next config_registry_sync (as does
  * turn_settled_timeout, now hook_timeout). And hooks.pos / timeout /
  * disabled, for the events of stage 1: an existing hook runs first in its
@@ -1573,6 +1574,7 @@ static int patch_v68_hooks(sqlite3 *db) {
         "ALTER TABLE agent_models ADD COLUMN reasoning_display TEXT NOT NULL"
         "  DEFAULT 'summary' CHECK (reasoning_display IN ('summary','none'));"
         "ALTER TABLE sessions ADD COLUMN cache_armed_at INTEGER;"
+        "ALTER TABLE sessions ADD COLUMN settle_event TEXT;"
         "CREATE INDEX idx_sessions_cache_armed ON sessions(cache_armed_at)"
         "  WHERE cache_armed_at IS NOT NULL;"
         /* Hooks: the manifest's order, its per-hook timeout, and the flag
@@ -1580,7 +1582,7 @@ static int patch_v68_hooks(sqlite3 *db) {
          * data patch: no deployment has such a row. */
         "ALTER TABLE hooks ADD COLUMN pos INTEGER NOT NULL DEFAULT 0;"
         "ALTER TABLE hooks ADD COLUMN timeout INTEGER"
-        "  CHECK (timeout IS NULL OR timeout > 0);"
+        "  CHECK (timeout IS NULL OR timeout BETWEEN 1 AND 3600);"
         "ALTER TABLE hooks ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;"
         "ALTER TABLE hooks ADD COLUMN async INTEGER NOT NULL DEFAULT 0;"
         "UPDATE hooks SET async = CASE WHEN wait THEN 0 ELSE 1 END;"
@@ -2733,7 +2735,7 @@ int session_count_active_agents(sqlite3 *db) {
 }
 
 /* Sessions holding a resource right now: an llm_jobs row (a worker thread is
- * running or queued for it — turn or compaction alike), a running tool
+ * running or queued for its request), a running tool
  * child, or a hook script the session is held for (state 'settling'; a
  * script is straight-line code, so at most one LLM() call at a time). A hook
  * nobody waits for holds a child slot, not a gate slot. Deliberately NOT "non-idle sessions": a parent blocked on a blocking
@@ -2955,8 +2957,10 @@ int64_t entry_append_cron_result(sqlite3 *db, int64_t session_id,
  * settling (a hook at the end of an iteration is awaited, settle.c) is
  * entered from idle (turn end) or tool_running (between iterations) and left
  * to idle or tool_running only: nothing that starts or resumes a request can
- * pull a held session out from under the script. */
-int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
+ * pull a held session out from under the script. settle_event says which
+ * event the hold began with, and lives exactly as long as the hold. */
+static int set_state(sqlite3 *db, int64_t session_id, const char *state,
+                     const char *event) {
     /* Stamp ownership in the same guarded CAS: idle clears the owner (invariant
      * state='idle' ⟺ owner_instance IS NULL), any busy state stamps this
      * process's instance id. ?2 is g_owner_instance bound as NULL when empty
@@ -2965,7 +2969,8 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     const char *sql =
         "UPDATE sessions SET state=?1, updated_at=unixepoch(),"
         " turn_iteration = CASE WHEN ?1='idle' THEN 0 ELSE turn_iteration END,"
-        " owner_instance = CASE WHEN ?1='idle' THEN NULL ELSE ?2 END"
+        " owner_instance = CASE WHEN ?1='idle' THEN NULL ELSE ?2 END,"
+        " settle_event = CASE WHEN ?1='settling' THEN ?4 END"
         " WHERE id=?3 AND ("
         "  (?1 IN ('llm_running','tool_running','rate_limited')"
         "     AND state IN ('idle','llm_running','tool_running','rate_limited','awaiting_approval')) OR"
@@ -2984,9 +2989,18 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     else
         sqlite3_bind_null(stmt, 2);
     sqlite3_bind_int64(stmt, 3, session_id);
+    if (event) sqlite3_bind_text(stmt, 4, event, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
+}
+
+int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
+    return set_state(db, session_id, state, NULL);
+}
+
+int session_set_settling(sqlite3 *db, int64_t session_id, const char *event) {
+    return event ? set_state(db, session_id, "settling", event) : -1;
 }
 
 /* Turn iteration accessors */
@@ -4692,7 +4706,7 @@ int db_recover_stale_sessions(sqlite3 *db) {
      * iteration). Runs last so the predicate still matched for steps a–c. */
     const char *reset_sql =
         "UPDATE sessions SET state='idle', turn_iteration=0, owner_instance=NULL,"
-        " updated_at=unixepoch() WHERE " RECOVER_DEAD_OWNER ";";
+        " settle_event=NULL, updated_at=unixepoch() WHERE " RECOVER_DEAD_OWNER ";";
     if (sqlite3_exec(db, reset_sql, NULL, NULL, NULL) != SQLITE_OK)
         goto rollback;
 

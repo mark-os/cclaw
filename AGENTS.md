@@ -140,10 +140,10 @@ comments, and specs:
 
 - **Turn** — inbox consumption → final assistant message + delivery. The unit
   users/channels see, bounded by `max_iterations`; the boundary where
-  `notify_parent` and compaction run. Stamped on every entry as
+  `notify_parent` and the `Stop` hooks run. Stamped on every entry as
   `entries.turn_id` (minted when a user entry opens a turn, inherited from the
   parent entry thereafter — trigger `entries_turn_ai`), which is what the
-  context cut and compaction snap to so neither ever splits a turn.
+  request cut snaps to so it never splits a turn.
 - **Iteration** — one LLM request → one assistant response → that response's
   tool calls fully resolved (the turn-join). Counted by
   `sessions.turn_iteration`, identified by `entries.iteration_id` /
@@ -152,12 +152,15 @@ comments, and specs:
   inline → immediate result; serial async → blocks the rest of the batch;
   parallel-safe → dispatched concurrently.
 
-**The mid-turn invariant**: only two kinds of writes reach `entries` mid-turn —
-LLM output, and tool results answering this turn's calls. Everything else
-(channel messages, cron fires, sub-agent/background results) queues in the
-inbox and enters at a turn boundary as user entries. This one rule buys
-provider adjacency legality, a byte-stable prefix for prompt caching, and turn
-atomicity — don't break it.
+**The mid-turn invariant**: only three kinds of writes reach `entries`
+mid-turn — LLM output, tool results answering this turn's calls, and a session
+edit applied between iterations by a hook or C's trim (`turn_edit.c`).
+Everything else (channel messages, cron fires, sub-agent/background results)
+queues in the inbox and enters at a turn boundary as user entries. This buys
+provider adjacency legality (an edit keeps calls paired) and turn atomicity —
+don't break it. The byte-stable prefix for prompt caching holds up to the
+first entry an edit changed, and is broken there on purpose
+([memory.md](specs/memory.md#the-mid-turn-rule)).
 
 **Freshness tiers**: the user context block is *turn-fresh* (frozen at
 iteration 1, `session_set_turn_context`); the head (system prompt, tools

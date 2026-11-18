@@ -6,6 +6,7 @@
 #include "config.h"
 #include "config_registry.h"
 #include "contain.h"
+#include "context.h"
 #include "db.h"
 #include "http.h"
 #include "log.h"
@@ -683,6 +684,141 @@ static void check_streak_guard(sqlite3 *db) {
     if (!n) print_ok("tripped sessions", "none");
 }
 
+/* ── Check 10b: Compaction per agent ────────────────────────────── */
+
+/* What keeps each agent's sessions under its trim threshold: the bundled
+ * script (the `compaction` extension shipped in the binary), another
+ * extension's ContextThreshold hook, or only the runtime's trim, which drops
+ * the oldest turns with no summary. A hook counts when hook_next would run
+ * it and wait for its reply (an async hook's reply is ignored). Then the
+ * newest edit record from a compaction — the trim's or a context hook's —
+ * on any of the agent's sessions. Plain SELECTs; this may run beside a live
+ * daemon. */
+#define DOCTOR_CTX_HOOKS(extra) \
+    " FROM hooks h JOIN agent_extensions ae ON ae.extension_name = h.extension_name" \
+    "   AND ae.agent_name = a.name AND ae.enabled = 1" \
+    " JOIN extensions e ON e.name = h.extension_name AND e.enabled = 1" \
+    "   AND (e.published = 1 OR e.owner_agent = a.name)" \
+    " WHERE h.event = 'ContextThreshold' AND h.enabled = 1 AND h.async = 0" extra
+
+static void when_str(time_t t, char *out, size_t cap) {
+    struct tm tm;
+    snprintf(out, cap, "?");
+    if (t > 0 && localtime_r(&t, &tm)) strftime(out, cap, "%Y-%m-%d %H:%M", &tm);
+}
+
+static void compaction_last(sqlite3 *db, FILE *out, const char *agent) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT e.session_id, j.value ->> 'by', j.value ->> 'at',"
+            "       j.value ->> '$.tokens.before', j.value ->> '$.tokens.after'"
+            "  FROM sessions s JOIN entries e ON e.session_id = s.id,"
+            "       json_each(CASE WHEN json_valid(e.data)"
+            "         AND json_type(e.data, '$.turn_edits') = 'array' THEN e.data"
+            "         ELSE '{\"turn_edits\":[]}' END, '$.turn_edits') j"
+            " WHERE s.agent_name = ?1 AND e.data LIKE '%turn_edits%'"
+            "   AND (j.value ->> 'by' = '" TRIM_SOURCE "' OR j.value ->> 'by' IN"
+            "        (SELECT 'hook:' || extension_name FROM hooks"
+            "          WHERE event IN ('ContextThreshold', 'CacheExpiring')))"
+            " ORDER BY j.value ->> 'at' DESC, e.id DESC LIMIT 1", -1, &s, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(s, 1, agent, -1, SQLITE_STATIC);
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        char when[32];
+        when_str((time_t)sqlite3_column_int64(s, 2), when, sizeof(when));
+        const char *by = (const char *)sqlite3_column_text(s, 1);
+        fprintf(out, "         last: %s by %s, %lld -> %lld tokens (session %lld)\n", when,
+                by && strcmp(by, TRIM_SOURCE) == 0 ? "the fallback trim" : by ? by : "?",
+                (long long)sqlite3_column_int64(s, 3), (long long)sqlite3_column_int64(s, 4),
+                (long long)sqlite3_column_int64(s, 0));
+    } else {
+        fprintf(out, "         last: none yet\n");
+    }
+    sqlite3_finalize(s);
+}
+
+void doctor_check_compaction(sqlite3 *db, const char *db_path, FILE *out) {
+    fprintf(out, "\n[compaction]\n");
+    if (!db) {
+        fprintf(out, "  skipped: no DB handle\n");
+        return;
+    }
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT a.name,"
+            "  (SELECT count(*)" DOCTOR_CTX_HOOKS(" AND h.disabled = 0"
+            "     AND h.extension_name = 'compaction' AND e.owner_agent IS NULL") "),"
+            "  (SELECT group_concat(DISTINCT h.extension_name)" DOCTOR_CTX_HOOKS(
+            "     AND h.disabled = 0 AND NOT (h.extension_name = 'compaction'"
+            "     AND e.owner_agent IS NULL)") "),"
+            "  (SELECT group_concat(DISTINCT h.extension_name)" DOCTOR_CTX_HOOKS(
+            "     AND h.disabled = 1") "),"
+            "  (SELECT max(h.fail_count)" DOCTOR_CTX_HOOKS(" AND h.disabled = 0") ")"
+            " FROM agents a ORDER BY a.name", -1, &s, NULL) != SQLITE_OK) {
+        fprintf(out, "  (cannot query hooks: %s)\n", sqlite3_errmsg(db));
+        return;
+    }
+    int n = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        const char *agent = (const char *)sqlite3_column_text(s, 0);
+        int bundled = sqlite3_column_int(s, 1) > 0;
+        const char *other = (const char *)sqlite3_column_text(s, 2);
+        const char *off = (const char *)sqlite3_column_text(s, 3);
+        int fails = sqlite3_column_int(s, 4);
+        char what[512];
+        if (bundled && other)
+            snprintf(what, sizeof(what), "the bundled script, then %s", other);
+        else if (bundled)
+            snprintf(what, sizeof(what), "the bundled script (summarises old turns)");
+        else if (other)
+            snprintf(what, sizeof(what), "another script: %s", other);
+        else
+            snprintf(what, sizeof(what), "the fallback only (old turns are dropped, not"
+                     " summarised)%s%s%s", off ? " — " : "", off ? off : "",
+                     off ? " is turned off" : "");
+        fprintf(out, "  %s %s: %s\n", off && !bundled && !other ? "WARN" : "ok  ", agent, what);
+        if (fails > 0)
+            fprintf(out, "         its script failed the last %d time%s (3 in a row turns it off)\n",
+                    fails, fails == 1 ? "" : "s");
+        compaction_last(db, out, agent);
+        n++;
+    }
+    sqlite3_finalize(s);
+    if (!n) fprintf(out, "  no agents\n");
+
+    /* Every hook turned off, any event: a disabled Stop hook matters too.
+     * The ways back are the ones the inbox note names (settle.c): the
+     * explorer's button, the statement for that one row, and promoting
+     * again only where an agent owns the extension. */
+    if (sqlite3_prepare_v2(db,
+            "SELECT h.extension_name, h.event, h.path, e.owner_agent IS NOT NULL"
+            "  FROM hooks h LEFT JOIN extensions e ON e.name = h.extension_name"
+            " WHERE h.disabled = 1"
+            " ORDER BY h.extension_name, h.event, h.path", -1, &s, NULL) != SQLITE_OK)
+        return;
+    int k = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        const char *ext = (const char *)sqlite3_column_text(s, 0);
+        const char *ev = (const char *)sqlite3_column_text(s, 1);
+        const char *path = (const char *)sqlite3_column_text(s, 2);
+        const char *slash = path ? strrchr(path, '/') : NULL;
+        if (!k) fprintf(out, "  hooks turned off after 3 failures in a row:\n");
+        fprintf(out, "    %s  %s  %s\n", ext, ev, slash ? slash + 1 : path ? path : "?");
+        char *sql = sqlite3_mprintf("UPDATE hooks SET disabled=0, fail_count=0 WHERE"
+                                    " extension_name='%q' AND event='%q' AND path='%q'",
+                                    ext ? ext : "", ev ? ev : "", path ? path : "");
+        fprintf(out, "      turn it back on: the explorer (/admin), extension %s,"
+                     " \"Turn back on\"; or\n"
+                     "      cclaw sqlite3 --write %s \"%s\"%s\n",
+                ext ? ext : "?", db_path && db_path[0] ? db_path : "<db>", sql ? sql : "?",
+                sqlite3_column_int(s, 3) ? "; or promote the extension again" : "");
+        sqlite3_free(sql);
+        k++;
+    }
+    sqlite3_finalize(s);
+    if (!k) fprintf(out, "  ok   hooks: none turned off\n");
+}
+
 /* ── Check 11: Update / rollback state ──────────────────────────── */
 
 static void fmt_age(time_t mtime, char *out, size_t cap) {
@@ -890,6 +1026,7 @@ int doctor_main(void) {
     check_denials(db);
     check_cron(db);
     check_streak_guard(db);
+    doctor_check_compaction(db, db_path, stdout);
     check_update(db, db_path);
     check_syslog();
 

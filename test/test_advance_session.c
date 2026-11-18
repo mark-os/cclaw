@@ -674,6 +674,84 @@ static void test_lost_submit_reparks_idle(void) {
     printf("  PASS test_lost_submit_reparks_idle\n");
 }
 
+/* A hook's note or summary may be the leaf of a turn still running (a note
+ * with no "before", a summary of the newest iterations). Notes and
+ * summaries are read through: what decides is the entry before them. A
+ * daemon killed while it held such a session for a hook leaves it to
+ * recovery, which resets it to idle; the turn must resume as the same turn,
+ * by the sweep's arm as by advance_session's — and a lost submit behind a
+ * note re-parks instead of passing for a completion. */
+static void test_note_leaf_mid_turn_resumes(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+    inbox_insert(db, sid, "cli", NULL, "do it");
+    assert(inbox_consume_into_entries(db, sid, 10) == 1);
+    entry_append_typed(db, sid, 1, "assistant_message", 0, NULL, NULL, NULL, 0,
+                       STOP_REASON_TOOL_USE, NULL, 0, 0, 0);
+    append_tool_call(db, sid, 1, "shell_exec", "call_1", "{\"command\":\"x\"}", 1);
+    Message res = { .role = ROLE_TOOL, .content = "output" };
+    ToolResult tr = { .tool_call_id = "call_1", .content = "output" };
+    res.tool_result = &tr;
+    res.tool_name = "shell_exec";
+    entry_append_with_iteration(db, sid, &res, 1);
+    assert(sqlite3_exec(db, "UPDATE tool_calls SET status='done';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    /* The hook's note (shaped as turn_edit writes it), then the crash. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO entries(parent_id, session_id, iteration_id, type, role, content, data)"
+        " VALUES((SELECT leaf_id FROM sessions WHERE id=1), 1, 0, 'system', 0, 'n',"
+        "        json_object('source','hook:x','edited_by','hook:x'));",
+        NULL, NULL, NULL) == SQLITE_OK);
+    assert(count(db, "SELECT role FROM entries WHERE id="
+                     "(SELECT leaf_id FROM sessions WHERE id=?);", sid) == 0);
+    session_set_iteration(db, sid, 1);
+    session_set_state(db, sid, "tool_running");
+    assert(session_set_settling(db, sid, "ContextThreshold") == 0);
+    assert(db_recover_stale_sessions(db) == 0);
+    assert(count(db, "SELECT state='idle' AND settle_event IS NULL FROM sessions"
+                     " WHERE id=?;", sid) == 1);
+
+    /* The sweep's arm finds it. */
+    assert(count(db, "SELECT EXISTS(SELECT 1 FROM entries le WHERE le.id="
+                     CCLAW_SQL_LEAF_READ_THROUGH("?1") " AND le.role IN (1,3));", sid) == 1);
+    AdvanceOutput out = advance_session(db, sid, 25);
+    assert(out.action == ADVANCE_DISPATCH_LLM && out.iteration == 1);
+    assert(count(db, "SELECT COUNT(DISTINCT turn_id) FROM entries WHERE session_id=?;",
+                 sid) == 1);
+
+    /* The submit is lost with the note still the leaf: re-parked, then
+     * resumed, never read as the answer. */
+    out = advance_session(db, sid, 25);
+    assert(out.action == ADVANCE_NOOP);
+    assert(count(db, "SELECT state='idle' FROM sessions WHERE id=?;", sid) == 1);
+    out = advance_session(db, sid, 25);
+    assert(out.action == ADVANCE_DISPATCH_LLM && out.iteration == 1);
+
+    /* A summary of the turn's iterations as the leaf: the user message
+     * before it opens the turn again. An answered turn with a note after it
+     * is at rest. */
+    int64_t s2 = session_create(db, "test2", "default", -1, 0);
+    Message u = { .role = ROLE_USER, .content = "q" };
+    entry_append_with_iteration(db, s2, &u, 0);
+    assert(sqlite3_exec(db,
+        "INSERT INTO entries(parent_id, session_id, type, role, content, data)"
+        " VALUES((SELECT leaf_id FROM sessions WHERE id=2), 2, 'compaction', 4, 's',"
+        "        json_object('source','hook:x','edited_by','hook:x'));",
+        NULL, NULL, NULL) == SQLITE_OK);
+    assert(advance_session(db, s2, 25).action == ADVANCE_DISPATCH_LLM);
+    Message a = { .role = ROLE_ASSISTANT, .content = "ok", .stop_reason = STOP_REASON_STOP };
+    entry_append_with_iteration(db, s2, &a, db_next_iteration_id(db, s2));
+    assert(advance_session(db, s2, 25).action == ADVANCE_DONE);
+    Message n = { .role = ROLE_SYSTEM, .content = "after" };
+    entry_append_with_iteration(db, s2, &n, 0);
+    assert(advance_session(db, s2, 25).action == ADVANCE_NOOP);
+    assert(count(db, "SELECT EXISTS(SELECT 1 FROM entries le WHERE le.id="
+                     CCLAW_SQL_LEAF_READ_THROUGH("?1") " AND le.role IN (1,3));", s2) == 0);
+
+    db_close(db);
+    printf("  PASS test_note_leaf_mid_turn_resumes\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_advance_session:\n");
@@ -695,6 +773,7 @@ int main(void) {
     test_error_stop_reaches_parent();
     test_idle_unanswered_tool_leaf_resumes();
     test_lost_submit_reparks_idle();
+    test_note_leaf_mid_turn_resumes();
     printf("All advance_session tests passed.\n");
     return 0;
 }

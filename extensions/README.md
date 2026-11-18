@@ -54,11 +54,13 @@ see what it did are in [turn-review/README.md](turn-review/README.md).
 
 ## compaction
 
-The one bundle on by default: a `ContextThreshold` hook. When a session grows
-past its trim threshold, the oldest part of it — whole earlier turns first,
-then the oldest steps of the turn still running — is replaced by a summary the
-agent's own model writes, with the actions already taken listed under it by
-the script. Without it the runtime's trim drops the same part with a one-line
-note. It is the reference example for `ContextThreshold` hooks; switching it
-off for an agent, or replacing it, is in
-[compaction/README.md](compaction/README.md).
+The one bundle on by default: a `ContextThreshold` and `CacheExpiring` hook.
+When a session grows past its trim threshold, the oldest part of it — whole
+earlier turns first, then the oldest steps of the turn still running — is
+replaced by a summary the agent's own model writes, with the actions already
+taken listed under it by the script. When an idle top-level session's prompt
+cache is about to lapse, it is summarised down to half its prune target the
+same way. Without it the runtime's trim drops the oldest part with a one-line
+note when the threshold is passed, and an idle session is left alone. It is
+the reference example for both events; switching it off for an agent, or
+replacing it, is in [compaction/README.md](compaction/README.md).

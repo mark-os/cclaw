@@ -112,8 +112,8 @@ failed:`. `source='agent_result'`, `source_ref=<child sid>` as before.
   session's one-shot reply edge with an error ("paused by autonomy guard") —
   a paused session never settles, and recovery never fires for a
   legitimately idle child. The standing edge is left alone; the real answer
-  ships after a human revives the session. The trip's role-0 leaf keeps the
-  sweep away in the meantime.
+  ships after a human revives the session. The trip's note is read through to
+  the answered turn before it, which keeps the sweep away in the meantime.
 - **`check_session` poll-consume** advances the standing edge's cursor to the
   child's leaf — collected-by-poll and pushed are the same fact.
 - **Synthetic answers drop one-shots**: recovery and the D11 turn-start

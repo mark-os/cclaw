@@ -979,9 +979,14 @@ static void test_fire_failure_auto_pause(void) {
     char q[128];
     snprintf(q, sizeof(q), "SELECT enabled FROM cron_jobs WHERE id=%lld", (long long)jid);
 
-    /* Two failures is not yet a streak. */
+    /* Two failures is not yet a streak — even when a hook rewrote the second
+     * prompt: the stand-in keeps the cron's source, and is the same fire. */
     stage_fire(db, sid, "broken", 1);
     stage_fire(db, sid, "broken", 1);
+    exec_ok(db, "INSERT INTO entries(session_id,parent_id,turn_id,type,role,content,data)"
+                " SELECT session_id,-1,turn_id,type,role,'[cron: broken] go, briefly',"
+                "        json_set(data,'$.edited_by','hook:x','$.replaces',id)"
+                " FROM entries WHERE id=(SELECT MAX(id) FROM entries WHERE role=1)");
     cron_run_due(db);
     assert(scalar(db, q) == 1);
     assert(inbox_match(db, sid, "cron", "go") == 1);      /* still firing */

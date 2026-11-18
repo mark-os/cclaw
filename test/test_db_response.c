@@ -466,6 +466,25 @@ static void test_usage_gemini(void) {
     assert(count_rows(db,
         "SELECT COALESCE(usage_out,-1) FROM entries WHERE type='assistant_message';") == 200);
 
+    /* A miss: Gemini's JSON omits a zero-valued field (proto3), so a usage
+     * report without cachedContentTokenCount is a reported zero — seen live
+     * 2026-11-18 on a request whose 12k-token prefix the previous one had
+     * just read from cache. No usageMetadata at all stays not reported. */
+    const char *miss =
+        "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},"
+        "\"finishReason\":\"STOP\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":5000,\"candidatesTokenCount\":20,"
+        " \"totalTokenCount\":5020}}";
+    assert(db_ingest_response(db, sid, 15, "gemini", ENDPOINT_GEMINI, miss, NULL, 1, &ir) == LLM_RESP_OK);
+    assert(usage_col_i(db, "cached_tokens", 15) == 0);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE iteration_id=15"
+                          " AND type='assistant_message' AND cached_tokens=0;") == 1);
+    const char *bare =
+        "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},"
+        "\"finishReason\":\"STOP\"}]}";
+    assert(db_ingest_response(db, sid, 16, "gemini", ENDPOINT_GEMINI, bare, NULL, 1, &ir) == LLM_RESP_OK);
+    assert(usage_col_i(db, "cached_tokens", 16) == -1);
+
     db_close(db);
     printf(" OK\n");
 }

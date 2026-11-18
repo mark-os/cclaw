@@ -152,6 +152,17 @@ form.f { display: flex; flex-direction: column; gap: 10px; }
 .list-ed select { font: inherit; font-size: .85rem; padding: 3px 6px; border: 1px solid var(--line);
   border-radius: 6px; background: var(--surface); color: var(--fg); }
 .note-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.list-ed .it .trimf { flex-basis: 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 8px 14px; padding-top: 6px; border-top: 1px dashed var(--line); margin-top: 2px; }
+.list-ed .it .trimf > p { grid-column: 1 / -1; margin: 0; }
+.meter { height: 8px; border-radius: 999px; background: var(--tag-bg); overflow: hidden; margin: 6px 0 2px; max-width: 34rem; }
+.meter > span { display: block; height: 100%; background: var(--ok); }
+.meter.over > span { background: var(--warn); }
+.ev { padding: 10px 0; border-top: 1px solid var(--line); }
+.ev:first-child { border-top: 0; padding-top: 2px; }
+.ev .hd { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: baseline; }
+.ev ul { margin: 4px 0 0; padding-left: 1.2em; }
+.ev li { margin: 2px 0; overflow-wrap: anywhere; }
 .row .r .act { margin-left: 4px; }
 @media (max-width: 640px) {
   dl.fields > div { grid-template-columns: minmax(0, 1fr); }
@@ -170,7 +181,7 @@ form.f { display: flex; flex-direction: column; gap: 10px; }
 <script>
 "use strict";
 /* Reading is generic: one list page and one row page serve every table,
-   drawn from /admin/api/meta. Three tables get a few extra sections built
+   drawn from /admin/api/meta. Some tables get a few extra sections built
    from the same API (agents, providers, channels). Every value from the
    database is untrusted text and only ever reaches the page as textContent. */
 
@@ -826,8 +837,16 @@ var SHAPED = {
             text: emptyList(p[0], "No models: this agent cannot run.", "No list: ") })), h("span", { class: "none", text: "none" })));
         }
         g.forEach(function (v, i) {
+          var extra = [];
+          if (v.reasoning_effort) extra.push("effort " + v.reasoning_effort);
+          if (p[0] === "chat") {
+            if (v.trim_threshold) extra.push("trimmed at " + fmtNum(v.trim_threshold));
+            if (v.prune_target) extra.push("cut to " + fmtNum(v.prune_target));
+            if (v.cache_lifetime) extra.push("cache " + lifetimeWords(v.cache_lifetime));
+            if (v.reasoning_display === "none") extra.push("reasoning not kept");
+          }
           list.appendChild(rowLine(p[1] + ", " + ordinal(i), [link(rowHash("models", [v.model_id]), v.model_id),
-            v.reasoning_effort ? ", effort " + v.reasoning_effort : ""]));
+            extra.length ? ", " + extra.join(", ") : ""]));
         });
       });
       return [list, opener("Assign models", "Assign models to " + name, function () {
@@ -938,10 +957,14 @@ var SHAPED = {
         if (x.values.enabled) r[2].rows.forEach(function (k) {
           if (k.values.extension_name !== x.values.extension_name) return;
           var when = { Stop: "runs after each turn", SubagentStop: "runs after each turn",
-                       ContextThreshold: "runs when the context fills up" }[k.values.event]
+                       ContextThreshold: "runs when the context fills up",
+                       CacheExpiring: "runs when an idle session's cache is about to lapse" }[k.values.event]
                      || "runs on " + k.values.event;
           p.appendChild(pill(k.values.async ? when : when + ", and may edit it"));
-          if (k.values.disabled) p.appendChild(pill("turned off: its script kept failing", "warn"));
+          if (k.values.disabled) {
+            p.appendChild(pill("turned off after 3 failures in a row", "warn"));
+            p.appendChild(hookEnableBtn(k.values));
+          }
         });
       });
       order.forEach(function (n) { list.appendChild(rowLine(link(rowHash("extensions", [n]), n), lines[n])); });
@@ -1280,6 +1303,49 @@ function copyAgentPanel(name, src) {
   return box;
 }
 
+/* A chat entry's context settings. Empty means the default, which is shown
+   as the placeholder: the threshold is half the model's window, the target
+   half the threshold. Only the first chat model governs a session; the
+   others' numbers apply when they come first. */
+function lifetimeWords(s) {
+  return s === 300 ? "5 minutes" : s === 3600 ? "1 hour" : s % 60 === 0 ? (s / 60) + " min" : s + " s";
+}
+function trimFields(it, m, governs) {
+  var win = m && m.context_window > 0 ? m.context_window : null;
+  function n(x) { return typeof x === "number" && x > 0 ? x : null; }
+  function thDefault() { return win ? Math.floor(win / 2) : null; }
+  function tgDefault() { var t = n(it.trim_threshold) || thDefault(); return t ? Math.floor(t / 2) : null; }
+  function numIn(key, label) {
+    var el = h("input", { type: "number", min: "1", step: "1", inputmode: "numeric", name: key });
+    el.setAttribute("aria-label", label + " for " + it.model_id);
+    if (it[key] !== null && it[key] !== undefined) el.value = String(it[key]);
+    el.addEventListener("input", function () {
+      var v = el.value.trim();
+      it[key] = v === "" ? null : Number(v);
+      placeholders();
+    });
+    return el;
+  }
+  var th = numIn("trim_threshold", "Trim threshold"), tg = numIn("prune_target", "Prune target");
+  var cl = numIn("cache_lifetime", "Cache lifetime");
+  function placeholders() {
+    th.placeholder = thDefault() ? "empty: " + fmtNum(thDefault()) + " (half the window)" : "empty: half the window";
+    tg.placeholder = tgDefault() ? "empty: " + fmtNum(tgDefault()) + " (half the threshold)" : "empty: half the threshold";
+  }
+  placeholders();
+  cl.placeholder = "empty: the provider's default";
+  var rd = selectIn("reasoning_display", [["summary", "keep a readable summary"], ["none", "do not keep it"]],
+                    it.reasoning_display || "summary");
+  rd.setAttribute("aria-label", "Reasoning display for " + it.model_id);
+  rd.addEventListener("change", function () { it.reasoning_display = rd.value; });
+  return h("div", { class: "trimf" },
+    governs ? h("p", { class: "why", text: "The first model governs: its numbers decide when this agent's sessions are trimmed." }) : null,
+    fieldIn("Trim when the session passes (tokens)", th, "At the end of a step over this, the compaction script runs; if the session is still over, the oldest turns are dropped." + (win ? " At most the window, " + fmtNum(win) + "." : "")),
+    fieldIn("Cut down to (tokens)", tg, "What a trim aims for. Must be below the threshold."),
+    fieldIn("Prompt cache lifetime (seconds)", cl, "Anthropic: 300 (5 minutes) or 3600 (1 hour, what an empty field becomes there). Elsewhere the provider's documented figure; empty means unknown, and no cache-expiry hook runs."),
+    fieldIn("Model's reasoning", rd, "Whether a readable summary of the model's thinking is kept with the session."));
+}
+
 function modelsEditor(name, current) {
   var box = h("div", null, h("p", { class: "muted", text: "Loading models…" }));
   allRows("models").then(function (models) {
@@ -1289,7 +1355,9 @@ function modelsEditor(name, current) {
     PURPOSES.forEach(function (p) {
       var purpose = p[0], list = current.filter(function (x) { return x.purpose === purpose; })
         .sort(function (a, b) { return a.pos - b.pos; })
-        .map(function (x) { return { model_id: x.model_id, reasoning_effort: x.reasoning_effort || "" }; });
+        .map(function (x) { return { model_id: x.model_id, reasoning_effort: x.reasoning_effort || "",
+          trim_threshold: x.trim_threshold, prune_target: x.prune_target, cache_lifetime: x.cache_lifetime,
+          reasoning_display: x.reasoning_display || "summary" }; });
       var items = h("div", { class: "list-ed", role: "list" }), err = h("div", { class: "err", role: "alert" });
       var adder = h("select", { class: "wide", "aria-label": "Model to add to the " + p[1].toLowerCase() + " list" });
       function draw() {
@@ -1311,6 +1379,7 @@ function modelsEditor(name, current) {
           var rm = btn("Remove", function () { list.splice(i, 1); draw(); }, "small");
           rm.setAttribute("aria-label", "Remove " + it.model_id + " from the list");
           add(row, [up, dn, rm]);
+          if (purpose === "chat") row.appendChild(trimFields(it, byId[it.model_id], i === 0));
           items.appendChild(row);
         });
         clear(adder);
@@ -1327,7 +1396,8 @@ function modelsEditor(name, current) {
       draw();
       var addBtn = btn("Add", function () {
         if (!adder.value) return;
-        list.push({ model_id: adder.value, reasoning_effort: "" });
+        list.push({ model_id: adder.value, reasoning_effort: "", trim_threshold: null, prune_target: null,
+                    cache_lifetime: null, reasoning_display: "summary" });
         draw();
         adder.focus();
       }, "small");
@@ -1335,8 +1405,15 @@ function modelsEditor(name, current) {
         err.textContent = "";
         save.disabled = true;
         act("models_set", { agent: name, purpose: purpose, models: list.map(function (x) {
-          return !isMedia(purpose) && x.reasoning_effort ? { model_id: x.model_id, reasoning_effort: x.reasoning_effort }
-                                                          : { model_id: x.model_id };
+          var o = { model_id: x.model_id };
+          if (!isMedia(purpose) && x.reasoning_effort) o.reasoning_effort = x.reasoning_effort;
+          if (purpose === "chat") {
+            o.trim_threshold = x.trim_threshold === undefined ? null : x.trim_threshold;
+            o.prune_target = x.prune_target === undefined ? null : x.prune_target;
+            o.cache_lifetime = x.cache_lifetime === undefined ? null : x.cache_lifetime;
+            o.reasoning_display = x.reasoning_display || "summary";
+          }
+          return o;
         }) }).then(function (r) { refresh(r.message); }, function (x) { save.disabled = false; err.textContent = x.message; });
       }, "primary");
       box.appendChild(h("div", { class: "grp" }, h("h3", { text: p[1] + (purpose === "chat" ? ", in order of preference"
@@ -1898,44 +1975,145 @@ SHAPED.channel_chats = function (res, el, seq) {
   });
 };
 
-/* An entry of a turn that an edit changed — a hook's or C's trim
-   (specs/turn-edit.md).
-   The record is on the turn's answer; the entries it took off the branch, put
-   in their place or added are found through it. */
+/* ── session edits (specs/turn-edit.md): what an edit left, as events ──
+   Every edit — a hook's script, the runtime's trim, the agent's
+   session_condense — appends a record ($.turn_edits) to one entry: the
+   answer at a turn's end, the tool result or note mid-turn, the trim's own
+   note. /admin/api/session finds them on any entry of the session. */
+function editWho(by) {
+  by = String(by || "?");
+  if (by === "fallback") return "the runtime's trim";
+  if (by.indexOf("hook:") === 0) {
+    var x = by.slice(5);
+    return x === "compaction" ? ["the bundled ", link(rowHash("extensions", [x]), x), " script"]
+                              : ["the script of ", link(rowHash("extensions", [x]), x)];
+  }
+  if (by.indexOf("tool:") === 0) return ["the agent, with its ", h("span", { class: "mono", text: by.slice(5) }), " tool"];
+  return by;
+}
+function eref(n) { return link(rowHash("entries", [n]), "#" + n); }
+function erefs(a) { return a.map(function (n, i) { return [i ? ", " : "", eref(n)]; }); }
+function plural(n, one, many) { return fmtNum(n) + " " + (n === 1 ? one : many || one + "s"); }
+function editEvent(ed) {
+  var tk = isObj(ed.tokens) ? ed.tokens : null, items = [];
+  var left = ed.left_branch || [], repl = (ed.replaced || []).filter(isObj), stood = {};
+  repl.forEach(function (p) { stood[p.original] = 1; });
+  var gone = left.filter(function (n) { return !stood[n]; });
+  if (isObj(ed.dropped)) {
+    var d = [];
+    if (ed.dropped.turns) d.push(plural(ed.dropped.turns, "earlier turn"));
+    if (ed.dropped.iterations) d.push(plural(ed.dropped.iterations, "step") + " of the running turn");
+    if (d.length) items.push(h("li", null, "Dropped " + d.join(" and ") + ", with no summary."));
+  }
+  if (gone.length) items.push(h("li", null, plural(gone.length, "entry", "entries") + " left the conversation: ", erefs(gone)));
+  repl.forEach(function (p) { items.push(h("li", null, "Replaced ", eref(p.original), " with ", eref(p.replacement))); });
+  if ((ed.summaries || []).length) items.push(h("li", null, "Summary written: ", erefs(ed.summaries)));
+  if ((ed.notes || []).length) items.push(h("li", null, "Note added: ", erefs(ed.notes)));
+  if (ed.thinking_cut) items.push(h("li", null, "The model's earlier reasoning is not replayed from ", eref(ed.thinking_cut), " on."));
+  var size = tk ? fmtNum(tk.before) + " → " + fmtNum(tk.after) + " tokens" : "";
+  return h("div", { class: "ev" },
+    h("div", { class: "hd" }, h("span", null, h("strong", null, "Edited by "), editWho(ed.source)),
+      h("span", { class: "muted small", text: (typeof ed.at === "number" ? when(ed.at) : "") })),
+    tk ? h("div", null, h("span", { text: size }),
+      h("span", { class: "muted small", text: ed.source === "fallback" ? " (the whole request, system prompt included)" : " (the conversation)" })) : null,
+    items.length ? h("ul", null, items) : null,
+    h("div", { class: "why" }, "Recorded on ", eref(ed.entry_id), ". The entries it took out are still stored; the model no longer sees them."),
+    isObj(ed.record) ? h("div", null, h("span", { class: "why", text: "What the script said about it:" }), jsonBlock(ed.record)) : null);
+}
+function sessionApi(id) { return api("session", { id: id }); }
+
+/* A session: how full its context is, and every edit made to it. */
+SHAPED.sessions = function (res, el, seq) {
+  var id = res.row.key[0], info = sessionApi(id);
+  sub(el, "Context", seq, info, function (r) {
+    var c = r.context, over = c.tokens > c.threshold, list = h("div", { class: "rows" });
+    var pct = c.threshold > 0 ? Math.min(100, Math.round(100 * c.tokens / c.threshold)) : 0;
+    list.appendChild(rowLine(h("span", null, "Size now",
+        h("span", { class: "why", text: c.head_measured ? "Conversation, system prompt and tools, as the provider last counted them (estimates for anything newer)."
+                                                         : "The conversation only: the system prompt and tool list are counted from the provider's next reply." }),
+        h("div", { class: "meter" + (over ? " over" : ""), role: "img", "aria-label": pct + "% of the trim threshold" }, h("span", { style: "width:" + pct + "%" }))),
+      [fmtNum(c.tokens) + " tokens ", over ? pill("over the threshold", "warn") : pill(pct + "% of the threshold", "ok")]));
+    list.appendChild(rowLine(h("span", null, "Trimmed when it passes",
+        h("span", { class: "why", text: c.threshold_set !== null ? "Set on the agent's first chat model." : "Not set: half the model's window." })),
+      fmtNum(c.threshold) + " tokens"));
+    list.appendChild(rowLine(h("span", null, "Cut down to",
+        h("span", { class: "why", text: c.target_set !== null ? "Set on the agent's first chat model." : "Not set: half the threshold." })),
+      fmtNum(c.target) + " tokens"));
+    list.appendChild(rowLine("Model's window", [c.model ? [link(rowHash("models", [c.model]), c.model), ", "] : "", fmtNum(c.window) + " tokens"]));
+    if (c.cache_lifetime && r.cache_armed_at)
+      list.appendChild(rowLine(h("span", null, "Cache-expiry check",
+          h("span", { class: "why", text: "When the prompt cache (" + lifetimeWords(c.cache_lifetime) + ") is about to lapse on an idle session, its cache-expiry hooks run." })),
+        "due " + ago(r.cache_armed_at + Math.floor(c.cache_lifetime * 9 / 10))));
+    return [list, h("p", { class: "note small" }, "Change these on the agent's page: ", link(rowHash("agents", [r.agent]), r.agent), ", Models.")];
+  });
+  sub(el, "Edits", seq, info, function (r) {
+    if (!r.edits.length) return emptyLine("Never edited: no compaction, trim or script has changed this session.");
+    return h("div", null, r.edits.map(editEvent));
+  });
+};
+
+/* An entry an edit wrote, moved or took out — marked, with the edit that
+   did it and a link between a replacement and its original. */
 SHAPED.entries = function (res, el, seq) {
-  var v = res.row.values, id = res.row.key[0];
-  if (v.turn_id === null || v.turn_id === undefined) return;
-  function e(n) { return link(rowHash("entries", [n]), "#" + n); }
-  function many(a) { return a.map(function (n, i) { return [i ? ", " : "", e(n)]; }); }
-  rowsFull("entries", { session_id: v.session_id, turn_id: v.turn_id, type: "assistant_message" }, 200).then(function (r) {
+  var v = res.row.values, id = res.row.key[0], d = looksJson(v.data);
+  var marks = h("div", { class: "rows" });
+  if (isObj(d) && d.replaces !== undefined && d.replaces !== null)
+    marks.appendChild(rowLine(h("span", null, pill("edited", "warn"), " Stands in for ", eref(d.replaces),
+      h("span", { class: "why", text: "Written by an edit in place of the original, which is kept." })), d.edited_by ? editWho(d.edited_by) : ""));
+  else if (isObj(d) && d.edited_by)
+    marks.appendChild(rowLine(h("span", null, pill("written by an edit", "warn"), " Not from the model or a tool."), editWho(d.edited_by)));
+  if (v.original_parent_id !== null && v.original_parent_id !== undefined)
+    marks.appendChild(rowLine(h("span", null, pill("moved", "warn"), " What came before it was edited.",
+      h("span", { class: "why" }, "It was first written after ", eref(v.original_parent_id), ".")), ""));
+  var sec = section("Edits", marks);
+  el.appendChild(sec);
+  if (!marks.firstChild) sec.hidden = true;
+  sessionApi(v.session_id).then(function (r) {
     if (!page(seq)) return;
-    var list = h("div", { class: "rows" });
-    r.rows.forEach(function (x) {
-      var d = looksJson(x.values.data), on = x.key[0];
-      (d && Array.isArray(d.turn_edits) ? d.turn_edits : []).forEach(function (t) {
-        if (!isObj(t)) return;
-        var by = String(t.by || "?"), ext = by.indexOf("hook:") === 0 ? by.slice(5) : null;
-        var who = ext ? ["the extension ", link(rowHash("extensions", [ext]), ext)] : by;
-        var left = [].concat(t.left_branch || []), repl = [].concat(t.replaced || []).filter(isObj), notes = [].concat(t.notes || []);
-        if (on === id) {
-          list.appendChild(rowLine(h("span", null, "This turn was edited after it ended, by ", who,
-            h("span", { class: "why", text: "The entries it took out are still stored; they are not on the session's branch, so the model no longer sees them." })),
-            typeof t.at === "number" ? when(t.at) : ""));
-          if (left.length) list.appendChild(rowLine("Left the branch", many(left)));
-          repl.forEach(function (p) { list.appendChild(rowLine("Result replaced", [e(p.original), " → ", e(p.replacement)])); });
-          if (notes.length) list.appendChild(rowLine("Notes added", many(notes)));
-          if (isObj(t.tokens)) list.appendChild(rowLine("Size of the turn, estimated tokens", fmtNum(t.tokens.before) + " → " + fmtNum(t.tokens.after)));
-          return;
-        }
-        var was = repl.filter(function (p) { return p.original === id; })[0], now = repl.filter(function (p) { return p.replacement === id; })[0];
-        var what = left.indexOf(id) >= 0 ? ["Not on the session's branch: taken out by ", who, was ? [", which put ", e(was.replacement), " in its place"] : ""]
-                 : now ? ["Written by ", who, " in place of ", e(now.original)]
-                 : notes.indexOf(id) >= 0 ? ["A note left on the turn by ", who] : null;
-        if (what) list.appendChild(rowLine(h("span", null, what), ["record on ", e(on)]));
-      });
+    r.edits.forEach(function (ed) {
+      var repl = (ed.replaced || []).filter(isObj);
+      var was = repl.filter(function (p) { return p.original === id; })[0];
+      var line = null;
+      if (ed.entry_id === id) line = [pill("record"), " An edit was recorded here."];
+      else if (was) line = [pill("replaced", "warn"), " Replaced by ", eref(was.replacement), "; the model sees that instead."];
+      else if ((ed.left_branch || []).indexOf(id) >= 0) line = [pill("taken out", "warn"), " No longer in the conversation the model sees."];
+      if (!line) return;
+      marks.appendChild(rowLine(h("span", null, line), ed.at ? when(ed.at) : ""));
+      marks.appendChild(editEvent(ed));
     });
-    if (list.firstChild) el.appendChild(section("Turn edit", list));
+    sec.hidden = !marks.firstChild;
   }, function () {});
+};
+
+/* An extension: its hooks, each with when it runs and how it has fared. */
+var HOOK_WHEN = { Stop: "after each turn of a top-level session", SubagentStop: "after each turn of a sub-agent's session",
+  ContextThreshold: "when a session passes its trim threshold", CacheExpiring: "when an idle session's prompt cache is about to lapse" };
+function hookEnableBtn(k) {
+  return confirmBtn("Turn back on", "The " + k.event + " hook of " + k.extension_name + " runs again from its next event. Its failure count starts from zero; " +
+    "three more failures in a row turn it off again.", "Turn it on",
+    function () { return act("hook_enable", { extension: k.extension_name, event: k.event, path: k.path }); });
+}
+SHAPED.extensions = function (res, el, seq) {
+  var name = res.row.key[0];
+  sub(el, "Hooks", seq, allRows("hooks", { extension_name: name }), function (r) {
+    if (!r.length) return emptyLine("No hooks: this extension does not run on session events.");
+    var list = h("div", { class: "rows" });
+    r.sort(function (a, b) { return a.values.event < b.values.event ? -1 : a.values.event > b.values.event ? 1 : a.values.pos - b.values.pos; });
+    r.forEach(function (x) {
+      var k = x.values, pills = h("span", { class: "pills" });
+      var file = String(k.path || "").split("/").pop();
+      if (k.disabled) { pills.appendChild(pill("turned off after 3 failures in a row", "bad")); pills.appendChild(hookEnableBtn(k)); }
+      else if (!k.enabled) pills.appendChild(pill("off"));
+      else pills.appendChild(pill("on", "ok"));
+      if (!k.disabled && k.fail_count > 0) pills.appendChild(pill("failed the last " + plural(k.fail_count, "time"), "warn"));
+      list.appendChild(rowLine(h("span", null, h("strong", { text: k.event }), " ", h("span", { class: "mono small", text: file }),
+        h("span", { class: "why", text: "Runs " + (HOOK_WHEN[k.event] || "on " + k.event) + ". " +
+          (k.async ? "The session does not wait for it, and its reply is ignored." : "The session waits for it, and its reply may edit the session.") +
+          " Time allowed: " + (k.timeout ? k.timeout + " s" : "the default (hook_timeout)") + "." })), pills));
+    });
+    return [list, h("p", { class: "note small", text: "A hook that fails three times in a row (crash, time out, or a reply that is refused) is turned off, and the default agent is told once." +
+      (res.row.values.owner_agent ? " Promoting the extension again also turns it back on." : "") })];
+  });
 };
 
 SHAPED.approvals = function (res, el, seq) {

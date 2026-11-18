@@ -466,7 +466,8 @@ static void test_declared_input(void) {
  * behind it is released by the sweep. */
 static void test_sweep(void) {
     int64_t sid = seed_turn("Rv", 400);
-    assert(session_set_state(g_db, sid, "settling") == 0);
+    assert(session_set_settling(g_db, sid, "Stop") == 0);
+    assert(count("SELECT settle_event='Stop' FROM sessions WHERE id=?1", sid) == 1);
     assert(!child_hook_holds(sid));
     turn_settle_sweep();
     assert(is_state(sid, "idle"));
@@ -778,7 +779,9 @@ static void test_cache_expiring(void) {
     before = measure(sid, "CeBoom");
     cache_expiring_tick();
     assert(is_state(sid, "settling") && child_count() == 1);
+    assert(count("SELECT settle_event='CacheExpiring' FROM sessions WHERE id=?1", sid) == 1);
     pump_until_idle(sid);
+    assert(count("SELECT settle_event IS NULL FROM sessions WHERE id=?1", sid) == 1);
     assert(fail_count("ceboom") == 1);
     assert(count(N_EDITS, sid) == 0 && count(N_TRIMS, sid) == 0);
     assert(measure(sid, "CeBoom") == before);
@@ -833,6 +836,15 @@ static void test_cache_expiring(void) {
     assert(count("SELECT type='user_message' AND content='still there?' FROM entries"
                  " WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1)", sid) == 1);
 
+    /* The sweep ends a CacheExpiring hold whose child went unheard-of as the
+     * reap would: idle, and no trim — the hold says what it was for. */
+    sid = seed_cache("CeNone");
+    before = measure(sid, "CeNone");
+    assert(session_set_settling(g_db, sid, "CacheExpiring") == 0);
+    turn_settle_sweep();
+    assert(is_state(sid, "idle") && count(N_TRIMS, sid) == 0);
+    assert(measure(sid, "CeNone") == before);
+
     /* At or under the prune target: no hook, nothing held. */
     sid = seed_cache("CeOk");
     snprintf(sql, sizeof(sql), "UPDATE agent_models SET trim_threshold=NULL, prune_target=%d"
@@ -881,6 +893,15 @@ static void test_disabled(void) {
         assert(count(N_TOLD, dsid) == (n == 3));
     }
     assert(count("SELECT disabled FROM hooks WHERE extension_name='trip' AND ?1", 1) == 1);
+    /* The note names the one hook — extension, event and script — and the
+     * ways back: the explorer's button, the statement for exactly that row,
+     * and (the agent owns it) promoting it again. */
+    assert(count("SELECT COUNT(*) FROM inbox WHERE session_id=?1 AND source_ref='hook'"
+                 " AND payload LIKE '%The Stop hook ''h.qjs'' of extension ''trip''%'"
+                 " AND payload LIKE '%\"Turn back on\"%'"
+                 " AND payload LIKE '%WHERE extension_name=''trip'' AND event=''Stop''"
+                 " AND path=''%/h.qjs''%'"
+                 " AND payload LIKE '%promote the extension again%'", dsid) == 1);
     /* Disabled: not run, not held, nobody told again. */
     int64_t sid = seed_turn("Trip", 10);
     assert(turn_settle_begin(sid, "Trip") == 0);

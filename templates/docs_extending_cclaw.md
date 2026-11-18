@@ -137,8 +137,9 @@ one edit at most. Originals are never deleted — the runtime records each
 edit. Text containing a secret refuses the whole reply; any refusal leaves
 the session untouched. Return `"{}"` to leave it alone. The model sees a note
 as `[note from extension <name>] …` and a summary as `[Summary of earlier
-conversation] …`; an edit inside the running turn makes the model re-think
-from that point (its earlier reasoning is not replayed after the edit), and
+conversation] …`. On Anthropic, an edit inside the running turn makes the
+model re-think from that point (its earlier reasoning is not replayed after
+the edit); other providers keep their reasoning as it was. On every provider
 the prompt cache restarts at the first changed entry, so edit in one
 worthwhile pass.
 

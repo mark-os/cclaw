@@ -74,17 +74,13 @@ Session state drives the loop via `advance_session()`:
 
 ```
 idle ──[inbox has work]──→ llm_running ──[tool_calls]──→ tool_running
-  ↑                            │                              │
-  │                            └──[stop, no tools]────────────┘
-  │                                                           │
-  └───────────────────────[all tools done]────────────────────┘
-                               ↓
-                          compacting (optional)
-                               ↓
-                             idle
+  ↑                          ↑     │                          │
+  │                          └─────┼────[all tools done]──────┘
+  │                                │
+  └──────[stop, no tools]──────────┘
 ```
 
-Other states: `awaiting_approval` (a tool call is parked for a human decision) and `rate_limited`. A parent that launched a blocking sub-agent stays parked until the child's result arrives.
+Other states: `awaiting_approval` (a tool call is parked for a human decision), `rate_limited`, and `settling` — a hook script the session waits for (between iterations, at a turn's end, or on an idle session whose prompt cache is about to lapse; see [specs/hooks.md](../specs/hooks.md)). A parent that launched a blocking sub-agent stays parked until the child's result arrives.
 
 ## Security Layers
 

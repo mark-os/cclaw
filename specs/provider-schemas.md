@@ -341,6 +341,10 @@ cacheRead = cachedContentTokenCount
 cacheWrite = 0  (automatic caching, no write metric)
 ```
 
+A zero-valued field is omitted, not sent as 0: a response with no
+`cachedContentTokenCount` (or no `thoughtsTokenCount`) read nothing from
+cache (or did not think). Checked live 2026-11-18.
+
 ### Quirks
 
 - **Complete tool args**: Unlike OpenAI, `functionCall.args` is a complete JSON
@@ -587,4 +591,9 @@ The request body is the output of a SQL query in `src/llm_payload.c`, with
 three builders: OpenAI-compat, Gemini-native and Anthropic Messages. CClaw
 sends `max_tokens` on the OpenAI-compat and Anthropic paths. Only the
 Anthropic builder sends `cache_control` markers (its caching is opt-in); the
-other two rely on implicit prefix caching.
+other two rely on implicit prefix caching. The markers' `ttl` is the routing
+entry's `cache_lifetime` (`"1h"` for 3600, none for 300 or unset), and the
+thinking display (Anthropic `thinking.display`, Gemini
+`thinkingConfig.includeThoughts`) its `reasoning_display` — see
+[providers.md](providers.md#anthropic-messages) and
+[providers.md](providers.md#reasoning-display).

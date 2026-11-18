@@ -52,6 +52,23 @@
     "   AND q.consumed=0" \
     "   AND COALESCE(q.source,'') NOT IN " CCLAW_AUTONOMOUS_SOURCES "))"
 
+/* The entry that decides whether a session's turn is waiting on a request:
+ * its leaf, read through notes and summaries (roles 0 and 4). A session edit
+ * may leave either at the end of a turn still running — a hook's note with no
+ * "before", a summary of the newest iterations — and the streak guard leaves
+ * its notes there too; none of them answers anything or asks anything. Role 1
+ * or 3 behind them is a turn nobody made the next request for; role 2 is a
+ * turn at rest. The id, or NULL for an empty branch. SID as above. */
+#define CCLAW_SQL_LEAF_READ_THROUGH(SID) \
+    "(WITH RECURSIVE lw(id, role, parent_id) AS (" \
+    "   SELECT le.id, le.role, le.parent_id FROM entries le" \
+    "    WHERE le.id=(SELECT leaf_id FROM sessions WHERE id=" SID ")" \
+    "      AND le.session_id=" SID \
+    "   UNION ALL SELECT le.id, le.role, le.parent_id FROM entries le" \
+    "    JOIN lw ON le.id=lw.parent_id" \
+    "    WHERE lw.role IN (0,4) AND le.session_id=" SID ")" \
+    " SELECT id FROM lw WHERE role NOT IN (0,4) LIMIT 1)"
+
 /* Return values from advance_session — tells caller what to do next */
 typedef enum {
     ADVANCE_NOOP = 0,        /* nothing to do (already idle, no inbox) */

@@ -898,8 +898,9 @@ static StreakGate streak_gate_check(sqlite3 *db, int64_t session_id) {
 
 /* One role-0 system entry on the session, stamped so it stays queryable after
  * compaction eats the prose. Role 0 is load-bearing twice over: the streak
- * reads role 1, so this can never be mistaken for a human turn, and a role-0
- * leaf is a legal resting place, so it never creates a turn to resume.
+ * reads role 1, so this can never be mistaken for a human turn, and a note
+ * is read through when deciding whether a turn waits on a request
+ * (CCLAW_SQL_LEAF_READ_THROUGH), so it never creates a turn to resume.
  * Caller holds the turn-open transaction. */
 static void streak_note(sqlite3 *db, int64_t session_id, const char *note,
                         const char *text) {
@@ -1040,7 +1041,7 @@ static ConcGate conc_gate_check(sqlite3 *db, int64_t session_id) {
          * stamped autonomous — no stamp means human, same rule as the streak. */
         gated = (int)db_scalar_i64(db,
             "SELECT EXISTS(SELECT 1 FROM entries e"
-            " WHERE e.id=(SELECT leaf_id FROM sessions WHERE id=?1)"
+            " WHERE e.id=" CCLAW_SQL_LEAF_READ_THROUGH("?1")
             "   AND e.session_id=?1 AND e.role=1"
             "   AND COALESCE(json_extract(e.data,'$.source'),'')"
             "       IN " CCLAW_AUTONOMOUS_SOURCES ");", session_id, 0);
@@ -1242,14 +1243,17 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             /* Empty inbox, but the leaf may be unanswered — role 1: a refused
              * dispatch (rate limit, disk floor, full worker pool) consumed the
              * inbox into entries, then parked the session idle. Role 3: a
-             * mid-turn LLM dispatch bounce reverted the session to idle, or D11
-             * closed a zombie call. Both are a turn waiting on a request nobody
-             * made; without this check they are stranded forever. Role 0/2/4
-             * leaves are legal resting places and stay put. */
+             * mid-turn LLM dispatch bounce reverted the session to idle, D11
+             * closed a zombie call, or recovery reset a session a dead process
+             * held mid-turn (for a hook, too). Both are a turn waiting on a
+             * request nobody made; without this check they are stranded
+             * forever. Notes and summaries are read through (a hook may leave
+             * one at the end of a running turn); a role-2 leaf is a turn at
+             * rest and stays put. */
             sqlite3_stmt *ls;
             if (sqlite3_prepare_v2(db,
                     "SELECT role FROM entries"
-                    " WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1)"
+                    " WHERE id=" CCLAW_SQL_LEAF_READ_THROUGH("?1")
                     "  AND session_id=?1 AND role IN (1,3)",
                     -1, &ls, NULL) == SQLITE_OK) {
                 sqlite3_bind_int64(ls, 1, session_id);
@@ -1336,7 +1340,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         {
             int64_t leaf_role = db_scalar_i64(db,
                 "SELECT role FROM entries"
-                " WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1)",
+                " WHERE id=" CCLAW_SQL_LEAF_READ_THROUGH("?1"),
                 session_id, 2);
             if (leaf_role == 1 || leaf_role == 3) {
                 LOG_WARN_("advance state=llm_running job=gone leaf_role=%d"

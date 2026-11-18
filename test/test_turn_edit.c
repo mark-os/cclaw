@@ -707,7 +707,6 @@ static void test_rejections(void) {
     REJECT(NOTE_BEFORE(t.c1), "is not the first entry of an iteration");
     REJECT(NOTE_BEFORE(t.r1), "is not the first entry of an iteration");
     REJECT(NOTE_BEFORE(t.u), "is not the first entry of an iteration");
-    REJECT(NOTE_BEFORE(t.fin), "is not the first entry of an iteration");
     REJECT(NOTE_BEFORE(99999), "is not the first entry of an iteration");
     /* (A note before an iteration the reply empties: on a turn of its own
      * below, since c5/c6 keep this turn's second iteration alive.) */
@@ -1029,9 +1028,19 @@ static void test_notes(void) {
         "|assistant:done");
     expect_text(db, t.sid, "[system] " NOTE_TAG, 0);
     expect_text(db, t.sid, "[system] first", 0);
+
+    /* "before" naming the answer — the id the input gives as final.entry_id
+     * — places the note before the answer's reasoning, as the default does. */
+    snprintf(reply, sizeof(reply), E("{\"op\":\"note\",\"text\":\"third\",\"before\":%lld}"),
+             (long long)t.fin);
+    apply_ok(db, &t, reply);
+    int64_t n4 = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[1].notes[0]')"
+                                   " FROM entries WHERE id=?", t.fin, -1);
+    BRANCH(db, t.sid, t.u0, t.a0, t.u, t.rs1, t.a1, t.c1, t.c2, t.c3, t.r2, t.r1, t.r3,
+           t.sys, n2, t.rs2, t.a2, t.c4, t.r4, n1, n3, n4, t.rs3, t.fin);
     expect_body(db, t.sid, O, "$.messages[3].reasoning_details[0].text", "why1");
     expect_body(db, t.sid, O, "$.messages[9].reasoning_details[0].text", "why2");
-    expect_body(db, t.sid, O, "$.messages[13].reasoning_details[0].text", "why3");
+    expect_body(db, t.sid, O, "$.messages[14].reasoning_details[0].text", "why3");
 
     /* A note on its own, on an answer without a reasoning entry: it sits
      * directly under the answer. */
@@ -1845,8 +1854,10 @@ static void test_past_turn(void) {
                       " AND json_extract(data,'$.turn_edits[0].thinking_cut')=%lld"
                       " FROM entries WHERE id=%lld", (long long)t.rs1, (long long)t.c2,
              (long long)t.r2, (long long)t.r1, (long long)t.a1, (long long)f3);
-    /* What was written says so (P4): source, and the original it stands for. */
-    expect_q(db, "1", "SELECT json_extract(data,'$.source')='" LABEL "'"
+    /* What was written says so (P4): who edited it, and the original it
+     * stands for; its own source stays the original's. */
+    expect_q(db, "1", "SELECT json_extract(data,'$.edited_by')='" LABEL "'"
+                      " AND json_extract(data,'$.source') IS NULL"
                       " AND json_extract(data,'$.replaces')=%lld AND turn_id=2"
                       " AND " TURN_EDIT_SQL_STANDS_IN("data") " FROM entries WHERE id=%lld",
              (long long)t.r1, (long long)n1);

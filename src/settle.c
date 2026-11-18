@@ -16,6 +16,7 @@
 #include "proc.h"
 #include "run_tool.h"
 #include "turn_edit.h"
+#include "util.h"
 #include "wake.h"
 
 _Static_assert(TURN_EDIT_INPUT_MAX_BYTES == RUNTOOL_ARG_FD_MAX,
@@ -158,11 +159,12 @@ static int cache_step(int64_t session_id, const char *agent, const HookRef *afte
     return started;
 }
 
-/* Mark the session held for the awaited child just started. The child is
- * started before the session is marked: if nothing starts, the session
- * never moved. */
-static int settle_hold(int64_t session_id, const char *from) {
-    if (session_set_state(proc_db(), session_id, "settling") != 0) {
+/* Mark the session held for the awaited child just started, for `event`
+ * (sessions.settle_event: whoever ends the hold, the sweep included, reads
+ * what follows it from there). The child is started before the session is
+ * marked: if nothing starts, the session never moved. */
+static int settle_hold(int64_t session_id, const char *from, const char *event) {
+    if (session_set_settling(proc_db(), session_id, event) != 0) {
         /* Not where we left it any more (a co-pointed process moved it) or
          * the write gave up. The script runs on, unheld, and its reply is
          * discarded. */
@@ -177,21 +179,24 @@ static int settle_hold(int64_t session_id, const char *from) {
 
 int turn_settle_begin(int64_t session_id, const char *agent) {
     if (!proc_db() || !agent) return 0;
-    if (!stop_step(session_id, agent, NULL) && !context_step(session_id, agent, NULL))
+    const char *event = HOOK_EVENT_CONTEXT_THRESHOLD;
+    if (stop_step(session_id, agent, NULL))
+        event = hook_stop_event(proc_db(), session_id);
+    else if (!context_step(session_id, agent, NULL))
         return 0;
-    return settle_hold(session_id, "idle");
+    return settle_hold(session_id, "idle", event);
 }
 
 int iteration_settle_begin(int64_t session_id, const char *agent) {
     if (!proc_db() || !agent) return 0;
     if (!context_step(session_id, agent, NULL)) return 0;
-    return settle_hold(session_id, "tool_running");
+    return settle_hold(session_id, "tool_running", HOOK_EVENT_CONTEXT_THRESHOLD);
 }
 
 int cache_settle_begin(int64_t session_id, const char *agent) {
     if (!proc_db() || !agent || !agent[0]) return 0;
     if (!cache_step(session_id, agent, NULL)) return 0;
-    return settle_hold(session_id, "idle");
+    return settle_hold(session_id, "idle", HOOK_EVENT_CACHE_EXPIRING);
 }
 
 void cache_expiring_tick(void) {
@@ -217,12 +222,18 @@ void cache_expiring_tick(void) {
  * to tool_running and advance_iteration_end runs the C check and sends the
  * next request. At turn end it goes idle, the C check runs against the
  * session as the hooks left it, and the idle branch of advance_session takes
- * it from there — gates, inbox drain, next turn. A flip that fails leaves
- * the session 'settling' with no child, which is exactly what the sweep
- * looks for. */
-static void settle_release(int64_t session_id, const char *agent, int check) {
+ * it from there — gates, inbox drain, next turn. A CacheExpiring hold goes
+ * idle with no check: C never trims an idle session. Which of these it is
+ * comes from the session row (turn_iteration, settle_event), so the sweep
+ * ends a hold exactly as the reap would. A flip that fails leaves the
+ * session 'settling' with no child, which is exactly what the sweep looks
+ * for. */
+static void settle_release(int64_t session_id, const char *agent) {
     int mid_turn = db_scalar_i64(proc_db(),
         "SELECT turn_iteration > 0 FROM sessions WHERE id=?1;", session_id, 0) == 1;
+    int check = db_scalar_i64(proc_db(),
+        "SELECT settle_event IS NOT '" HOOK_EVENT_CACHE_EXPIRING "' FROM sessions"
+        " WHERE id=?1;", session_id, 1) == 1;
     const char *next = mid_turn ? "tool_running" : "idle";
     if (session_set_state(proc_db(), session_id, next) != 0) {
         LOG_WARN_("settle release failed session=%lld — the sweep retries",
@@ -240,28 +251,46 @@ static void settle_release(int64_t session_id, const char *agent, int check) {
 
 /* The hook is disabled: one note to the default agent, who can tell the
  * operator. A disabled ContextThreshold hook leaves the agent on C's trim,
- * which is why anyone is told at all. */
+ * which is why anyone is told at all. The note names the one hook (an
+ * extension may have several, and only this one is off) and the ways back
+ * that exist for it: the explorer's button, the statement, and — only for an
+ * extension an agent owns — promoting it again (a bundle shipped in the
+ * binary, or one installed by the operator, cannot be). */
 static void notify_disabled(const SettleChild *sc, const char *outcome, const char *reason) {
     sqlite3 *db = proc_db();
     char *agent = db_default_agent_name(db);
     int64_t sid = agent ? db_recent_session(db, agent) : 0;
     const char *slash = strrchr(sc->hook.path, '/');
     const char *handler = slash ? slash + 1 : sc->hook.path;
-    char text[1024];
-    snprintf(text, sizeof(text),
-             "The hook '%s' (%s) of extension '%s' failed %d times in a row and has"
-             " been disabled — last: %s: %.200s. %s Fix the extension and promote it"
-             " again, or clear the flag (UPDATE hooks SET disabled=0, fail_count=0"
-             " WHERE extension_name='%s'), to re-enable the hook. Tell the operator.",
-             handler, sc->hook.event,
-             sc->hook.extension, HOOK_FAIL_LIMIT, outcome, reason,
-             strcmp(sc->hook.event, HOOK_EVENT_CONTEXT_THRESHOLD) == 0
-                 ? "Until then sessions over their trim threshold are cut by the"
-                   " runtime's fallback, which drops the oldest turns."
-                 : strcmp(sc->hook.event, HOOK_EVENT_CACHE_EXPIRING) == 0
-                 ? "Until then idle sessions are left as they are."
-                 : "Turns are left as they are.", sc->hook.extension);
-    if (sid > 0 && inbox_insert_scanned(db, sid, "system", "hook", text) > 0) {
+    char *owner = NULL;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "SELECT owner_agent FROM extensions WHERE name=?1",
+                           -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, sc->hook.extension, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
+            owner = strdup((const char *)sqlite3_column_text(st, 0));
+        sqlite3_finalize(st);
+    }
+    char *db_path = util_resolve_db_path();
+    const char *effect =
+        strcmp(sc->hook.event, HOOK_EVENT_CONTEXT_THRESHOLD) == 0
+            ? "Until then sessions over their trim threshold are cut by the runtime's"
+              " fallback, which drops the oldest turns without a summary."
+        : strcmp(sc->hook.event, HOOK_EVENT_CACHE_EXPIRING) == 0
+            ? "Until then idle sessions are left as they are."
+            : "Until then turns are left as they are.";
+    char *text = sqlite3_mprintf(
+        "The %s hook '%s' of extension '%s' failed %d times in a row and has been turned"
+        " off (disabled) — last: %s: %.200s. %s Its other hooks, if any, still run. To turn"
+        " it back on once its script is fixed: in the explorer (/admin), open the"
+        " extension '%s' and press \"Turn back on\" beside the hook; or run"
+        " cclaw sqlite3 --write %s \"UPDATE hooks SET disabled=0, fail_count=0 WHERE"
+        " extension_name='%q' AND event='%q' AND path='%q'\"%s. Tell the operator.",
+        sc->hook.event, handler, sc->hook.extension, HOOK_FAIL_LIMIT, outcome, reason,
+        effect, sc->hook.extension, db_path ? db_path : "<db>", sc->hook.extension,
+        sc->hook.event, sc->hook.path,
+        owner ? "; or have its owner promote the extension again" : "");
+    if (text && sid > 0 && inbox_insert_scanned(db, sid, "system", "hook", text) > 0) {
         wake_session(sid);
         LOG_WARN_("hook %s ext=%s disabled after %d failures — %s told (session %lld)",
                   sc->hook.event, sc->hook.extension, HOOK_FAIL_LIMIT, agent,
@@ -270,6 +299,9 @@ static void notify_disabled(const SettleChild *sc, const char *outcome, const ch
         LOG_WARN_("hook %s ext=%s disabled after %d failures — no session to tell",
                   sc->hook.event, sc->hook.extension, HOOK_FAIL_LIMIT);
     }
+    sqlite3_free(text);
+    free(db_path);
+    free(owner);
     free(agent);
 }
 
@@ -329,12 +361,12 @@ void turn_settle_child_done(const SettleChild *sc) {
     cclaw_log_clear_ctx();
 
     if (!held) return;
-    int cache = strcmp(event, HOOK_EVENT_CACHE_EXPIRING) == 0;
     int next = is_stop_event(event)
         ? stop_step(sid, sc->agent, &sc->hook) || context_step(sid, sc->agent, NULL)
-        : cache ? cache_step(sid, sc->agent, &sc->hook)
+        : strcmp(event, HOOK_EVENT_CACHE_EXPIRING) == 0
+        ? cache_step(sid, sc->agent, &sc->hook)
         : context_step(sid, sc->agent, &sc->hook);
-    if (!next) settle_release(sid, sc->agent, !cache);
+    if (!next) settle_release(sid, sc->agent);
 }
 
 void turn_settle_sweep(void) {
@@ -364,6 +396,6 @@ void turn_settle_sweep(void) {
         if (child_hook_holds(held[i].id)) continue;
         LOG_WARN_("settle sweep: session=%lld held with no hook child — releasing",
                   (long long)held[i].id);
-        settle_release(held[i].id, held[i].agent, 1);
+        settle_release(held[i].id, held[i].agent);
     }
 }

@@ -84,8 +84,10 @@ static char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
         /* Per hook: a count says nothing. A hook is a script that runs,
          * unasked, at a moment of every session of an agent with this
          * extension, sees the session, and — when the session waits for it —
-         * may edit it (specs/hooks.md). Promotion is the only approval it
-         * ever gets. check_hook_events has vetted the fields by now. */
+         * may edit it: everything turn_edit_apply allows, said plainly,
+         * because promotion is the only approval it ever gets
+         * (specs/hooks.md, specs/turn-edit.md). check_hook_events has vetted
+         * the fields by now. */
         " || COALESCE((SELECT char(10) || group_concat("
         "      '  - hook ' || COALESCE(json_extract(hj.value,'$.event'),'?') || ' ' ||"
         "      COALESCE(json_extract(hj.value,'$.handler'),'?') || ': ' ||"
@@ -93,12 +95,20 @@ static char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
         "        WHEN 'Stop' THEN 'runs after every turn'"
         "        WHEN 'SubagentStop' THEN 'runs after every turn of a sub-agent'"
         "        WHEN 'ContextThreshold'"
-        "          THEN 'runs when a session grows past its trim threshold'"
+        "          THEN 'runs after any step of a turn, mid-turn or at its end, when the'"
+        "               || ' session has grown past its trim threshold'"
+        "        WHEN 'CacheExpiring'"
+        "          THEN 'runs on a session left idle while its prompt cache is about to'"
+        "               || ' lapse'"
         "        ELSE 'runs' END ||"
         "      CASE WHEN COALESCE(json_extract(hj.value,'$.async'),0)"
         "           THEN ' and reads the session; not waited for, cannot change it'"
-        "           ELSE ', reads the session, and may drop tool calls, replace results'"
-        "                || ' and add notes; the session waits for it' END ||"
+        "           ELSE ', reads the session, and may change what the agent remembers of'"
+        "                || ' it: rewrite any message (yours or the agent''s) and the'"
+        "                || ' arguments of any tool call, drop tool calls and replace their'"
+        "                || ' results, add notes, and drop whole turns or replace them with'"
+        "                || ' a summary it writes (the originals are kept, out of the'"
+        "                || ' agent''s sight); the session waits for it' END ||"
         "      COALESCE(' (at most ' || json_extract(hj.value,'$.timeout') || ' s)', '') ||"
         /* ...and how much of the conversation it reads: the newest turn
          * alone, or that and some or all of what came before. */

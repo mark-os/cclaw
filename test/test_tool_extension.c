@@ -107,12 +107,14 @@ static void test_promote_parks_apply_approval(void) {
         " \"input\":{\"history\":5,\"history_results\":false,\"max_bytes\":2000000}},"
         "{\"event\":\"SubagentStop\",\"handler\":\"all.qjs\",\"input\":{\"history\":\"all\"}},"
         "{\"event\":\"ContextThreshold\",\"handler\":\"one.qjs\",\"timeout\":120,"
-        " \"input\":{\"history\":1}}]}");
+        " \"input\":{\"history\":1}},"
+        "{\"event\":\"CacheExpiring\",\"handler\":\"idle.qjs\"}]}");
     write_file(WS "/extensions/goodx/tx.qjs", "'ok'");
     write_file(WS "/extensions/goodx/rev.qjs", "return '{}'");
     write_file(WS "/extensions/goodx/log.qjs", "return '{}'");
     write_file(WS "/extensions/goodx/all.qjs", "return '{}'");
     write_file(WS "/extensions/goodx/one.qjs", "return '{}'");
+    write_file(WS "/extensions/goodx/idle.qjs", "return '{}'");
 
     /* The dispatcher has the session in tool_running before dispatching a
      * call; the promote park's awaiting_approval transition is CAS-guarded
@@ -146,7 +148,12 @@ static void test_promote_parks_apply_approval(void) {
      * an awaited one may edit it; a droppable tool's calls are what it may
      * take out. A count ("1 hooks") would say none of that. */
     assert(strstr(args, "hosts=[api.good.test] droppable params="));
-    assert(strstr(args, "- hook Stop rev.qjs: runs after every turn, reads the session, and may drop"));
+    assert(strstr(args, "- hook Stop rev.qjs: runs after every turn, reads the session, and may"
+                        " change what the agent remembers of it: rewrite any message (yours or"
+                        " the agent's) and the arguments of any tool call, drop tool calls and"
+                        " replace their results, add notes, and drop whole turns or replace"
+                        " them with a summary it writes (the originals are kept, out of the"
+                        " agent's sight); the session waits for it."));
     assert(strstr(args, "- hook Stop log.qjs: runs after every turn and reads the session;"
                         " not waited for"));
     /* ...and how much of the conversation each one is sent. */
@@ -156,8 +163,11 @@ static void test_promote_parks_apply_approval(void) {
     assert(strstr(args, "- hook SubagentStop all.qjs: runs after every turn of a sub-agent,"
                         " reads the session, and may"));
     assert(strstr(args, "It is sent the newest turn and the whole conversation before it\\n"));
-    assert(strstr(args, "- hook ContextThreshold one.qjs: runs when a session grows past its"
-                        " trim threshold, reads the session"));
+    assert(strstr(args, "- hook ContextThreshold one.qjs: runs after any step of a turn,"
+                        " mid-turn or at its end, when the session has grown past its trim"
+                        " threshold, reads the session"));
+    assert(strstr(args, "- hook CacheExpiring idle.qjs: runs on a session left idle while its"
+                        " prompt cache is about to lapse, reads the session, and may change"));
     assert(strstr(args, "the session waits for it (at most 120 s). It is sent the newest turn"
                         " and the turn before it"));
     sqlite3_finalize(st);

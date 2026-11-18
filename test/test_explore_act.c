@@ -384,6 +384,16 @@ static void test_models(void) {
         "below its trim threshold");
     has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"image\",\"models\":["
                  "{\"model_id\":\"mock/b\",\"trim_threshold\":100}]}"), "chat list only");
+    /* An empty threshold is half the window (mock/a has none of its own:
+     * the default 128000), and the target must be below that too. */
+    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+                 "{\"model_id\":\"mock/a\",\"trim_threshold\":null,\"prune_target\":64000}]}"),
+        "half the model's window (64000 tokens)");
+    exec("UPDATE models SET context_window = 10000 WHERE id = 'mock/a';");
+    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+                 "{\"model_id\":\"mock/a\",\"trim_threshold\":null,\"prune_target\":6000}]}"),
+        "(5000 tokens)");
+    exec("UPDATE models SET context_window = NULL WHERE id = 'mock/a';");
     /* The cache lifetime the same way: set, kept when left out, cleared by
      * null; on an Anthropic model only 300 or 3600, and 3600 when a new
      * entry says nothing. */
@@ -436,6 +446,30 @@ static void test_models(void) {
     has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"utility\",\"models\":["
                  "{\"model_id\":\"mock/a\",\"reasoning_display\":\"none\"}]}"), "chat list only");
     printf("PASS: test_models\n");
+}
+
+/* A hook three failures turned off comes back on with its count at zero;
+ * one that is on, or that does not exist, is refused in words. */
+static void test_hooks(void) {
+    exec("INSERT INTO hooks(extension_name, event, path, fail_count, disabled) VALUES"
+         " ('ext1', 'ContextThreshold', '/x/compact.qjs', 3, 1),"
+         " ('ext1', 'Stop', '/x/review.qjs', 1, 0);");
+    has(act(200, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"ContextThreshold\","
+                 "\"path\":\"/x/compact.qjs\"}"), "on again");
+    assert(qeq("SELECT disabled || ':' || fail_count FROM hooks WHERE event='ContextThreshold'", "0:0"));
+    has(act(409, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"ContextThreshold\","
+                 "\"path\":\"/x/compact.qjs\"}"), "not turned off");
+    has(act(409, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"Stop\","
+                 "\"path\":\"/x/review.qjs\"}"), "not turned off");
+    assert(qeq("SELECT fail_count FROM hooks WHERE event='Stop'", "1"));
+    has(act(404, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"CacheExpiring\","
+                 "\"path\":\"/x/compact.qjs\"}"), "no CacheExpiring hook");
+    has(act(404, "{\"action\":\"hook_enable\",\"extension\":\"nope\",\"event\":\"Stop\","
+                 "\"path\":\"/x/review.qjs\"}"), "no extension called");
+    has(act(400, "{\"action\":\"hook_enable\",\"extension\":\"ext1\"}"), "Say which hook");
+    has(act(400, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"Stop\","
+                 "\"path\":\"/x/review.qjs\",\"fail_count\":0}"), "does not take a field");
+    printf("PASS: test_hooks\n");
 }
 
 static void test_chats(void) {
@@ -810,6 +844,7 @@ int main(void) {
     test_grants();
     test_agent_copy();
     test_models();
+    test_hooks();
     test_chats();
     test_providers();
     test_memory();

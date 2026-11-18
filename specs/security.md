@@ -623,7 +623,7 @@ All three credential tools run via the `--run-tool` broker (re-exec'd child, nam
 | inbox message (channel inbound) | — | — | yes | yes |
 | JS http_request (url/headers/body, child-side) | yes | yes | — | — |
 
-The rule: **anything heading into entries goes through both mask passes (`tool_result_postprocess`, `src/secret_interp.c`); anything heading into a tool exec goes through inject.** Sanitize-on-write is the invariant — the LLM payload is assembled straight from `entries` with no outbound scan, so every write path into entries must either run the mask passes or be derived from content that already did (model output, compaction summaries, sub-agent results are clean by induction).
+The rule: **anything heading into entries goes through both mask passes (`tool_result_postprocess`, `src/secret_interp.c`); anything heading into a tool exec goes through inject.** Sanitize-on-write is the invariant — the LLM payload is assembled straight from `entries` with no outbound scan, so every write path into entries must either run the mask passes or be derived from content that already did (model output, sub-agent results are clean by induction). Text a hook script or `session_condense` writes into a session (summaries, notes, replaced results, rewritten messages and arguments) runs the same chain and is refused on a hit, never stored masked ([turn-edit.md](turn-edit.md#rejected-whole)).
 
 ## Secret Scanner (AC-based Content DLP)
 

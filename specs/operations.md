@@ -225,6 +225,53 @@ answer to "can I delete this?".
 
 [error-handling.md]: error-handling.md
 
+## Compaction and hooks — `--doctor`
+
+`cclaw --doctor`'s `[compaction]` section says, per agent, what keeps its
+sessions under the trim threshold — the bundled script (the `compaction`
+extension), another extension's awaited `ContextThreshold` hook, or the
+fallback trim alone (WARN when that is because a context hook was turned
+off) — how many times in a row its script has just failed, and the newest
+edit a compaction made on any of its sessions (the trim's, or a
+`ContextThreshold` or `CacheExpiring` hook's: who, when, tokens before and
+after, which session). Then every hook, of any event, that three failures in
+a row turned off — extension, event, script — with the ways to turn that one
+hook back on, the same ones the default agent's inbox note gives: the
+explorer's **Turn back on** on the extension's page; the `UPDATE` for that
+row (extension, event and path) to run with `cclaw sqlite3 --write`; and,
+for an extension an agent owns, promoting it again (the bundled `compaction`
+has no owner and is not offered that). See [hooks.md](hooks.md#failures)
+and [turn-edit.md](turn-edit.md#cs-trim).
+
+The log has one line per hook run (`hook <event> ext=<name> outcome=…`) and
+one per trim (`trim session=… source=fallback turns=… iterations=…
+tokens=…->… threshold=… target=…`).
+
+### Upgrading to schema v68
+
+- **The 1-hour prompt cache on Anthropic.** Every Anthropic `chat` routing
+  entry gets `cache_lifetime` 3600, which sends the 1-hour cache marker. A
+  cache write then costs 2× base input instead of 1.25×; an agent whose
+  turns come minutes apart reads it back instead of writing it again. Set
+  300 on an entry to keep the 5-minute marker
+  ([providers.md](providers.md#anthropic-messages)).
+- **Removed and renamed config keys.** `context_threshold`,
+  `compaction_target`, `compaction` and `save_reasoning` are gone, and
+  `turn_settled_timeout` is now `hook_timeout`. Their rows leave the
+  `config` table at the first start; **a value set for
+  `turn_settled_timeout` is not carried over** — set `hook_timeout` again if
+  it was raised. `CCLAW_*` env vars for the old names are ignored.
+- **Where the thresholds went.** When a session is trimmed and how far are
+  `trim_threshold` and `prune_target` on the routing entry, empty by
+  default: half the model's window, and half of that
+  ([memory.md](memory.md#the-thresholds)).
+- **Compaction is the `compaction` extension**, installed and attached to
+  every agent at the first start. Switching it off for an agent leaves that
+  agent on the fallback trim (`extensions/compaction/README.md`).
+- **Reasoning text is kept by default** (`reasoning_display` `summary`
+  on every entry); set `none` on an entry to stop storing it.
+- A session caught in the removed `compacting` state goes `idle`.
+
 ## The dashboard — `/dashboard` and `/admin`
 
 `cclaw dashboard` prints two links with the token: `<base>/dashboard?token=…`

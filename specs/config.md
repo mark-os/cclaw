@@ -49,6 +49,16 @@ deployment's statement of intent (root-owned, survives wipes), while `value`
 is runtime-mutable by agents. An agent cannot `config_set` its way past an
 operator-pinned value.
 
+**A key that leaves the registry leaves the table.** Every start syncs the
+core registry into `config` and deletes core rows it no longer declares
+(`config_registry_sync`), value and all; a renamed key starts from its
+default. An env var for a key that no longer exists is ignored. Per-model
+settings are not keys at all: how an agent uses a model — reasoning effort,
+when its session is trimmed and how far, the prompt cache lifetime, the
+reasoning display — lives on the routing entry (`agent_models`,
+[schema.md](schema.md#agent_models)), set through the config document's
+`agent.models` ([config-doc.md](config-doc.md)) or the explorer.
+
 ## Secrets
 
 Manifest `config[]` entries (and core registry entries) can carry a `secret` flag:

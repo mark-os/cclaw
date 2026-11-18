@@ -4,6 +4,7 @@
 #include "db.h"
 #include "log.h"
 #include "tool_args.h"
+#include "turn_edit.h"
 #include "wake.h"
 #include "channel_api.h"
 #include <errno.h>
@@ -775,6 +776,8 @@ static int fire_streak_tripped(sqlite3 *db, const DueJob *j, int64_t now,
         "                ORDER BY a.id DESC LIMIT 1) END AS detail"
         "  FROM entries e JOIN sessions s ON s.id=e.session_id"
         "  WHERE e.created_at >= ?2 AND s.agent_name IN (?3, ?4)"
+        /* A rewritten prompt or notice keeps its source: one fire, one row. */
+        "    AND NOT " TURN_EDIT_SQL_STANDS_IN("e.data")
         "    AND ((e.type='cron_result' AND json_extract(e.data,'$.job')=?1)"
         "         OR (json_extract(e.data,'$.source') IN ('cron','cron_error')"
         "             AND json_extract(e.data,'$.source_ref')=?1))"

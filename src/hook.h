@@ -32,7 +32,8 @@ const char *hook_event_refusal(const char *event);
 
 /* The most a manifest's "timeout" may say, in seconds. A hook holds its
  * session for as long as it runs, so this bounds how long a message can
- * wait behind one. Generous enough for a slow box and a slow provider. */
+ * wait behind one. Generous enough for a slow box and a slow provider.
+ * hooks.timeout's CHECK (templates/schema.sql, the v68 patch) repeats it. */
 #define HOOK_TIMEOUT_MAX 3600
 
 typedef struct {

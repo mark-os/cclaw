@@ -1,361 +1,451 @@
-# Turn edit — what a turnSettled script sees and may change
+# Turn edit — what a hook sees and may change
 
-`src/turn_edit.c`. Two functions: `turn_edit_input` builds the finished turn,
-and as much of the conversation that led up to it as the hook asked for, as
-plain data for a [turnSettled](hooks.md) script, and `turn_edit_apply` checks the script's
-reply and edits the turn. They run no script and change
-no session state; `src/settle.c` calls them.
+`src/turn_edit.c`. `turn_edit_input` builds the session as plain data for a
+[hook](hooks.md) script: the newest turn, and as much of the conversation
+before it as the hook asked for. `turn_edit_apply` checks the script's reply
+and edits the session. `turn_edit_trim` is C's own fallback, which goes
+through the same checks and the same writing. None of them runs a script or
+changes session state; `src/settle.c`, `src/advance.c` and `src/loop.c` call
+them, and `session_condense` is a thin caller of the summarise path.
 
-A finished turn can carry material the rest of the session does not need: a
-search that found nothing, 300 lines of log of which five mattered. A script
-can take that off the session's active branch, replace a result with shorter
-text, or leave a note. Rows are re-pointed or added, never deleted — the
-originals stay in the table, as with compaction.
+A session carries material later requests do not need: a search that found
+nothing, 300 lines of log of which five mattered, forty turns of a finished
+task. A script can take that off the session's active branch, replace a
+result with shorter text, rewrite a message, leave a note, or replace a run
+of turns or steps with a summary it wrote. Rows are re-pointed or added,
+never modified or deleted — the originals stay in the table.
 
-What an edit is *for* is the script's business: line numbering, excerpts,
-prompts, size thresholds and wording live in the extension's JavaScript. The
-runtime enforces only what must not be left to an untrusted script: edits
-touch only the finished turn; a call leaves with its result; the answer and
-the user messages are never edited; protected calls are not dropped; text a
-script supplies passes the secret scanner; all or nothing.
-
-`extensions/turn-review` is the reference script built on this contract.
+What an edit is *for* is the script's business: prompts, thresholds,
+excerpts and wording live in the extension's JavaScript. C checks structure
+and keeps the record, never content.
 
 ## Input
 
-`turn_edit_input(db, session_id, &spec, &too_big)` returns the script's
-`args`: the newest turn of the session's active branch at the top level, and
-under `history` as much of the branch before it as the hook asked for. `spec`
-is the hook's declared input (`TurnEditInputSpec`, read from `hooks.input` by
-`hook_next`).
+`turn_edit_input(db, session_id, &spec, &what, &too_big)` returns the
+script's `args`. `spec` is the hook's declared input (`TurnEditInputSpec`,
+from `hooks.input` by `hook_next`); `what` says the event, whether the
+newest turn must have ended with an answer (the stop events), and the
+`context` object of the context events ([hooks.md](hooks.md#input-and-reply)).
 
 ### What a hook asks for
 
-The manifest entry declares it; the runtime sends exactly that:
-
 ```json
-{"event": "turnSettled", "handler": "review.qjs", "wait": true,
+{"event": "Stop", "handler": "review.qjs",
  "input": {"history": 5, "history_results": false, "max_bytes": 2000000}}
 ```
 
 | Option | Values | Default | |
 |---|---|---|---|
-| `history` | `"none"`, a positive integer N, `"all"` | `"none"` | earlier turns sent with the finished one: none, the last N, or the whole active branch including any compaction summary |
+| `history` | `"none"`, a positive integer N, `"all"` | `"none"` | earlier turns sent with the newest one: none, the last N, or the whole active branch, summaries included |
 | `history_results` | boolean | `true` | `false`: earlier turns' tool results come without their text |
 | `max_bytes` | integer, 1024 … 16777216 | 1048576 (1 MiB) | the most the whole input may be, in bytes of JSON text |
 
-Every option is optional, and so is `input` itself: a hook that declares
-nothing — `extensions/turn-review` is one — is sent the finished turn alone,
-as before history existed. `extension_manifest_validate` refuses anything
-else at promote, naming it: `input` not an object, a key other than these
-three, `history` that is not `"none"`, `"all"` or an integer ≥ 1,
-`history_results` that is not a boolean, `max_bytes` that is not an integer
-from 1 to 16777216. The declaration is stored as given in `hooks.input` (NULL
-when absent); the defaults are the runtime's and are filled in each time the
-hook runs, so they are not frozen into old rows.
+Every option is optional, and so is `input` itself. Promote refuses anything
+else, naming it. The declaration is stored as given in `hooks.input` (NULL
+when absent); the defaults are filled in each time the hook runs.
 
 **The defaults, and why.** 1 MiB is about the most a script on the default
-QuickJS heap (`js_heap_mb` 8) can parse — the parsed value costs several times
-its text. A script that asks for more history should raise both. The ceiling,
-16 MiB (`TURN_EDIT_INPUT_MAX_BYTES`), is the largest value the hook vehicle
-carries (`RUNTOOL_ARG_FD_MAX`; `settle.c` asserts they are equal): an input
-past it could not be delivered at all.
+QuickJS heap (`js_heap_mb` 8) can parse — the parsed value costs several
+times its text. 1024 is the least: below it the JSON around the smallest
+turn does not fit. 16 MiB (`TURN_EDIT_INPUT_MAX_BYTES`) is the largest
+input the hook vehicle carries (`RUNTOOL_ARG_FD_MAX`; `settle.c` asserts
+they are equal).
 
 ### The rules
 
-1. **The finished turn is always sent whole**, every result with its text. If
-   it alone does not fit in `max_bytes`, nothing is built: `turn_edit_input`
-   returns NULL with `too_big` set, and the hook is "not started" — one log
-   line (`outcome=not_started reason=the finished turn alone is larger than
-   the hook's max_bytes (N)`), the session never held, and not counted as a
-   failure of the script (the same as any hook that cannot be started,
-   [hooks.md](hooks.md#the-hold-always-ends)).
-2. **`history`** selects the earlier part of the branch. `"none"` sends `[]`,
-   and the statement reads the newest turn's entries and no others — the cost
-   of building the input is that of one turn whatever the session's length. N
-   is the last N turns, oldest first, and any compaction summary with fewer
-   than N turns between it and the finished turn — so a summary older than all
-   N is not sent. `"all"` is the
-   whole branch: what compaction left of the first turn, the summary, every
-   turn since.
-3. **`history_results: false`** keeps every earlier call, its `args`, and its
-   `result` object, but the `result` has no `text` key —
-   `{"entry_id":905,"tokens":2900}` — so a script can still name the entry or
-   weigh it. A call with no result still has `result: null`. The finished
-   turn's results are never cut.
-4. **`max_bytes`** caps the whole input. History that does not fit loses its
-   oldest turns first, whole turns only — never part of a turn, never a gap
-   in the middle. A compaction summary is kept in preference to every turn
-   older than it (in practice, the opening of the first turn that compaction
-   keeps), and goes before any turn newer than it.
-5. **The input says what it was given**: `input` echoes the resolved options
-   (`{"history":"none"|N|"all","history_results":…,"max_bytes":…}`), and
-   `history_omitted` counts the requested earlier turns left out for size (0
-   when nothing was cut; a summary left out is not counted — it goes only with
-   every turn older than it). A script can therefore tell a session's first
-   turn (`history: []`, `input.history` not `"none"`, `history_omitted: 0`)
-   from "not asked for" (`input.history: "none"`) and from "cut for size"
-   (`history_omitted > 0`).
+1. **The newest turn is always sent whole**, every result with its text. If
+   it alone does not fit in `max_bytes`, nothing is built: NULL with
+   `too_big` set, and the hook is "not started" — one log line, passed over,
+   not counted ([hooks.md](hooks.md#the-hold-always-ends)). On a stop event
+   nothing is built either when the newest turn did not end with an
+   assistant message.
+2. **`history`** selects the earlier part of the branch. `"none"` sends `[]`
+   and reads no entry outside the newest turn. N is the last N turns, oldest
+   first, with any summary standing among them. `"all"` is the whole branch.
+3. **`history_results: false`** keeps every earlier call, its `args` and
+   its `result` object, but the `result` has no `text` —
+   `{"entry_id":905,"tokens":2900}`. The newest turn's results are never cut.
+4. **`max_bytes`** caps the whole input. History that does not fit loses
+   its oldest turns first, whole. A summary between turns is kept in
+   preference to every turn older than it.
+5. **The input says what it was given**: `input` echoes the resolved options,
+   and `history_omitted` counts the requested earlier turns left out for size
+   (summaries are not counted).
 
-**What `max_bytes` bounds, precisely**: the length in bytes of the JSON text
-handed to the script — the returned string is never longer. Which earlier
-turns fit is decided first from integers alone, before any text is read: each
-entry is priced at its stored text (`entries.content_bytes`) plus a fixed 128
-bytes for the keys and ids around it, the head at 512 bytes, and an earlier
-result whose text is not sent at the 128 alone. That estimate is close for
-ordinary text but runs short where JSON escaping grows text — quotes and
-newlines double, control characters become six bytes. So the built document's
-real length is checked: if it is over, the statement runs again with the
-overshoot held back from history (more of the oldest goes), and a third and
-last time with no history at all; if even the turn alone is over, the hook is
-not started (rule 1). Each run reads text only for the entries it sends; in
-the ordinary case there is one run.
+**What `max_bytes` bounds, precisely**: the length of the JSON text handed
+to the script — the returned string is never longer. One statement decides
+it: a pass over integers keeps the earlier units, newest first, whose stored
+text (`content_bytes`) could still fit beside the newest turn; text is then
+read and serialised for those only, and they are kept, newest first, while
+the bytes actually written out fit. What is measured is exactly what is
+handed over.
 
 ### Shape
 
 ```json
-{"event":"turnSettled","session_id":12,"agent":"alavanca",
+{"event":"Stop","session_id":12,"agent":"alavanca",
  "input":{"history":"all","history_results":true,"max_bytes":1048576},
  "turn_id":37,
  "tokens":{"turn":9120,"tools":7400},
- "user_messages":[{"entry_id":900,"text":"…"}],
- "notes":[{"entry_id":930,"text":"…","before_iteration":412}],
+ "user_messages":[{"entry_id":900,"text":"…","tokens":40}],
+ "notes":[{"entry_id":930,"text":"…","tokens":12,"before_iteration":412}],
  "iterations":[
-   {"iteration_id":411,"entry_id":901,"text":"Let me look at the logs.",
-    "calls":[{"call_id":"c1","entry_id":903,"tool":"shell_exec",
+   {"iteration_id":411,"entry_id":901,"message_id":902,
+    "text":"Let me look at the logs.","tokens":30,"reasoning":"…",
+    "calls":[{"call_id":"c1","entry_id":903,"tool":"shell_exec","tokens":25,
               "args":{"command":"…"},"protected":false,"is_error":false,
               "result":{"entry_id":905,"text":"…","tokens":2900}}]}],
- "final":{"entry_id":960,"iteration_id":413,"text":"…"},
+ "final":{"entry_id":960,"iteration_id":413,"text":"…","tokens":200,
+          "reasoning":"…"},
  "history":[
-   {"turn_id":1,"tokens":{"turn":40,"tools":0},
-    "user_messages":[{"entry_id":3,"text":"…"}],"notes":[],"iterations":[],
-    "final":null},
    {"summary":{"entry_id":880,"text":"…","tokens":1200}},
    {"turn_id":36,"tokens":{…},"user_messages":[…],"notes":[…],
-    "iterations":[…],"final":{"entry_id":899,"iteration_id":410,"text":"…"}}],
+    "iterations":[…],"final":{…}}],
  "history_omitted":0}
 ```
 
-- `input` — the options this input was built with (above).
-- `tokens` — the whole turn's size, and its `tool_call` + `tool_result`
-  entries': each entry at the provider's count once a report has measured
-  it (`entries.tokens`) and at the runtime's estimate (chars/3) until then
-  ([memory.md](memory.md#context-window-management)). A finished turn's
-  entries are measured except what its last request never carried.
+A context event adds `context` after `input`
+([hooks.md](hooks.md#input-and-reply)).
+
+- `tokens` — on every entry, its stored count (`entries.tokens`) or, where
+  unmeasured, its estimate; per turn, the whole turn's and its `tool_call` +
+  `tool_result` entries'. An iteration's `tokens` is its assistant text's.
 - `user_messages` — the turn's `user_message` entries, in order.
-- `notes` — `system` entries already in the turn (runtime notices, notes an
-  earlier hook left), with the id of the iteration each precedes (the
-  answer's, for a note right before the answer).
-- `iterations` — every iteration but the last, in order. `entry_id` is the
-  iteration's first row on the branch (its `reasoning` row when it has one) —
-  what a note's `before` names. `text` is its assistant text (`""` when none).
-  `calls` are in call order. `args` is the parsed object, or the stored string
-  when it is not JSON. `result` is null for a call with no result; `text` is
-  the stored content verbatim. A result is paired with its call by call id
-  within the turn, not by `iteration_id`: a sub-agent's answer or an approval
-  notice is appended under an iteration id of its own.
-- `final` — the turn's last assistant message. It is never edited.
-- `history` — the earlier part of the branch that was asked for and fits,
-  oldest first ([below](#history)). Always an array: `[]` when none was asked
-  for, on a session's first turn, or when none fits.
-- `history_omitted` — earlier turns asked for and left out for size.
+- `notes` — `system` entries in the turn (runtime notices, notes a hook or
+  the trim left) and summaries of some of its iterations (marked
+  `"summary": true`), each with the id of the iteration it stands before
+  (`before_iteration`; null when nothing follows it).
+- `iterations` — every iteration but the answer's, in order. `entry_id` is
+  its first row on the branch (its `reasoning` row when it has one) — what a
+  note's `before` and a summary's `from_iteration`/`to_iteration` name by
+  iteration id. `message_id` is its assistant message. `text` is the
+  assistant text (`""` when none). `reasoning` is the readable summary of
+  the model's reasoning for that response, present only when one was kept
+  (`agent_models.reasoning_display`); never the thinking itself, its
+  signature or the replay blob. `calls` are in call order; `args` is the
+  parsed object, or the stored string when it is not JSON. A result is paired
+  with its call by call id within the turn: a sub-agent's answer or an
+  approval notice is appended under an iteration id of its own.
+- `final` — the turn's answer: its newest row that is not a note, when that
+  is an assistant message. Null while the turn is still running (a context
+  event between iterations) and for a turn that ended on a cutoff.
+- `history` — earlier turns in the same shape, and `{"summary":{…}}` where a
+  summary stands between turns, oldest first. An assistant entry that
+  stopped on an error is left out of an earlier turn (with its reasoning),
+  as every request leaves it out.
+- `protected` — see [below](#protected-calls).
 
-### History
-
-It is for reading only — an edit names calls and entries of the newest turn
-and nothing else.
-
-`history` is the active branch as the agent now has it — the entries the next
-request is built from — not the session as first written:
-
-- **An earlier turn** is an object with the newest turn's own fields:
-  `turn_id`, `tokens`, `user_messages`, `notes`, `iterations`, `final`. One
-  serializer writes both (`SQL_TURN_FIELDS`), so a field means the same thing
-  in either place. `final` is `null` for a turn that did not end with an
-  assistant message, or of which only the opening is left.
-- **A compaction summary** is `{"summary":{"entry_id","text","tokens"}}`, at
-  the place it stands on the branch. After an ordinary compaction that is
-  second: the branch keeps its first entry, so `history[0]` is what is left
-  of the first turn (its opening user message, `final: null`) — a turn, for
-  counting N and for `history_omitted` — then the summary, then whole turns.
-  What a summary replaced is not in `history`. A summary written by
-  `session_condense` stands between the turns on either side of the range it
-  replaced.
-- **An edited turn** shows as edited: dropped calls are absent, a replaced
-  result has the replacement's text and entry id, a hook's note is in
-  `notes`. The originals are in the table, not on the branch.
-- An assistant entry that stopped on an error is left out of an earlier turn,
-  as it is left out of every request (`context_plan`), and costs nothing
-  against `max_bytes`. The newest turn is reported in full.
-- `protected` is computed for an earlier turn's calls as for the newest
-  turn's. It says what kind of call it was; no edit can reach it.
-
-Two ways `history: "all"` can be more than the next request carries, both
-because the request's cut depends on the model it is built for and this input
-does not: the branch is not trimmed to the context budget (with compaction
-off or failing, the request is a sliding window over the tail; here only
-`max_bytes` trims), and the leading system prompt and the per-turn context
-block are not in it — they are not entries.
-
-Call ids are scoped to their turn. Providers reuse them across turns, so a
-call's `result` is looked up among its own turn's entries, and an edit's
-`call_id` among the newest turn's (`turn_load`); a `call_id` or `before` taken
-from `history` is refused like any other id that is not the turn's.
-
-**Building it.** One statement, two passes over the branch: a recursive walk
-from the leaf over integer columns (ids, parents, `turn_id`, `content_bytes`)
-numbers the units — the newest turn, each earlier turn, each summary —
-stops at the first unit past the N asked for, prices them and decides which
-fit; then text is read for the chosen entries only. Building the document
-costs about five times its size in memory for a moment, so `max_bytes` also
-bounds what the daemon spends.
+`history` is the active branch as the agent now has it, edits included,
+not the session as first written. It can be longer than what the next
+request carries — the request's cut and the head (system prompt, tools,
+user context block) are not in it.
 
 ### Protected calls
 
-`protected: true` means the call cannot be dropped. Its result's text can
-still be replaced.
+`protected: true` means the call cannot be dropped on its own. It may still
+be rewritten and its result replaced, and it leaves with a whole turn or
+iteration.
 
-- The tool is not marked droppable. `tools.droppable` is 1 only for tools
-  whose purpose is to look something up; a call made for its effect — a file
-  written, a message sent, an agent launched, a memory note, a config request,
-  a schedule, a secret saved — is the record that the effect happened.
-  Built-in tools declare it in their C recipe (`ToolRecipe.droppable`, synced
-  by `tools_sync_to_db`); an extension tool declares `"droppable": true` in its
-  manifest. A tool with no `tools` row is protected. `check_session` is
-  protected: on an idle child it returns the child's answer and advances the
-  delivery cursor, so its result can be the only copy.
-- The call passed `save_secret`: whatever the tool, that call stored a
-  credential.
-- The call's `tool_calls` row has a status other than `done` (a background
-  job).
+- The tool is not droppable: `tools.droppable` is 1 only for tools whose
+  purpose is to look something up. A call made for its effect — a file
+  written, a message sent, an agent launched, a memory note, a config
+  request, a schedule — is the record that the effect happened. Built-in
+  tools declare it in their C recipe, an extension tool with
+  `"droppable": true` in its manifest; a tool with no `tools` row is
+  protected. `check_session` is protected.
+- The call passed `save_secret` — read on the call as the model made it, so
+  a rewrite of its arguments cannot make it droppable.
+- The call's `tool_calls` row is not `done` (`pending`, `running`, or a
+  detached `background` job).
 
 ## Reply
 
 `turn_edit_apply(db, session_id, reply_json, source_label, &err)`.
-`source_label` is `hook:<extension>`.
+`source_label` is `hook:<extension>`, or `tool:session_condense`.
 
 ```json
-{"edits":[
-   {"op":"drop","call_id":"c4"},
-   {"op":"replace","call_id":"c1","text":"…"},
-   {"op":"note","text":"…","before":901}],
+{"edits":[{"op":"drop","call_id":"c4"}],
  "record":{"…":"…"}}
 ```
 
+`record` is an optional object (at most 16 KB, `TURN_EDIT_RECORD_MAX_BYTES`)
+stored untouched with the runtime's record of the edit. It is never sent to
+the model. Returns `TURN_EDIT_APPLIED`, `NOTHING`, `REJECTED` or `ERROR`;
+only `APPLIED` writes anything.
+
+**Nothing to do** — `{}`, `{"edits":[]}`, or a record with no edits. Shape
+checks run first, so a malformed record with no edits is `REJECTED`.
+
+### Operations
+
+Valid on any turn of the active branch, between iterations of a running turn
+as at a turn's end. A `call_id` is looked up in the newest turn unless
+`turn_id` names another: providers reuse call ids across turns.
+
 | op | fields | does |
 |----|--------|------|
-| `drop` | `call_id` | takes the call and its result off the branch |
-| `replace` | `call_id`, `text` | puts a new result with this text in the old one's place |
-| `note` | `text`, `before?` | inserts a system note before an iteration; default: before the answer's iteration |
+| `drop` | `call_id`, `turn_id`? | the call and its result leave the branch |
+| `replace` | `call_id`, `turn_id`?, `text` | a new result with this text in the old one's place |
+| `rewrite` | `entry_id`, `text` | new text for a user message, an assistant message, a note or a summary |
+| `rewrite` | `call_id`, `turn_id`?, `args` | new arguments (an object) for a call |
+| `note` | `text`, `before`? | a system note before an iteration |
+| `drop_turns` | `from_turn`, `to_turn` | a run of whole turns before the newest leaves |
+| `summarise` | `text`, `from_turn`, `to_turn` | a run of whole turns before the newest is replaced by a summary |
+| `summarise` | `text`, `from_iteration`, `to_iteration` | a run of whole iterations of the newest turn is replaced by a summary |
 
-`record` is an optional object the runtime stores untouched with its own
-record of the edit (below). It is never sent to the model.
+```json
+{"op":"drop","call_id":"c4"}
+{"op":"replace","call_id":"c1","turn_id":30,"text":"the 5 lines that mattered: …"}
+{"op":"rewrite","entry_id":900,"text":"Deploy the fix to staging."}
+{"op":"rewrite","call_id":"c2","args":{"path":"notes.md"}}
+{"op":"note","text":"Dropped two empty searches.","before":901}
+{"op":"drop_turns","from_turn":3,"to_turn":9}
+{"op":"summarise","from_turn":3,"to_turn":20,"text":"The user asked … We decided …"}
+{"op":"summarise","from_iteration":411,"to_iteration":430,"text":"Read the logs; …"}
+```
 
-Returns `TURN_EDIT_APPLIED`, `TURN_EDIT_NOTHING`, `TURN_EDIT_REJECTED` or
-`TURN_EDIT_ERROR`. Only `APPLIED` writes anything; `REJECTED` and `ERROR` set
-a one-line reason.
+- **`drop`** — the call must be finished (`done`), droppable and carry an
+  iteration id. Every result with its call id in that turn leaves with it.
+  An iteration left with no call leaves whole — its assistant text,
+  reasoning and results included (the newest turn's answer excepted).
+- **`replace`** — the call must not be `pending` or `running`, and must have
+  exactly one result.
+- **`rewrite`** — by `entry_id`: a `user_message`, `assistant_message`,
+  `system` note or `compaction` summary on the branch, never the newest
+  turn's answer (it has been delivered, and delivery keys on it); a result
+  is changed with `replace`, a call by `call_id` with `args`. A rewritten
+  user message keeps its turn. By `call_id`: the call must not be `pending`
+  or `running`.
+- **`note`** — `before` is the `entry_id` of an iteration's first row, in
+  any turn (an `iterations` item's `entry_id`), or the newest turn's answer
+  (`final.entry_id`). Without it the note goes before the newest turn's
+  answer, or, while the turn runs, at the end of the branch, where the next
+  response reads it. Before the answer means before its reasoning too, named
+  or not: the reasoning stays next to the answer. Refused before an
+  iteration this reply empties. Several notes at one place land in edit
+  order.
+- **`drop_turns`, `summarise` by turn** — turn ids, oldest to newest, a
+  contiguous run of the branch, all before the newest turn. The summary is
+  one entry where the run was, carrying the first replaced turn's id: it
+  opens no turn, and later trims treat it as the oldest content.
+- **`summarise` by iteration** — iteration ids of the newest turn, in branch
+  order; never the iteration that holds the turn's answer (while the turn
+  runs, its newest iteration may go too). The notes and
+  summaries standing directly before `from_iteration` (in `notes` with
+  `before_iteration` = `from_iteration`) leave with the run, so a turn
+  summarised again and again carries one summary: fold their text into
+  yours. The summary carries the newest turn's id. Rows before the turn's
+  first iteration (its user messages) stay.
 
-**Nothing to do** — `{}`, `{"edits":[]}`, or a record with no edits (a record
-describes edits). Shape checks run first, so a malformed record with no edits
-is `REJECTED`, not `NOTHING`.
+### What C checks
 
-**Rejected whole** — one failed check refuses the entire reply:
+Only these, for every operation, a script's or the trim's:
 
-- shape (reason `edits[N] …` for an edit): not a JSON object; a top-level key
-  other than `edits` and `record`, or one given twice; `edits` not an array;
-  `record` not an object, or larger than 16 KB
-  (`TURN_EDIT_RECORD_MAX_BYTES`); an edit that is not an object, has an
-  unknown `op`, names a field twice, has a field its op does not take, lacks
-  a required field, or has one of the wrong type (`call_id` a string, `text`
-  a non-empty string, `before` an integer);
-- calls (reason `drop: …` / `replace: …`): a call id that is not a
-  `tool_call` of this turn on the branch, or that names more than one; one
-  call named by two edits; a call whose `tool_calls` row is not `done`;
-  dropping a protected call; replacing on a call with no result, or with more
-  than one;
-- notes (reason `note: …`): `before` that is not the first row of an
-  iteration of this turn (the `entry_id` of an `iterations` item, or of the
-  answer's iteration), or that names an iteration this reply empties;
-- text (reason `edits[N]: …`): invisible characters are stripped first, and
-  text that is empty after that is refused; then the text goes through
-  `tool_result_postprocess` with a fresh `secrets_snapshot` — stored secret
-  values and the scanner's rules, the chain `inbox_insert_scanned` runs. A
-  hit refuses the reply; text is never stored masked;
-- the turn is not finished: the session's leaf is not an
-  `assistant_message`, or a call of the turn is still `pending` or `running`.
+1. **Pairing.** A call and its result leave together. An iteration left with
+   no call leaves whole. An iteration that keeps some of its calls, or has a
+   call or its text rewritten, loses its `reasoning` entry: a provider's
+   reasoning blob is bound to the full set of calls it was produced with.
+2. **Unfinished calls.** A `pending` or `running` call blocks whatever
+   would remove it, its whole turn or iteration included. A `background`
+   job does not: it has its "started" result and is answered later in the
+   inbox.
+3. **Effect calls.** A protected call cannot be dropped on its own; it may
+   be rewritten and may leave with its whole turn or iteration.
+4. **The record.** Originals are never modified or deleted, and every edit
+   appends a record ([below](#the-record)).
 
-`ERROR` is a failure on our side: a DB error, or an answer entry whose `data`
-is not valid JSON (the record cannot be appended without overwriting it, so
-nothing is written).
+And two rules of the reply itself: the newest turn's answer is never edited
+or removed, and each entry is named by one edit at most (including the rows
+an operation takes with it).
 
-The reply's shape and text are checked without a transaction. Everything that
-reads the turn runs inside one `BEGIN IMMEDIATE`, so what is checked is what
-is edited; the function refuses to run inside a caller's transaction.
+### Rejected whole
+
+One failed check refuses the entire reply, with a one-line reason:
+
+- shape (`edits[N] …`): not a JSON object; a top-level key other than
+  `edits` and `record`, or one given twice; `edits` not an array; `record`
+  not an object, or too large; an edit that is not an object, has an unknown
+  `op`, names a field twice, has a field its op does not take, lacks one it
+  needs, or has one of the wrong type (ids integers, `call_id` a string,
+  `text` a non-empty string, `args` an object);
+- the operations (`drop: …`, `summarise: …` …): an id not on the branch or
+  not of the right kind; a call id naming more than one call; an entry named
+  by two edits; any of the checks above;
+- text (`edits[N]: …`): invisible characters are stripped from `text`
+  first, and text empty after that is refused; then `text`, and a call's
+  `args` as JSON, go through `tool_result_postprocess` with a fresh
+  `secrets_snapshot` — stored secret values and the scanner's rules, the
+  chain `inbox_insert_scanned` runs. A hit refuses the reply; text is never
+  stored masked;
+- the session has no entry.
+
+`ERROR` is a failure on our side (a DB error); nothing is written. The
+reply's shape and text are checked without a transaction. Everything that
+reads the branch runs inside one `BEGIN IMMEDIATE`, so what is checked is
+what is edited; the function refuses to run inside a caller's transaction.
 
 ## What is written
 
 All in that one transaction.
 
-- **Drop.** The `tool_call` entry and its `tool_result` leave the branch. An
-  iteration left with no call leaves whole — assistant text and reasoning
-  included. One that keeps some of its calls loses its `reasoning` entry: a
-  provider's reasoning blob is bound to the full set of calls it was produced
-  with and must not be replayed beside a subset.
-- **Replace.** A new `tool_result` takes the original's place, carrying its
-  `iteration_id`, `turn_id`, `tool_call_id`, `tool_name`, `is_error`,
-  `network_hosts` and `fence_id` — so a replaced network result keeps its
-  untrusted-content fence on the wire. Any length is applied.
-- **Note.** An ordinary `system` entry: role 0, `iteration_id` 0, the turn's
-  `turn_id`, `data` = `{"source":"hook:<extension>"}`. Several notes at one
-  place land in edit order.
+- **A stand-in** (a replaced result, a rewritten message, call, note or
+  summary) is a new row in the original's place, carrying its type, role,
+  `turn_id`, `iteration_id`, `part_index`, `tool_call_id`, `tool_name`,
+  `is_error`, `stop_reason`, `model`, `network_hosts` and `fence_id` — so a
+  replaced network result keeps its untrusted-content fence. Not the usage
+  and cost columns: they belong to the response the original was.
+- **A note** is an ordinary `system` entry: role 0, `iteration_id` 0, the
+  turn of the place it goes.
+- **A summary** is a `compaction` entry: role 4, no iteration, sent as user
+  text under `[Summary of earlier conversation]`.
 
-The turn's chain is rebuilt front to back: each entry that stays hangs off the
-entry that now precedes it. A re-pointed entry keeps the parent it was written
-under in `original_parent_id` — the first one, if it is re-pointed again; an
-entry that leaves the branch is not modified. The answer keeps its row and
-stays `sessions.leaf_id` (inserts move the leaf through `entries_leaf_ai`; it
-is put back before commit). New entries carry the turn's `turn_id` explicitly,
-so `entries_turn_ai` does not open a turn; the next user message opens a new
-one under the answer as usual.
+The branch is rebuilt front to back: each entry that stays hangs off the
+entry that now precedes it. Before `COMMIT` it is walked again from the
+leaf: it must be exactly the expected chain, hanging off the same root;
+otherwise the transaction rolls back and the call returns `ERROR`. The leaf
+is the last row of the new chain — at a turn's end the answer, unchanged.
 
-Before `COMMIT` the turn is walked again from the leaf: it must be one chain of
-exactly the expected entries, hanging off the same predecessor. Otherwise the
-transaction is rolled back and the call returns `ERROR`.
+Not changed: `tool_calls` rows, any original row's content, usage or cost.
 
-Not changed: `tool_calls` rows, usage and cost columns, every entry of earlier
-turns.
+### Edited entries
+
+Every entry an edit wrote has `data.edited_by` = the edit's label
+(`hook:<ext>`, `fallback` for the trim, `tool:session_condense`). A note or
+summary also has `data.source` = the same label: the edit is where its
+words came from. A stand-in keeps the original's `data` keys — its
+`data.source` among them, so a rewritten cron prompt is still the cron's
+and the runaway-turn guard, which reads the source of user messages, still
+counts its turn as autonomous — and has `data.replaces` = the id of the first
+original it stands for, through any chain of rewrites
+(`TURN_EDIT_SQL_STANDS_IN` tests it). A reader that counts events by source
+skips stand-ins: the cron failure streak counts one fire once. Notes (role 0)
+and summaries (role 4) are never user messages to any reader that picks
+entries by role. An original re-pointed past removed rows has
+`original_parent_id` = the parent it was written under (the first one, if
+re-pointed again). An original that left the branch is not touched and still
+points at its own parent, so the session as written can always be walked
+back.
 
 ### The record
 
-One object is appended to `$.turn_edits` in the `data` of the turn's final
-assistant entry (other keys there are kept). A turn may be edited more than
-once — by several hooks in a row — and each apply appends one element.
+One object appended to `$.turn_edits` in the `data` of one entry: the
+session's leaf after a script's edit (at a turn's end, its answer), the note
+the trim wrote. Other keys there are kept. Never sent to the model.
 
 ```json
-{"by":"hook:review","at":1763300000,
- "left_branch":[903,905],
+{"by":"hook:compaction","at":1763300000,
+ "left_branch":[412,415,416],
  "replaced":[{"original":910,"replacement":971}],
  "notes":[972],
- "tokens":{"before":9120,"after":3100},
+ "summaries":[973],
+ "tokens":{"before":91200,"after":43100},
+ "thinking_cut":973,
  "record":{"…":"the script's own, when it sent one"}}
 ```
 
-- `left_branch` — every entry that left the branch, in chain order, replaced
-  originals included.
-- `replaced`, `notes` — in edit order.
-- `tokens` — the turn's size before and after this apply, each entry at
-  its stored count or its estimate. The compaction check that follows the
-  apply takes `before − after` off the sent body it last measured. Nothing
-  is measured again: what left the branch took its count with it, and a
-  replaced result keeps its measure scaled to the new length
-  ([memory.md](memory.md#context-window-management)).
+- `left_branch` — every original that left the branch, in chain order,
+  replaced and rewritten originals included.
+- `replaced` — `{original, replacement}` per stand-in; `notes`,
+  `summaries` — the entries written. All in edit order.
+- `tokens` — the branch's size before and after, each entry at its stored
+  count or its estimate (the trim: the session's size as it measures it,
+  head included).
+- `thinking_cut` — the first entry of the new branch that is new or
+  re-pointed; null when only the tail went ([Thinking](#thinking-after-an-edit)).
+- The trim adds `dropped` `{turns, iterations}` (this trim alone), `total`
+  (the same, with every earlier trim note it folded: what its text says)
+  and `limits` `{window, threshold, target}`.
+
+The record's host is always at least as new as every usage report it
+changed the ground of, which is how accounting and the head measure tell
+that an edit came between two reports.
+
+## C's trim
+
+`turn_edit_trim`, the fallback. It runs as the C check at the end of every
+iteration and at turn end, after the hooks ([hooks.md](hooks.md#order-at-the-end-of-an-iteration)),
+and acts when the session is over `trim_threshold`: no `ContextThreshold`
+hook, a hook that failed or is disabled, or one that left the session over.
+No model call; it reads no policy but the two numbers and works whatever
+they are (a `prune_target` at or above the threshold cuts to the threshold).
+
+The size is what the next request would carry (`context_measure`): the
+head — the provider's measure where a usable report gives one, else the
+estimate — plus every entry at its stored count or estimate, 0 for a
+response that stopped on an error and its results. Under the threshold it
+returns without a transaction.
+
+1. **Turns.** Drop the oldest whole turns before the newest, down to
+   `prune_target`. A turn holding a `pending` or `running` call is skipped.
+2. **Iterations.** If still over, drop the oldest whole iterations of the
+   newest turn, skipping any that is blocked. The entries before its first
+   iteration (the user messages that opened it) and its newest iteration
+   always stay.
+3. **The note.** One `system` note (`data.source = "fallback"`, sent as
+   `[system]`) before the first entry kept after the first one dropped —
+   inside the newest turn when its iterations went, else where the turns
+   were: "*N earlier turns and M earlier steps of this turn were dropped to
+   fit the context. What they said is no longer in front of you; check
+   before repeating an action.*" A long turn is trimmed again and again:
+   when this trim dropped iterations, an earlier trim's note among the
+   turn's opening entries leaves the branch and its running total (its
+   record's `total`) is carried into the new note's text, so the model reads
+   one running total. A trim note a script rewrote is the script's text and
+   stays. The record sits on the note; its `dropped` counts this trim alone,
+   its `total` what the text says.
+4. **Still over the threshold.** Between iterations the turn stops: an
+   error-stop assistant entry ("*error: context limit reached (~N tokens
+   after trimming, over this agent's T-token trim threshold) — work was cut
+   mid-flight …*") ends it and is delivered on every edge. At turn end there
+   is no turn to stop: one WARN log line. This is also the only way out when
+   the newest iteration alone exceeds the threshold (one large parallel
+   batch), since step 2 always keeps it.
+
+When nothing could be dropped at all, nothing is written and the result is
+step 4. The note carries no record of effects; that risk belongs to the
+fallback only (the bundled compaction lists them).
+
+The request cut (`context_plan`) uses the same line as its budget —
+`trim_threshold`, or `max_history_tokens` when that is set — so on a turn's
+first request, before any trim has run, the request still fits.
+
+## Accounting of written entries
+
+A stand-in keeps the original's measured count scaled to its length
+(`tokens × new_bytes / content_bytes`) when the original was measured and is
+at least 256 bytes; otherwise it is unmeasured and reads as its estimate. A
+note or summary has only its estimate. None is measured later: the next
+report after an edit is not compared with the one before it
+([memory.md](memory.md#context-window-management)), and later reports
+measure only what was appended after them. What left the branch took its
+count with it. The trigger, the C check and the trim all read
+`COALESCE(tokens, token_estimate)`.
+
+## Thinking after an edit
+
+An edit that changes the branch at or before a response's reasoning, after
+that reasoning was produced, leaves it bound to a conversation that is no
+longer sent. The record's `thinking_cut` marks the point; the payload
+builder (`SQL_TRANSCRIPT_STALE`, `src/llm_payload.c`) marks stale every
+reasoning entry older than the record's host that stands at or after the
+cut. What is stale is always a trailing run of the blocks that existed when
+the edit was made. Per wire format:
+
+| Format | After an edit |
+|---|---|
+| Anthropic | stale thinking is not replayed: the iteration is rebuilt from its entries without thinking, and the model re-thinks from the edit point. `drop_block` (sent on every request) is the backstop |
+| OpenAI-compatible | unchanged: DeepSeek requires `reasoning_content` back inside a tool loop and does not check it against the history; OpenRouter's `reasoning_details` carry Gemini signatures the call they rode on needs |
+| Gemini | unchanged: a kept call keeps its `thoughtSignature`, even when the edit took its iteration's reasoning entry off the branch; Gemini checks the signature's presence, not the history |
+
+Scripts never see signatures or replay blobs.
 
 ## On the wire
 
-A note is sent like any mid-conversation system entry — user-role text — but
-labelled by its source: `[note from extension <ext>] <text>`. Every other
-`system` entry keeps `[system] <text>` (`SQL_SYSTEM_NOTE_PREFIX`,
-`src/llm_payload.c`). A hook's note is typically written by a model that has
-just read untrusted tool output; `[system]` would lend that text the
-runtime's own authority. A `system` entry whose `data` is not valid JSON is
-sent as `[system]`.
+A hook's note is sent like any mid-conversation system entry — user-role
+text — but labelled by its source: `[note from extension <ext>] <text>`.
+Every other `system` entry, the trim's note included, keeps `[system] <text>`
+(`SQL_SYSTEM_NOTE_PREFIX`, `src/llm_payload.c`); so does one whose `data` is
+not valid JSON. A hook's note is typically written by a model that has just
+read untrusted tool output; `[system]` would lend that text the runtime's
+own authority. A summary is sent as `[Summary of earlier conversation]` and
+its text. The prompt cache restarts at the first changed entry.

@@ -382,7 +382,7 @@ static void test_edited_turn(void) {
          " (903, 3, 902, 1, 'tool_result', 3, 'three hundred lines', 'c1'),"
          " (905, 3, 902, 1, 'tool_result', 3, 'five lines', 'c1');"
          "INSERT INTO entries(id, session_id, parent_id, turn_id, type, role, content, data) VALUES"
-         " (906, 3, 905, 1, 'system', 0, 'a note', '{\"source\":\"hook:rev\"}'),"
+         " (906, 3, 905, 1, 'system', 0, 'a note', '{\"source\":\"hook:rev\",\"edited_by\":\"hook:rev\"}'),"
          " (904, 3, 906, 1, 'assistant_message', 2, 'done', json_object('turn_edits', json_array("
          "   json_object('by','hook:rev','at',1763300000,'left_branch',json_array(903),"
          "     'replaced',json_array(json_object('original',903,'replacement',905)),"
@@ -415,6 +415,79 @@ static void test_edited_turn(void) {
     assert(src && strcmp(src, "hook:rev") == 0);
     free(src); free(out);
     printf("PASS: test_edited_turn\n");
+}
+
+/* ── a session's context and edits (explore_session) ───────────────────── */
+
+/* Records are found on any entry — the trim's note, a tool result a script's
+ * edit left as the leaf mid-turn, an answer — newest first, in one shape;
+ * the size is the branch the next request carries; the limits are the
+ * governing entry's, with what the entry sets beside the defaults. */
+static void test_session_edits(void) {
+    exec("INSERT INTO sessions(id, name, agent_name) VALUES (20,'long','alpha');"
+         "INSERT INTO entries(id, session_id, parent_id, turn_id, type, role, content, tokens) VALUES"
+         " (2001, 20,   -1, 1, 'user_message', 1, 'go', 100),"
+         " (2002, 20, 2001, 1, 'tool_call', 2, '{}', 50),"
+         " (2003, 20, 2002, 1, 'tool_result', 3, 'long output', 4000);"
+         /* The trim's note, with its record; a script's stand-in for 2003. */
+         "INSERT INTO entries(id, session_id, parent_id, turn_id, type, role, content, tokens, data) VALUES"
+         " (2004, 20, 2001, 1, 'system', 0, '1 earlier turn was dropped', 20,"
+         "   json_object('source','fallback','edited_by','fallback','turn_edits',json_array(json_object('by','fallback',"
+         "     'at',1763300000,'left_branch',json_array(1999),'replaced',json_array(),"
+         "     'notes',json_array(2004),'summaries',json_array(),"
+         "     'tokens',json_object('before',90000,'after',30000),'thinking_cut',NULL,"
+         "     'dropped',json_object('turns',1,'iterations',0),"
+         "     'limits',json_object('window',128000,'threshold',64000,'target',32000))))),"
+         " (2005, 20, 2002, 1, 'tool_result', 3, 'short', 10,"
+         "   json_object('edited_by','hook:compaction','replaces',2003,"
+         "     'turn_edits',json_array(json_object('by','hook:compaction','at',1763300100,"
+         "       'left_branch',json_array(2003),"
+         "       'replaced',json_array(json_object('original',2003,'replacement',2005)),"
+         "       'notes',json_array(),'summaries',json_array(),"
+         "       'tokens',json_object('before',4150,'after',160),'thinking_cut',2005,"
+         "       'record',json_object('why','shorter'))))),"
+         /* Not a record: turn_edits that is not an array, and data that is not JSON. */
+         " (2006, 20, 2005, 1, 'assistant_message', 2, 'done', 5, '{\"turn_edits\":{\"by\":\"x\"}}'),"
+         " (2007, 20, 2006, 2, 'user_message', 1, 'more', 5, 'not json');"
+         "UPDATE entries SET original_parent_id = 2002 WHERE id = 2004;"
+         "UPDATE sessions SET leaf_id = 2007 WHERE id = 20;");
+    char *out = NULL;
+    assert(explore_session(g_db, 20, &out) == 200 && out);
+    assert(qi("SELECT json_array_length(?1, '$.edits')", out) == 2);
+    /* Newest host first: the mid-turn record on a tool result is found. */
+    assert(qi("SELECT ?1 ->> '$.edits[0].entry_id' = 2005 AND ?1 ->> '$.edits[0].source' = 'hook:compaction'"
+              " AND ?1 ->> '$.edits[0].tokens.before' = 4150 AND ?1 ->> '$.edits[0].tokens.after' = 160"
+              " AND ?1 ->> '$.edits[0].replaced[0].original' = 2003"
+              " AND ?1 ->> '$.edits[0].thinking_cut' = 2005"
+              " AND ?1 ->> '$.edits[0].record.why' = 'shorter'"
+              " AND ?1 ->> '$.edits[0].turn_id' = 1", out) == 1);
+    assert(qi("SELECT ?1 ->> '$.edits[1].source' = 'fallback' AND ?1 ->> '$.edits[1].dropped.turns' = 1"
+              " AND ?1 ->> '$.edits[1].limits.target' = 32000"
+              " AND json_type(?1, '$.edits[1].record') = 'null'"
+              " AND json_array_length(?1, '$.edits[1].summaries') = 0", out) == 1);
+    /* The branch 2007 -> 2006 -> 2005 -> 2002 -> 2001; no report, so no head. */
+    assert(qi("SELECT ?1 ->> '$.context.tokens'", out) == 5 + 5 + 10 + 50 + 100);
+    assert(qi("SELECT ?1 ->> '$.context.head' = 0 AND ?1 ->> '$.context.head_measured' = 0", out) == 1);
+    /* alpha's first chat model (m1) sets nothing: half of the default window. */
+    assert(qi("SELECT ?1 ->> '$.context.model' = 'm1' AND ?1 ->> '$.context.window' = 128000"
+              " AND ?1 ->> '$.context.threshold' = 64000 AND ?1 ->> '$.context.target' = 32000"
+              " AND json_type(?1, '$.context.threshold_set') = 'null'"
+              " AND json_type(?1, '$.context.target_set') = 'null'", out) == 1);
+    free(out);
+    exec("UPDATE agent_models SET trim_threshold = 5000, prune_target = 2000"
+         " WHERE agent_name = 'alpha' AND purpose = 'chat' AND pos = 0;");
+    assert(explore_session(g_db, 20, &out) == 200);
+    assert(qi("SELECT ?1 ->> '$.context.threshold' = 5000 AND ?1 ->> '$.context.threshold_set' = 5000"
+              " AND ?1 ->> '$.context.target' = 2000 AND ?1 ->> '$.context.target_set' = 2000", out) == 1);
+    free(out);
+    exec("UPDATE agent_models SET trim_threshold = NULL, prune_target = NULL WHERE agent_name = 'alpha';");
+    /* A session never edited has an empty list; no session is a 404. */
+    assert(explore_session(g_db, 2, &out) == 200);
+    assert(qi("SELECT json_array_length(?1, '$.edits') = 0 AND ?1 ->> '$.agent' = 'beta'", out) == 1);
+    free(out);
+    assert(explore_session(g_db, 999, &out) == 404);
+    free(out);
+    printf("PASS: test_session_edits\n");
 }
 
 /* ── prompt-cache statistics (explore_cache) ───────────────────────────── */
@@ -696,7 +769,7 @@ static void test_http(void) {
     static const char *const API[] = {
         "/admin/api/meta", "/admin/api/rows?table=agents",
         "/admin/api/row?table=agents&key=%5B%22alpha%22%5D", "/admin/api/nope",
-        "/admin/api/cache",
+        "/admin/api/cache", "/admin/api/session?id=20",
     };
     /* Not signed in: every path is refused, with a way in. */
     for (size_t i = 0; i < sizeof(API) / sizeof(API[0]); i++) {
@@ -740,6 +813,10 @@ static void test_http(void) {
     assert(qi("SELECT ?1 ->> '$.row.values.name' = 'alpha'", b.d) == 1);
     assert(http(c, "/admin/api/cache?days=7", NULL, &b, &h) == 200);
     assert(qi("SELECT ?1 ->> '$.days' = 7 AND json_type(?1, '$.models') = 'array'", b.d) == 1);
+    assert(http(c, "/admin/api/session?id=20", NULL, &b, &h) == 200);
+    assert(qi("SELECT json_array_length(?1, '$.edits') = 2 AND ?1 ->> '$.session_id' = 20", b.d) == 1);
+    assert(http(c, "/admin/api/session", NULL, &b, &h) == 400);
+    assert(http(c, "/admin/api/session?id=999", NULL, &b, &h) == 404);
     assert(http(c, "/admin/api/row?table=nosuch&key=%5B1%5D", NULL, &b, &h) == 404);
     assert(http(c, "/admin/api/rows", NULL, &b, &h) == 400);
     assert(http(c, "/admin/api/nope", NULL, &b, &h) == 404);
@@ -770,6 +847,7 @@ int main(void) {
     test_row_keys();
     test_injection();
     test_edited_turn();
+    test_session_edits();
     test_cache();
     test_page_source();
     test_secret_walk();

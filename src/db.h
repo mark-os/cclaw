@@ -222,6 +222,11 @@ int process_is_live(sqlite3 *db, const char *id, int ttl_sec);
 /* Set session state (idle, running, waiting, error). Returns 0 on success. */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state);
 
+/* Hold the session for an awaited hook of `event`: state 'settling' and
+ * sessions.settle_event in one guarded write (from idle or tool_running
+ * only). Every other transition clears settle_event. 0 on success. */
+int session_set_settling(sqlite3 *db, int64_t session_id, const char *event);
+
 /* Turn iteration tracking */
 int session_set_iteration(sqlite3 *db, int64_t session_id, int iter);
 int session_bump_iteration(sqlite3 *db, int64_t session_id);

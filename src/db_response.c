@@ -101,7 +101,12 @@ static const char SCALAR_GEMINI[] =
     "     'sig', json_extract(value,'$.thoughtSignature'))), '[]')"
     "    FROM json_each(?1,'$.candidates[0].content.parts')"
     "    WHERE json_extract(value,'$.thoughtSignature') IS NOT NULL),"
-    " json_extract(?1,'$.usageMetadata.cachedContentTokenCount'),"
+    /* Gemini's JSON omits a zero-valued field (proto3), so a usage report
+     * without cachedContentTokenCount is a miss — a reported zero. Checked
+     * live: the field is absent on a request whose prefix the one before
+     * had just read from cache. No usageMetadata stays not reported. */
+    " CASE WHEN json_type(?1,'$.usageMetadata') = 'object' THEN"
+    "   COALESCE(json_extract(?1,'$.usageMetadata.cachedContentTokenCount'),0) END,"
     " NULL,"
     " json_extract(?1,'$.usageMetadata.thoughtsTokenCount')";
 

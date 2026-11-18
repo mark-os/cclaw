@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v67 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v68 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -154,7 +154,7 @@ path goes through. Removing a capability from a model that is already
 assigned is not checked.
 
 `utility` (v65) is the list a script's `LLM(prompt, {purpose: "utility"})`
-walks ([js-llm.md](js-llm.md#purpose)) — side work such as a `turnSettled`
+walks ([js-llm.md](js-llm.md#purpose)) — side work such as a `Stop`
 hook's review, which wants a cheap, fast model rather than the one that
 drives the turns. Any model may be on it (no capability is required) and an
 entry may carry a `reasoning_effort`. An agent with no `utility` rows is
@@ -168,6 +168,27 @@ CHECK; rows are carried unchanged.
 | `model_id` | TEXT NOT NULL | FK models(id) |
 | `pos` | INTEGER NOT NULL | 0 = first; PK (agent_name, purpose, pos) |
 | `reasoning_effort` | TEXT | `off\|minimal\|low\|medium\|high` (CHECK-enforced), or NULL = send nothing. Translated per model through `models.effort_map` at request-build time — see [providers.md](providers.md#reasoning-effort) |
+| `trim_threshold` | INTEGER | v68. Tokens; CHECK > 0. Over it at the end of an iteration, the session fires `ContextThreshold` and, if still over, C trims it. NULL = half the model's `context_window`. Read off the governing entry only — the agent's first `chat` entry whose model is not `disabled` (`context_limits`) — see [memory.md](memory.md#the-thresholds) |
+| `prune_target` | INTEGER | v68. Tokens; CHECK > 0 and below `trim_threshold` when that is set. How far C's trim cuts. NULL = half the threshold |
+| `cache_lifetime` | INTEGER | v68. Seconds the provider keeps this model's prompt cache; CHECK > 0. Arms `CacheExpiring` ([hooks.md](hooks.md#cacheexpiring)); NULL = unknown, no event. On an Anthropic-format model it is 300 or 3600 and selects the cache marker sent ([providers.md](providers.md#anthropic-messages)) |
+| `reasoning_display` | TEXT NOT NULL DEFAULT 'summary' | v68. `summary\|none` (CHECK-enforced): whether the model is asked for a readable summary of its reasoning, kept as the `reasoning` entry's text. Mapped per wire format — see [providers.md](providers.md#reasoning-display) |
+
+The four v68 columns apply to the chat list (the explorer and the config
+document refuse them elsewhere; the schema does not). Triggers:
+
+- `agent_models_window_bi` / `_bu` (insert; update of `trim_threshold` or
+  `model_id`) refuse a `trim_threshold` larger than the model's
+  `context_window`.
+- `agent_models_lifetime_bi` / `_bu` (insert; update of `cache_lifetime` or
+  `model_id`) refuse a `cache_lifetime` other than 300 or 3600 on a model
+  whose provider's `endpoint_type` is `anthropic`.
+- `agent_models_lifetime_ai` sets `cache_lifetime` = 3600 on a new `chat` row
+  for an Anthropic model that gave none. NULL is reachable only by clearing it
+  afterwards, and a write path that replaces the list (delete + insert) puts
+  3600 back.
+
+The v68 patch sets `cache_lifetime` = 3600 on every existing Anthropic `chat`
+row and leaves every other row's new columns at their defaults.
 
 ---
 
@@ -195,7 +216,7 @@ route.
 
 ## llm_jobs
 
-Transient work queue. The daemon poll loop writes one row per LLM request or compaction. A worker thread runs the request and deletes the row when it completes (`src/llm_worker.c`). A row that exists means a worker holds or will hold that session.
+Transient work queue. The daemon poll loop writes one row per LLM request. A worker thread runs the request and deletes the row when it completes (`src/llm_worker.c`). A row that exists means a worker holds or will hold that session.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -203,11 +224,11 @@ Transient work queue. The daemon poll loop writes one row per LLM request or com
 | `session_id` | INTEGER NOT NULL | |
 | `agent_name` | TEXT NOT NULL | FK → `agents(name)` ON UPDATE CASCADE |
 | `recall` | INTEGER NOT NULL DEFAULT 0 | whether to run FTS recall before this request |
-| `job_type` | INTEGER NOT NULL DEFAULT 0 | 0 = LLM request for a turn, 1 = compaction |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 The row's existence is its state (completion deletes it); the always-`pending`
-`status` column and its index were dropped in v59.
+`status` column and its index were dropped in v59; `job_type` (turn or
+compaction) in v68, with the compaction it named.
 
 ---
 
@@ -246,8 +267,11 @@ stores their sum and the convention holds there too. Gemini completion tokens ar
 included in candidates).
 
 No consumer may *depend* on any of these fields: absent or zero must degrade to
-the pre-existing behavior exactly. Today's only consumer is `rate_limit_check`,
-which weights cache reads at 0.25 via `COALESCE(cached_tokens,0)`.
+the pre-existing behavior exactly. Consumers: `rate_limit_check`, which
+weights cache reads at 0.25 via `COALESCE(cached_tokens,0)`; the
+`CacheExpiring` payload (`cache_read_tokens` / `cache_write_tokens` of the
+session's last `ok` row); and the explorer's cache view, which reads
+`entries.cached_tokens`.
 
 Retention controlled by config key `llm_response_archive_max`: >0 keeps the most
 recent N 'ok' rows **plus** the most recent N failures (so `[resp #N]` citations in
@@ -530,15 +554,18 @@ in the comment on `patch_v61_chats()` (`src/db.c`).
 | `tool_filter` | TEXT | JSON array of tool names (see below) |
 | `state` | TEXT NOT NULL DEFAULT 'idle' | see state machine below |
 | `owner_instance` | TEXT | FK to `processes.instance_id`; NULL ⟺ idle |
+| `settle_event` | TEXT | v68. While `state` = `settling`: the event the hold began with (`Stop`, `SubagentStop`, `ContextThreshold`, `CacheExpiring`), set in the same write as the state (`session_set_settling`) and cleared by every other transition and by recovery. Whoever ends the hold — the reap or the sweep — reads it: no C check follows `CacheExpiring` ([hooks.md](hooks.md#the-hold)). NULL in every other state |
 | `turn_iteration` | INTEGER NOT NULL DEFAULT 0 | iteration within current turn |
 | `turn_context` | TEXT | The user context block (`<RELEVANT_CONTEXT>` text), materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; always present (it carries `<current_time>` even when nothing else is live) |
 | `turn_context_tokens` | INTEGER | v67. The provider's count for the context block the newest measured request carried; the next turn's first report gives it back before sharing the growth in `usage_in` (`usage_attribute`). The block's estimate when that report could not be compared; NULL = no report yet |
 | `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
-| `compaction_fail_count` | INTEGER NOT NULL DEFAULT 0 | consecutive failed compaction attempts; zeroed on success. At 3 (`COMPACTION_FAIL_NOTIFY`, `llm_proc.c`) the session's channel gets one operator notice per streak — the agent is never told; the session keeps running on the read-time context window (`plan_find_cut`), nothing is deleted |
+| `cache_armed_at` | INTEGER | v68. The `CacheExpiring` arm: when the session's last answered request started, set when the governing entry has a `cache_lifetime`. Cleared when the event fires or the cache has lapsed, so it fires once per idle period (`src/cache_expiring.c`). NULL = not armed |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
-Index: `idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS NOT NULL`.
+Indexes: `idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS NOT NULL`;
+`idx_sessions_cache_armed ON sessions(cache_armed_at) WHERE cache_armed_at IS NOT NULL` (v68).
+`compaction_fail_count` was dropped in v68.
 The chat columns that lived here until v61 (`chat_title`, `chat_is_admin`,
 `chat_error_notice_at`) are `channel_chats.title`, `is_admin`,
 `error_notice_at`.
@@ -572,18 +599,17 @@ Unique: `(session_id, target_kind, target_ref)`.
 | `idle` | No work in progress; `owner_instance` is NULL |
 | `llm_running` | LLM request in flight on a worker thread |
 | `tool_running` | Tool execution in progress |
-| `compacting` | Context compaction running |
 | `rate_limited` | Parked waiting for rate-limit window |
 | `awaiting_approval` | Parked for human approval of a tool call |
-| `settling` | The turn is over and an awaited `turnSettled` hook script is running ([hooks.md](hooks.md#the-hold)). Entered from `idle` only, left to `idle` only; the inbox queues and is not consumed. A dead owner's `settling` is recovered to `idle` with no resume nudge |
+| `settling` | An awaited hook script is running ([hooks.md](hooks.md#the-hold)): at a turn's end, between two iterations, or on an idle session whose cache is expiring. Entered from `idle` or `tool_running`, left to `idle` or `tool_running` only; the inbox queues and is not consumed; counts as holding a resource for `session_max_concurrent`. A dead owner's `settling` is recovered to `idle`; a turn held between iterations is then resumed by the daemon's inbox sweep, which reads the leaf through notes and summaries ([hooks.md](hooks.md#a-hold-cut-short)) |
 
 Transitions are guarded by a CAS in `session_set_state()` (`src/db.c`): idle clears `owner_instance`, any busy state stamps it. `turn_iteration` resets to 0 on transition to idle.
 
-An idle session whose leaf entry is unanswered — role 1 (dispatch refused after the inbox drain) or role 3 (a mid-turn dispatch bounce, or a zombie call closed at turn start) — is not resting: `advance_session` resumes it, and the daemon tick's `session_sweep_inbox` wakes it with the same predicate. A role-3 resume continues the *same* turn, so it re-derives `turn_iteration` from the leaf turn's distinct `iteration_id`s (the idle transition above zeroed it) and keeps the frozen `turn_context`. Role 0/2/4 leaves are legal resting places.
+An idle session whose leaf entry is unanswered — role 1 (dispatch refused after the inbox drain) or role 3 (a mid-turn dispatch bounce, a zombie call closed at turn start, or recovery of a session a dead process held mid-turn) — is not resting: `advance_session` resumes it, and the daemon tick's `session_sweep_inbox` wakes it with the same predicate. The leaf is read through notes and summaries (roles 0 and 4: a hook may leave one at the end of a running turn, the streak guard after an answer) to the entry before them (`CCLAW_SQL_LEAF_READ_THROUGH`, `src/advance.h`); the `llm_running` lost-submit check reads it the same way. A role-3 resume continues the *same* turn, so it re-derives `turn_iteration` from the leaf turn's distinct `iteration_id`s (the idle transition above zeroed it) and keeps the frozen `turn_context`. A role-2 entry, read through, is a turn at rest.
 
 ### The autonomous-turn streak (cross-turn runaway guard)
 
-`max_iterations` bounds a turn; nothing bounded turns *generating* turns with no human in the causal chain (cron chatter, sub-agent respawn ping-pong). Both turn-open branches of `advance_session` — `idle` and its twin `compacting` — check the streak **before** the drain. **Metric**: `COUNT(DISTINCT turn_id)` over the session's entries newer than the last *human* turn, where a human turn is the most recent one holding a role-1 entry whose `data.source` is not in `('cron','cron_error','agent_result','spawn','system')` — or holds no stamp at all (only the drain stamps, so unstamped means a human-adjacent writer). No human turn ever ⇒ every turn counts. The classification is autonomous-side because the human side is open-ended: `cli`, any channel name, `approval`. There is no counter column; the SQL fragments live in `src/advance.h` and are shared with `--doctor`. **Cap**: config `max_autonomous_turn_streak` (default 50, 0 = off). At or past it, a turn open whose *entire* pending inbox batch is autonomous consumes nothing and returns `ADVANCE_NOOP` — the inbox rows stay durable and the session simply goes quiet (the daemon sweep keeps waking it; each wake NOOPs at the gate for two indexed counts). An unanswered-leaf resume is never gated: the guard only fires when there is queued work. **Recovery**: a human row anywhere in the pending batch lets the turn through, and opening it resets the streak by construction. **Notices**: at ~80% of the cap an allowed turn gets one role-0 entry stamped `{"source":"streak_guard","note":"warn"}` appended to its opening batch; the first refusal of a trip writes one stamped `…"note":"tripped"` (role 0, so it neither counts toward the streak nor looks like a leaf to resume) plus a `channel_outbox` notice to the operator (the channel's admins; see [error-handling.md](error-handling.md#operator-notices)) and a syslog WARN. Once-per-trip is derived from that marker being newer than the last human turn — a human turn later starts a fresh trip.
+`max_iterations` bounds a turn; nothing bounded turns *generating* turns with no human in the causal chain (cron chatter, sub-agent respawn ping-pong). The turn-open branch of `advance_session` (`idle`) checks the streak **before** the drain. **Metric**: `COUNT(DISTINCT turn_id)` over the session's entries newer than the last *human* turn, where a human turn is the most recent one holding a role-1 entry whose `data.source` is not in `('cron','cron_error','agent_result','spawn','system')` — or holds no stamp at all (only the drain stamps, so unstamped means a human-adjacent writer). No human turn ever ⇒ every turn counts. The classification is autonomous-side because the human side is open-ended: `cli`, any channel name, `approval`. There is no counter column; the SQL fragments live in `src/advance.h` and are shared with `--doctor`. **Cap**: config `max_autonomous_turn_streak` (default 50, 0 = off). At or past it, a turn open whose *entire* pending inbox batch is autonomous consumes nothing and returns `ADVANCE_NOOP` — the inbox rows stay durable and the session simply goes quiet (the daemon sweep keeps waking it; each wake NOOPs at the gate for two indexed counts). An unanswered-leaf resume is never gated: the guard only fires when there is queued work. **Recovery**: a human row anywhere in the pending batch lets the turn through, and opening it resets the streak by construction. **Notices**: at ~80% of the cap an allowed turn gets one role-0 entry stamped `{"source":"streak_guard","note":"warn"}` appended to its opening batch; the first refusal of a trip writes one stamped `…"note":"tripped"` (role 0, so it neither counts toward the streak nor makes a leaf to resume: it is read through to the answered turn before it) plus a `channel_outbox` notice to the operator (the channel's admins; see [error-handling.md](error-handling.md#operator-notices)) and a syslog WARN. Once-per-trip is derived from that marker being newer than the last human turn — a human turn later starts a fresh trip.
 
 The same choke point carries a second, unrelated gate: the
 `session_max_concurrent` drain-side concurrency gate (defer-not-refuse, human
@@ -610,8 +636,8 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `session_id` | INTEGER NOT NULL | |
 | `parent_id` | INTEGER NOT NULL DEFAULT -1 | tree structure (Pi model); -1 = root |
-| `original_parent_id` | INTEGER | the parent the entry was written under, set when compaction or a [turn edit](turn-edit.md) re-points it. A turn edit keeps the first value (`COALESCE`); rows it takes off the branch are not touched and still point at their own parent, so the turn as written can be walked back |
-| `turn_id` | INTEGER | the turn this entry belongs to — minted when a user entry follows a non-user one, inherited from the parent thereafter (trigger `entries_turn_ai`). The context cut and compaction snap to it so neither splits a turn. |
+| `original_parent_id` | INTEGER | the parent the entry was written under, set when a [turn edit](turn-edit.md) re-points it. A turn edit keeps the first value (`COALESCE`); rows it takes off the branch are not touched and still point at their own parent, so the turn as written can be walked back |
+| `turn_id` | INTEGER | the turn this entry belongs to — minted when a user entry follows a non-user one, inherited from the parent thereafter (trigger `entries_turn_ai`). The request cut snaps to it so it never splits a turn; whole-turn edits name it. An edit's summary carries the first turn it replaced (between turns) or the running turn's id (a summary of its iterations); a note, the turn of the place it goes |
 | `iteration_id` | INTEGER | one LLM request/response *inside* a turn (`db_next_iteration_id`); shared by the assistant message, its tool_call parts and their tool results |
 | `type` | TEXT NOT NULL DEFAULT 'user_message' | entry type discriminator |
 | `part_index` | INTEGER NOT NULL DEFAULT 0 | ordering within multi-part entries |
@@ -625,13 +651,13 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `model` | TEXT | which model produced this |
 | `usage_in` | INTEGER | input tokens |
 | `usage_out` | INTEGER | output tokens |
-| `cached_tokens` | INTEGER | cache-read subset of `usage_in`; NULL when the provider doesn't report it. Discounted to 0.25 weight by `rate_limit_check` |
+| `cached_tokens` | INTEGER | cache-read subset of `usage_in`; NULL when the provider doesn't report it, 0 when it reports none (rows ingested before v68 stored a reported 0 as NULL). Discounted to 0.25 weight by `rate_limit_check`; read by the explorer's cache view |
 | `cost_nano` | INTEGER | nanodollars |
 | `token_estimate` | INTEGER | chars/3 + 4 heuristic (`TOKEN_ESTIMATE`, errs high; v52 rescaled old rows from `content_bytes`) |
 | `tokens` | INTEGER | v67. The provider's count for this entry, written once when a response reports it (`usage_attribute`, `db_response.c`): its share of `usage_out` for what the model wrote, its share of the growth in `usage_in` for what was appended. NULL = not measured, read as `token_estimate`. A reasoning entry holds what its replay costs — 0 once it is no longer sent or counted. See [memory.md](memory.md#context-window-management) |
 | `content_bytes` | INTEGER | byte length of content + tool_calls |
 | `tool_call_count` | INTEGER NOT NULL DEFAULT 0 | denormalized for plan pass |
-| `data` | TEXT | JSON side-channel, merged not overwritten (`json_patch`), nullable. `$.source` / `$.source_ref` — provenance stamped by the inbox drain (the cron auto-pause streak reads it), and on a `system` entry who wrote it (`hook:<extension>` for a hook's note); `$.job` on a `cron_result` — the job that produced it; `$.turn_edits` on a turn's final `assistant_message` — see [below](#entriesdata-turn_edits) |
+| `data` | TEXT | JSON side-channel, merged not overwritten (`json_patch`), nullable. `$.source` / `$.source_ref` — provenance stamped by the inbox drain (the runaway-turn guard and the cron auto-pause streak read it), and on a note or summary an edit wrote, who wrote it (`hook:<extension>`, `fallback` for C's trim, `tool:session_condense`); a stand-in keeps its original's; `$.edited_by` on every entry an edit wrote — the edit's label; `$.replaces` on an edit's stand-in — the first original it stands for, which readers of `$.source` that count events (the cron auto-pause streak) skip ([turn-edit.md](turn-edit.md#edited-entries)); `$.job` on a `cron_result` — the job that produced it; `$.turn_edits` on the entry that hosts an edit's record — see [below](#entriesdata-turn_edits) |
 | `network_hosts` | TEXT | JSON array of hosts the tool run contacted (proxy-observed) |
 | `fence_id` | TEXT | Random id minted when `network_hosts` is set; see below |
 | `reasoning_meta` | TEXT | `type='reasoning'` rows only — replay tag+blob, see below |
@@ -641,31 +667,37 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 
 | type | content holds |
 |------|---------------|
-| `system` | System prompt text, or a mid-conversation note (`role=0`, `iteration_id=0`). Sent as user text `[system] <text>`, except a note whose `data.source` is `hook:<ext>` — left by a [turnSettled hook](turn-edit.md) — which is sent as `[note from extension <ext>] <text>` |
+| `system` | System prompt text, or a mid-conversation note (`role=0`, `iteration_id=0`). Sent as user text `[system] <text>`, except a note whose `data.source` is `hook:<ext>` — left by a [hook](turn-edit.md) — which is sent as `[note from extension <ext>] <text>` |
 | `user_message` | User's message text |
 | `assistant_message` | Assistant's text response (may be NULL if tool_calls only) |
 | `tool_call` | **Validated JSON arguments** (normalized via `json()` at ingest; single source of truth for tool call args) |
 | `tool_result` | Tool execution output (text) |
-| `reasoning` | Model reasoning/thinking text |
-| `compaction` | Compressed summary text |
+| `reasoning` | The reasoning text the provider returned — a summary on Anthropic and Gemini, whatever the upstream sends on an OpenAI-compatible provider — kept when the routing entry's `reasoning_display` is `summary`; empty under `none`. Replay reads `reasoning_meta`, never this |
+| `compaction` | A summary an edit wrote in place of a run of turns or iterations (a hook's `summarise`, `session_condense`); `role=4` |
 | `cron_result` | A scheduled script's output, posted with no LLM call behind it. `role=2` so ordinary delivery finds it and `iteration_id=0` because it spent no iteration; `data.job` names the job and `is_error` records how the run went. The payload serializer labels it (`[scheduled script <job> output]`) rather than passing it through bare — the model must not read a machine's stdout back as its own words |
 
 ### entries.data `$.turn_edits`
 
-On a turn's final assistant entry: one element per applied [turn edit](turn-edit.md#the-record), appended in the edit's transaction; other keys on the entry are kept. Never sent to the model.
+One element per applied [edit](turn-edit.md#the-record), appended in the
+edit's transaction on one entry: the session's leaf after a script's edit
+(at a turn's end, its answer), the note C's trim wrote. Other keys on the
+entry are kept. Never sent to the model.
 
 ```json
-{"turn_edits": [{"by": "hook:review", "at": 1763300000,
+{"turn_edits": [{"by": "hook:compaction", "at": 1763300000,
                  "left_branch": [412, 415, 416],
                  "replaced": [{"original": 204, "replacement": 431}],
-                 "notes": [432],
-                 "tokens": {"before": 9120, "after": 3310},
+                 "notes": [432], "summaries": [433],
+                 "tokens": {"before": 91200, "after": 43100},
+                 "thinking_cut": 431,
                  "record": {"…": "the script's own, when it sent one"}}]}
 ```
 
-- `left_branch` — every entry taken off the branch, in chain order (replaced originals included). The rows stay in the table.
-- `replaced` — per replaced result, the original `tool_result` and the new one in its place; `notes` — the `system` entries the edit inserted. Both in edit order.
-- `tokens` — the turn's size on the branch before and after: each entry at `tokens`, or `token_estimate` where unmeasured.
+- `left_branch` — every original taken off the branch, in chain order (replaced and rewritten originals included). The rows stay in the table.
+- `replaced` — per stand-in, the original and the new row in its place; `notes`, `summaries` — the entries the edit inserted. All in edit order.
+- `tokens` — the branch's size before and after: each entry at `tokens`, or `token_estimate` where unmeasured (C's trim: the session's size, head included).
+- `thinking_cut` — the first entry of the new branch that is new or re-pointed; reasoning produced before the edit at or after it is not replayed on Anthropic. Null when only the tail went.
+- C's trim adds `dropped` `{turns, iterations}` and `limits` `{window, threshold, target}`.
 
 ### entries.reasoning_meta
 
@@ -682,9 +714,9 @@ goes back on the wire:
 | `gemini_parts` | `[{fn, sig}, …]` | `thoughtSignature` on the matching replayed `functionCall` part |
 | `anthropic_content` | the response's whole `content` array, verbatim | the assistant message's `content`, in place of the one rebuilt from entries — within the producing turn only (see [providers.md](providers.md#anthropic-messages)) |
 
-The blob — not `entries.content` — is what replay reads: `save_reasoning`
-governs whether the *display* text is kept, while the wire requirement holds
-either way. No blob (pre-v48 rows, or a provider that sent none) → nothing is
+The blob — not `entries.content` — is what replay reads: the routing entry's
+`reasoning_display` governs whether the *display* text is kept, while the
+wire requirement holds either way. No blob (pre-v48 rows, or a provider that sent none) → nothing is
 emitted; a reasoning field is never invented.
 
 ### entries.network_hosts
@@ -790,24 +822,30 @@ Tool registry. Built-in C tools have NULL `extension_name`/`path`; JS tools poin
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `policy` | TEXT | JSON restrict-only argument policy |
 | `egress_hosts` | TEXT | comma-separated hosts declared by the manifest; non-NULL **replaces** the agent's host grants for calls of this tool. Only a promoted extension tool can carry one — see [extensions.md](extensions.md#declared-reach-hosts) |
-| `droppable` | INTEGER NOT NULL DEFAULT 0 | v63. 1 = a [turnSettled hook](turn-edit.md#protected-calls) may take a call of this tool out of context; 0 = protected (its result's text can still be replaced). Built-in tools: the recipe's `droppable` flag, written by `tools_sync_to_db`. Extension tools: `$.tools[].droppable` in the manifest, 0 when unstated |
+| `droppable` | INTEGER NOT NULL DEFAULT 0 | v63. 1 = a [hook](turn-edit.md#protected-calls) may drop a call of this tool on its own; 0 = protected (its result's text can still be replaced). Built-in tools: the recipe's `droppable` flag, written by `tools_sync_to_db`. Extension tools: `$.tools[].droppable` in the manifest, 0 when unstated |
 
 ---
 
 ## hooks
 
-Extension-provided hooks. Same provenance model as tools — the DB holds config + a path, never code. One event exists, `turnSettled` ([hooks.md](hooks.md)); the manifest validator refuses any other name. Rows are written by promote, one per `$.hooks[]` entry, and read at each event for the session's agent (never cached).
+Extension-provided hooks. Same provenance model as tools — the DB holds config + a path, never code. Events: `Stop`, `SubagentStop`, `ContextThreshold`, `CacheExpiring` ([hooks.md](hooks.md)); the manifest validator refuses any other name. Rows are written by promote, one per `$.hooks[]` entry, and read at each event for the session's agent (never cached).
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `extension_name` | TEXT NOT NULL | FK → `extensions(name)` ON UPDATE CASCADE (v59) |
-| `event` | TEXT NOT NULL | event name: `turnSettled` |
+| `event` | TEXT NOT NULL | event name |
 | `path` | TEXT NOT NULL | handler file in extension store |
-| `enabled` | INTEGER NOT NULL DEFAULT 1 | |
-| `wait` | INTEGER NOT NULL DEFAULT 1 | v64. 1 = the session is held in `settling` until the script ends and its reply is applied; 0 = started, not awaited, output discarded. From `$.hooks[].wait` |
-| `fail_count` | INTEGER NOT NULL DEFAULT 0 | v64. Consecutive failed runs of this hook, any session; a success zeroes it, re-promote resets it. The 3rd in a row sends one operator notice |
-| `input` | TEXT | v66. JSON: what a `turnSettled` script is sent besides the finished turn — `$.hooks[].input` as declared, `{history, history_results, max_bytes}`, validated at promote. NULL = nothing declared; each option a row does not name takes its default when the hook runs (`hook_next`): the turn alone, results with their text, at most 1 MB. See [turn-edit.md](turn-edit.md#input) |
+| `enabled` | INTEGER NOT NULL DEFAULT 1 | the operator's switch; never set by the runtime |
+| `async` | INTEGER NOT NULL DEFAULT 0 | v68 (replaces `wait`, its inverse). 0 = the session is held in `settling` until the script ends and its reply is applied; 1 = started, not awaited, output discarded. From `$.hooks[].async` |
+| `fail_count` | INTEGER NOT NULL DEFAULT 0 | v64. Consecutive failed runs of this hook, any session; a success zeroes it, re-promote resets it |
+| `input` | TEXT | v66. JSON: what the script is sent besides the newest turn — `$.hooks[].input` as declared, `{history, history_results, max_bytes}`, validated at promote. NULL = nothing declared; each option a row does not name takes its default when the hook runs (`hook_next`): the turn alone, results with their text, at most 1 MB. See [turn-edit.md](turn-edit.md#input) |
+| `pos` | INTEGER NOT NULL DEFAULT 0 | v68. The entry's index in the manifest's `hooks[]`. Hooks for one event run in `(extension_name, pos, path)` order |
+| `timeout` | INTEGER | v68. Seconds the script may run; CHECK 1–3600 (`HOOK_TIMEOUT_MAX`; promote admits the same range). NULL = config `hook_timeout` |
+| `disabled` | INTEGER NOT NULL DEFAULT 0 | v68. 1 = turned off after `HOOK_FAIL_LIMIT` (3) failures in a row; the default agent was told once. Cleared by re-promote, by a new version of a bundle shipped in the binary, or by hand (`UPDATE hooks SET disabled=0, fail_count=0 …`) |
 | PRIMARY KEY | (extension_name, event, path) | |
+
+The v68 patch copies `wait` into `async` (inverted) and drops `wait`;
+existing rows get `pos` 0, no timeout, enabled.
 
 ---
 

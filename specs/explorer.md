@@ -119,8 +119,7 @@ Everything needed to draw any table:
   `models_cache.provider_name` → `providers`; and `grants.value` → `tools`
   `when {"kind": "tool"}`, → `secrets` `when {"kind": "secret"}`.
 - `codes` — `entries.role` (`Role`, types.h), `entries.stop_reason`
-  (`StopReason`), `llm_jobs.job_type` (0 turn, 1 compaction —
-  llm_worker.c), `channel_outbox.deliver_mode` (0 formatted, 1 plain).
+  (`StopReason`), `channel_outbox.deliver_mode` (0 formatted, 1 plain).
 
 ### `GET /admin/api/rows?table=T[&filter=F][&limit=N][&after=C]`
 
@@ -173,7 +172,9 @@ the provider gave no figure), `reported_zero`, `hits` (cached > 0),
 and `share` = cached ÷ prompt tokens over those (null when none reported).
 `days` keeps requests of the last N days; gaps are still measured against
 full history. Ingestion (`db_response.c`) writes `entries.cached_tokens`
-whenever the provider reported a count, zero included; rows ingested before
+whenever the provider reported a count, zero included — Gemini omits
+`cachedContentTokenCount` on a miss (its JSON drops zero-valued fields), so a
+Gemini usage report without it is stored as 0; rows ingested before
 schema v68 stored a reported zero as NULL and read as not reported.
 
 ```json
@@ -275,7 +276,8 @@ among them.) Network actions release the lock around the provider call.
 | `grant_add` | agent, kind (`tool` `host` `read_path` `write_path` `secret`), value, approval_mode?, expires_at? | agent exists; tool exists in `tools`; host is a host rule, not a URL; a path is absolute and not cclaw.db, its -wal/-shm, `.cclaw_key` or a directory holding them (`grant_path_hits_db`); a secret name is valid and not a `system` secret (as `cclaw secret grant`); mode only on tools; expiry in the future; an identical live grant is 409. Source `operator`. A tool's mode, when not given, is `always` for `agent_approval_tools`, else `silent`; re-granting a tool with another mode changes only the mode |
 | `grant_remove` | agent, kind, value | the grant exists |
 | `agent_copy` | from, name, description?, attach_memory? | the operator's `clone_from` through `agent_definition_apply` (creator NULL: no creator caps; everything else as for any new agent — baseline extensions, heartbeat schedule, workspace under `<db dir>/agents/<name>/workspace`, made on the web thread since nothing in it belongs to the event loop). Copies prompt and limits, every model list with effort, every grant (source `agent_create`), extension attachments. Memory is not part of a clone; `attach_memory` shares each of the source's blocks **read-only**. Name PascalCase and new |
-| `models_set` | agent, purpose (`chat` `image` `audio` `utility`), models: [{model_id, reasoning_effort?}] in order | one transaction replacing that list; chat may not be empty; no duplicates; models exist; effort only on chat and utility, one of the five levels; image/audio only for models whose capabilities include it (the trigger is the backstop, its refusal turned into a sentence); an unchanged list writes nothing |
+| `models_set` | agent, purpose (`chat` `image` `audio` `utility`), models: [{model_id, reasoning_effort?, trim_threshold?, prune_target?, cache_lifetime?, reasoning_display?}] in order | one transaction replacing that list; chat may not be empty; no duplicates; models exist; effort only on chat and utility, one of the five levels; image/audio only for models whose capabilities include it; `trim_threshold`, `prune_target` (tokens) and `cache_lifetime` (seconds) are whole numbers ≥ 1 or null, `reasoning_display` is `summary`, `none` or null, and all four only on the chat list. A field left out keeps what that model's row has now (a page that does not show it does not reset it); null is the default. The schema is the backstop — a threshold over the window, a prune target not below the threshold, an Anthropic lifetime other than 300/3600 — each refusal turned into a sentence; an unchanged list writes nothing |
+| `hook_enable` | extension, event, path | the hook exists and is turned off (`hooks.disabled`); clears the flag and `fail_count` in one transaction, as promoting the extension again would. One log line — `hooks` is not change-logged |
 | `session_new_on_chat` | agent, channel, chat_id, confirm_handover? | the chat is a `channel_chats` row; `channel_pin_new_session`. A chat that talks to **another agent's** session is 409 with `{"confirm": {"kind": "handover", "from", "to"}}` until `confirm_handover` equals the receiving agent's name — handing a chat to an agent is an authority change, so it takes a typed name, not one click. The previous session is left behind and keeps naming the chat |
 | `session_move_to_chat` | session_id, channel, chat_id, confirm_handover? | `channel_pin_session`: the session's old chat goes on with a fresh session for the same agent (decision 4); the target chat's previous session is left behind; same handover rule; sub-agent sessions refused |
 | `chat_settings` | channel, chat_id, delivery_mode? (`auto` `explicit`), tool_filter? (list or `"unrestricted"`), guidance? | tools exist; an empty list is refused — "unrestricted" is its own choice; `""` guidance clears |
@@ -313,25 +315,22 @@ Letting an agent use a secret is `grant_add` with kind `secret`.
 | `#/t/<table>[?f=<filter JSON>]` | List: key and a few identifying columns, long text previewed, filter chips, "Load more" |
 | `#/r/<table>/<key parts…>` | Row: fields grouped "What you configured" / "What cclaw observed" where the column class is known (else one group), each with its explanation; links from this row; rows that point here, with counts, opening the filtered list |
 | `#/add-provider` | New provider: name, endpoint, wire format, key |
-| `#/cache[?days=N]` | Prompt cache: per model, a table of the `cache` buckets (requests, cached share, hits, reported zero, not reported), with all time / 30 / 7 / 1 day; linked from home |
+| `#/cache[?days=N]` | Prompt cache: per model, a table of the `cache` buckets (requests, cached share, hits, reported zero, not reported), with all time / 30 / 7 / 1 day; linked from home. Read it before relying on a `cache_lifetime`: the hit rate by gap is what shows whether the entered lifetime is real ([hooks.md](hooks.md#cacheexpiring)) |
 
 Agents, providers, channels, models, memory blocks, chats, approvals,
 secrets and entries add sections (and their actions) above the fields: an
 agent's model lists by purpose in order, grants by kind with their source,
 sessions with their chat and whether that chat still sends to them, memory,
-extensions (an attached one that ships a [hook](hooks.md) says it runs after
-each turn, and whether its script keeps failing) and schedules; a provider's key (stored secret or environment), registered
+extensions (an attached one that ships a [hook](hooks.md) says when it runs
+and whether its failures turned it off — [below](#hooks)) and schedules; a
+provider's key (stored secret or environment), registered
 models and how many models the provider offers; a channel's routed and
 unrouted chats with their reply mode and its defaults; a model's edit and
 remove; a block's attachments and notes; a chat's route and settings; an
 approval's card and decision; a secret's allowed hosts and the agents that may
-use it; an entry's part in a [turn edit](turn-edit.md) — on the turn's answer,
-the record (`$.turn_edits` of its `data`) as links: who edited, the entries
-that left the branch, each replaced result beside its replacement, the notes,
-the size before and after; on an entry the edit took out, put in or added,
-one line saying so with a link to the record. The section reads the turn's
-assistant entries (`rows`, filtered by session, turn and type, whole values);
-an unedited turn shows nothing. The providers, memory blocks and secrets lists offer adding one; the
+use it; a session's context and edits, and an entry's part in an edit
+([below](#edits-hooks-and-limits-in-the-explorer)). The providers, memory
+blocks and secrets lists offer adding one; the
 approvals list shows the pending ones as cards. Anything else uses the generic
 pages.
 
@@ -360,6 +359,128 @@ untrusted (agents and chat users write these tables) and reaches the page
 only through `textContent` — the page contains no `innerHTML` (a unit test
 checks the source).
 
+## Edits, hooks and limits in the explorer
+
+How the explorer shows a session's size against its limits, the
+[edits](turn-edit.md) made to it, and the [hooks](hooks.md) an extension
+runs.
+
+### `GET /admin/api/session?id=N`
+
+A session's size, its limits and every edit made to it (`explore_session`,
+`src/explore.c`); 400 without a positive `id`, 404 for no such session.
+
+```json
+{"session_id": 12, "agent": "researcher", "cache_armed_at": 1763300000,
+ "context": {"tokens": 41200, "head": 18040, "head_measured": true,
+             "model": "anthropic/claude-sonnet-5-5", "window": 200000,
+             "threshold": 100000, "threshold_set": null,
+             "target": 50000, "target_set": null, "cache_lifetime": 3600},
+ "edits": [{"entry_id": 971, "turn_id": 37, "source": "hook:compaction",
+            "at": 1763300100, "tokens": {"before": 91200, "after": 43100},
+            "left_branch": [412, 415], "replaced": [{"original": 910, "replacement": 971}],
+            "notes": [], "summaries": [972], "thinking_cut": 972,
+            "dropped": null, "limits": null, "record": {"…": "…"}}]}
+```
+
+- `context` — the governing routing entry's limits as the C check resolves
+  them (`context_limits`: `window`, `threshold`, `target`), beside what the
+  entry itself says (`threshold_set`, `target_set`; null = the default) and
+  its `cache_lifetime`. `tokens` is the branch the next request would carry
+  (`context_measure`) plus the head; the head is the provider's measure when
+  a report since the last edit gives one (`head_measured` true), else 0 —
+  building the system prompt is not a read — so `tokens` can read lower
+  than the size the C check compares.
+- `cache_armed_at` — `sessions.cache_armed_at`: when the session's
+  `CacheExpiring` timer was armed, or null.
+- `edits` — every record in `$.turn_edits` on any entry of the session,
+  newest host first, whether or not the host is still on the branch: who
+  made it (`source`: `hook:<extension>`, `fallback` for the runtime's trim,
+  `tool:session_condense`), when, and the record's fields
+  ([turn-edit.md](turn-edit.md#the-record)); `dropped` and `limits` are the
+  trim's, `record` the script's own. A `turn_edits` that is not an array, or
+  `data` that is not JSON, is not a record.
+
+### The session page
+
+A session's row page has two sections, both from `session`:
+
+- **Context** — the size now with a meter against the trim threshold
+  ("over the threshold" when it is), the threshold and the target each with
+  whether the routing entry sets it or it is the default, the model and its
+  window, and — when the entry has a `cache_lifetime` and the session is
+  armed — when the cache-expiry check is due (90% of the lifetime after
+  `cache_armed_at`). It links to the agent's page, where the numbers are
+  changed.
+- **Edits** — one event per record, newest first: who made it, when, the
+  size before and after (the trim's is the whole request, system prompt
+  included; a script's is the conversation), the turns and steps the trim
+  dropped, the entries that left the conversation, each replaced entry
+  beside its replacement, the summaries and notes written, where the model's
+  earlier reasoning stops being replayed (`thinking_cut`), the entry the
+  record is on, and the script's own record. "Never edited" when there is
+  none.
+
+### The entry page
+
+An entry's row page has an **Edits** section when an edit touched it, read
+from the entry's own `data` and `original_parent_id` and from the session's
+records:
+
+| Mark | When |
+|---|---|
+| **edited** — "Stands in for #N", and who edited it | `data.replaces` is set: a stand-in for a rewritten message or call, or a replaced result |
+| **written by an edit** — "Not from the model or a tool", and who | `data.edited_by` is set and `data.replaces` is not: a note or summary a script, the trim or `session_condense` wrote |
+| **moved** — "It was first written after #N" | `original_parent_id` is set: what came before it was edited |
+| **record** | a record is on this entry |
+| **replaced** — "Replaced by #N; the model sees that instead" | a record names it as an original with a replacement |
+| **taken out** — "No longer in the conversation the model sees" | a record's `left_branch` names it |
+
+Each of the last three is followed by the whole event, as on the session
+page. An entry no edit touched shows no section.
+
+### Routing entries
+
+On an agent's page each chat model line adds, when set: "trimmed at N"
+(`trim_threshold`), "cut to N" (`prune_target`), "cache 5 minutes" / "cache
+1 hour" / "cache N min" (`cache_lifetime`), "reasoning not kept"
+(`reasoning_display` = `none`). The chat list's editor (`models_set`) has, per
+model, a field for each: the threshold and the target as token counts with
+their defaults as placeholders ("empty: 100,000 (half the window)", "empty:
+50,000 (half the threshold)", recomputed as the threshold is typed), the
+cache lifetime in seconds, and whether a readable summary of the model's
+reasoning is kept. The first model's fields say that it governs. A prune
+target at or above the default threshold, when no threshold is set, is
+refused with: "The prune target for M (T tokens) must be below its trim
+threshold, which is empty and so half the model's window (W tokens). Lower
+the target, or set a threshold above it." — the schema cannot see that
+default; `request_config` refuses the same in the same words.
+
+### Hooks
+
+An extension's page has a **Hooks** section: each hook by event, then
+manifest position, with its script's file name, when it runs, whether the
+session waits for it (and so may have its session edited) or not, its time
+allowance (its own `timeout`, or `hook_timeout`), and "on", "off"
+(`hooks.enabled`) or "turned off after 3 failures in a row"
+(`hooks.disabled`). A live hook that has failed lately says "failed the last
+N times". A note under the list says that three failures in a row turn a
+hook off and the default agent is told once, and — for an extension an
+agent owns — that promoting it again also turns it back on.
+
+On an agent's page each attached, enabled extension lists its enabled hooks
+as pills ("runs after each turn", "runs when the context fills up", "runs
+when an idle session's cache is about to lapse", with ", and may edit it"
+when the session waits for it), and a hook its failures turned off is marked
+there too.
+
+Beside a turned-off hook, in both places, **Turn back on** asks for
+confirmation and sends `hook_enable` {extension, event, path}. It clears
+`hooks.disabled` and `fail_count` in one transaction, as promoting the
+extension again would, and logs the operator's act (`hooks` is not
+change-logged). Refusals: 400 when a field is missing, 404 for no such
+extension or no such hook of it, 409 for a hook that is not turned off.
+
 ## The admin panel — `/dashboard`
 
 `templates/dashboard.html`: the task-shaped screens for the person running
@@ -384,7 +505,7 @@ record:
   Approve / Deny for an applied request, no Always for a sensitive target;
   "Details" shows the channel card); a session whose leaf entry is an
   assistant error (`stop_reason` 4 — what `advance.c` itself tests) from the
-  last three days; `sessions.compaction_fail_count` ≥ 3; an active channel
+  last three days; an active channel
   whose `<ext>.enabled` is on (DB value or default) but has no `pid`; an
   unrouted chat the gate told the operator about (`notified_at`) that spoke in
   the last seven days; an outbox row `failed…` in the last 24 h; and
@@ -404,8 +525,8 @@ record:
   `channel_outbox` rows created between this turn's first entry and the
   next's (they are pruned after `outbox_retention_sec`). Long text arrives as
   a preview and is fetched whole by "show more"; a turn is drawn once all its
-  entries have arrived (keyset pages of 200). A session held by a turnSettled
-  hook (`settling`) reads "tidying up" and counts as working.
+  entries have arrived (keyset pages of 200). A session held by a hook
+  (`settling`) reads "tidying up" and counts as working.
 - **An edited turn** ([turn-edit.md](turn-edit.md)) — the session's entries
   include the ones an edit took off the branch, so the turn is drawn from the
   records on its assistant entries (`data.turn_edits`; a long `data` arrives

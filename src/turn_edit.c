@@ -100,10 +100,10 @@
  * results with their text (0/1), ?4 max_bytes, ?5 the event name, ?6 1 when
  * the newest turn must have ended with an answer, ?7 a JSON object sent as
  * "context", or NULL. */
-/* A summary standing between turns (it carries the turn id of what came
- * before the run it replaced, never the next turn's) is a unit of its own; a
- * summary of iterations of a turn carries that turn's id and is part of it,
- * read with its notes. */
+/* A summary standing between turns (it carries the id of the first turn it
+ * replaced — mark_span — so never the id of the turn before it or after it)
+ * is a unit of its own; a summary of iterations of a turn carries that
+ * turn's id and is part of it, read with its notes. */
 #define SQL_SEP "(e.type='compaction' AND e.turn_id IS NOT b.turn_id)"
 #define SQL_NEW_UNIT "(COALESCE(NOT " SQL_SAME_TURN("e", "b") ", 1) OR b.sep)"
 #define SQL_ROW_ERRORED "(e.role=2 AND COALESCE(e.stop_reason,0) IN (4,5))"
@@ -1068,7 +1068,9 @@ static int opens_iteration(const Branch *b, int i) {
 /* Where each note goes: before the iteration it names, in any turn. By
  * default before the newest turn's answer — reasoning included, so that
  * stays next to the answer — or, while the turn runs, at the end, where the
- * next response will read it. Runs after the removals are marked: an
+ * next response will read it. The answer is named by its own id (the input's
+ * final.entry_id; its reasoning row has none there) and the note goes before
+ * its reasoning all the same. Runs after the removals are marked: an
  * iteration this reply empties is no place to stand. */
 static TurnEditResult place_notes(const Branch *b, Reply *reply, char **err_out) {
     int answer = b->answer;
@@ -1080,8 +1082,9 @@ static TurnEditResult place_notes(const Branch *b, Reply *reply, char **err_out)
         if (e->op != 'n') continue;
         e->row = e->has_before ? -1 : answer >= 0 ? answer : b->n;
         for (int i = 0; i < b->n && e->row < 0; i++)
-            if (b->rows[i].id == e->before && (i == answer || opens_iteration(b, i)))
-                e->row = i;
+            if (b->rows[i].id == e->before &&
+                (i == answer || i == b->answer || opens_iteration(b, i)))
+                e->row = i == b->answer ? answer : i;
         if (e->row < 0)
             return fail(err_out, TURN_EDIT_REJECTED,
                         "note: \"before\" %lld is not the first entry of an iteration",
@@ -1159,8 +1162,10 @@ static int64_t insert_text(sqlite3 *db, const char *sql, int64_t ref, int64_t pa
  * content came from is carried over (fence_id and network_hosts keep the
  * untrusted-content wrap on replaced network output). Not the report columns:
  * usage and cost belong to the response the original was. data keeps the
- * original's keys but its records, and says who wrote this row and which
- * original it stands for — the first one, through any chain of rewrites:
+ * original's keys but its records — $.source among them, so a rewritten
+ * cron prompt is still the cron's and the runaway-turn guard still reads it
+ * as autonomous — and says who edited it ($.edited_by) and which original it
+ * stands for ($.replaces) — the first one, through any chain of rewrites:
  * that is the mark an explorer shows as "edited" (P4), and what the call
  * tests read through (SQL_CALL_ROOT). */
 static const char SQL_INSERT_STAND_IN[] =
@@ -1177,29 +1182,33 @@ static const char SQL_INSERT_STAND_IN[] =
     "  CASE WHEN tokens IS NOT NULL AND content_bytes >= 256"
     "       THEN tokens * ?5 / content_bytes END,"
     "  json_set(json_remove(COALESCE(data,'{}'),'$.turn_edits'),"
-    "    '$.source',?7,"
+    "    '$.edited_by',?7,"
     "    '$.replaces'," SQL_CALL_ROOT("entries") ")"
     " FROM entries WHERE id=?1;";
 
 /* A note is an ordinary system entry, shaped like every other one written
  * mid-session (advance.c's streak_note): type 'system', role 0, iteration 0,
- * provenance in data.source. Role 0 is what keeps it out of every reader
- * that picks entries by role; the transcript sends it by its type, and reads
- * a 'hook:<extension>' source to say whose words it is (llm_payload.c's
- * SQL_SYSTEM_NOTE_PREFIX). ?1 = session id. */
+ * provenance in data.source, and data.edited_by as on every entry an edit
+ * wrote. Role 0 is what keeps it out of every reader that picks entries by
+ * role (the runaway-turn guard reads role 1 only); the transcript sends it by
+ * its type, and reads a 'hook:<extension>' source to say whose words it is
+ * (llm_payload.c's SQL_SYSTEM_NOTE_PREFIX). ?1 = session id. */
 static const char SQL_INSERT_NOTE[] =
     "INSERT INTO entries (parent_id, session_id, turn_id, iteration_id, type, role,"
     "  content, token_estimate, content_bytes, data)"
-    " VALUES (?2, ?1, ?6, 0, 'system', 0, ?3, ?4, ?5, json_object('source',?7));";
+    " VALUES (?2, ?1, ?6, 0, 'system', 0, ?3, ?4, ?5,"
+    "         json_object('source',?7,'edited_by',?7));";
 
 /* A summary is a compaction entry, as session_condense's and the old
  * compaction's are: sent as user text under '[Summary of earlier
- * conversation]', no iteration (it stands alone on the wire). ?1 = session. */
+ * conversation]', no iteration (it stands alone on the wire). Role 4, so no
+ * reader that counts user messages (the runaway-turn guard, the cron failure
+ * streak) takes it for one. ?1 = session. */
 static const char SQL_INSERT_SUMMARY[] =
     "INSERT INTO entries (parent_id, session_id, turn_id, iteration_id, type, role,"
     "  content, stop_reason, token_estimate, content_bytes, tool_call_count, data)"
     " VALUES (?2, ?1, ?6, NULL, 'compaction', 4, ?3, 0, ?4, ?5, 0,"
-    "         json_object('source',?7));";
+    "         json_object('source',?7,'edited_by',?7));";
 
 /* The new branch as written, root→leaf, and the first row of it that is new
  * or hangs off something new: everything before that row is as it was. */
@@ -1383,8 +1392,14 @@ static int record_write(sqlite3 *db, int64_t host, const char *label, const Bran
 
 /* Everything that needs the branch: runs inside the write transaction, so
  * what is checked is what is edited. */
+/* What an applied edit did, for its log line. */
+typedef struct {
+    int before, after;          /* the branch's tokens */
+    int left, replaced, notes, summaries;
+} EditTally;
+
 static TurnEditResult apply_locked(sqlite3 *db, int64_t session_id, Reply *reply,
-                                   const char *label, char **err_out) {
+                                   const char *label, EditTally *t, char **err_out) {
     Branch b = {0};
     Chain c = {0};
     TurnEditResult rc;
@@ -1413,6 +1428,15 @@ static TurnEditResult apply_locked(sqlite3 *db, int64_t session_id, Reply *reply
         LOG_ERROR_("turn edit session=%lld: edited branch failed its check",
                    (long long)session_id);
         goto out;
+    }
+    t->before = before;
+    t->after = after;
+    for (int i = 0; i < b.n; i++) t->left += b.rows[i].remove || b.rows[i].edit >= 0;
+    for (int k = 0; k < reply->n; k++) {
+        char op = reply->e[k].op;
+        t->replaced += op == 'r' || op == 'w';
+        t->notes += op == 'n';
+        t->summaries += op == 's';
     }
     rc = TURN_EDIT_APPLIED;
 out:
@@ -1444,12 +1468,19 @@ TurnEditResult turn_edit_apply(sqlite3 *db, int64_t session_id, const char *repl
         reply_free(&reply);
         return fail(err_out, TURN_EDIT_ERROR, "BEGIN failed: %s", sqlite3_errmsg(db));
     }
-    rc = apply_locked(db, session_id, &reply, source_label, err_out);
+    EditTally t = {0};
+    rc = apply_locked(db, session_id, &reply, source_label, &t, err_out);
     if (rc != TURN_EDIT_APPLIED ||
         sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) {
         if (rc == TURN_EDIT_APPLIED)
             rc = fail(err_out, TURN_EDIT_ERROR, "COMMIT failed: %s", sqlite3_errmsg(db));
         sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+    } else {
+        /* One line per edit, whoever sent it — the trim logs its own. */
+        LOG_INFO_("edit session=%lld source=%s tokens=%d->%d left=%d replaced=%d"
+                  " notes=%d summaries=%d", (long long)session_id,
+                  source_label ? source_label : "?", t.before, t.after, t.left,
+                  t.replaced, t.notes, t.summaries);
     }
     reply_free(&reply);
     return rc;
@@ -1542,15 +1573,18 @@ static void trim_note_text(char *buf, size_t cap, int n_turns, int n_steps) {
 
 /* A long turn is trimmed again and again, and each trim's note would stay
  * among the rows that opened it. The new note replaces those: an earlier
- * trim note there leaves the branch and its counts are carried into the new
- * note's text, so the model reads one running total. */
+ * trim note there leaves the branch and its running total (the record's
+ * `total`, which is what its text said — `dropped` is that trim alone) is
+ * carried into the new note's text, so the model reads one running total. */
 static void trim_fold_notes(sqlite3 *db, Branch *b, int *total, int *n_turns, int *n_steps) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "SELECT json_extract(data,'$.turn_edits[0].dropped.turns'),"
-            "       json_extract(data,'$.turn_edits[0].dropped.iterations')"
+            "SELECT json_extract(data,'$.turn_edits[0].total.turns'),"
+            "       json_extract(data,'$.turn_edits[0].total.iterations')"
             "  FROM entries WHERE id=?1 AND type='system' AND json_valid(data)"
-            "   AND json_extract(data,'$.source')='" TRIM_SOURCE "';",
+            "   AND json_extract(data,'$.source')='" TRIM_SOURCE "'"
+            /* A trim note a script rewrote is the script's text now. */
+            "   AND json_extract(data,'$.replaces') IS NULL;",
             -1, &st, NULL) != SQLITE_OK)
         return;
     for (int i = b->newest; i < b->n && !opens_unit(&b->rows[i], -1); i++) {
@@ -1614,8 +1648,10 @@ static TrimResult trim_locked(sqlite3 *db, int64_t session_id, int head,
     rep->note_id = note.new_id;
     snprintf(extra, sizeof(extra),
              "{\"dropped\":{\"turns\":%d,\"iterations\":%d},"
+             "\"total\":{\"turns\":%d,\"iterations\":%d},"
              "\"limits\":{\"window\":%d,\"threshold\":%d,\"target\":%d}}",
-             rep->turns, rep->iterations, lim->window, lim->threshold, lim->target);
+             rep->turns, rep->iterations, n_turns, n_steps,
+             lim->window, lim->threshold, lim->target);
     if (record_write(db, note.new_id, TRIM_SOURCE, &b, &reply, rep->before, rep->after, c.cut,
                      extra) != 0)
         goto out;

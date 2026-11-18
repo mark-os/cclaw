@@ -591,6 +591,28 @@ static int act_models_set(Act *a) {
                  "  AND c.purpose=?3 AND c.model_id = j.value ->> 'model_id'",
               list, agent, purpose);
     if (!list) { tx_end(a, 0); return refuse(a, 500, "The list could not be saved."); }
+    /* A prune target at or above the threshold it serves would leave a
+     * trimmed session over it. The schema refuses that only against a set
+     * threshold; an empty one means half the window, so check that here. */
+    sqlite3_stmt *pt = prep(a,
+        "SELECT j.value ->> 'model_id', j.value ->> 'prune_target',"
+        "       COALESCE(j.value ->> 'trim_threshold', COALESCE(m.context_window, ?2) / 2)"
+        "  FROM json_each(?1) j JOIN models m ON m.id = j.value ->> 'model_id'"
+        " WHERE j.value ->> 'prune_target' IS NOT NULL AND j.value ->> 'trim_threshold' IS NULL"
+        "   AND j.value ->> 'prune_target' >= COALESCE(m.context_window, ?2) / 2 LIMIT 1",
+        list, num(a, config_get_int(a->db, "context_window")), NULL, NULL);
+    if (pt && sqlite3_step(pt) == SQLITE_ROW) {
+        char model[256];
+        snprintf(model, sizeof(model), "%s", (const char *)sqlite3_column_text(pt, 0));
+        long long target = sqlite3_column_int64(pt, 1), th = sqlite3_column_int64(pt, 2);
+        sqlite3_finalize(pt);
+        tx_end(a, 0);
+        return refuse(a, 400, "The prune target for %s (%lld tokens) must be below its trim"
+                              " threshold, which is empty and so half the model's window"
+                              " (%lld tokens). Lower the target, or set a threshold above it.",
+                      model, target, th);
+    }
+    sqlite3_finalize(pt);
     char *cur = qs(a, "SELECT json_group_array(json_object('model_id', model_id, 'reasoning_effort',"
                       " reasoning_effort, 'trim_threshold', trim_threshold, 'prune_target',"
                       " prune_target, 'cache_lifetime', cache_lifetime,"
@@ -628,7 +650,9 @@ static int act_models_set(Act *a) {
                 return refuse(a, 400, "On an Anthropic model the cache lifetime is 300 (the"
                                       " 5-minute cache) or 3600 (the 1-hour cache, the default).");
             if (strstr(err, "CHECK constraint"))
-                return refuse(a, 400, "A prune target must be below its trim threshold.");
+                return refuse(a, 400, "A prune target must be below its trim threshold: once a"
+                                      " session passes the threshold it is cut down to the"
+                                      " target.");
             return refuse(a, 500, "The list could not be saved.");
         }
     }
@@ -1476,6 +1500,39 @@ static int act_secret_remove(Act *a) {
                 n[0], n[1], n[1] == 1 ? "" : "s", n[2], n[2] == 1 ? "" : "s");
 }
 
+/* ── hooks ───────────────────────────────────────────────────────────────── */
+
+/* Turn back on a hook that three failures in a row turned off (hook.c):
+ * the flag clears and the count starts again, as promoting the extension
+ * again would do. Nothing else about the hook changes. */
+static int act_hook_enable(Act *a) {
+    char *ext = ftext(a, "extension"), *event = ftext(a, "event"), *path = ftext(a, "path");
+    if (!ext || !event || !path)
+        return refuse(a, 400, "Say which hook: its extension, its event and its script.");
+    if (qi(a, "SELECT 1 FROM extensions WHERE name=?1", ext, NULL, NULL) != 1)
+        return refuse(a, 404, "There is no extension called \"%s\".", ext);
+    if (tx_begin(a) != 0) return busy(a);
+    long long off = qi(a, "SELECT disabled FROM hooks WHERE extension_name=?1 AND event=?2"
+                          " AND path=?3", ext, event, path);
+    if (off < 0) {
+        tx_end(a, 0);
+        return refuse(a, 404, "%s has no %s hook running %s.", ext, event, path);
+    }
+    if (off == 0) {
+        tx_end(a, 0);
+        return refuse(a, 409, "The %s hook of %s is not turned off: there is nothing to turn"
+                              " back on.", event, ext);
+    }
+    int ok = qx(a, "UPDATE hooks SET disabled=0, fail_count=0 WHERE extension_name=?1"
+                   " AND event=?2 AND path=?3", ext, event, path, NULL) == 1;
+    if (tx_end(a, ok) != 0) return refuse(a, 500, "The hook could not be turned back on.");
+    /* hooks is not a change-logged table (a builtin's rows are rewritten at
+     * every start), so the operator's act is a log line. */
+    LOG_INFO_("hook %s ext=%s path=%s re-enabled from the explorer", event, ext, path);
+    return done(a, NULL, "The %s hook of %s is on again, from its next event. If its script still"
+                " fails three times in a row it is turned off again, and you are told.", event, ext);
+}
+
 /* ── dispatch ────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -1524,6 +1581,7 @@ static const ActDef ACTIONS[] = {
     { "secret_add", "[\"name\",\"value\",\"scope\",\"replace\"]", act_secret_add, 0 },
     { "secret_hosts_set", "[\"name\",\"hosts\"]", act_secret_hosts_set, 0 },
     { "secret_remove", "[\"name\"]", act_secret_remove, 0 },
+    { "hook_enable", "[\"extension\",\"event\",\"path\"]", act_hook_enable, 0 },
 };
 
 int explore_act(sqlite3 *db, const char *body, char **out) {

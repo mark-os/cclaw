@@ -9,7 +9,7 @@ of each:
 | Component | Runs in | Lifecycle |
 |-----------|---------|-----------|
 | Tools | forked child of the agent process (one fork+exec per call) | per-call, isolated |
-| Hooks | forked child, when its event fires (one event: `turnSettled`) — see [hooks.md](hooks.md) | per-run, isolated |
+| Hooks | forked child, when its event fires (`Stop`, `SubagentStop`, `ContextThreshold`, `CacheExpiring`) — see [hooks.md](hooks.md) | per-run, isolated |
 | Channel | separate `cclaw --channel` process (daemon-managed) | long-lived, restarted on crash |
 | Scripts | forked child, on a cron schedule | per-run, isolated |
 | Skills | prompt index entry; body `file_read` on demand ([skills.md](skills.md)) | indexed at prompt build |
@@ -66,8 +66,8 @@ directory.
 |-------|---------|
 | `name` | Extension identity. Primary key in `extensions`. |
 | `version` | Free-form version string (display / update tracking). |
-| `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), hosts?, policy?, droppable?}`. `hosts?` is the tool's declared egress — see [Declared reach](#declared-reach-hosts). `droppable?` (boolean, default `false`) says a [turnSettled hook](turn-edit.md#protected-calls) may take the tool's calls out of context — set it only on a tool that looks something up; leave it off any tool called for its effect. |
-| `hooks[]` | Each: `{event, handler (file), wait?, input?}`. `event` must be `turnSettled` (validate refuses any other name); `wait` is a boolean, default `true` — whether the session is held while the script runs. `input?` says what the script is sent besides the finished turn: `{history?: "none" (default) \| N \| "all", history_results?: boolean (default true), max_bytes?: 1…16777216 (default 1048576)}`; unknown keys and wrong types are refused. See [hooks.md](hooks.md) and [turn-edit.md](turn-edit.md#input). |
+| `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), hosts?, policy?, droppable?}`. `hosts?` is the tool's declared egress — see [Declared reach](#declared-reach-hosts). `droppable?` (boolean, default `false`) says a [hook](turn-edit.md#protected-calls) may drop the tool's calls on their own — set it only on a tool that looks something up; leave it off any tool called for its effect. |
+| `hooks[]` | Each: `{event, handler (file), input?, async?, timeout?}`. `event` is `Stop`, `SubagentStop`, `ContextThreshold` or `CacheExpiring` (validate refuses any other name, and `matcher`, until the tool events exist); `async` is a boolean, default `false` — `true` means the session does not wait and the reply is discarded; `timeout` is 1–3600 seconds, default config `hook_timeout`. `input?` says what the script is sent besides the newest turn: `{history?: "none" (default) \| N \| "all", history_results?: boolean (default true), max_bytes?: 1024…16777216 (default 1048576)}`; unknown keys and wrong types are refused. A hook's position in the array orders it among the extension's hooks for one event. See [hooks.md](hooks.md) and [turn-edit.md](turn-edit.md#input). |
 | `channel` | At most one: `{type, handler (file), transports?}`. Runs as a separate process. `transports?` is an optional advisory array (`poll`/`webhook`/`persistent`) validated at `--check` — see [channel-transports.md](channel-transports.md). |
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
 | `skills[]` | Bundle-relative paths, each a directory containing `SKILL.md` or a bare `.md` file ([skills.md](skills.md) format). Validated at promote: path must be bundle-relative and its frontmatter must parse with a `description`. |
@@ -347,28 +347,38 @@ way the value is never visible to the model or written to disk.
 A hook is a `.qjs` handler the runtime forks when an event happens, through
 the same vehicle as a scheduled script: the agent's sandbox profile, its
 granted secrets, `LLM()` bridged under the source `hook:<extension>`, and
-`getConfig()` reading the extension's own settings. One event exists,
-`turnSettled` — a turn that completed normally on a top-level session, after
-its reply is delivered. The script receives the finished turn as `args` and
-returns its reply as JSON text: a list of edits — `drop` a call with its
-result, `replace` a result's text, add a `note` — and an optional opaque
-`record`, or `{}` for none. The input and reply contract is in
-[turn-edit.md](turn-edit.md). Declared in the manifest:
+`getConfig()` reading the extension's own settings. Four events fire:
+
+| Event | When |
+|---|---|
+| `Stop` | a top-level session's turn ended with an answer, after its reply is delivered |
+| `SubagentStop` | the same, in a sub-agent's session |
+| `ContextThreshold` | an iteration ended (no call in flight) with the session over its trim threshold |
+| `CacheExpiring` | an idle session above its prune target is about to lose its prompt cache |
+
+The script receives the session as `args` and returns its reply as JSON
+text: a list of edits — `drop`, `replace`, `rewrite`, `note`, `drop_turns`,
+`summarise` — and an optional opaque `record`, or `{}` for none. The input
+and reply contract is in [turn-edit.md](turn-edit.md). Declared in the
+manifest:
 
 ```json
-"hooks": [ { "event": "turnSettled", "handler": "review.qjs", "wait": true } ]
+"hooks": [ { "event": "Stop", "handler": "review.qjs" } ]
 ```
 
-The finished turn is all a hook is sent unless it says otherwise; `input`
-asks for the conversation before it — `{"history": 5}` (the last five turns),
-`{"history": "all"}`, with `"history_results": false` to leave earlier tool
-output out and `"max_bytes"` to set the size (default 1 MiB, at most 16 MiB;
-the oldest history goes first when it does not fit).
+The newest turn is all a hook is sent unless it says otherwise; `input`
+asks for the conversation before it — `{"history": 5}` (the last five
+turns), `{"history": "all"}`, with `"history_results": false` to leave
+earlier tool output out and `"max_bytes"` to set the size (default 1 MiB, at
+most 16 MiB; the oldest history goes first when it does not fit).
 
 Promote writes one `hooks` row per entry; an agent runs the hooks of the
 extensions attached and enabled for it, resolved from the DB at each event.
-The hold, the deadline (`turn_settled_timeout`) and the failure rules are in
-[hooks.md](hooks.md). `extensions/turn-review` is a working example.
+The order, the hold, the deadline (`hook_timeout`, or the entry's
+`timeout`) and the failure rules — three in a row disable the hook — are in
+[hooks.md](hooks.md). `extensions/compaction` (shipped in the binary,
+attached to every agent) and `extensions/turn-review` (attached by hand) are
+working examples.
 
 ## Channel Component
 
@@ -472,13 +482,20 @@ the same files. The `tools` table is the authoritative tool registry:
 reads it.
 
 There is **one extension model**, not two. Extensions shipped in the binary
-(the `telegram`, `discord` and `whatsapp` channels and the `cclaw-docs` skills
-bundle) are installed at every daemon start via
+(the `telegram`, `discord` and `whatsapp` channels, the `cclaw-docs` skills
+bundle, and the `compaction` hook bundle — `SHIPPED_BUNDLES` in the Makefile
+embeds `extensions/compaction`) are installed at every daemon start via
 `extension_install_builtin()`, which stages the embedded templates and runs
 them through the same `extension_install()` path as an agent's promote, with
 no owner: `extensions.owner_agent` is NULL (a declared FK to `agents` since
-v59; before that the string `'system'` stood in). No owner means no
-attachment, no grants and no cron rows are minted for one. The agent-facing
+v59; before that the string `'system'` stood in), and published. No owner
+means no grants and no cron rows are minted for one, and no attachment by
+ownership: `cclaw-docs` and `compaction` are attached to every existing agent
+by the install itself (`INSERT OR IGNORE`, so an attachment the operator set
+to `enabled = 0` stays off; `compaction` only on the install that first
+creates its row) and to new agents through `agent_default_extensions`.
+Reinstalling the hook bundle keeps the operator's `hooks.enabled`, and keeps
+`fail_count` and `disabled` while the bundle's version is unchanged. The agent-facing
 `extension_list` still shows such an extension as owned by `system`. They carry a real `extension.json`
 like any other bundle — no manifest synthesis, no `builtin` flag.
 
@@ -574,8 +591,8 @@ This spec's declarative model is implemented: the manifest loader
 (`src/extension_manifest.c`), the shared store + promote copy, the
 `tools`/`hooks`/`extensions` schema, the read-only mount, and the
 promote/publish/attach operations. There is no `registerTool`/`registerHook`
-runtime scrape; hooks are dispatched as forked scripts on the `turnSettled`
-event ([hooks.md](hooks.md)). The **channel component contract is also
+runtime scrape; hooks are dispatched as forked scripts on their events
+([hooks.md](hooks.md)). The **channel component contract is also
 implemented** (`cclaw --channel`, the `channels`/`channel_*` tables, the
 `channel.*` channel API). The `skills[]` and `config[]` manifest sections are
 implemented (validation + ingest in `src/extension_manifest.c`; extension

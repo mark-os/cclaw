@@ -17,6 +17,7 @@
 #include "change_log.h"
 #include "civetweb.h"
 #include "config_registry.h"
+#include "context.h"
 #include "dashboard.h"
 #include "explore_act.h"
 #include "web.h"
@@ -1161,6 +1162,89 @@ int explore_cache(sqlite3 *db, int days, char **out) {
     return take_json(db, st, out);
 }
 
+/* ── session: its size against its limits, and every edit made to it ───────
+ * The limits are the governing routing entry's (context_limits — the same
+ * numbers the C check reads), with what the entry itself says beside them,
+ * so a page can tell a set value from a default. The size is the branch the
+ * next request would carry (context_measure); the head is the provider's
+ * measure when a report since the last edit gives one, else 0 — counting the
+ * system prompt here would mean building it, and that is not a read.
+ *
+ * The edits are every record in $.turn_edits on any entry of the session —
+ * the answer at a turn's end, a tool result or note mid-turn, the trim's
+ * note — newest first, whether or not the host is still on the branch. */
+static const char SESSION_SQL[] =
+    "WITH s AS (SELECT id, agent_name, cache_armed_at FROM sessions WHERE id = ?1),"
+    " gov AS (SELECT am.model_id, am.trim_threshold, am.prune_target, am.cache_lifetime"
+    "   FROM s JOIN agent_models am ON am.agent_name = s.agent_name"
+    "   JOIN models m ON m.id = am.model_id"
+    "  WHERE am.purpose = 'chat' AND m.status != 'disabled' ORDER BY am.pos LIMIT 1),"
+    " ed AS (SELECT e.id AS host, e.turn_id AS turn_id, j.key AS k, j.value AS v"
+    "   FROM entries e, json_each(CASE WHEN json_valid(e.data)"
+    "       AND json_type(e.data, '$.turn_edits') = 'array' THEN e.data"
+    "       ELSE '{\"turn_edits\":[]}' END, '$.turn_edits') j"
+    "  WHERE e.session_id = ?1 AND json_type(j.value) = 'object')"
+    " SELECT json_object('session_id', s.id, 'agent', s.agent_name,"
+    "  'cache_armed_at', s.cache_armed_at,"
+    "  'context', json_object('tokens', ?2, 'head', ?3,"
+    "    'head_measured', json(CASE WHEN ?3 > 0 THEN 'true' ELSE 'false' END),"
+    "    'model', (SELECT model_id FROM gov), 'window', ?4,"
+    "    'threshold', ?5, 'threshold_set', (SELECT trim_threshold FROM gov),"
+    "    'target', ?6, 'target_set', (SELECT prune_target FROM gov),"
+    "    'cache_lifetime', (SELECT cache_lifetime FROM gov)),"
+    "  'edits', json((SELECT json_group_array(json_object("
+    "      'entry_id', host, 'turn_id', turn_id, 'source', v ->> '$.by', 'at', v ->> '$.at',"
+    "      'tokens', json(v -> '$.tokens'),"
+    "      'left_branch', json(COALESCE(v -> '$.left_branch', '[]')),"
+    "      'replaced', json(COALESCE(v -> '$.replaced', '[]')),"
+    "      'notes', json(COALESCE(v -> '$.notes', '[]')),"
+    "      'summaries', json(COALESCE(v -> '$.summaries', '[]')),"
+    "      'thinking_cut', v ->> '$.thinking_cut',"
+    "      'dropped', json(v -> '$.dropped'), 'limits', json(v -> '$.limits'),"
+    "      'record', json(v -> '$.record')) ORDER BY host DESC, k DESC)"
+    "    FROM ed)))"
+    " FROM s";
+
+int explore_session(sqlite3 *db, int64_t session_id, char **out) {
+    char *agent = NULL;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "SELECT agent_name FROM sessions WHERE id = ?1",
+                           -1, &st, NULL) != SQLITE_OK)
+        return fail(db, 500, "query failed", NULL, out);
+    sqlite3_bind_int64(st, 1, session_id);
+    int found = sqlite3_step(st) == SQLITE_ROW;
+    if (found && sqlite3_column_text(st, 0))
+        agent = strdup((const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    if (!found) return fail(db, 404, "no such session", NULL, out);
+
+    ContextLimits lim;
+    context_limits(db, agent, config_get_int(db, "context_window"), &lim);
+    free(agent);
+    ContextPlan m = {0};
+    int head = 0, total = 0;
+    if (context_measure(db, session_id, 0, &m) == 0) {
+        head = m.head;
+        total = m.head;
+        for (int i = 0; i < m.count; i++) total += m.entries[i].tokens;
+    }
+    context_plan_free(&m);
+
+    if (sqlite3_prepare_v2(db, SESSION_SQL, -1, &st, NULL) != SQLITE_OK) {
+        char *err = strdup(sqlite3_errmsg(db));
+        int s = fail(db, 500, "query failed", err, out);
+        free(err);
+        return s;
+    }
+    sqlite3_bind_int64(st, 1, session_id);
+    sqlite3_bind_int(st, 2, total);
+    sqlite3_bind_int(st, 3, head);
+    sqlite3_bind_int(st, 4, lim.window);
+    sqlite3_bind_int(st, 5, lim.threshold);
+    sqlite3_bind_int(st, 6, lim.target);
+    return take_json(db, st, out);
+}
+
 /* ── HTTP ────────────────────────────────────────────────────────────────── */
 
 static const char *status_text(int s) {
@@ -1272,6 +1356,13 @@ static int api_dispatch(sqlite3 *db, const char *what, const char *qs, char **ou
     if (strcmp(what, "approval") == 0) {
         char *id = param(qs, "id");
         int s = explore_approval_card(db, id, out);
+        free(id);
+        return s;
+    }
+    if (strcmp(what, "session") == 0) {
+        char *id = param(qs, "id");
+        int s = id && atoll(id) > 0 ? explore_session(db, atoll(id), out)
+                                    : fail(db, 400, "id is required", NULL, out);
         free(id);
         return s;
     }

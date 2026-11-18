@@ -4,6 +4,7 @@
 #include "config_registry.h"
 #include "db.h"
 #include "test_util.h"
+#include "turn_edit.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -287,6 +288,35 @@ static void test_tripped_leaf_does_not_resume(void) {
     printf("  PASS test_tripped_leaf_does_not_resume\n");
 }
 
+/* A script that rewrites a user message does not change who sent it: the
+ * stand-in keeps the original's source, so an autonomous turn stays
+ * autonomous. A note or summary a script writes is never a user message. */
+static void test_rewrite_keeps_source(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = session_create(db, "t", "default", -1, 0);
+    run_turn(db, sid, "cli");
+    run_turn(db, sid, "cron");
+    run_turn(db, sid, "cron");
+    assert(streak_of(db, sid) == 2);
+    int64_t u = scalar(db, "SELECT MAX(id) FROM entries WHERE session_id=?1 AND role=1;", sid);
+    char reply[256];
+    snprintf(reply, sizeof(reply),
+             "{\"edits\":[{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"tock\"},"
+             "{\"op\":\"note\",\"text\":\"n\"},"
+             "{\"op\":\"summarise\",\"from_turn\":1,\"to_turn\":2,\"text\":\"s\"}]}",
+             (long long)u);
+    char *err = NULL;
+    assert(turn_edit_apply(db, sid, reply, "hook:x", &err) == TURN_EDIT_APPLIED);
+    assert(scalar(db, "SELECT COUNT(*) FROM entries WHERE session_id=?1 AND role=1"
+                      " AND json_extract(data,'$.source')='cron'"
+                      " AND json_extract(data,'$.edited_by')='hook:x'"
+                      " AND json_extract(data,'$.replaces') IS NOT NULL;", sid) == 1);
+    assert(streak_of(db, sid) == 2);
+
+    db_close(db);
+    printf("  PASS test_rewrite_keeps_source\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_streak_guard:\n");
@@ -297,6 +327,7 @@ int main(void) {
     test_warn_at_eighty_percent();
     test_trip_notice_once_per_trip();
     test_tripped_leaf_does_not_resume();
+    test_rewrite_keeps_source();
     printf("All streak guard tests passed.\n");
     return 0;
 }

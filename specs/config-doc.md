@@ -30,7 +30,7 @@ never happened and a receipt that says it did).
 
 | Section | Shape | Scope | Kind |
 |---------|-------|-------|------|
-| `agent` | `{models?: [id \| {id, effort?}], max_iterations?: n, shell_timeout?: n}` | this agent | settings |
+| `agent` | `{models?: [id \| {id, effort?, trim_threshold?, prune_target?, cache_lifetime?, reasoning_display?}], max_iterations?: n, shell_timeout?: n}` | this agent | settings |
 | `grants` | `{tools?, hosts?, read_paths?, write_paths?, secrets?: [value], remove?: {…same kinds}}` | this agent | authority |
 | `routes` | `["channel:chat_id"]` | this agent | authority |
 | `secret_bindings` | `{SECRET_NAME: [host]}` | this agent | authority |
@@ -61,7 +61,7 @@ description states it in one line so the model does not have to guess:
 
 | Section | Verb | Meaning |
 |---------|------|---------|
-| `agent.*` | **replace** | Each named field replaces its current value. `agent.models` is the *whole* chat routing list (`agent_models` rows with `purpose='chat'`), in order, first = primary; unnamed fields keep their values. The agent's `image`/`audio`/`utility` lists are not part of this document and are left untouched (the operator writes them). An entry is a canonical id string or `{id, effort}`, where `effort` (`off\|minimal\|low\|medium\|high`) sets `agent_models.reasoning_effort` for that model — omitted means NULL, i.e. send nothing and take the provider default. `models.effort_map` (how a level spells on the wire) is operator-only, never part of this document. |
+| `agent.*` | **replace** | Each named field replaces its current value. `agent.models` is the *whole* chat routing list (`agent_models` rows with `purpose='chat'`), in order, first = primary; unnamed fields keep their values. The agent's `image`/`audio`/`utility` lists are not part of this document and are left untouched (the operator writes them). An entry is a canonical id string or an object `{id, effort?, trim_threshold?, prune_target?, cache_lifetime?, reasoning_display?}` setting that routing entry's columns (below); a field omitted — or the plain id string — takes the column's default, since the list is a whole replacement. `models.effort_map` (how a level spells on the wire) is operator-only, never part of this document. |
 | `grants.*` | **add** | Values are added to what the agent already holds. Values it already has are filtered out before parking, so an approver only decides what is new. `grants.secrets` names secrets the agent may use (v60): each must be a stored agent-scope secret or an environment secret with a binding; system secrets are refused. Applied rows record `source='approval'` and the approval's id. |
 | `grants.remove` | **remove, immediately** | See below. |
 | `routes` | **add** | First-come; a route owned by another agent is refused. |
@@ -74,6 +74,31 @@ Everything above except `grants.remove` **parks for human approval** and applies
 all-or-nothing under one savepoint. One document, one approval — batching
 related needs (define a provider, register a model on it, adopt it via
 `agent.models`) is the intended usage, not an abuse of it.
+
+### The routing entry's fields
+
+| Field | Column | Values | Omitted |
+|---|---|---|---|
+| `effort` | `reasoning_effort` | `off\|minimal\|low\|medium\|high` | NULL: send nothing, the provider's default ([providers.md](providers.md#reasoning-effort)) |
+| `trim_threshold` | `trim_threshold` | tokens, integer ≥ 1, at most the model's window | NULL: half the window |
+| `prune_target` | `prune_target` | tokens, integer ≥ 1, below `trim_threshold` | NULL: half the threshold |
+| `cache_lifetime` | `cache_lifetime` | seconds, integer ≥ 1; 300 or 3600 on an Anthropic model | NULL; 3600 on an Anthropic model |
+| `reasoning_display` | `reasoning_display` | `summary\|none` | `summary` |
+
+The trim numbers and the cache lifetime are read off the first entry only —
+the governing one ([memory.md](memory.md#the-thresholds)). Validation refuses,
+at park time and with the reason: an unknown key, a non-integer or
+non-positive number, `prune_target` at or above `trim_threshold` in the same
+entry, a `cache_lifetime` other than 300 or 3600 on an existing Anthropic
+model, and a `reasoning_display` other than the two words. The schema
+refuses the same on apply (a threshold over the window, a lifetime on a
+model this document registers), and the apply error names the rule. The
+export (`search_config format:json`) writes an entry as an object only when
+one of these differs from its default, so it round-trips as a patch base;
+the prose form appends `(effort …)`, `(trim at N)`, `(prune to N)`,
+`(cache Ns)`, `(reasoning not shown)`, and the approval card shows the same
+asks on each entry (`id(effort)[trim at N][prune to N][cache Ns][reasoning not
+shown]`).
 
 ## `grants.remove` — narrowing never waits
 

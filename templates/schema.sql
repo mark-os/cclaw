@@ -403,8 +403,14 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- anything itself. A chat's filter is not copied
                                             -- here: channel_chats.tool_filter is read live.
   state TEXT NOT NULL DEFAULT 'idle',         -- idle | llm_running | tool_running | awaiting_approval |
-                                              -- rate_limited | settling (a hook at the end of an
-                                              -- iteration is awaited; the inbox queues)
+                                              -- rate_limited | settling (a hook is awaited — at the
+                                              -- end of an iteration, or on an idle session whose
+                                              -- cache is lapsing; the inbox queues)
+  settle_event TEXT,                          -- v68. while settling: the event the hold began
+                                              -- with ('Stop', 'SubagentStop', 'ContextThreshold',
+                                              -- 'CacheExpiring'); whoever ends the hold reads it —
+                                              -- no C check follows a CacheExpiring hold. NULL in
+                                              -- every other state
   owner_instance TEXT,                      -- live owner (processes.instance_id); NULL ⟺ state='idle'
   turn_iteration INTEGER NOT NULL DEFAULT 0,  -- LLM requests made so far in the current turn
   turn_context TEXT,                        -- <RELEVANT_CONTEXT> block, materialized once at turn
@@ -704,10 +710,11 @@ CREATE TABLE IF NOT EXISTS tools (
 -- ═══ Hooks ═══
 -- Same provenance model as tools. A hook is a script the runtime forks, in
 -- the agent's sandbox, when its event happens (specs/hooks.md). Events:
--- Stop, SubagentStop, ContextThreshold.
+-- Stop, SubagentStop, ContextThreshold, CacheExpiring.
 CREATE TABLE IF NOT EXISTS hooks (
   extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,
-  event TEXT NOT NULL,                        -- event name: 'Stop', 'SubagentStop', 'ContextThreshold'
+  event TEXT NOT NULL,                        -- event name: 'Stop', 'SubagentStop',
+                                              -- 'ContextThreshold', 'CacheExpiring'
   path TEXT NOT NULL,                         -- handler file (in the shared store)
   enabled INTEGER NOT NULL DEFAULT 1,
   async INTEGER NOT NULL DEFAULT 0,           -- v68. 0 = the session is held until the script ends
@@ -722,8 +729,9 @@ CREATE TABLE IF NOT EXISTS hooks (
                                               -- at most 1 MB (specs/turn-edit.md#input)
   pos INTEGER NOT NULL DEFAULT 0,             -- v68. its index in the manifest's hooks[]: an
                                               -- extension's hooks for one event run in this order
-  timeout INTEGER                             -- v68. seconds the script may run; NULL = config
-    CHECK (timeout IS NULL OR timeout > 0),   -- hook_timeout
+  timeout INTEGER                             -- v68. seconds the script may run, at most
+    CHECK (timeout IS NULL OR timeout BETWEEN 1 AND 3600), -- HOOK_TIMEOUT_MAX; NULL = config
+                                              -- hook_timeout
   disabled INTEGER NOT NULL DEFAULT 0,        -- v68. 1 = turned off after 3 failures in a row
                                               -- (crash, timeout, refused reply); the default
                                               -- agent was told once. Set back to 0, or promote

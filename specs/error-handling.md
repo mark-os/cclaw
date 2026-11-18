@@ -58,9 +58,11 @@ Three outcome classes exist:
 
 A system notice is a message the daemon writes itself, about the system, for
 the person who runs it. There are four: the model serving an agent changed,
-a session's compaction keeps failing, a cron job was auto-paused, and a
-session hit its autonomous-turn limit. `channel_notify_operator()` sends
-each one.
+a cron job was auto-paused, a session hit its autonomous-turn limit, and an
+update crash-looped after it had served and was not rolled back.
+`channel_notify_operator()` sends each one. A hook disabled after three
+failures in a row is reported differently: one note in the default agent's
+inbox, which tells the operator ([hooks.md](hooks.md#failures)).
 
 A system notice goes to the channel's **operator destination** and names the
 agent and session. It does not go to the session's chat: that chat can be a

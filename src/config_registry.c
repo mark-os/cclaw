@@ -82,7 +82,8 @@ static const ConfigDef s_defs[] = {
       " autonomous turn opens defer (inbox rows stay queued); batches with a"
       " human in them always open (0 = unlimited)" },
     { "hook_timeout", "60",
-      "Seconds a hook script (Stop, SubagentStop, ContextThreshold) may run"
+      "Seconds a hook script (Stop, SubagentStop, ContextThreshold,"
+      " CacheExpiring) may run"
       " before it is killed and the session left as it was; a hook's own"
       " \"timeout\" in its manifest overrides this. While an awaited hook runs"
       " the session is held and new messages queue, so this is also the"

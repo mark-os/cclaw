@@ -113,7 +113,9 @@ static void session_sweep_inbox(void) {
     /* Besides queued inbox rows, also pick up sessions whose leaf entry is
      * unanswered: role 1 (a refused dispatch consumed the inbox then parked the
      * session idle/rate_limited, so no inbox row remains to trigger a retry) or
-     * role 3 (a mid-turn dispatch bounce left a tool result nobody answered).
+     * role 3 (a mid-turn dispatch bounce, or recovery after a process died
+     * mid-turn, left a tool result nobody answered) — read through notes and
+     * summaries, which a hook may leave at the end of a running turn.
      * Advancing them re-runs the dispatch gates once pressure clears
      * (rate_limited flips to idle on the first advance, dispatches on the next
      * tick). Keep this predicate identical to advance_session's idle-branch
@@ -137,8 +139,8 @@ static void session_sweep_inbox(void) {
         "   AND (EXISTS (SELECT 1 FROM inbox i"
         "                WHERE i.session_id=s.id AND i.consumed=0)"
         "     OR EXISTS (SELECT 1 FROM entries e"
-        "                WHERE e.id=s.leaf_id AND e.session_id=s.id"
-        "                  AND e.role IN (1,3))))"
+        "                WHERE e.id=" CCLAW_SQL_LEAF_READ_THROUGH("s.id")
+        "                  AND e.session_id=s.id AND e.role IN (1,3))))"
         "  OR (s.state = 'llm_running'"
         "      AND s.owner_instance = ?1"
         "      AND NOT EXISTS (SELECT 1 FROM llm_jobs j"

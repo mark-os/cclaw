@@ -234,6 +234,19 @@ static void test_notes_fold(void) {
              " entries WHERE id=%lld), '$.turn_edits[0].left_branch') WHERE value=?1)",
              (long long)r2.note_id);
     assert(q1(db, sql, r1.note_id) == 1);
+
+    /* A third trim carries the running total the second note said (1 + 5),
+     * not the second trim's own drop (found live: the third note said 12
+     * after 6 + 6 + 6). */
+    TrimReport r3;
+    for (int i = 0; i < 3; i++) step(db, sid, 600, 900);
+    assert(turn_edit_trim(db, sid, 0, &l, &r3) == TRIM_APPLIED);
+    assert(r3.turns == 0 && r3.iterations == 3);
+    assert(!on_branch(db, sid, r2.note_id) && on_branch(db, sid, r3.note_id));
+    assert(q1(db, "SELECT content LIKE '1 earlier turn and 8 earlier steps of this turn"
+                  " were dropped%' FROM entries WHERE id=?", r3.note_id) == 1);
+    assert(q1(db, "SELECT json_extract(data,'$.turn_edits[0].dropped.iterations')"
+                  " FROM entries WHERE id=?", r3.note_id) == 3);
     db_close(db);
     printf("  PASS test_notes_fold\n");
 }

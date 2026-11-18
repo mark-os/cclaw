@@ -56,8 +56,11 @@ cp -r extensions/turn-review ~/.cclaw/agents/<Agent>/workspace/extensions/
 then tell the agent: *promote the extension draft turn-review*. The approval
 reads `promote 'turn-review': adds 0 tools, 1 hooks, … 2 config keys`, then
 `- hook Stop review.qjs: runs after every turn, reads the session, and may
-drop tool calls, replace results and add notes; the session waits for it. It
-is sent the newest turn`. From
+change what the agent remembers of it: rewrite any message (yours or the
+agent's) and the arguments of any tool call, drop tool calls and replace their
+results, add notes, and drop whole turns or replace them with a summary it
+writes (the originals are kept, out of the agent's sight); the session waits
+for it. It is sent the newest turn`. From
 the agent's next turn the hook runs; no restart. For a second agent, have the
 owner `extension_publish` it and the other agent `extension_attach` it.
 
@@ -85,10 +88,10 @@ and costs more.
 | Key | Default | |
 |---|---|---|
 | `turn-review.min_tool_tokens` | 4000 | A turn with less tool traffic than this is left alone, and the model is not asked. |
-| `turn-review.max_turn_tokens` | 60000 | A turn bigger than this is not reviewed; ordinary compaction deals with it. |
+| `turn-review.max_turn_tokens` | 60000 | A turn bigger than this is not reviewed; compaction deals with it. |
 | `hook_timeout` | 60 | The runtime's deadline for any hook script, in seconds (a manifest entry's own `"timeout"` overrides it). The review asks its model with a 45 s limit. |
 
-Token counts are the runtime's estimates (chars/3, `entries.token_estimate`), not the provider's count, which can run higher. The prompt, the note length and the
+Token counts are the provider's, where a usage report has measured the entry (`entries.tokens`), and the runtime's estimate (chars/3) where not. The prompt, the note length and the
 marker wording are constants at the top of `review.qjs`: edit the draft and
 promote again.
 

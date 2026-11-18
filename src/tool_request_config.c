@@ -573,6 +573,42 @@ static char *validate_agent(sqlite3 *db, const char *changes,
                     "       json_extract(e.value,'$.trim_threshold')", changes))
         return strdup("error: agent.models prune_target must be below its "
                       "trim_threshold — the trim cuts the session down to it");
+    /* The same against an empty threshold, which is half the model's window:
+     * the schema cannot see that default, so the explorer's models_set and
+     * this path refuse it in the same words. The window is this document's
+     * models entry's, else the registered model's, else the global default. */
+    sqlite3_stmt *pt;
+    if (sqlite3_prepare_v2(db,
+            "SELECT id, target, threshold FROM ("
+            " SELECT json_extract(e.value,'$.id') AS id,"
+            "        json_extract(e.value,'$.prune_target') AS target,"
+            "        COALESCE((SELECT json_extract(d.value,'$.context_window')"
+            "                    FROM json_each(COALESCE(?2,'[]')) d"
+            "                   WHERE json_extract(d.value,'$.id')=json_extract(e.value,'$.id')),"
+            "                 (SELECT m.context_window FROM models m"
+            "                   WHERE m.id=json_extract(e.value,'$.id')), ?3) / 2 AS threshold"
+            "   FROM json_each(?1,'$.agent.models') e"
+            "  WHERE e.type='object' AND json_extract(e.value,'$.prune_target') IS NOT NULL"
+            "    AND json_extract(e.value,'$.trim_threshold') IS NULL)"
+            " WHERE target >= threshold LIMIT 1", -1, &pt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(pt, 1, changes, -1, SQLITE_STATIC);
+        if (canon_models) sqlite3_bind_text(pt, 2, canon_models, -1, SQLITE_STATIC);
+        sqlite3_bind_int(pt, 3, config_get_int(db, "context_window"));
+        char *m = NULL;
+        if (sqlite3_step(pt) == SQLITE_ROW) {
+            const char *id = (const char *)sqlite3_column_text(pt, 0);
+            size_t n = (id ? strlen(id) : 0) + 256;
+            if ((m = malloc(n)) != NULL)
+                snprintf(m, n, "error: The prune target for %s (%lld tokens) must be below"
+                         " its trim threshold, which is empty and so half the model's"
+                         " window (%lld tokens). Lower the target, or set a threshold"
+                         " above it.", id ? id : "?",
+                         (long long)sqlite3_column_int64(pt, 1),
+                         (long long)sqlite3_column_int64(pt, 2));
+        }
+        sqlite3_finalize(pt);
+        if (m) return m;
+    }
     /* The schema refuses the same on apply, for a model this document
      * registers; said here for the ones that exist. */
     bad = q1_text(db,

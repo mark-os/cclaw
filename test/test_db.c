@@ -265,6 +265,7 @@ static void unshape_v68(sqlite3 *db) {
                               "ALTER TABLE agent_models DROP COLUMN cache_lifetime;"
                               "DROP INDEX idx_sessions_cache_armed;"
                               "ALTER TABLE sessions DROP COLUMN cache_armed_at;"
+                              "ALTER TABLE sessions DROP COLUMN settle_event;"
                               "ALTER TABLE agent_models DROP COLUMN prune_target;"
                               "ALTER TABLE agent_models DROP COLUMN trim_threshold;"
                               "ALTER TABLE hooks DROP COLUMN pos;"
@@ -2126,6 +2127,10 @@ static void test_schema_patch_v68(void) {
         " FROM sessions WHERE id=8", 0, -1) == 1);
     assert(db_scalar_i64(db, "SELECT group_concat(session_id) FROM llm_jobs", 0, -1) == 8);
     assert(sqlite3_exec(db, "UPDATE hooks SET timeout=0;", NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE hooks SET timeout=3601;", NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE hooks SET timeout=3600;", NULL, NULL, NULL) == SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sessions WHERE settle_event IS NOT NULL",
+                         0, -1) == 0);
     /* The rules are live on the patched table. */
     assert(sqlite3_exec(db, "UPDATE agent_models SET trim_threshold=9000;",
                         NULL, NULL, NULL) != SQLITE_OK);

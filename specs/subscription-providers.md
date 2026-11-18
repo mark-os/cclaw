@@ -420,9 +420,11 @@ the hook.
     and back. Claude has not seen the entries in between.
   - **`session_condense`.** The agent replaces a range of its own past turns
     with a summary. This is an edit in the middle of the history.
-  - **Compaction.** Old turns are replaced by a compaction entry.
-  - **The read-time window.** When compaction fails, `plan_find_cut` drops old
-    turns from the request without deleting them.
+  - **Session edits.** Hooks (the bundled compaction among them) and C's
+    trim drop or summarise turns, and iterations of the running turn,
+    between two requests.
+  - **The read-time window.** When a turn opens over the trim threshold,
+    `plan_find_cut` drops old turns from the request without deleting them.
   - **The entry tree.** A session is a tree with a `leaf_id`; the visible
     history is the branch from the leaf to the root. Anything that moves the
     leaf to another branch replaces the history.

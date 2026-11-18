@@ -161,8 +161,8 @@ plan (newest = highest `entries.turn_id`). A turn that opens with several
 queued user messages gets the block before all of them. It does not move while
 the turn runs, so every iteration of a turn extends the same prompt-cache
 prefix, and it never lands between an assistant's tool calls and their
-results. Entries that do not open a turn do not move it: a compaction summary
-inherits the turn of the entry it follows, a `cron_result` the turn it lands
+results. Entries that do not open a turn do not move it: an edit's summary
+carries the turn id of what it replaced, a `cron_result` the turn it lands
 in. If no entry on the plan has a `turn_id`, the block goes before the first
 entry.
 
@@ -192,15 +192,19 @@ What the builder does that the other two don't, and why:
   original position, so what is stored (`reasoning_meta.format =
   'anthropic_content'`) and replayed is the response's whole `content` array.
   CClaw's user context block moves at every turn boundary, which is an edit
-  to that prefix; inside a turn the prefix is byte-stable (the mid-turn
-  invariant). So blocks from earlier turns are dropped (a leading run, which
-  the API permits) and the current turn's go back untouched. A model switch
+  to that prefix; inside a turn the prefix is byte-stable until a session
+  edit between two iterations changes it. So blocks from earlier turns are
+  dropped (a leading run, which the API permits), and the current turn's go
+  back untouched — except those an edit overtook: blocks produced before an
+  edit and standing at or after its `thinking_cut` are stale and not
+  replayed (a trailing run), and the model re-thinks from there
+  ([turn-edit.md](turn-edit.md#thinking-after-an-edit)). A model switch
   falls back to rebuilding the message from entries, without thinking, and so
   does an iteration whose `reasoning` entry is not on the plan.
 - **`thinking.block_binding.prefix_mismatch_behavior: "drop_block"`.** On
   accounts where the binding check is enforced, replaying a block after its
-  prefix changed is a 400. The scoping above should prevent that, but a
-  mid-turn context cut can still edit the prefix, and losing one block's reasoning beats losing the turn. Every drop is
+  prefix changed is a 400. The scoping above should prevent that; this is
+  the backstop, and losing one block's reasoning beats losing the turn. Every drop is
   reported in the response's `input_transformations`, archived with the body:
 
   ```sql
@@ -214,8 +218,25 @@ What the builder does that the other two don't, and why:
   user context block — the stable prefix ends just before it, so one marker
   writes the entry the next turn reads and the other reads the entry the
   previous turn wrote. `llm_responses.cached_tokens` / `cache_write_tokens` show it
-  working. Changing an agent's tool set invalidates everything (tools are the
-  head of the prefix).
+  working, and the explorer's cache view (`#/cache`) shows the hit rate by
+  the gap between requests. Changing an agent's tool set invalidates
+  everything (tools are the head of the prefix).
+- **The marker's lifetime is the routing entry's `cache_lifetime`.** 3600
+  sends `{"type":"ephemeral","ttl":"1h"}` on every marker; 300, or none, the
+  plain `{"type":"ephemeral"}`, which is the 5-minute cache. All markers move
+  together, since the API refuses a longer-lived marker after a shorter one.
+  No beta header is needed. On an Anthropic-format model the value is 300 or
+  3600 (triggers on `agent_models`), and a new `chat` entry that gives none
+  gets 3600, the lifetime that matches an agent that waits on people. The
+  cost: a 1-hour write is billed at 2× base input instead of 1.25× (reported
+  in `cache_creation.ephemeral_1h_input_tokens`, which the stored
+  `cache_write_tokens` already sums). Set 300 on an
+  entry whose sessions run back-to-back (a busy sub-agent) to pay the lower
+  write price. The same value arms `CacheExpiring`
+  ([hooks.md](hooks.md#cacheexpiring)).
+- **`thinking.display` follows `reasoning_display`**:
+  `summarized` for `summary`, `omitted` for `none`, always sent explicitly
+  ([below](#reasoning-display)).
 - **Usage is normalized.** Anthropic's `input_tokens` excludes cache reads and
   writes; the stored prompt count adds them back, so `usage_in` means the same
   thing on every provider.
@@ -233,8 +254,28 @@ key, which covers the model-specific cases without code:
 | Want | `request_extra` |
 |------|-----------------|
 | A model that predates adaptive thinking (Haiku 4.5 and older) | `{"thinking": null}` |
-| Readable reasoning summaries in `reasoning` entries (with `save_reasoning`) | `{"thinking": {"display": "summarized"}}` |
 | No prompt caching | `{"cache_control": null}` (the per-block markers remain) |
+
+## Reasoning Display
+
+Whether the model is asked for a readable summary of its reasoning is also
+a routing decision: `agent_models.reasoning_display` ∈ `summary` (the
+default) | `none`. The text is kept as the `reasoning` entry's `content`,
+shown in the explorer, and sent to hook scripts as each iteration's
+`reasoning`; the replay blob (`reasoning_meta`) is captured either way, and
+token accounting does not change.
+
+| Wire format | `summary` | `none` |
+|---|---|---|
+| Anthropic | `thinking.display: "summarized"` — readable text in each thinking block, kept | `thinking.display: "omitted"` (empty text) |
+| Gemini native | `generationConfig.thinkingConfig.includeThoughts: true` — thought summaries come back as `thought: true` parts, kept as the text and never replayed | nothing sent |
+| OpenAI-compatible | nothing sent; whatever reasoning text the provider returns is kept | nothing sent; returned text is not stored |
+
+Display changes visibility only: the signature, the billing and the replay
+are the same, and a summarized Anthropic block replays verbatim. On Gemini
+the signature a replayed `functionCall` needs rides on the call part either
+way. The Gemini patch comes before the effort fragment, so a level's
+`thinkingConfig` merges beside it, and `request_extra` keeps the last word.
 
 ## Reasoning Effort
 

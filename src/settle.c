@@ -194,17 +194,18 @@ static void notify_disabled(const SettleChild *sc, const char *outcome, const ch
     int64_t sid = agent ? db_recent_session(db, agent) : 0;
     const char *slash = strrchr(sc->hook.path, '/');
     const char *handler = slash ? slash + 1 : sc->hook.path;
-    char text[768];
+    char text[1024];
     snprintf(text, sizeof(text),
              "The hook '%s' (%s) of extension '%s' failed %d times in a row and has"
              " been disabled — last: %s: %.200s. %s Fix the extension and promote it"
-             " again to re-enable the hook. Tell the operator.",
+             " again, or clear the flag (UPDATE hooks SET disabled=0, fail_count=0"
+             " WHERE extension_name='%s'), to re-enable the hook. Tell the operator.",
              handler, sc->hook.event,
              sc->hook.extension, HOOK_FAIL_LIMIT, outcome, reason,
              strcmp(sc->hook.event, HOOK_EVENT_CONTEXT_THRESHOLD) == 0
                  ? "Until then sessions over their trim threshold are cut by the"
                    " runtime's fallback, which drops the oldest turns."
-                 : "Turns are left as they are.");
+                 : "Turns are left as they are.", sc->hook.extension);
     if (sid > 0 && inbox_insert_scanned(db, sid, "system", "hook", text) > 0) {
         wake_session(sid);
         LOG_WARN_("hook %s ext=%s disabled after %d failures — %s told (session %lld)",

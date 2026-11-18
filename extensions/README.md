@@ -1,14 +1,16 @@
 # Extension bundles
 
-Extension bundles that ship with the source but are **not** embedded in the
-binary. Nothing here is compiled or loaded automatically: a bundle becomes real
-only when it is copied into an agent workspace and promoted, exactly as an
-agent-authored one is. Keeping them here means a bundle survives a database
-rebuild and gets reviewed like the rest of the tree, without growing the binary
-for every deployment that does not want it.
+Extension bundles that ship with the source. Most are **not** embedded in the
+binary: a bundle becomes real only when it is copied into an agent workspace
+and promoted, exactly as an agent-authored one is. Keeping them here means a
+bundle survives a database rebuild and gets reviewed like the rest of the tree,
+without growing the binary for every deployment that does not want it.
 
-Built-in extensions are the other thing — those live in `templates/` and are
-compiled in (`templates/channel_telegram.qjs` and friends).
+The exception is a bundle listed in `SHIPPED_BUNDLES` in the Makefile —
+today only [compaction](compaction/README.md). Its files (not its README) are
+compiled in, and every start installs them into the shared store with no
+owner, like the built-in channels in `templates/` (`channel_telegram.qjs` and
+friends). Editing such a bundle here changes the next build.
 
 ## gemini-search
 
@@ -49,3 +51,14 @@ original text, and the originals stay in the database. It is the reference
 example for [hooks](../specs/hooks.md) and for `LLM(…, {purpose: "utility"})`;
 attached by hand, never a default. Install, model routing, settings and how to
 see what it did are in [turn-review/README.md](turn-review/README.md).
+
+## compaction
+
+The one bundle on by default: a `ContextThreshold` hook. When a session grows
+past its trim threshold, the oldest part of it — whole earlier turns first,
+then the oldest steps of the turn still running — is replaced by a summary the
+agent's own model writes, with the actions already taken listed under it by
+the script. Without it the runtime's trim drops the same part with a one-line
+note. It is the reference example for `ContextThreshold` hooks; switching it
+off for an agent, or replacing it, is in
+[compaction/README.md](compaction/README.md).

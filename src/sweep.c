@@ -123,7 +123,7 @@ static void session_sweep_inbox(void) {
      * counts, no LLM. Cheaper than teaching this SQL the guard's predicate.
      *
      * Stuck-completion arm: a session this instance owns, parked in
-     * llm_running/compacting with no llm_jobs row, has nothing in flight —
+     * llm_running with no llm_jobs row, has nothing in flight —
      * its completion advance lost a write to a BUSY give-up (state flip or
      * pool-full revert; a failed worker job_delete leaves a row and is NOT
      * this shape). advance_session is idempotent there (redundant-wake
@@ -139,7 +139,7 @@ static void session_sweep_inbox(void) {
         "     OR EXISTS (SELECT 1 FROM entries e"
         "                WHERE e.id=s.leaf_id AND e.session_id=s.id"
         "                  AND e.role IN (1,3))))"
-        "  OR (s.state IN ('llm_running','compacting')"
+        "  OR (s.state = 'llm_running'"
         "      AND s.owner_instance = ?1"
         "      AND NOT EXISTS (SELECT 1 FROM llm_jobs j"
         "                      WHERE j.session_id = s.id))"

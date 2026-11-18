@@ -543,7 +543,7 @@ static void test_compaction_entry_in_payload(void) {
     int64_t e4 = entry_append_with_iteration(db, sid, &m4, 2);
     assert(e1 > 0 && e4 > 0);
     /* Summarize e2+e3 away; keep e1 and e4 */
-    int64_t cid = entry_compact(db, sid, e1, e4,
+    int64_t cid = test_legacy_compact(db, sid, e1, e4,
                                 "Earlier: user greeted, assistant replied.");
     assert(cid > 0);
 

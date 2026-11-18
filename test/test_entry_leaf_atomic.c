@@ -73,7 +73,7 @@ static void test_compaction_does_not_move_leaf(void) {
     assert(leaf_of(db, sid) == b);
 
     /* Insert a compaction summary between a and b: leaf must stay at b. */
-    int64_t c = entry_compact(db, sid, a, b, "summary");
+    int64_t c = test_legacy_compact(db, sid, a, b, "summary");
     assert(c > 0);
     assert(leaf_of(db, sid) == b); /* unchanged */
     sqlite3_close(db);

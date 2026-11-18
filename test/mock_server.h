@@ -13,6 +13,17 @@ void mock_server_enqueue(int http_status, const char *body);
 /* Queue a canned response with extra headers (NULL-terminated "Key: Value" array, or NULL). */
 void mock_server_enqueue_with_headers(int http_status, const char *body, const char **headers);
 
+/* Answer every request whose body contains `needle` with this response,
+ * instead of popping the queue — a side call (a hook's LLM()) whose place
+ * among the queued turn responses is not fixed. Such a request is counted
+ * by mock_server_rule_hits, not mock_server_request_count, and does not
+ * replace mock_server_last_request_body. One rule at a time; NULL needle
+ * (or mock_server_reset) clears it. */
+void mock_server_answer_when(const char *needle, int http_status, const char *body);
+
+/* Requests answered by the rule since it was set. */
+int mock_server_rule_hits(void);
+
 /* Start mock server. Returns the assigned port, or -1 on failure. */
 int mock_server_start(void);
 

@@ -38,11 +38,11 @@ static sqlite3 *open_seeded(void) {
         "INSERT INTO extensions(name, path, owner_agent, published) VALUES"
         " ('ext_a','/s/ext_a','Other',1),('ext_b','/s/ext_b','Main',0),"
         " ('ext_c','/s/ext_c','Other',0);"
-        "INSERT INTO hooks(extension_name, event, path, wait) VALUES"
-        " ('ext_b','Stop','/s/ext_b/z.qjs',1),"
-        " ('ext_b','Stop','/s/ext_b/a.qjs',0),"
-        " ('ext_a','Stop','/s/ext_a/r.qjs',1),"
-        " ('ext_c','Stop','/s/ext_c/r.qjs',1);"
+        "INSERT INTO hooks(extension_name, event, path, async) VALUES"
+        " ('ext_b','Stop','/s/ext_b/z.qjs',0),"
+        " ('ext_b','Stop','/s/ext_b/a.qjs',1),"
+        " ('ext_a','Stop','/s/ext_a/r.qjs',0),"
+        " ('ext_c','Stop','/s/ext_c/r.qjs',0);"
         "INSERT INTO agent_extensions(agent_name, extension_name) VALUES"
         " ('Main','ext_a'),('Main','ext_b'),('Main','ext_c'),"
         " ('Other','ext_c');");
@@ -285,8 +285,8 @@ static void test_state_guard(void) {
     expect_state(db, sid, "settling");
     /* Nothing that starts or resumes a request can take a held session
      * (tool_running is how a hold between iterations ends, below). */
-    static const char *const busy[] = { "llm_running", "compacting",
-                                        "rate_limited", "awaiting_approval", "settling" };
+    static const char *const busy[] = { "llm_running", "rate_limited",
+                                        "awaiting_approval", "settling" };
     for (size_t i = 0; i < sizeof(busy) / sizeof(busy[0]); i++) {
         assert(session_set_state(db, sid, busy[i]) != 0);
         expect_state(db, sid, "settling");
@@ -304,7 +304,7 @@ static void test_state_guard(void) {
     expect_state(db, sid, "tool_running");
 
     /* Any other busy state cannot be put into the hold. */
-    static const char *const no_hold[] = { "llm_running", "compacting", "rate_limited",
+    static const char *const no_hold[] = { "llm_running", "rate_limited",
                                            "awaiting_approval" };
     for (size_t i = 0; i < sizeof(no_hold) / sizeof(no_hold[0]); i++) {
         run(db, "UPDATE sessions SET state='idle';");

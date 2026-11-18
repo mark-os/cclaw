@@ -67,16 +67,6 @@ char *llm_request(sqlite3 *db, const char *agent_name,
                   const char *request_json, const char *source,
                   int64_t session_id, int64_t iteration_id);
 
-/* Delimiter between a summary's prose and the mechanical state coda, so a
- * later reader (human or model) can tell the two apart. */
-#define COMPACTION_CODA_MARKER "--- carried state ---"
-
-/* E2: live commitments (open approvals incl. unconsumed tickets, running
- * sub-agent sessions, armed cron one-shots) rendered as the coda appended to
- * a summary entry (session_condense). Malloc'd, or NULL when nothing is
- * open. Exposed for tests. */
-char *compaction_state_coda(sqlite3 *db, int64_t session_id);
-
 /* Healthy, non-degraded models whose capabilities JSON array contains cap
  * (e.g. "audio"), ordered by priority. Fills out (max slots), returns count. */
 int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, int max);

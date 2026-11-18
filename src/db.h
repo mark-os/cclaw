@@ -131,13 +131,6 @@ int session_get_depth(sqlite3 *db, int64_t session_id);
 /* Append entry as child of a specific parent (for branching).
  * Updates session leaf_id to new entry. Returns new entry id or -1. */
 
-/* Insert compaction summary and reparent.
- * Inserts ROLE_COMPACTION entry as child of last_kept_id.
- * Reparents first_after_id to point to the new summary node.
- * Returns compaction entry id (>0) or -1 on error. Does NOT update session leaf_id. */
-int64_t entry_compact(sqlite3 *db, int64_t session_id, int64_t last_kept_id,
-                      int64_t first_after_id, const char *summary);
-
 /* Free an Entry array returned by session_get_branch. */
 void entry_branch_free(Entry *entries, int count);
 

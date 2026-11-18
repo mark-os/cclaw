@@ -8,6 +8,7 @@
 #include "http.h"
 #include "log.h"
 #include "monocypher.h"
+#include "turn_edit.h"
 #include "update_channel.h"
 #include "util.h"
 
@@ -934,12 +935,14 @@ void update_verify_turn_done(sqlite3 *db, int64_t session_id) {
     int starts = 0, served = 0;
     if (!verify_marker_get(db, tag, sizeof(tag), &starts, &served)) return;
     /* Only a turn the model actually finished is evidence of health — not one
-     * that ended on the error boundary or was aborted. */
+     * that ended on the error boundary or was aborted. The newest response,
+     * not a session edit's rewrite of an older one (newer by id). */
     sqlite3_stmt *st = NULL;
     int good = 0;
     if (sqlite3_prepare_v2(db,
             "SELECT stop_reason IN (?2, ?3) FROM entries WHERE session_id=?1"
-            " AND role=2 ORDER BY id DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
+            " AND role=2 AND NOT " TURN_EDIT_SQL_STANDS_IN("data")
+            " ORDER BY id DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(st, 1, session_id);
         sqlite3_bind_int(st, 2, STOP_REASON_STOP);
         sqlite3_bind_int(st, 3, STOP_REASON_LENGTH);

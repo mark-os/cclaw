@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "extension_manifest.h"
+#include "agent_define.h"
+#include "hook.h"
 #include "channel.h"
 #include "config_registry.h"
 #include "db.h"
@@ -254,10 +256,10 @@ static void test_hook_ingest(void) {
     assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     assert(qint(db, "SELECT count(*) FROM hooks WHERE extension_name='nws'"
                     " AND event='Stop' AND enabled=1 AND fail_count=0 AND disabled=0") == 2);
-    assert(qint(db, "SELECT wait FROM hooks WHERE path='" STORE "/review.qjs'"
-                    " AND event='Stop'") == 1);
-    assert(qint(db, "SELECT wait FROM hooks WHERE path='" STORE "/observe.qjs'") == 0);
-    assert(qint(db, "SELECT wait FROM hooks WHERE event='ContextThreshold'") == 1);
+    assert(qint(db, "SELECT async FROM hooks WHERE path='" STORE "/review.qjs'"
+                    " AND event='Stop'") == 0);
+    assert(qint(db, "SELECT async FROM hooks WHERE path='" STORE "/observe.qjs'") == 1);
+    assert(qint(db, "SELECT async FROM hooks WHERE event='ContextThreshold'") == 0);
     assert(qint(db, "SELECT group_concat(pos, ',') = '0,1,2' FROM (SELECT pos FROM hooks"
                     " WHERE extension_name='nws' ORDER BY pos)") == 1);
     assert(qint(db, "SELECT timeout FROM hooks WHERE event='Stop' AND path='" STORE
@@ -275,8 +277,8 @@ static void test_hook_ingest(void) {
         "{\"event\":\"Stop\",\"handler\":\"review.qjs\",\"async\":false}]}");
     assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     assert(qint(db, "SELECT count(*) FROM hooks WHERE extension_name='nws'") == 1);
-    assert(qint(db, "SELECT wait*100 + fail_count*10 + disabled FROM hooks"
-                    " WHERE extension_name='nws'") == 100);
+    assert(qint(db, "SELECT async*100 + fail_count*10 + disabled FROM hooks"
+                    " WHERE extension_name='nws'") == 0);
 
     db_close(db);
     printf("  PASS test_hook_ingest\n");
@@ -766,6 +768,81 @@ static void test_install_refuses_owner_takeover(void) {
     printf("  PASS test_install_refuses_owner_takeover\n");
 }
 
+/* The bundled compaction (decision 5): shipped in the binary, installed with
+ * no owner, published, and attached to every agent the first time — a fresh
+ * DB, or one upgraded from before the bundle. After that, an agent's opt-out
+ * (enabled=0, or the row gone) survives restarts; a new agent gets it from
+ * agent_default_extensions; the operator's switches and the failure flag on
+ * the hook survive a restart, and a new version starts the count over. */
+static void test_install_builtin_compaction(void) {
+    test_db_clean(TEST_DB);
+    rm_rf("/tmp/extensions/compaction");
+    sqlite3 *db = open_seeded();
+    assert(config_registry_sync(db) == 0);
+    assert(extension_install_builtin(db, TEST_DB) == 0);
+
+    assert(qint(db, "SELECT owner_agent IS NULL AND published=1 AND enabled=1"
+                    " FROM extensions WHERE name='compaction'") == 1);
+    struct stat st;
+    assert(stat("/tmp/extensions/compaction/compact.qjs", &st) == 0);
+    assert(stat("/tmp/extensions/compaction/extension.json", &st) == 0);
+    assert(qint(db, "SELECT COUNT(*) FROM hooks WHERE extension_name='compaction'"
+                    " AND event='ContextThreshold' AND async=0 AND timeout=600"
+                    " AND json_extract(input,'$.history')='all'"
+                    " AND path='/tmp/extensions/compaction/compact.qjs'") == 1);
+    /* Every agent there was has it, and runs it. */
+    assert(qint(db, "SELECT COUNT(*) FROM agents a WHERE NOT EXISTS (SELECT 1 FROM"
+                    " agent_extensions ae WHERE ae.agent_name=a.name"
+                    " AND ae.extension_name='compaction' AND ae.enabled=1)") == 0);
+    assert(hook_any(db, "default", HOOK_EVENT_CONTEXT_THRESHOLD) == 1);
+
+    /* Opt-outs survive a restart: switched off, and detached. */
+    assert(sqlite3_exec(db,
+        "UPDATE agent_extensions SET enabled=0 WHERE agent_name='grantee'"
+        "  AND extension_name='compaction';"
+        "DELETE FROM agent_extensions WHERE agent_name='intruder'"
+        "  AND extension_name='compaction';", NULL, NULL, NULL) == SQLITE_OK);
+    assert(extension_install_builtin(db, TEST_DB) == 0);
+    assert(qint(db, "SELECT enabled FROM agent_extensions WHERE agent_name='grantee'"
+                    " AND extension_name='compaction'") == 0);
+    assert(qint(db, "SELECT COUNT(*) FROM agent_extensions WHERE agent_name='intruder'"
+                    " AND extension_name='compaction'") == 0);
+    assert(hook_any(db, "grantee", HOOK_EVENT_CONTEXT_THRESHOLD) == 0);
+
+    /* A new agent gets it. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO providers(name, base_url) VALUES('p','http://p');"
+        "INSERT INTO models(id, provider_name, model) VALUES('p/m','p','m');"
+        "INSERT INTO agent_models(agent_name, model_id, pos) VALUES('default','p/m',0);",
+        NULL, NULL, NULL) == SQLITE_OK);
+    char *err = NULL;
+    assert(agent_definition_apply(db, "{\"name\":\"Newcomer\"}", "default",
+                                  NULL, GRANT_ORIGIN("seed", 0), &err) == 0 ||
+           (fprintf(stderr, "apply: %s\n", err ? err : "?"), 0));
+    free(err);
+    assert(qint(db, "SELECT enabled FROM agent_extensions WHERE agent_name='Newcomer'"
+                    " AND extension_name='compaction'") == 1);
+
+    /* Disabled by its failures, or switched off by the operator: a restart
+     * keeps both. The extension switched off as a whole stays off too. */
+    assert(sqlite3_exec(db, "UPDATE hooks SET disabled=1, fail_count=3, enabled=0"
+                            " WHERE extension_name='compaction';"
+                            "UPDATE extensions SET enabled=0 WHERE name='compaction';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(extension_install_builtin(db, TEST_DB) == 0);
+    assert(qint(db, "SELECT disabled=1 AND fail_count=3 AND enabled=0 FROM hooks"
+                    " WHERE extension_name='compaction'") == 1);
+    assert(qint(db, "SELECT enabled FROM extensions WHERE name='compaction'") == 0);
+    /* A new version is new code: the count starts over; the switch stays. */
+    assert(sqlite3_exec(db, "UPDATE extensions SET version='0.0.1' WHERE name='compaction'",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(extension_install_builtin(db, TEST_DB) == 0);
+    assert(qint(db, "SELECT disabled=0 AND fail_count=0 AND enabled=0 FROM hooks"
+                    " WHERE extension_name='compaction'") == 1);
+    db_close(db);
+    printf("  PASS test_install_builtin_compaction\n");
+}
+
 /* extension_install_builtin on a fresh scratch DB: telegram lands with no owner
  * published=1 with a manifest on disk; the channel row exists ('draft'); a
  * second run preserves an 'active' status. */
@@ -1025,6 +1102,7 @@ int main(void) {
     test_extension_fork_roundtrip();
     test_install_refuses_owner_takeover();
     test_install_builtin();
+    test_install_builtin_compaction();
     test_manifest_agents();
     /* cleanup */
     test_db_clean(TEST_DB);

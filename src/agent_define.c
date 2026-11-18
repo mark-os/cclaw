@@ -607,22 +607,8 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
             sqlite3_finalize(st);
         } else rc = -1;
     }
-    if (rc == 0) {
-        char *defexts = config_get(db, "agent_default_extensions");
-        if (defexts) {
-            if (sqlite3_prepare_v2(db,
-                    "INSERT OR IGNORE INTO agent_extensions(agent_name, extension_name, enabled)"
-                    " SELECT ?1, value, 1 FROM json_each(?2)"
-                    " WHERE value IN (SELECT name FROM extensions)",
-                    -1, &st, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
-                sqlite3_bind_text(st, 2, defexts, -1, SQLITE_STATIC);
-                sqlite3_step(st);
-                sqlite3_finalize(st);
-            }
-            free(defexts);
-        }
-    }
+    if (rc == 0)
+        agent_attach_default_extensions(db, name);
 
     if (rc == 0)
         memory_blocks_seed(db, name, json);
@@ -648,6 +634,23 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
     free(clone);
     free(name);
     return rc;
+}
+
+void agent_attach_default_extensions(sqlite3 *db, const char *name) {
+    char *defexts = config_get(db, "agent_default_extensions");
+    if (!defexts) return;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR IGNORE INTO agent_extensions(agent_name, extension_name, enabled)"
+            " SELECT ?1, value, 1 FROM json_each(?2)"
+            " WHERE json_valid(?2) AND value IN (SELECT name FROM extensions)",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, defexts, -1, SQLITE_STATIC);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+    }
+    free(defexts);
 }
 
 /* ── update: overlay an existing agent (specs/self-configuration.md) ──

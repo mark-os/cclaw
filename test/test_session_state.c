@@ -46,12 +46,13 @@ static void test_invalid_transitions(void) {
     assert(session_set_state(db, sid, "awaiting_approval") == -1);
 
     /* busy → busy is valid: a turn moves llm_running → tool_running →
-     * llm_running, and ends llm_running → compacting */
+     * llm_running */
     assert(session_set_state(db, sid, "llm_running") == 0);
     assert(session_set_state(db, sid, "tool_running") == 0);
     assert(session_set_state(db, sid, "llm_running") == 0);
-    assert(session_set_state(db, sid, "compacting") == 0);
     assert(session_set_state(db, sid, "idle") == 0);
+    /* compacting was deleted with the C compaction: an unknown name now */
+    assert(session_set_state(db, sid, "compacting") == -1);
 
     /* unknown state names are rejected */
     assert(session_set_state(db, sid, "running") == -1);
@@ -142,7 +143,7 @@ static void test_startup_recovery(void) {
     assert(db);
 
     /* One session stuck in each non-idle state a crash can strand. */
-    const char *stuck[] = {"llm_running","tool_running","compacting",
+    const char *stuck[] = {"llm_running","tool_running","settling",
                            "awaiting_approval","rate_limited"};
     const int n_stuck = (int)(sizeof(stuck) / sizeof(stuck[0]));
     int64_t ids[sizeof(stuck) / sizeof(stuck[0])];
@@ -278,7 +279,7 @@ static void test_recovery_owner_scoped(void) {
     /* Session 3: transient, NULL owner — should be reset */
     int64_t s3 = session_create(db, "t", NULL, -1, 0);
     assert(s3 > 0);
-    force_state(db, s3, "compacting", 2);
+    force_state(db, s3, "rate_limited", 2);
 
     /* Recover */
     assert(db_recover_stale_sessions(db) == 0);

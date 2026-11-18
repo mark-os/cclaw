@@ -248,7 +248,8 @@ static void set_user_version(sqlite3 *db, int v) {
 
 /* Turn a fresh (current) database back into the v67 shape: agent_models
  * has no trim numbers and no window triggers, hooks no pos, timeout or
- * disabled. unshape_v67 starts here, so every older patch test replays v68
+ * disabled and `wait` for `async`; llm_jobs has its job_type and sessions
+ * its compaction_fail_count back. unshape_v67 starts here, so every older patch test replays v68
  * over a real v67 shape. */
 static void unshape_v68(sqlite3 *db) {
     char *err = NULL;
@@ -261,7 +262,14 @@ static void unshape_v68(sqlite3 *db) {
                               "ALTER TABLE agent_models DROP COLUMN trim_threshold;"
                               "ALTER TABLE hooks DROP COLUMN pos;"
                               "ALTER TABLE hooks DROP COLUMN timeout;"
-                              "ALTER TABLE hooks DROP COLUMN disabled;",
+                              "ALTER TABLE hooks DROP COLUMN disabled;"
+                              "ALTER TABLE hooks ADD COLUMN wait INTEGER NOT NULL DEFAULT 1;"
+                              "UPDATE hooks SET wait = 1 - async;"
+                              "ALTER TABLE hooks DROP COLUMN async;"
+                              "ALTER TABLE llm_jobs ADD COLUMN job_type INTEGER NOT NULL"
+                              "  DEFAULT 0;"
+                              "ALTER TABLE sessions ADD COLUMN compaction_fail_count INTEGER"
+                              "  NOT NULL DEFAULT 0;",
                           NULL, NULL, &err);
     if (rc != SQLITE_OK) fprintf(stderr, "unshape_v68: %s\n", err ? err : "?");
     assert(rc == SQLITE_OK);
@@ -1856,32 +1864,31 @@ static void test_schema_patch_v64(void) {
     assert(sqlite3_exec(db,
         "INSERT INTO extensions(name, path, published) VALUES('ext','/e',1);"
         "INSERT INTO hooks(extension_name, event, path) VALUES('ext','Stop','/e/r.qjs');"
-        "INSERT INTO sessions(agent_name, state) VALUES(NULL,'compacting');",
+        "INSERT INTO sessions(agent_name, state) VALUES(NULL,'tool_running');",
         NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 63);
 
     assert(db_schema_compat(db) == 1);
     int uv = 0;
     assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
-    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM hooks WHERE wait=1 AND fail_count=0"
+    /* Waited for (v68 says it as async=0), no failures. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM hooks WHERE async=0 AND fail_count=0"
         " AND enabled=1 AND path='/e/r.qjs';", 0, -1) == 1);
     /* NOT NULL with defaults: a writer that names neither column still works. */
     assert(sqlite3_exec(db, "INSERT INTO hooks(extension_name, event, path)"
         " VALUES('ext','Stop','/e/later.qjs');", NULL, NULL, NULL) == SQLITE_OK);
-    assert(db_scalar_i64(db, "SELECT wait*10 + fail_count FROM hooks"
-        " WHERE path='/e/later.qjs';", 0, -1) == 10);
-    /* The patched table has the columns where a fresh schema puts them. */
+    assert(db_scalar_i64(db, "SELECT async*10 + fail_count FROM hooks"
+        " WHERE path='/e/later.qjs';", 0, -1) == 0);
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM pragma_table_info('hooks')"
-        " WHERE (name='wait' AND \"notnull\"=1 AND dflt_value='1' AND cid=4)"
-        "    OR (name='fail_count' AND \"notnull\"=1 AND dflt_value='0' AND cid=5);",
-        0, -1) == 2);
+        " WHERE name='fail_count' AND \"notnull\"=1 AND dflt_value='0' AND cid=4;",
+        0, -1) == 1);
     /* The primary key survived the column drop and re-add. */
     assert((sqlite3_exec(db, "INSERT INTO hooks(extension_name, event, path)"
         " VALUES('ext','Stop','/e/later.qjs');", NULL, NULL, NULL) & 0xff)
         == SQLITE_CONSTRAINT);
     /* Session states are not enumerated in the schema: the new one needs no
      * table change, and an existing row's state is untouched. */
-    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sessions WHERE state='compacting';",
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sessions WHERE state='tool_running';",
         0, -1) == 1);
 
     db_close(db);
@@ -1987,7 +1994,7 @@ static void test_schema_patch_v66(void) {
     int uv = 0;
     assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM hooks WHERE extension_name='ext'"
-        " AND event='Stop' AND path='/e/r.qjs' AND enabled=1 AND wait=0"
+        " AND event='Stop' AND path='/e/r.qjs' AND enabled=1 AND async=1"
         " AND fail_count=2 AND input IS NULL;", 0, -1) == 1);
     assert(sqlite3_exec(db, "UPDATE hooks SET input='{\"history\":\"all\"}';",
                         NULL, NULL, NULL) == SQLITE_OK);
@@ -2045,9 +2052,11 @@ static void test_schema_patch_v67(void) {
 }
 
 /* v68: agent_models.trim_threshold / prune_target and the window triggers;
- * hooks.pos / timeout / disabled. Existing routing rows keep everything and
- * read NULL — the 50% defaults; existing hooks run first in their
- * extension, on the default deadline, enabled.
+ * hooks.pos / timeout / disabled, and wait turned into async. Existing
+ * routing rows keep everything and read NULL — the 50% defaults; existing
+ * hooks run first in their extension, on the default deadline, enabled. The
+ * C compaction's leftovers: a session in 'compacting' goes idle, its job and
+ * the columns only it used go.
  * The patched tables (and change-log triggers) are shaped like fresh ones. */
 static void test_schema_patch_v68(void) {
     const char *path = "/tmp/test_cclaw_schema_v68.sqlite";
@@ -2066,7 +2075,14 @@ static void test_schema_patch_v68(void) {
         " VALUES ('Keep','p/m',0,'high');"
         "INSERT INTO extensions(name, path, published) VALUES('ext','/e',1);"
         "INSERT INTO hooks(extension_name, event, path, wait, fail_count)"
-        " VALUES('ext','Stop','/e/r.qjs',0,2);", NULL, NULL, NULL) == SQLITE_OK);
+        " VALUES('ext','Stop','/e/r.qjs',0,2), ('ext','Stop','/e/w.qjs',1,0);"
+        /* Left by the C compaction: one session mid-compaction, its job, and
+         * a session busy with an ordinary request. */
+        "INSERT INTO sessions(id, agent_name, state, owner_instance, turn_iteration,"
+        "                     compaction_fail_count)"
+        " VALUES (7,'Keep','compacting','dead-1',3,2), (8,'Keep','llm_running','dead-1',1,0);"
+        "INSERT INTO llm_jobs(session_id, agent_name, job_type) VALUES (7,'Keep',1),"
+        " (8,'Keep',0);", NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 67);
 
     assert(db_schema_compat(db) == 1);
@@ -2074,8 +2090,16 @@ static void test_schema_patch_v68(void) {
     assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
     assert(db_scalar_i64(db, "SELECT reasoning_effort='high' AND trim_threshold IS NULL"
         " AND prune_target IS NULL FROM agent_models WHERE agent_name='Keep'", 0, -1) == 1);
-    assert(db_scalar_i64(db, "SELECT wait=0 AND fail_count=2 AND pos=0 AND timeout IS NULL"
-        " AND disabled=0 FROM hooks WHERE extension_name='ext'", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT async=1 AND fail_count=2 AND pos=0 AND timeout IS NULL"
+        " AND disabled=0 FROM hooks WHERE path='/e/r.qjs'", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT async FROM hooks WHERE path='/e/w.qjs'", 0, -1) == 0);
+    /* The session caught compacting had its answer: it is idle, unowned, and
+     * its job is gone. The ordinary one is untouched. */
+    assert(db_scalar_i64(db, "SELECT state='idle' AND owner_instance IS NULL"
+        " AND turn_iteration=0 FROM sessions WHERE id=7", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT state='llm_running' AND owner_instance='dead-1'"
+        " FROM sessions WHERE id=8", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT group_concat(session_id) FROM llm_jobs", 0, -1) == 8);
     assert(sqlite3_exec(db, "UPDATE hooks SET timeout=0;", NULL, NULL, NULL) != SQLITE_OK);
     /* The rules are live on the patched table. */
     assert(sqlite3_exec(db, "UPDATE agent_models SET trim_threshold=9000;",

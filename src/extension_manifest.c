@@ -945,11 +945,11 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
      * re-promote starts the failure count over and clears a hook disabled
      * by its failures — new code has not failed yet. */
     rc |= run_ingest(db,
-        "INSERT INTO hooks(extension_name, event, path, enabled, wait, input,"
+        "INSERT INTO hooks(extension_name, event, path, enabled, async, input,"
         "                  pos, timeout) "
         "SELECT :name, json_extract(value,'$.event'), "
         "       :store || '/' || json_extract(value,'$.handler'), 1, "
-        "       CASE WHEN json_extract(value,'$.async') THEN 0 ELSE 1 END, "
+        "       CASE WHEN json_extract(value,'$.async') THEN 1 ELSE 0 END, "
         "       json_extract(value,'$.input'), key, json_extract(value,'$.timeout') "
         "FROM json_each(COALESCE(json_extract(:m,'$.hooks'),'[]')) "
         "WHERE json_extract(value,'$.event') IS NOT NULL",
@@ -1307,6 +1307,63 @@ static int install_channel_builtin(sqlite3 *db, const char *base, const char *na
     return rc;
 }
 
+/* Install a builtin bundle that brings hooks. A reinstall rewrites its hook
+ * rows (extension_install), so what the runtime and the operator wrote on
+ * them is carried across: the operator's on/off switch (hooks.enabled)
+ * always, and the failure count with the flag three failures set
+ * (decision 31) while the version is the same — a restart is not a new
+ * script, a new version is. The first install — a fresh DB, or one this
+ * bundle is new to — attaches it to every agent there is; agents created
+ * later get it from agent_default_extensions. A detach is an operator's
+ * act, and survives restarts: an agent opts out with enabled=0 on its
+ * attachment, or by losing the row. */
+static int install_hook_builtin(sqlite3 *db, const char *base, const char *name,
+                                const BuiltinFile *files, size_t nfiles) {
+    if (builtin_row_foreign(db, name)) return 0;   /* never fight a foreign row */
+    sqlite3_stmt *s;
+    char *before = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_object('version', e.version, 'hooks',"
+            "  (SELECT json_group_array(json_object('event', h.event, 'path', h.path,"
+            "     'enabled', h.enabled, 'fail_count', h.fail_count, 'disabled', h.disabled))"
+            "     FROM hooks h WHERE h.extension_name = e.name))"
+            " FROM extensions e WHERE e.name=?1", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(s, 0);
+            before = v ? strdup(v) : NULL;
+        }
+        sqlite3_finalize(s);
+    }
+
+    BuiltinBundle b = { name, files, nfiles };
+    int rc = builtin_stage_install(db, base, &b);
+    if (rc == 0 && before && sqlite3_prepare_v2(db,
+            "UPDATE hooks SET enabled = j.value ->> 'enabled',"
+            "  fail_count = CASE WHEN e.version = ?2 ->> 'version'"
+            "                    THEN j.value ->> 'fail_count' ELSE 0 END,"
+            "  disabled = CASE WHEN e.version = ?2 ->> 'version'"
+            "                  THEN j.value ->> 'disabled' ELSE 0 END"
+            " FROM json_each(?2, '$.hooks') j, extensions e"
+            " WHERE e.name = ?1 AND hooks.extension_name = ?1"
+            "   AND hooks.event = j.value ->> 'event' AND hooks.path = j.value ->> 'path'",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, before, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) != SQLITE_DONE) rc = -1;
+        sqlite3_finalize(s);
+    }
+    if (rc == 0 && !before && sqlite3_prepare_v2(db,
+            "INSERT OR IGNORE INTO agent_extensions(agent_name, extension_name, enabled)"
+            " SELECT name, ?1, 1 FROM agents", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) != SQLITE_DONE) rc = -1;
+        sqlite3_finalize(s);
+    }
+    free(before);
+    return rc;
+}
+
 int extension_install_builtin(sqlite3 *db, const char *db_path) {
     if (!db || !db_path) return -1;
 
@@ -1330,6 +1387,10 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
         { "channel.qjs",    TPL_CHANNEL_WHATSAPP_QJS },
         { "extension.json", TPL_CHANNEL_WHATSAPP_MANIFEST_JSON },
     };
+    static const BuiltinFile compaction_files[] = {
+        { "extension.json", TPL_EXT_COMPACTION_EXTENSION_JSON },
+        { "compact.qjs",    TPL_EXT_COMPACTION_COMPACT_QJS },
+    };
     static const BuiltinFile docs_files[] = {
         { "extension.json", TPL_DOCS_MANIFEST_JSON },
         { "skills/configuring-cclaw/SKILL.md",    TPL_DOCS_CONFIGURING_CCLAW_MD },
@@ -1350,6 +1411,10 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
                                   sizeof(discord_files)/sizeof(*discord_files));
     rc |= install_channel_builtin(db, base, "whatsapp", whatsapp_files,
                                   sizeof(whatsapp_files)/sizeof(*whatsapp_files));
+
+    /* ── compaction (the ContextThreshold hook; source extensions/compaction) ── */
+    rc |= install_hook_builtin(db, base, "compaction", compaction_files,
+                               sizeof(compaction_files)/sizeof(*compaction_files));
 
     /* ── cclaw-docs (skills-only self-documentation) ── */
     if (!builtin_row_foreign(db, "cclaw-docs")) {

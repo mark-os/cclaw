@@ -250,33 +250,6 @@ static void test_own_stale_job_excluded(void) {
     printf("  PASS test_own_stale_job_excluded\n");
 }
 
-/* The compacting branch is the idle branch's twin: same gate, same deferral —
- * and the idle flip stands either way (compaction is done regardless). */
-static void test_compacting_twin_deferred(void) {
-    sqlite3 *db = open_seeded();
-    set_cap(db, 1);
-    holder_llm(db);
-
-    int64_t sid = session_create(db, "t", "default", -1, 0);
-    inbox_insert(db, sid, "cron", NULL, "fire");
-    assert(session_set_state(db, sid, "compacting") == 0);
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_NOOP);
-    assert(out.deferred == 1);
-    assert(state_is(db, sid, "idle"));
-    assert(inbox_count(db, sid) == 1);
-
-    /* Human in the batch: the twin opens it over the cap too. */
-    inbox_insert(db, sid, "cli", NULL, "hi");
-    assert(session_set_state(db, sid, "compacting") == 0);
-    out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
-    assert(inbox_count(db, sid) == 0);
-
-    db_close(db);
-    printf("  PASS test_compacting_twin_deferred\n");
-}
-
 /* cap 0 = gate off, however many holders exist. */
 static void test_cap_zero_off(void) {
     sqlite3 *db = open_seeded();
@@ -303,7 +276,6 @@ int main(void) {
     test_role3_resume_exempt();
     test_role1_leaf_gated_by_stamp();
     test_own_stale_job_excluded();
-    test_compacting_twin_deferred();
     test_cap_zero_off();
     printf("All concurrency gate tests passed.\n");
     return 0;

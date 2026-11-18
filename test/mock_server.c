@@ -21,6 +21,8 @@ static MockResponse *s_queue_tail;
 static pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int s_request_count;
 static char *s_last_body;
+static char *s_rule_needle, *s_rule_body;
+static int s_rule_status, s_rule_hits;
 
 /* Telegram mock state */
 static MockResponse *s_tg_updates_head;
@@ -60,6 +62,24 @@ void mock_server_enqueue_with_headers(int http_status, const char *body, const c
     pthread_mutex_unlock(&s_mutex);
 }
 
+void mock_server_answer_when(const char *needle, int http_status, const char *body) {
+    pthread_mutex_lock(&s_mutex);
+    free(s_rule_needle);
+    free(s_rule_body);
+    s_rule_needle = needle ? strdup(needle) : NULL;
+    s_rule_body = needle && body ? strdup(body) : NULL;
+    s_rule_status = http_status;
+    s_rule_hits = 0;
+    pthread_mutex_unlock(&s_mutex);
+}
+
+int mock_server_rule_hits(void) {
+    pthread_mutex_lock(&s_mutex);
+    int n = s_rule_hits;
+    pthread_mutex_unlock(&s_mutex);
+    return n;
+}
+
 static int handle_completions(struct mg_connection *conn, void *cbdata) {
     (void)cbdata;
     const struct mg_request_info *ri = mg_get_request_info(conn);
@@ -86,6 +106,18 @@ static int handle_completions(struct mg_connection *conn, void *cbdata) {
     }
 
     pthread_mutex_lock(&s_mutex);
+    if (s_rule_needle && req_body && strstr(req_body, s_rule_needle)) {
+        s_rule_hits++;
+        int st = s_rule_status;
+        char *rb = strdup(s_rule_body ? s_rule_body : "{}");
+        pthread_mutex_unlock(&s_mutex);
+        free(req_body);
+        mg_printf(conn, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n"
+                        "Content-Length: %d\r\n\r\n%s",
+                  st, st == 200 ? "OK" : "Error", (int)strlen(rb), rb);
+        free(rb);
+        return st;
+    }
     s_request_count++;
     free(s_last_body);
     s_last_body = req_body; /* take ownership */
@@ -190,6 +222,7 @@ void mock_server_stop(void) {
         s_ctx = NULL;
     }
     mg_exit_library();
+    mock_server_answer_when(NULL, 0, NULL);
 
     pthread_mutex_lock(&s_mutex);
     while (s_queue_head) {
@@ -227,6 +260,7 @@ void mock_server_stop(void) {
 }
 
 void mock_server_reset(void) {
+    mock_server_answer_when(NULL, 0, NULL);
     pthread_mutex_lock(&s_mutex);
     while (s_queue_head) {
         MockResponse *r = s_queue_head;

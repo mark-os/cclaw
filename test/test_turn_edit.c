@@ -1299,7 +1299,7 @@ static void test_history(void) {
     expect_id_at(db, in, "$.history[1].tokens.turn", turn_tokens(db, &t));
     free(in);
 
-    /* Compaction, as entry_compact leaves it: the branch keeps its first
+    /* Compaction, as the old C compaction left it (test_legacy_compact): the branch keeps its first
      * entry, then the summary, then whole turns. History is that branch —
      * what is left of the first turn, the summary where it stands, and
      * nothing of what it replaced. */
@@ -1307,7 +1307,7 @@ static void test_history(void) {
     int64_t f_last = add_typed(db, t.sid, db_next_iteration_id(db, t.sid),
                                "assistant_message", "bye", NULL, NULL);
     int64_t u_next = db_scalar_i64(db, "SELECT parent_id FROM entries WHERE id=?", f_next, -1);
-    int64_t cmp = entry_compact(db, t.sid, t.u0, u_next, "SUMMARY of two turns");
+    int64_t cmp = test_legacy_compact(db, t.sid, t.u0, u_next, "SUMMARY of two turns");
     assert(cmp > 0);
     in = input_all(db, t.sid);
     assert(in);
@@ -1341,7 +1341,7 @@ static void test_history(void) {
     add_plain_turn(db, mid, "c", "C");
     int64_t m4 = add_plain_turn(db, mid, "d", "D");
     int64_t m4u = db_scalar_i64(db, "SELECT parent_id FROM entries WHERE id=?", m4, -1);
-    int64_t mc = entry_compact(db, mid, m1, m4u, "b and c");
+    int64_t mc = test_legacy_compact(db, mid, m1, m4u, "b and c");
     assert(mc > 0);
     add_plain_turn(db, mid, "e", "E");
     in = input_all(db, mid);
@@ -1451,7 +1451,7 @@ static void test_input_options(void) {
     add_plain_turn(db, cs, "q5", x);
     add_plain_turn(db, cs, "q6", x);
     add_plain_turn(db, cs, "go", "done");
-    assert(entry_compact(db, cs, u0, u4, sum) > 0);
+    assert(test_legacy_compact(db, cs, u0, u4, sum) > 0);
     const int SPLICE = 64;
 
     in = input_all(db, cs);
@@ -1673,7 +1673,7 @@ static void test_turn_edges(void) {
     assert(in);
     expect_at(db, in, "$.iterations[0].calls[0].result.text", "nothing there");
     free(in);
-    int64_t cmp = entry_compact(db, sid, u0, u, "sum");
+    int64_t cmp = test_legacy_compact(db, sid, u0, u, "sum");
     assert(cmp > 0);
 
     assert(turn_edit_apply(db, sid, E(DROP("k1")), LABEL, NULL) == TURN_EDIT_APPLIED);
@@ -1696,7 +1696,7 @@ static void test_turn_edges(void) {
     /* Compaction after an edit: the edited turn is summarized away like any
      * other. */
     int64_t u2 = add_user(db, sid, "more");
-    assert(entry_compact(db, sid, u0, u2, "sum2") > 0);
+    assert(test_legacy_compact(db, sid, u0, u2, "sum2") > 0);
     expect_shape(db, sid, O, "user:hi|user:[Summary of earlier conversation]\nsum2|user:more");
 
     db_close(db); test_db_clean(DB_PATH);
@@ -2085,6 +2085,40 @@ static void test_running_turn(void) {
     printf("  PASS test_running_turn\n");
 }
 
+/* A long turn summarised again: the summary of its earlier iterations, and
+ * a note, stand right before the next run summarised — they leave with it,
+ * so the turn carries one summary, not a stack. A note further back stays. */
+static void test_running_turn_refold(void) {
+    sqlite3 *db = open_seeded();
+    T t = seed_turn(db, "refold", 0);
+    R w = add_running(db, t.sid);
+    char r[512];
+    snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"step four\",\"from_iteration\":%lld,"
+             "\"to_iteration\":%lld},{\"op\":\"note\",\"text\":\"heads up\",\"before\":%lld}"),
+             (long long)w.it4, (long long)w.it4, (long long)w.rs5);
+    apply_to(db, t.sid, r, w.rk2);
+    int64_t sum1 = leaf_rec_id(db, t.sid, ".summaries[0]");
+    int64_t note = leaf_rec_id(db, t.sid, ".notes[0]");
+    BRANCH(db, t.sid, t.u0, t.a0, t.u, t.rs1, t.a1, t.c1, t.c2, t.c3, t.r2, t.r1, t.r3, t.rs2,
+           t.a2, t.c4, t.r4, t.rs3, t.fin, w.u, sum1, note, w.rs5, w.a5, w.k2, w.rk2);
+    int64_t it6 = db_next_iteration_id(db, t.sid);
+    int64_t a6 = add_typed(db, t.sid, it6, "assistant_message", "six", NULL, NULL);
+    int64_t k3 = add_call(db, t.sid, it6, "k3", "look", "{}", "done");
+    int64_t rk3 = add_typed(db, t.sid, it6, "tool_result", "rk3", "k3", "look");
+    snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"steps four and five\","
+             "\"from_iteration\":%lld,\"to_iteration\":%lld}"), (long long)w.it5, (long long)w.it5);
+    apply_to(db, t.sid, r, rk3);
+    int64_t sum2 = leaf_rec_id(db, t.sid, ".summaries[0]");
+    BRANCH(db, t.sid, t.u0, t.a0, t.u, t.rs1, t.a1, t.c1, t.c2, t.c3, t.r2, t.r1, t.r3, t.rs2,
+           t.a2, t.c4, t.r4, t.rs3, t.fin, w.u, sum2, a6, k3, rk3);
+    expect_q(db, "1", "SELECT json_extract(data,'$.turn_edits[0].left_branch') ="
+             " json_array(%lld,%lld,%lld,%lld,%lld,%lld) FROM entries WHERE id=%lld",
+             (long long)sum1, (long long)note, (long long)w.rs5, (long long)w.a5,
+             (long long)w.k2, (long long)w.rk2, (long long)rk3);
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_running_turn_refold\n");
+}
+
 /* Accounting of what an edit writes: a stand-in for a measured entry keeps
  * its count scaled by length, a short or unmeasured one and a new entry take
  * the estimate; and a report older than an edit no longer measures the head. */
@@ -2145,6 +2179,7 @@ int main(void) {
     test_whole_turns();
     test_finished_turn_ops();
     test_running_turn();
+    test_running_turn_refold();
     test_written_tokens();
     printf("All turn edit tests passed.\n");
     return 0;

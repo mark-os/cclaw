@@ -39,7 +39,7 @@ int hook_next(sqlite3 *db, const char *agent, const char *event, int wait,
      * stable order one hook at a time, with no cursor to keep. */
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "SELECT h.extension_name, h.path, h.wait,"
+            "SELECT h.extension_name, h.path, 1 - h.async,"
             "       CASE json_extract(" HOOK_INPUT ",'$.history')"
             "         WHEN 'all' THEN -1 WHEN 'none' THEN 0"
             "         ELSE COALESCE(json_extract(" HOOK_INPUT ",'$.history'), 0) END,"
@@ -52,7 +52,7 @@ int hook_next(sqlite3 *db, const char *agent, const char *event, int wait,
             " WHERE ae.agent_name = ?1 AND ae.enabled = 1 AND h.enabled = 1"
             "   AND h.disabled = 0 AND e.enabled = 1 AND h.event = ?2"
             "   AND (e.published = 1 OR e.owner_agent = ?1)"
-            "   AND (?3 < 0 OR h.wait = ?3)"
+            "   AND (?3 < 0 OR h.async = 1 - ?3)"
             "   AND (?4 IS NULL OR (h.extension_name, h.pos, h.path) > (?4, ?6, ?5))"
             " ORDER BY h.extension_name, h.pos, h.path LIMIT 1;",
             -1, &st, NULL) != SQLITE_OK)

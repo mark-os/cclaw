@@ -38,7 +38,7 @@ typedef struct {
     char path[PATH_MAX];    /* handler file, absolute, in the extension store */
     char event[32];         /* hooks.event */
     int pos;                /* hooks.pos: its place in the manifest */
-    int wait;               /* hooks.wait: 1 = the session waits (not "async") */
+    int wait;               /* 1 = the session waits (hooks.async = 0) */
     int timeout;            /* hooks.timeout in seconds; 0 = the configured default */
     TurnEditInputSpec input;/* hooks.input with the defaults filled in */
 } HookRef;
@@ -47,9 +47,10 @@ typedef struct {
  * position, path) order, after `after` (NULL = the first). An agent runs a
  * hook when it has the extension attached and enabled and the extension is
  * published or its own — the rule its tools load by (tools.c) — and the hook
- * is neither switched off nor disabled by its failures. `wait` selects
- * hooks.wait 0 or 1; -1 takes either. `input` is what the hook asked to be
- * sent (hooks.input), each option it did not name at its default. Read from
+ * is neither switched off nor disabled by its failures. `wait` 1 selects
+ * the awaited hooks (hooks.async = 0), 0 the async ones; -1 takes either.
+ * `input` is what the hook asked to be sent (hooks.input), each option it
+ * did not name at its default. Read from
  * the tables on every call: nothing is cached, so an extension attached a
  * moment ago is found. Returns 1 with *out filled, 0 when there is none, -1
  * on a database error. */

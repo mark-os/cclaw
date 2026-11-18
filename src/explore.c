@@ -59,21 +59,19 @@ static const char HOME_JSON[] =
     "\"doc\":\"Requests an agent made that needed a yes or no.\"}]";
 
 /* Numeric codes, as the code that writes them names them: Role and
- * StopReason (types.h), llm_worker.c's job types, the outbox's degradation
- * ladder (schema.sql). */
+ * StopReason (types.h), the outbox's degradation ladder (schema.sql). */
 static const char CODES_JSON[] =
     "{\"entries.role\":{\"0\":\"system\",\"1\":\"user\",\"2\":\"assistant\","
     "\"3\":\"tool\",\"4\":\"compaction\"},"
     "\"entries.stop_reason\":{\"0\":\"none\",\"1\":\"stop\",\"2\":\"length\","
     "\"3\":\"tool use\",\"4\":\"error\",\"5\":\"aborted\"},"
-    "\"llm_jobs.job_type\":{\"0\":\"turn\",\"1\":\"compaction\"},"
     "\"channel_outbox.deliver_mode\":{\"0\":\"formatted\",\"1\":\"plain\"}}";
 
 /* 0/1 columns. */
 static const char BOOLS_JSON[] =
     "[\"config.secret\",\"config.required\",\"extensions.published\","
     "\"extensions.enabled\",\"agent_extensions.enabled\",\"tools.enabled\","
-    "\"hooks.enabled\",\"hooks.wait\",\"tools.droppable\",\"memory_blocks.read_only\",\"agent_memory_blocks.read_only\","
+    "\"hooks.enabled\",\"hooks.async\",\"hooks.disabled\",\"tools.droppable\",\"memory_blocks.read_only\",\"agent_memory_blocks.read_only\","
     "\"inbox.consumed\",\"entries.is_error\",\"channel_chats.is_admin\","
     "\"delivery_edges.one_shot\",\"llm_jobs.recall\",\"cron_jobs.enabled\"]";
 

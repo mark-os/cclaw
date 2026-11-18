@@ -16,6 +16,12 @@ templates/schema.sql                →  TPL_SCHEMA_SQL
 templates/docs_creating_agents.md   →  TPL_DOCS_CREATING_AGENTS_MD
 ```
 
+The extension bundles listed in `SHIPPED_BUNDLES` (Makefile) are embedded the same way, prefixed with the bundle's name, all files but the README:
+
+```
+extensions/compaction/compact.qjs   →  TPL_EXT_COMPACTION_COMPACT_QJS
+```
+
 Source files `#include "templates.h"` (from `build/`) and reference the constants directly.
 
 ## Template Files

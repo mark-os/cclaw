@@ -937,9 +937,11 @@ var SHAPED = {
         /* A hook is a script the extension runs on this agent's turns. */
         if (x.values.enabled) r[2].rows.forEach(function (k) {
           if (k.values.extension_name !== x.values.extension_name) return;
-          p.appendChild(pill(k.values.event === "turnSettled"
-            ? (k.values.wait ? "runs after each turn, and may edit it" : "runs after each turn") : "runs on " + k.values.event));
-          if (k.values.fail_count >= 3) p.appendChild(pill("its script keeps failing", "warn"));
+          var when = { Stop: "runs after each turn", SubagentStop: "runs after each turn",
+                       ContextThreshold: "runs when the context fills up" }[k.values.event]
+                     || "runs on " + k.values.event;
+          p.appendChild(pill(k.values.async ? when : when + ", and may edit it"));
+          if (k.values.disabled) p.appendChild(pill("turned off: its script kept failing", "warn"));
         });
       });
       order.forEach(function (n) { list.appendChild(rowLine(link(rowHash("extensions", [n]), n), lines[n])); });
@@ -1896,7 +1898,8 @@ SHAPED.channel_chats = function (res, el, seq) {
   });
 };
 
-/* An entry of a turn that a turnSettled script edited (specs/turn-edit.md).
+/* An entry of a turn that an edit changed — a hook's or C's trim
+   (specs/turn-edit.md).
    The record is on the turn's answer; the entries it took off the branch, put
    in their place or added are found through it. */
 SHAPED.entries = function (res, el, seq) {

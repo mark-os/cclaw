@@ -1,5 +1,9 @@
 /* A long turn against a small context: C's trim keeps it going.
  *
+ * The agent runs no compaction script: the bundled one, which a fresh DB
+ * attaches to the default agent, is switched off — what "rolling" is
+ * (decision 5) — so C's trim is all there is.
+ *
  * One `-p` turn of many iterations against a mock LLM, each response a big
  * assistant message and a call, the agent's routing entry given a trim
  * threshold a few iterations above its head. The real binary runs the whole
@@ -161,6 +165,14 @@ static int set_limits(int64_t sid, int *threshold_out) {
              head + 4 * step, head + 2 * step, agent ? agent : "");
     int rc = head > 0 && sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK
              && sqlite3_changes(db) > 0 ? 0 : -1;
+    snprintf(sql, sizeof(sql),
+             "UPDATE agent_extensions SET enabled=0 WHERE agent_name='%s'"
+             " AND extension_name='compaction' AND enabled=1;", agent ? agent : "");
+    if (rc == 0 && (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK ||
+                    sqlite3_changes(db) != 1)) {
+        fprintf(stderr, "the default agent does not have the bundled compaction\n");
+        rc = -1;
+    }
     *threshold_out = head + 4 * step;
     free(agent);
     sqlite3_close(db);
@@ -216,6 +228,17 @@ int main(void) {
         goto done;
     }
 
+    /* No script ran: the hook is attached but switched off. */
+    FILE *lf = fopen(LOG2, "r");
+    char line[1024];
+    int hooks = 0;
+    while (lf && fgets(line, sizeof(line), lf)) if (strstr(line, "hook ContextThreshold")) hooks++;
+    if (lf) fclose(lf);
+    if (hooks) {
+        fprintf(stderr, "FAIL: a ContextThreshold hook ran\n");
+        dump_log(LOG2);
+        goto done;
+    }
     /* Every iteration was asked for, and the turn ended on the answer. */
     if (mock_server_request_count() != STEPS + 1) {
         fprintf(stderr, "FAIL: %d requests, expected %d\n", mock_server_request_count(),

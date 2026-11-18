@@ -338,6 +338,8 @@ char *turn_edit_input(sqlite3 *db, int64_t session_id, const TurnEditInputSpec *
  *   summarise   a run of whole turns before the        text, from_turn to_turn
  *               newest, or of whole iterations of     | from_iteration to_iteration
  *               the newest, is replaced by the text
+ *               (with the notes and summaries right
+ *               before the iterations: iteration_span)
  *
  * Call ids are scoped to their turn (providers reuse them), so a call is named
  * within turn_id, or within the newest turn when that is absent. */
@@ -953,7 +955,15 @@ static TurnEditResult iteration_span(const Branch *b, const Edit *e, int *lo, in
         rc = fail(err_out, TURN_EDIT_REJECTED, "summarise: iteration %lld holds the turn's"
                   " answer, which is never edited", (long long)e->to);
     else {
+        /* The notes and summaries standing directly before the run — after
+         * the iteration before it, or after the turn's user entries — leave
+         * with it (the input lists them in `notes` with before_iteration =
+         * from_iteration): a turn summarised again and again then carries
+         * one summary that folds the last, not a stack of them. */
         *lo = starts[uf];
+        while (*lo > b->newest &&
+               (b->rows[*lo - 1].kind == ROW_SYSTEM || b->rows[*lo - 1].kind == ROW_SUMMARY))
+            (*lo)--;
         *hi = starts[ut + 1];
     }
     free(starts);

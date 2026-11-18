@@ -42,6 +42,10 @@ endif
 $(shell mkdir -p $(BUILDDIR) && echo "$(BUILD_TAG)" > $(BUILD_TAGFILE))
 
 TEMPLATES := $(wildcard templates/*)
+# Extension bundles compiled into the binary and installed at every start
+# (extension_install_builtin); the rest of extensions/ is copy-and-promote.
+SHIPPED_BUNDLES := extensions/compaction
+TEMPLATES += $(foreach d,$(SHIPPED_BUNDLES),$(wildcard $(d)/*))
 SRC      := $(filter-out src/net_shim.c $(filter-out src/contain_$(CONTAIN).c,$(wildcard src/contain_*.c)),$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 # Recursive (=): TEST_BIN/INTEG_BIN/E2E_BIN are defined below; expansion
@@ -105,7 +109,7 @@ $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILDDIR)/templates.h $(BUILDDIR)/templates.c: $(TEMPLATES) scripts/gen_templates.sh | $(BUILDDIR)/
-	./scripts/gen_templates.sh $(BUILDDIR)/templates.h templates
+	./scripts/gen_templates.sh $(BUILDDIR)/templates.h templates $(SHIPPED_BUNDLES)
 
 $(BUILDDIR)/templates.o: $(BUILDDIR)/templates.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -I$(BUILDDIR) -c -o $@ $<

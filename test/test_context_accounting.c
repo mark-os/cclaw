@@ -92,7 +92,7 @@ static void test_provider_floor_and_staleness(void) {
     assert(size_of(db, sid, 0, &head) > 8900 && head > 8900);
 
     /* Compact away the middle: the 9000 figure predates the summary. */
-    assert(entry_compact(db, sid, e1, e3, "summary") > 0);
+    assert(test_legacy_compact(db, sid, e1, e3, "summary") > 0);
     assert(size_of(db, sid, 0, &head) < 100 && head == 0);
 
     /* A new post-compaction response reinstates the provider term. */
@@ -423,7 +423,7 @@ static void test_untrusted_difference(void) {
     int64_t u1 = user_msg(db, sid, 300);
     ingest(db, sid, 2000 + 50 + 90, 50, 0, 0, NULL);
     assert(tok(db, u1) == 90);
-    assert(entry_compact(db, sid, u0, u1, "summary") > 0);
+    assert(test_legacy_compact(db, sid, u0, u1, "summary") > 0);
     int64_t u2 = user_msg(db, sid, 300);
     ingest(db, sid, 900, 50, 0, 0, NULL);
     assert(tok(db, u2) == -1);

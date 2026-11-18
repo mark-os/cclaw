@@ -1498,8 +1498,19 @@ static int patch_v65_utility(sqlite3 *db) {
  * replace leave the config table at the next config_registry_sync (as does
  * turn_settled_timeout, now hook_timeout). And hooks.pos / timeout /
  * disabled, for the events of stage 1: an existing hook runs first in its
- * extension, on the default deadline, enabled. The change_log triggers name
- * every logged column, so they are rebuilt. */
+ * extension, on the default deadline, enabled; hooks.wait becomes hooks.async,
+ * its inverse, the manifest's own word.
+ *
+ * The C compaction is gone (the bundled extension `compaction` replaces it,
+ * installed and attached to every agent at startup by
+ * extension_install_builtin, which is where the rows come from — this patch
+ * runs before the extension row can exist). What it left: a session caught
+ * in 'compacting' by the upgrade was at a turn's end with its answer already
+ * written, so it goes idle, and the sweep drains whatever its inbox holds; a
+ * compaction job row has no worker to finish it; sessions.compaction_fail_count
+ * and llm_jobs.job_type (1 was compaction, 0 the only value left) have no
+ * reader. The change_log triggers name every logged column, so they are
+ * rebuilt. */
 static int patch_v68_hooks(sqlite3 *db) {
     static const char sql[] =
         "ALTER TABLE agent_models ADD COLUMN trim_threshold INTEGER"
@@ -1525,7 +1536,16 @@ static int patch_v68_hooks(sqlite3 *db) {
         "ALTER TABLE hooks ADD COLUMN pos INTEGER NOT NULL DEFAULT 0;"
         "ALTER TABLE hooks ADD COLUMN timeout INTEGER"
         "  CHECK (timeout IS NULL OR timeout > 0);"
-        "ALTER TABLE hooks ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;";
+        "ALTER TABLE hooks ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;"
+        "ALTER TABLE hooks ADD COLUMN async INTEGER NOT NULL DEFAULT 0;"
+        "UPDATE hooks SET async = CASE WHEN wait THEN 0 ELSE 1 END;"
+        "ALTER TABLE hooks DROP COLUMN wait;"
+        /* The C compaction. */
+        "UPDATE sessions SET state='idle', owner_instance=NULL, turn_iteration=0,"
+        "  updated_at=unixepoch() WHERE state='compacting';"
+        "DELETE FROM llm_jobs WHERE job_type <> 0;"
+        "ALTER TABLE llm_jobs DROP COLUMN job_type;"
+        "ALTER TABLE sessions DROP COLUMN compaction_fail_count;";
     char *err = NULL;
     if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
         LOG_ERROR_("schema v68: %s", err ? err : "?");
@@ -2606,54 +2626,6 @@ static const char *type_from_role(const Message *msg) {
     return "user_message";
 }
 
-/* Insert compaction summary entry and reparent.
- * - Inserts role=COMPACTION entry with parent_id = last_kept_id
- * - Reparents first_after_id to point to the new summary node
- * - Sets original_parent_id on reparented entry
- * Returns new compaction entry id (>0) or -1 on error. */
-int64_t entry_compact(sqlite3 *db, int64_t session_id, int64_t last_kept_id,
-                      int64_t first_after_id, const char *summary) {
-    if (!db || !summary) return -1;
-
-    /* Insert compaction entry as child of last_kept_id */
-    const char *ins_sql =
-        "INSERT INTO entries (parent_id, session_id, type, role, content, stop_reason,"
-        " token_estimate, content_bytes, tool_call_count)"
-        " VALUES (?,?,'compaction',4,?,0,?,?,0);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, ins_sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, last_kept_id);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    sqlite3_bind_text(stmt, 3, summary, -1, SQLITE_TRANSIENT);
-    int len = (int)strlen(summary);
-    sqlite3_bind_int(stmt, 4, TOKEN_ESTIMATE(len));
-    sqlite3_bind_int(stmt, 5, len);
-
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) return -1;
-
-    int64_t compact_id = sqlite3_last_insert_rowid(db);
-
-    /* Reparent first_after_id → compact_id, save original_parent_id */
-    const char *reparent_sql =
-        "UPDATE entries SET original_parent_id = parent_id, parent_id = ?"
-        " WHERE id = ? AND session_id = ?;";
-    if (sqlite3_prepare_v2(db, reparent_sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, compact_id);
-    sqlite3_bind_int64(stmt, 2, first_after_id);
-    sqlite3_bind_int64(stmt, 3, session_id);
-
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) return -1;
-
-    return compact_id;
-}
-
-
 /* Sum cost_nano for all entries in a session */
 int64_t session_cost(sqlite3 *db, int64_t session_id) {
     return db_scalar_i64(db, "SELECT COALESCE(SUM(cost_nano),0) FROM entries WHERE session_id=?;", session_id, 0);
@@ -2929,9 +2901,9 @@ int64_t entry_append_cron_result(sqlite3 *db, int64_t session_id,
     return (rc == SQLITE_DONE) ? sqlite3_last_insert_rowid(db) : -1;
 }
 
-/* State transition guard. Busy states (llm_running/tool_running/compacting/
+/* State transition guard. Busy states (llm_running/tool_running/
  * rate_limited) are reachable from idle or each other (a turn moves
- * llm_running → tool_running → llm_running, and ends llm_running → compacting);
+ * llm_running → tool_running → llm_running);
  * idle is reachable from any busy state plus awaiting_approval;
  * awaiting_approval is reachable from llm_running/tool_running;
  * tool_running is also reachable from awaiting_approval (approval resolved).
@@ -2950,14 +2922,13 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
         " turn_iteration = CASE WHEN ?1='idle' THEN 0 ELSE turn_iteration END,"
         " owner_instance = CASE WHEN ?1='idle' THEN NULL ELSE ?2 END"
         " WHERE id=?3 AND ("
-        "  (?1 IN ('llm_running','tool_running','compacting','rate_limited')"
-        "     AND state IN ('idle','llm_running','tool_running','compacting','rate_limited','awaiting_approval')) OR"
+        "  (?1 IN ('llm_running','tool_running','rate_limited')"
+        "     AND state IN ('idle','llm_running','tool_running','rate_limited','awaiting_approval')) OR"
         "  (?1 = 'awaiting_approval' AND state IN ('llm_running','tool_running')) OR"
         "  (?1 = 'settling' AND state IN ('idle','tool_running')) OR"
         "  (?1 = 'tool_running' AND state = 'settling') OR"
         "  (?1 = 'idle' AND state IN"
-        "     ('llm_running','tool_running','compacting','rate_limited','awaiting_approval',"
-        "      'settling'))"
+        "     ('llm_running','tool_running','rate_limited','awaiting_approval','settling'))"
         ");";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -4495,8 +4466,7 @@ int64_t db_cost_last_24h(sqlite3 *db) {
 /* Set of session states that mean "a turn was in flight" — a crash here leaves
  * the edge-triggered loop with no event to re-advance them. */
 #define RECOVER_STALE_STATES \
-    "('llm_running','tool_running','compacting','awaiting_approval','rate_limited'," \
-    "'settling')"
+    "('llm_running','tool_running','awaiting_approval','rate_limited','settling')"
 
 /* Dead-owner predicate: a stale-state session whose owner is gone. owner NULL
  * (legacy/idle-races) or an owner with no live processes row both qualify; a

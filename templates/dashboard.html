@@ -234,9 +234,9 @@ function list(a) { return a.length <= 1 ? a.join("") : a.slice(0, -1).join(", ")
 function firstLine(s, n) { s = String(s || "").split("\n")[0]; return s.length > (n || 90) ? s.slice(0, n || 90) + "…" : s; }
 function hostOf(u) { try { return new URL(u).host; } catch (e) { return String(u); } }
 
-var BUSY = ["llm_running", "tool_running", "compacting", "settling", "rate_limited", "awaiting_approval"];
+var BUSY = ["llm_running", "tool_running", "settling", "rate_limited", "awaiting_approval"];
 var STATE_WORD = { idle: ["idle", ""], llm_running: ["thinking", "ok"], tool_running: ["running a tool", "ok"],
-  compacting: ["summarizing", "ok"], settling: ["tidying up", "ok"], rate_limited: ["waiting to retry", "warn"], awaiting_approval: ["waiting on you", "warn"] };
+  settling: ["tidying up", "ok"], rate_limited: ["waiting to retry", "warn"], awaiting_approval: ["waiting on you", "warn"] };
 function stateWord(st) { return STATE_WORD[st] || [st, ""]; }
 
 /* What a parked call asks for, as a sentence after the agent's name. */
@@ -334,13 +334,6 @@ function needsYou(d) {
     n++;
     c.appendChild(row([s ? agentLink(s.agent_name) : null, s ? "'s " : "", sessionLink(e.session_id, "last turn"), " failed",
       h("span", { class: "why", text: firstLine(txt(e.content), 140) })], [pill("error", "bad"), " ", ago(e.created_at)]));
-  });
-  Object.keys(d.sessions).forEach(function (id) {
-    var s = d.sessions[id];
-    if (s.compaction_fail_count < 3) return;
-    n++;
-    c.appendChild(row([agentLink(s.agent_name), "'s ", sessionLink(s.id, "conversation"), " is too long and could not be summarized",
-      h("span", { class: "why", text: "Start a fresh session (send /new in its chat)." })], pill("stuck", "bad")));
   });
   d.channels.forEach(function (ch) {
     if (ch.status !== "active" || ch.pid > 0 || !ch.extension_name) return;

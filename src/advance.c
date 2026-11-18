@@ -91,6 +91,14 @@ static char *rich_cutoff_message(sqlite3 *db, int64_t session_id, const char *no
     return buf;
 }
 
+/* A row a session edit wrote in another's place (turn_edit.c: a rewritten
+ * message carries data.replaces) says again what was already said by the
+ * original; delivery is of what the agent wrote, when it wrote it. For the
+ * same reason "the newest assistant row by id" — the latest response — must
+ * skip it: a rewrite of an older message is newer by id. */
+#define SQL_NOT_STAND_IN \
+    "CASE WHEN json_valid(data) THEN json_extract(data,'$.replaces') END IS NULL"
+
 /* Did this session's turn end on an error? entries.stop_reason is an INTEGER
  * column: reading it as text and comparing to "error" (as this did until
  * 2026-08-01) never matched, so every errored child told its parent it
@@ -100,7 +108,8 @@ static int session_stopped_with_error(sqlite3 *db, int64_t session_id) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "SELECT stop_reason FROM entries WHERE session_id=?"
-            " AND role=2 ORDER BY id DESC LIMIT 1", -1, &st, NULL) != SQLITE_OK)
+            " AND role=2 AND " SQL_NOT_STAND_IN " ORDER BY id DESC LIMIT 1",
+            -1, &st, NULL) != SQLITE_OK)
         return 0;
     sqlite3_bind_int64(st, 1, session_id);
     int is_error = (sqlite3_step(st) == SQLITE_ROW) &&
@@ -168,12 +177,6 @@ static void edge_cursor_set(sqlite3 *db, int64_t edge_id, int64_t cursor) {
     sqlite3_step(st);
     sqlite3_finalize(st);
 }
-
-/* A row a session edit wrote in another's place (turn_edit.c: a rewritten
- * message carries data.replaces) says again what was already delivered as
- * the original; delivery is of what the agent wrote, when it wrote it. */
-#define SQL_NOT_STAND_IN \
-    "CASE WHEN json_valid(data) THEN json_extract(data,'$.replaces') END IS NULL"
 
 /* Content-bearing assistant prose in (cursor, ∞), oldest→newest, joined with
  * the rich_cutoff_message separator. Session-scoped by id order rather than
@@ -441,7 +444,7 @@ static int64_t oneshot_resolve(sqlite3 *db, int64_t child_sid, int64_t parent_si
         free(stored);
         free(scrubbed);
         /* Unpark parent — but only from a state that permits it. A parent
-         * sitting in awaiting_approval or compacting must not be stomped
+         * sitting in awaiting_approval must not be stomped
          * back to tool_running (that double-prompts / re-emits per sibling
          * completion); the eventual wake re-advances it from its own state. */
         char pstate[32] = {0};
@@ -455,8 +458,7 @@ static int64_t oneshot_resolve(sqlite3 *db, int64_t child_sid, int64_t parent_si
             }
             sqlite3_finalize(ps);
         }
-        if (strcmp(pstate, "awaiting_approval") != 0 &&
-            strcmp(pstate, "compacting") != 0)
+        if (strcmp(pstate, "awaiting_approval") != 0)
             session_set_state(db, parent_sid, "tool_running");
         woken = parent_sid;
     }
@@ -482,7 +484,7 @@ static char *no_response_text(sqlite3 *db, int64_t sid, int is_error) {
     if (is_error) return strdup("error: sub-agent terminated abnormally");
     int len_stop = db_scalar_i64(db,
         "SELECT e.stop_reason=2 /* STOP_REASON_LENGTH */ FROM entries e"
-        " WHERE e.session_id=?1 AND e.role=2"
+        " WHERE e.session_id=?1 AND e.role=2 AND " SQL_NOT_STAND_IN
         " ORDER BY e.id DESC LIMIT 1;", sid, 0) == 1;
     if (len_stop)
         return strdup("(no response: the model hit its output cap before"
@@ -538,7 +540,7 @@ static void channel_edge_ensure(sqlite3 *db, int64_t sid, const EdgeSessionRow *
 int session_final_truncated(sqlite3 *db, int64_t session_id) {
     return (int)db_scalar_i64(db,
         "SELECT stop_reason=2 FROM entries WHERE session_id=?1 AND role=2"
-        " ORDER BY id DESC LIMIT 1;", session_id, 0);
+        " AND " SQL_NOT_STAND_IN " ORDER BY id DESC LIMIT 1;", session_id, 0);
 }
 
 /* Push the content-bearing assistant entries in (cursor, ∞) one by one on an
@@ -1306,11 +1308,11 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
          * at that point means "no tool calls yet", not "plain-text answer",
          * so without this check the turn is misdiagnosed as done and the
          * final response is dropped. Stay parked and wait for the real
-         * signal, matching the "compacting" branch below. */
+         * signal. */
         int job_in_flight = 0;
         {   sqlite3_stmt *js;
             if (sqlite3_prepare_v2(db,
-                    "SELECT 1 FROM llm_jobs WHERE session_id=? AND job_type=0 LIMIT 1",
+                    "SELECT 1 FROM llm_jobs WHERE session_id=? LIMIT 1",
                     -1, &js, NULL) == SQLITE_OK) {
                 sqlite3_bind_int64(js, 1, session_id);
                 if (sqlite3_step(js) == SQLITE_ROW) job_in_flight = 1;
@@ -1450,86 +1452,6 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             return out;
         }
         AdvanceOutput out = iteration_end(db, session_id, agent, new_iter, max_iterations);
-        free(agent);
-        return out;
-    }
-
-    if (strcmp(state, "compacting") == 0) {
-        /* A wake while compacting is only a *completion* once the compaction
-         * job row is gone — the worker deletes it (llm_worker.c) before
-         * notifying. Any other wake (inbox insert, sibling sub-agent finish)
-         * must not flip us to idle and consume the inbox while the worker is
-         * still mutating the branch; stay parked and wait for the real signal. */
-        int compaction_in_flight = 0;
-        {   sqlite3_stmt *js;
-            if (sqlite3_prepare_v2(db,
-                    "SELECT 1 FROM llm_jobs WHERE session_id=? AND job_type=1 LIMIT 1",
-                    -1, &js, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(js, 1, session_id);
-                if (sqlite3_step(js) == SQLITE_ROW) compaction_in_flight = 1;
-                sqlite3_finalize(js);
-            }
-        }
-        if (compaction_in_flight) {
-            AdvanceOutput out = make_output(ADVANCE_WAITING, session_id, agent, iter);
-            free(agent);
-            return out;
-        }
-        /* Compaction finished — atomically go idle + check inbox */
-        if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
-            free(agent);
-            return make_output(ADVANCE_ERROR, session_id, NULL, 0);
-        }
-        session_set_state(db, session_id, "idle");
-        /* The idle branch's twin: this is the other place a turn opens off the
-         * inbox, so it takes the same guard. The session stays idle (already
-         * set above — compaction is done either way). */
-        StreakGate gate = streak_gate_check(db, session_id);
-        if (gate.refuse) {
-            int64_t wake = streak_refuse(db, session_id, &gate);
-            if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
-                sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-            else if (wake > 0)
-                wake_session(wake);   /* fail-notified blocking waiter */
-            AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, 0);
-            free(agent);
-            return out;
-        }
-        /* The idle branch's concurrency twin. The idle flip above stands
-         * (compaction is done either way); only the drain is deferred. */
-        ConcGate cgate = conc_gate_check(db, session_id);
-        if (cgate.defer) {
-            if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
-                sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-            AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, 0);
-            out.deferred = 1;
-            free(agent);
-            return out;
-        }
-        int consumed = inbox_consume_into_entries_locked(db, session_id, 100);
-        if (consumed > 0) {
-            if (gate.warn) streak_warn(db, session_id, &gate);
-            session_set_iteration(db, session_id, 0);
-            session_set_state(db, session_id, "llm_running");
-            LOG_INFO_("advance state=compacting next=llm_running inbox=%d", consumed);
-        }
-        if (consumed < 0) {
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-            free(agent);
-            return make_output(ADVANCE_ERROR, session_id, NULL, 0);
-        }
-        if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-            free(agent);
-            return make_output(ADVANCE_ERROR, session_id, NULL, 0);
-        }
-        if (consumed > 0) {
-            AdvanceOutput out = make_output(ADVANCE_DISPATCH_LLM, session_id, agent, 0);
-            free(agent);
-            return out;
-        }
-        LOG_INFO_("advance state=compacting next=idle reason=done");
-        AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, 0);
         free(agent);
         return out;
     }

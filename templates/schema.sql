@@ -159,7 +159,6 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
   session_id INTEGER NOT NULL,
   agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,
   recall INTEGER NOT NULL DEFAULT 0,
-  job_type INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
@@ -357,8 +356,8 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- anything itself. A chat's filter is not copied
                                             -- here: channel_chats.tool_filter is read live.
   state TEXT NOT NULL DEFAULT 'idle',         -- idle | llm_running | tool_running | awaiting_approval |
-                                              -- compacting | rate_limited | settling (a hook at the end of
-                                              -- an iteration is awaited; the inbox queues)
+                                              -- rate_limited | settling (a hook at the end of an
+                                              -- iteration is awaited; the inbox queues)
   owner_instance TEXT,                      -- live owner (processes.instance_id); NULL ⟺ state='idle'
   turn_iteration INTEGER NOT NULL DEFAULT 0,  -- LLM requests made so far in the current turn
   turn_context TEXT,                        -- <RELEVANT_CONTEXT> block, materialized once at turn
@@ -369,9 +368,6 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- measured request carried (usage_attribute); the
                                             -- next turn's first report subtracts it. NULL = none yet.
   leaf_id INTEGER DEFAULT -1,                 -- the newest entry of the active branch; -1 = none
-  compaction_fail_count INTEGER NOT NULL DEFAULT 0,  -- consecutive failed compaction attempts;
-                                            -- zeroed on success. At 3 the operator channel gets
-                                            -- one notice (llm_proc.c) — the agent is never told.
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   FOREIGN KEY (channel_name, chat_id) REFERENCES channel_chats(channel_name, chat_id)
@@ -495,8 +491,8 @@ CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
   );
 END;
 
--- Leaf advance is atomic with insert; compaction excluded (entry_compact inserts mid-branch).
--- A turn edit also inserts mid-branch (turn_edit.c) and puts the leaf back itself.
+-- Leaf advance is atomic with insert; a summary (compaction) is excluded: a turn edit
+-- inserts it mid-branch (turn_edit.c) and puts the leaf back itself.
 CREATE TRIGGER IF NOT EXISTS entries_leaf_ai AFTER INSERT ON entries
 WHEN NEW.type != 'compaction'
 BEGIN
@@ -658,8 +654,8 @@ CREATE TABLE IF NOT EXISTS hooks (
   event TEXT NOT NULL,                        -- event name: 'Stop', 'SubagentStop', 'ContextThreshold'
   path TEXT NOT NULL,                         -- handler file (in the shared store)
   enabled INTEGER NOT NULL DEFAULT 1,
-  wait INTEGER NOT NULL DEFAULT 1,            -- 1 = the session is held until the script ends and
-                                              -- its reply is applied; 0 = the manifest's
+  async INTEGER NOT NULL DEFAULT 0,           -- v68. 0 = the session is held until the script ends
+                                              -- and its reply is applied; 1 = the manifest's
                                               -- "async": started and not awaited, output discarded
   fail_count INTEGER NOT NULL DEFAULT 0,      -- consecutive failed runs, any session; zeroed by a
                                               -- run that works

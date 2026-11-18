@@ -290,6 +290,9 @@ static void ensure_default_agent(const char *base_dir) {
                            GRANT_ORIGIN("seed", 0));
         agent_config_grant(proc_db(), "Assistant", "tool", "secret_create", 0,
                            GRANT_ORIGIN("seed", 0));
+        /* The default extensions every new agent gets — the bundled
+         * compaction among them, installed just before this runs. */
+        agent_attach_default_extensions(proc_db(), "Assistant");
         /* Disabled 'heartbeat' bare-wake job — visible/enable-able in cron_list. */
         cron_seed_heartbeat(proc_db(), "Assistant");
         /* default_agent needs no write — 'Assistant' is the registry default */

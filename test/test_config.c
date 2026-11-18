@@ -75,10 +75,20 @@ static void test_registry_sync_drops_orphans(void) {
     assert(sqlite3_exec(db,
         "INSERT INTO config(key, default_value, description) VALUES"
         " ('agent_max_per_parent', '8', 'removed 2026-08-04'),"
-        " ('myext.poll_secs', '60', 'extension-owned');",
+        " ('myext.poll_secs', '60', 'extension-owned');"
+        /* Gone with the C compaction (v68), an operator's value and all. */
+        "INSERT INTO config(key, value, default_value) VALUES"
+        " ('turn_settled_timeout', '90', '60'), ('compaction', '0', '1'),"
+        " ('context_threshold', '0.7', '0.6'), ('compaction_target', '0.4', '0.3');",
         NULL, NULL, NULL) == SQLITE_OK);
     assert(config_registry_sync(db) == 0);
     sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM config WHERE key IN ('turn_settled_timeout','compaction',"
+        " 'context_threshold','compaction_target')", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 0);
+    sqlite3_finalize(st);
     assert(sqlite3_prepare_v2(db,
         "SELECT COUNT(*) FROM config WHERE key='agent_max_per_parent'",
         -1, &st, NULL) == SQLITE_OK);

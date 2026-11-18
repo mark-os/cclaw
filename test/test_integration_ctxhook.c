@@ -18,6 +18,17 @@
  *       drop an old turn when the script has nothing to summarise yet), the
  *       turn finishes, and the last request carries the summaries and not
  *       what they replaced.
+ *
+ * Those four run with the bundled `compaction` switched off for the agent
+ * (it is attached to the default agent of a fresh DB, which is checked).
+ * Then the bundled extension itself, the test's own switched off, each on a
+ * session of its own:
+ *
+ *   (e) its LLM() call answered by the mock: the turn compacts mid-turn
+ *       through it — one summary that folds the last, actions listed — C
+ *       never cuts it, and the turn finishes;
+ *   (f) its LLM() call failing: each run is a counted failure, C's trim keeps
+ *       the turn going, it finishes, and the third failure turns the hook off.
  */
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 600
@@ -182,6 +193,17 @@ static int set_limits(int64_t sid, char *agent_out, size_t cap) {
              head + 4 * step, head + 2 * step, agent ? agent : "");
     int rc = head > 0 && sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK
              && sqlite3_changes(db) > 0 ? 0 : -1;
+    /* The bundled compaction is the default agent's from its first run;
+     * these cases test their own hook, so it is switched off — rolling
+     * (decision 5) is exactly this. */
+    snprintf(sql, sizeof(sql),
+             "UPDATE agent_extensions SET enabled=0 WHERE agent_name='%s'"
+             " AND extension_name='compaction' AND enabled=1;", agent ? agent : "");
+    if (rc == 0 && (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK ||
+                    sqlite3_changes(db) != 1)) {
+        fprintf(stderr, "the default agent does not have the bundled compaction\n");
+        rc = -1;
+    }
     test_seed_agent(db, "Nobody");
     if (rc == 0) rc = config_set(db, "default_agent", "Nobody");
     if (rc == 0) rc = config_set(db, "hook_timeout", "20");
@@ -228,10 +250,15 @@ static int count_in_log(const char *path, const char *needle) {
 /* One long turn on `sid`. It must end on the model's answer, after every
  * step was asked for, having trimmed mid-turn more than once. *first_id is
  * where to start counting this turn's rows. */
+/* The bundled script's request: its instructions open with this. */
+#define SUMMARISER "You compress the oldest part of an AI agent"
+static int g_summariser_down;   /* (f): the bundled script's model answers 500 */
+
 static int long_turn(const char *exe, const char *url, int64_t sid, const char *label) {
     char sql[512];
     int64_t since = db_count("SELECT COALESCE(MAX(id),0) FROM entries;");
     mock_server_reset();
+    if (g_summariser_down) mock_server_answer_when(SUMMARISER, 500, "{\"error\":\"down\"}");
     for (int i = 0; i < STEPS; i++) {
         char *b = step_response(i);
         mock_server_enqueue(200, b);
@@ -330,6 +357,96 @@ static int summarise_turn(const char *exe, const char *url, int64_t sid) {
     }
     if (db_count("SELECT fail_count FROM hooks WHERE extension_name='compact'") != 0) {
         fprintf(stderr, "FAIL (d): the hook's applied replies were counted as failures\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* Which compaction the agent runs: the bundled one, or the test's own. */
+static int use_bundled(const char *agent, int bundled) {
+    sqlite3 *db = db_open(DB_PATH);
+    if (!db) return -1;
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "UPDATE agent_extensions SET enabled = (extension_name='compaction') = %d"
+             " WHERE agent_name='%s' AND extension_name IN ('compaction','compact');",
+             bundled, agent);
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK &&
+             sqlite3_changes(db) == 2 ? 0 : -1;
+    sqlite3_close(db);
+    return rc;
+}
+
+/* A session of its own for the agent, so the turn is the whole session. */
+static int64_t new_session(const char *agent) {
+    sqlite3 *db = db_open(DB_PATH);
+    if (!db) return -1;
+    int64_t sid = session_create(db, "bundled", agent, -1, 0);
+    sqlite3_close(db);
+    return sid;
+}
+
+static const char *RESP_SUMMARY =
+    "{\"choices\":[{\"message\":{\"role\":\"assistant\","
+    "\"content\":\"BUNDLED SUMMARY: each step looked and found nothing.\"},"
+    "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":9}}";
+
+/* (e): the bundled extension keeps the running turn small. */
+static int bundled_turn(const char *exe, const char *url, int64_t sid) {
+    char sql[512];
+    mock_server_reset();
+    mock_server_answer_when(SUMMARISER, 200, RESP_SUMMARY);
+    for (int i = 0; i < STEPS; i++) {
+        char *b = step_response(i);
+        mock_server_enqueue(200, b);
+        free(b);
+    }
+    mock_server_enqueue(200, RESP_FINAL);
+    if (run_cli_p(exe, url, "work through it", sid, LOG2) != 0 ||
+        mock_server_request_count() != STEPS + 1) {
+        fprintf(stderr, "FAIL (e): the run did not finish (%d requests)\n",
+                mock_server_request_count());
+        dump_log(LOG2);
+        return -1;
+    }
+    snprintf(sql, sizeof(sql),
+             "SELECT content='all done' AND stop_reason=1 FROM entries"
+             " WHERE id=(SELECT leaf_id FROM sessions WHERE id=%lld);", (long long)sid);
+    if (db_count(sql) != 1) {
+        fprintf(stderr, "FAIL (e): the turn did not end on the model's answer\n");
+        dump_log(LOG2);
+        return -1;
+    }
+    int applied = count_in_log(LOG2, "hook ContextThreshold ext=compaction outcome=applied");
+    int asked = mock_server_rule_hits();
+    snprintf(sql, sizeof(sql),
+             "SELECT COUNT(*) FROM entries WHERE session_id=%lld AND type='system'"
+             " AND json_extract(data,'$.source')='" TRIM_SOURCE "';", (long long)sid);
+    int64_t trims = db_count(sql);
+    /* On the branch: one summary, the bundled one, listing the actions. */
+    snprintf(sql, sizeof(sql),
+             "WITH RECURSIVE b(id) AS (SELECT leaf_id FROM sessions WHERE id=%lld"
+             " UNION ALL SELECT e.parent_id FROM entries e JOIN b ON e.id=b.id)"
+             " SELECT COUNT(*) FROM entries e JOIN b ON b.id=e.id WHERE e.type='compaction'"
+             " AND json_extract(e.data,'$.source')='hook:compaction'"
+             " AND e.content LIKE 'BUNDLED SUMMARY%%Actions already taken%%no_such_tool%%';",
+             (long long)sid);
+    int64_t on_branch = db_count(sql);
+    if (applied < 2 || asked != applied || trims != 0 || on_branch != 1) {
+        fprintf(stderr, "FAIL (e): %d applied, %d summariser calls, %lld C trims,"
+                " %lld bundled summaries on the branch\n",
+                applied, asked, (long long)trims, (long long)on_branch);
+        dump_log(LOG2);
+        return -1;
+    }
+    const char *last = mock_server_last_request_body();
+    if (!last || !strstr(last, "BUNDLED SUMMARY") || strstr(last, "MARK00") ||
+        !strstr(last, "MARK11") || !strstr(last, "work through it")) {
+        fprintf(stderr, "FAIL (e): the last request is not the summarised branch\n");
+        return -1;
+    }
+    if (db_count("SELECT fail_count FROM hooks WHERE extension_name='compaction'") != 0) {
+        fprintf(stderr, "FAIL (e): the bundled hook's runs were counted as failures\n");
         return -1;
     }
     return 0;
@@ -442,6 +559,30 @@ int main(void) {
     }
     if (summarise_turn(exe, url, sid) != 0) goto done;
     printf("  PASS long_turn_hook_summarises_running_turn\n");
+
+    /* (e) The bundled extension, as shipped. */
+    if (use_bundled(agent, 1) != 0) { fprintf(stderr, "FAIL: switch to bundled\n"); goto done; }
+    int64_t sid_e = new_session(agent);
+    if (sid_e <= 0 || bundled_turn(exe, url, sid_e) != 0) goto done;
+    printf("  PASS long_turn_bundled_compaction_summarises_mid_turn\n");
+
+    /* (f) The bundled extension with its model down. */
+    int64_t sid_f = new_session(agent);
+    if (sid_f <= 0) goto done;
+    g_summariser_down = 1;
+    if (long_turn(exe, url, sid_f, "(f) bundled, model down") != 0) goto done;
+    int failed = count_in_log(LOG2, "hook ContextThreshold ext=compaction outcome=failed");
+    if (failed < 1 || mock_server_rule_hits() != failed ||
+        db_count("SELECT (disabled=1) = (fail_count>=3) FROM hooks"
+                 " WHERE extension_name='compaction'") != 1 ||
+        (failed >= 3 && db_count("SELECT disabled FROM hooks"
+                                 " WHERE extension_name='compaction'") != 1)) {
+        fprintf(stderr, "FAIL (f): %d failed runs, %d summariser calls\n", failed,
+                mock_server_rule_hits());
+        dump_log(LOG2);
+        goto done;
+    }
+    printf("  PASS long_turn_bundled_compaction_fails_turn_finishes\n");
     printf("All context-hook integration tests passed.\n");
     rc = 0;
 

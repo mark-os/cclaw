@@ -104,6 +104,38 @@ static inline void test_agent_add_model(sqlite3 *db, const char *agent,
     sqlite3_finalize(s);
 }
 
+/* A summary in the shape the deleted C compaction left in existing
+ * databases (the shape a test of how such a DB is read needs): a compaction
+ * entry hung off last_kept_id, first_after_id re-pointed at it with its
+ * original parent remembered. The leaf does not move (entries_leaf_ai skips
+ * compaction rows). Returns the summary's id, or -1. */
+static inline int64_t test_legacy_compact(sqlite3 *db, int64_t session_id,
+                                          int64_t last_kept_id, int64_t first_after_id,
+                                          const char *summary) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO entries (parent_id, session_id, type, role, content, stop_reason,"
+            " token_estimate, content_bytes, tool_call_count)"
+            " VALUES (?1, ?2, 'compaction', 4, ?3, 0, octet_length(?3)/3 + 4, octet_length(?3), 0);",
+            -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(s, 1, last_kept_id);
+    sqlite3_bind_int64(s, 2, session_id);
+    sqlite3_bind_text(s, 3, summary, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(s);
+    sqlite3_finalize(s);
+    if (rc != SQLITE_DONE) return -1;
+    int64_t id = sqlite3_last_insert_rowid(db);
+    if (sqlite3_prepare_v2(db,
+            "UPDATE entries SET original_parent_id = parent_id, parent_id = ?1"
+            " WHERE id = ?2 AND session_id = ?3;", -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(s, 1, id);
+    sqlite3_bind_int64(s, 2, first_after_id);
+    sqlite3_bind_int64(s, 3, session_id);
+    rc = sqlite3_step(s);
+    sqlite3_finalize(s);
+    return rc == SQLITE_DONE ? id : -1;
+}
+
 /* Tier-leaf drivers for sandboxed tools: extract args_json into wire params
  * exactly as the dispatching parent does (tool_args_extract on a :memory:
  * db; NULL schema — every top-level key ships, file_edit's edits flatten),

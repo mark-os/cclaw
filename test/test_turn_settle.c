@@ -389,7 +389,7 @@ static void test_passed_over(void) {
 /* async — started, never held for, and its reply goes nowhere. */
 static void test_not_awaited(void) {
     install_as("obs", "Obs", 0, DROP_C1);
-    assert(count("SELECT wait FROM hooks WHERE extension_name='obs' AND ?1 = 1", 1) == 0);
+    assert(count("SELECT async FROM hooks WHERE extension_name='obs' AND ?1 = 1", 1) == 1);
     int64_t sid = seed_turn("Obs", 400);
     assert(turn_settle_begin(sid, "Obs") == 0);
     assert(is_state(sid, "idle"));

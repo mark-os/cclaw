@@ -287,35 +287,6 @@ static void test_tripped_leaf_does_not_resume(void) {
     printf("  PASS test_tripped_leaf_does_not_resume\n");
 }
 
-/* The compacting branch is the idle branch's twin — it consumes the inbox and
- * flips to llm_running too, so it takes the same gate. */
-static void test_compacting_twin_gated(void) {
-    sqlite3 *db = open_seeded();
-    int64_t sid = session_create(db, "t", "default", -1, 0);
-    set_cap(db, 2);
-    run_turn(db, sid, "cron");
-    run_turn(db, sid, "cron");
-
-    inbox_insert(db, sid, "cron", NULL, "fire");
-    assert(session_set_state(db, sid, "compacting") == 0);
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_NOOP);
-    assert(state_is(db, sid, "idle"));   /* compaction still ends */
-    assert(inbox_count(db, sid) == 1);
-    assert(notes(db, sid, "tripped") == 1);
-
-    /* Human row in the batch: the same branch opens the turn. */
-    inbox_insert(db, sid, "cli", NULL, "hi");
-    assert(session_set_state(db, sid, "compacting") == 0);
-    out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
-    assert(state_is(db, sid, "llm_running"));
-    assert(inbox_count(db, sid) == 0);
-
-    db_close(db);
-    printf("  PASS test_compacting_twin_gated\n");
-}
-
 int main(void) {
     TEST_INIT();
     printf("test_streak_guard:\n");
@@ -326,7 +297,6 @@ int main(void) {
     test_warn_at_eighty_percent();
     test_trip_notice_once_per_trip();
     test_tripped_leaf_does_not_resume();
-    test_compacting_twin_gated();
     printf("All streak guard tests passed.\n");
     return 0;
 }

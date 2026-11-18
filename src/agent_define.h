@@ -28,6 +28,12 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
                            const char *agents_dir, GrantOrigin origin,
                            char **err);
 
+/* Attach the extensions config agent_default_extensions names (those that
+ * exist) to a newly created agent — the bundled ones, shipped in the binary
+ * (extension_install_builtin), among them. An existing attachment, enabled
+ * or not, is left as it is. Every path that creates an agent calls this. */
+void agent_attach_default_extensions(sqlite3 *db, const char *name);
+
 /* Update an existing agent (update_agent tool). Authorization is
  * creator-or-self via agents.created_by; caps (profile, grants) apply against
  * the caller exactly as at creation. Fields overlay (absent = keep, unknown

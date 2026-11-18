@@ -1,7 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_session_condense.h"
 #include "db.h"
-#include "llm_proc.h"
 #include "tool_args.h"
 #include "turn_edit.h"
 #include <stdio.h>
@@ -22,6 +21,56 @@ static const char *CONDENSE_PARAMS =
     " goal, decisions, state, open threads. Everything you leave out is gone"
     " from your context\"}"
     "},\"required\":[\"from_turn\",\"to_turn\",\"summary\"]}";
+
+/* The mechanical carry-over (E2): the commitments a prose summary is most
+ * likely to drop, read straight from the DB in one pass. Same three live-state
+ * sources (and wording) the turn-fresh user context block uses
+ * (llm_payload.c), plus this agent's armed one-shots. Every section
+ * COALESCE'd away when empty; all-empty yields '' and no coda at all. */
+static const char SQL_STATE_CODA[] =
+    "WITH appr AS ("
+    /* Pending only — decided rows are history, not carryable state (see the
+     * matching rationale in llm_payload.c). */
+    "  SELECT group_concat("
+    "    '  #' || a.id || ' ' || COALESCE(a.tool_name, '?') ||"
+    "    ' — pending: waiting on a human decision', char(10)) AS txt"
+    "  FROM approvals a WHERE a.session_id=?1 AND a.state='pending'"
+    "), sub AS ("
+    "  SELECT group_concat("
+    "    '  session #' || s.id || ' (' || COALESCE(s.agent_name,'?') || ') — ' || s.state,"
+    "    char(10)) AS txt"
+    "  FROM sessions s WHERE s.parent_session_id=?1 AND s.state != 'idle'"
+    "), one AS ("
+    /* One-shots only (run_at set): a recurring job re-announces itself every
+     * fire, but a one-shot fires once and is gone — losing it loses the plan. */
+    "  SELECT group_concat("
+    "    '  ' || c.name || ' — fires ' || datetime(c.next_run_at,'unixepoch') || 'Z: ' || c.task,"
+    "    char(10)) AS txt"
+    "  FROM cron_jobs c"
+    "  WHERE c.agent_name=(SELECT agent_name FROM sessions WHERE id=?1)"
+    "    AND c.enabled=1 AND c.run_at IS NOT NULL AND c.next_run_at > unixepoch()"
+    ")"
+    "SELECT COALESCE('open approvals:' || char(10) || appr.txt || char(10), '') ||"
+    "       COALESCE('running sub-agents:' || char(10) || sub.txt || char(10), '') ||"
+    "       COALESCE('scheduled one-shots:' || char(10) || one.txt || char(10), '')"
+    " FROM appr, sub, one;";
+
+char *condense_carried_state(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, SQL_STATE_CODA, -1, &s, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_int64(s, 1, session_id);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t && t[0]) {
+            size_t n = strlen(t) + sizeof(CONDENSE_CODA_MARKER) + 2;
+            r = malloc(n);
+            if (r) snprintf(r, n, "%s\n%s", CONDENSE_CODA_MARKER, t);
+        }
+    }
+    sqlite3_finalize(s);
+    return r;
+}
 
 /* The edit, as a hook would send it: one summarise of whole turns. Built by
  * SQLite so the summary's text is escaped by the JSON writer, not by hand. */
@@ -90,7 +139,7 @@ char *tool_session_condense_handler(const char *arguments, void *user_data,
      * summary text. The author is the agent itself, which makes the
      * guarantee more valuable, not less: it cannot drop state by summarizing
      * carelessly. */
-    char *coda = compaction_state_coda(ctx->db, ctx->session_id);
+    char *coda = condense_carried_state(ctx->db, ctx->session_id);
     char *content = summary;
     if (coda) {
         size_t sz = strlen(summary) + strlen(coda) + 8;

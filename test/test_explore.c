@@ -206,7 +206,7 @@ static void test_meta_complete(void) {
               " WHERE (j.value->>'name', k.value->>'name', k.value->>'display') IN (VALUES"
               " ('entries','role','code'), ('entries','created_at','time'),"
               " ('models','degraded_until','time'), ('tools','enabled','bool'),"
-              " ('tools','droppable','bool'), ('hooks','wait','bool'))", m) == 6);
+              " ('tools','droppable','bool'), ('hooks','async','bool'))", m) == 6);
     assert(qi("SELECT ?1 ->> '$.codes.\"entries.role\".\"2\"' = 'assistant'", m) == 1);
     assert(qi("SELECT ?1 ->> '$.home[0].tables[0]' = 'agents'"
               " AND ?1 ->> '$.home[8].tables[0]' = 'approvals'", m) == 1);

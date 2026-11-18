@@ -62,6 +62,10 @@ when its `event` happens in a session of an agent the extension is attached to:
   `trim_threshold` and `prune_target`, and every entry in `args` its
   `tokens`. If the session is still over the threshold afterwards, the
   runtime trims it itself (oldest turns first, down to `prune_target`).
+  Every agent has one such hook already: the bundled extension `compaction`,
+  which summarises the oldest part of the session with your own model. An
+  agent without it (its attachment switched off) is on the runtime's trim
+  alone; another extension's `ContextThreshold` hook may replace it.
 
 The entry takes `event`, `handler`, `input` (below), `async` and `timeout`,
 nothing else. The session waits for the script (at most `timeout` seconds,
@@ -69,7 +73,8 @@ default config `hook_timeout`) and its JSON reply may edit the session — any
 turn of it, including the one still running when a `ContextThreshold` script
 runs between iterations; with `"async": true` it is not waited for and its
 reply is ignored. Three failures in a row (crash, timeout, refused reply)
-disable the hook until the extension is promoted again. The reply:
+disable the hook until the extension is promoted again (or the operator
+clears `hooks.disabled`). The reply:
 
 ```json
 {"edits":[{"op":"drop","call_id":"c4"},
@@ -87,7 +92,7 @@ disable the hook until the extension is promoted again. The reply:
 | `note` | `text`, `before`? | a note before an iteration (`before`: its `entry_id`); default before the answer, or at the end while the turn runs |
 | `drop_turns` | `from_turn`, `to_turn` | a run of whole turns before the newest leaves |
 | `summarise` | `text`, `from_turn`, `to_turn` | a run of whole turns before the newest is replaced by your text |
-| `summarise` | `text`, `from_iteration`, `to_iteration` | a run of whole iterations of the newest turn (never its answer's) is replaced by your text |
+| `summarise` | `text`, `from_iteration`, `to_iteration` | a run of whole iterations of the newest turn (never its answer's) is replaced by your text; the notes and summaries standing right before `from_iteration` (in `notes`, `before_iteration` = `from_iteration`) leave with it, so fold their text into yours |
 
 A `call_id` is looked up in the newest turn unless `turn_id` names another
 (providers reuse call ids across turns). `args` lists the newest turn's

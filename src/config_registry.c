@@ -32,7 +32,7 @@ static const ConfigDef s_defs[] = {
     { "web_admin_token",    "",
       "Admin dashboard auth token (auto-generated at daemon start; cclaw dashboard prints the URL)" },
     { "max_history_tokens", "0",
-      "History token cap per request (0 = derive from context window)" },
+      "History token cap per request (0 = the agent's trim threshold)" },
     { "channel_deaf_timeout", "300",
       "Seconds of received-traffic silence before a live channel runner is"
       " restarted (0 = off; per-channel <ext>.deaf_timeout overrides)" },
@@ -57,14 +57,8 @@ static const ConfigDef s_defs[] = {
     { "daily_cost_limit",   "5.00",
       "Max LLM spend in USD over a rolling 24h window (0 = unlimited;"
       " unpriced models cost 0 — token_rate_limit is the universal brake)" },
-    { "context_threshold",  "0.6",
-      "Context fill ratio that triggers compaction" },
     { "context_window",     "128000",
       "Global default context window in tokens (overridden per-model in models table)" },
-    { "compaction_target",  "0.3",
-      "Target context fill ratio after compaction" },
-    { "compaction",         "1",
-      "Automatic context compaction (1 = on, 0 = off)" },
     { "auto_recall",        "0",
       "Automatic memory recall into context (1 = on, 0 = off)" },
     { "recall_max_tokens",  "500",
@@ -90,11 +84,12 @@ static const ConfigDef s_defs[] = {
       " running tool child; parents blocked on sub-agents hold nothing. Past it,"
       " autonomous turn opens defer (inbox rows stay queued); batches with a"
       " human in them always open (0 = unlimited)" },
-    { "turn_settled_timeout", "60",
-      "Seconds a turnSettled hook script may run before it is killed and the"
-      " turn left untouched. While an awaited hook runs the session is held"
-      " and new messages queue, so this is also the longest such a wait can"
-      " be; raise it on slow boxes or links" },
+    { "hook_timeout", "60",
+      "Seconds a hook script (Stop, SubagentStop, ContextThreshold) may run"
+      " before it is killed and the session left as it was; a hook's own"
+      " \"timeout\" in its manifest overrides this. While an awaited hook runs"
+      " the session is held and new messages queue, so this is also the"
+      " longest such a wait can be; raise it on slow boxes or links" },
     { "max_autonomous_turn_streak", "50",
       "Consecutive turns a session may open with no human in the causal chain"
       " (cron fires, sub-agent results, system notices) before turn-open"

@@ -20,8 +20,10 @@ typedef struct {
     StopReason stop_reason;
     int tool_call_count;    /* number of tool_calls in assistant msg (0 otherwise) */
     int usage_in;           /* provider's prompt count, on a reported response only */
-    unsigned char fresh;    /* written after the newest compaction on the branch */
-    unsigned char turn_edited; /* its turn carries a turn-edit record */
+    unsigned char fresh;    /* written after the newest edit on the branch */
+    unsigned char reset;    /* a summary, or an entry carrying an edit's record
+                             * ($.turn_edits): a report older than it was sent
+                             * another branch */
     int tokens;             /* its size: the provider's count once a report has
                              * measured it (entries.tokens), the estimate until
                              * then (token_estimate, chars/3 + 4) */
@@ -37,22 +39,35 @@ typedef struct {
                             * the provider's measure of it when that is larger */
 } ContextPlan;
 
+/* Trim notes carry data.source = TRIM_SOURCE (turn_edit.c, the trim). */
+#define TRIM_SOURCE "fallback"
+
+/* The governing routing entry's numbers (context_limits): its model's window
+ * and when / how far the session is trimmed, defaults filled in. */
+typedef struct {
+    int window;     /* models.context_window, or the global default */
+    int threshold;  /* agent_models.trim_threshold, or 50% of window */
+    int target;     /* agent_models.prune_target, or 50% of threshold */
+} ContextLimits;
+
 /* Plan which entries to include in LLM request (pass 1).
  * Queries SQLite for branch metadata without loading content.
  * overhead: estimated head (tool definitions + system prompt); the provider's
  *           measure replaces it when larger (out->head).
- * context_window: effective context window for this request (0 = use cfg default).
+ * The budget is cfg->max_history_tokens when set, else the session's agent's
+ * trim_threshold (context_limits, cfg->context_window as the default window).
  * Returns 0 on success, -1 on error. Caller frees with context_plan_free(). */
 int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhead, ContextPlan *out);
 
+/* The branch as the next request would send it, measured, with no cut:
+ * entries (error/aborted responses and their results left out) at
+ * COALESCE(tokens, token_estimate), and out->head — the provider's measure
+ * of the head when usable, else `head`. The size of the session is
+ * out->head plus the entries' tokens. Free with context_plan_free(). */
+int context_measure(sqlite3 *db, int64_t session_id, int head, ContextPlan *out);
+
 /* Free a ContextPlan. */
 void context_plan_free(ContextPlan *plan);
-
-/* Index of the first entry compaction keeps: walk the tail back until
- * target_tokens is spent, then snap to a turn boundary. Returns 0 when there is
- * nothing to compact (the whole branch fits, or it is a single turn). Lives here
- * next to the request cut so both boundary rules read the same way. */
-int context_compaction_keep_from(const ContextPlan *plan, int target_tokens);
 
 /* Truncate tool result at write time. If content exceeds limits, writes
  * full output to <session tmp dir>/<tool_call_id>.out and returns truncated
@@ -90,20 +105,11 @@ void session_tmp_dir(sqlite3 *db, int64_t session_id, char *buf, size_t bufsz);
 int context_head_estimate(sqlite3 *db, const char *agent_name, int64_t session_id,
                           const Config *cfg, const char *system_prompt);
 
-/* Compaction trigger: the context's size (head + entries, each at the
- * provider's count once measured and its estimate until then), or the sent
- * payload /3, exceeds context_threshold x window less the last turn. */
-int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg);
-
-/* 1 when the leaf turn's measured size no longer fits in window - head, so
- * no cut can rescue the next request. *turn_tokens receives the turn's size. */
-int context_turn_overflows(sqlite3 *db, int64_t session_id, int window, int head,
-                           int *turn_tokens);
-
-/* Resolve the effective context window for an agent's model.
- * Priority: models.context_window (non-NULL) → global_default.
- * Returns global_default if agent has no model or model has NULL window. */
-int model_context_window(sqlite3 *db, const char *agent_name, int global_default);
+/* The governing entry of the agent's routing list — its first enabled chat
+ * model — read into *out, the 50% defaults filled in. default_window stands
+ * for a model with no context_window, or an agent with no list. */
+void context_limits(sqlite3 *db, const char *agent_name, int default_window,
+                    ContextLimits *out);
 
 char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
                           int max_tokens);

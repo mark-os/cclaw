@@ -678,8 +678,9 @@ static const char *SQL_CHANGES_AGENT_SETTINGS =
     "   CASE WHEN cur IS NOT NULL AND cur <> req"
     "        THEN '   (now: '||cur||')' ELSE '' END)"
     " FROM (SELECT j.key AS key,"
-    /* models entries may be bare id strings or {id, effort} objects — render
-     * the object form as id(effort) so the approver sees the effort ask, and
+    /* models entries may be bare id strings or {id, effort, trim_threshold,
+     * prune_target} objects — render the object form as id(effort)[trim…]
+     * so the approver sees the ask, and
      * mirror the spelling on the current side so an effort-only change diffs
      * as a change instead of a no-op. */
     "   CASE WHEN j.type IN ('array','object')"
@@ -687,13 +688,17 @@ static const char *SQL_CHANGES_AGENT_SETTINGS =
     "            CASE WHEN type='object'"
     "              THEN json_extract(value,'$.id')"
     "                   ||COALESCE('('||json_extract(value,'$.effort')||')','')"
+    "                   ||COALESCE('[trim at '||json_extract(value,'$.trim_threshold')||']','')"
+    "                   ||COALESCE('[prune to '||json_extract(value,'$.prune_target')||']','')"
     "              ELSE atom END, ', ') FROM json_each(j.value)),"
     "                   '(empty)')"
     "     ELSE COALESCE(j.atom,'(empty)') END AS req,"
     "   CASE j.key"
     "     WHEN 'models' THEN (SELECT group_concat(m, ', ')"
     "       FROM (SELECT model_id"
-    "               ||COALESCE('('||reasoning_effort||')','') m"
+    "               ||COALESCE('('||reasoning_effort||')','')"
+    "               ||COALESCE('[trim at '||trim_threshold||']','')"
+    "               ||COALESCE('[prune to '||prune_target||']','') m"
     "             FROM agent_models"
     "              WHERE agent_name=" SQL_CUR_AGENT " AND purpose='chat'"
     "              ORDER BY pos))"

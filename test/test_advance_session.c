@@ -100,9 +100,11 @@ static void test_max_iterations(void) {
     printf("  PASS test_max_iterations\n");
 }
 
-/* Context accounting: a turn whose own tool results outgrow the window is
- * cut like the iteration limit — a complete assistant entry, session idle,
- * ADVANCE_DONE — instead of being sent to the provider to 400. */
+/* The C check at the end of an iteration: a turn whose newest iteration
+ * alone is over the trim threshold (half a 2000-token window here) cannot be
+ * trimmed under it, and is cut like the iteration limit — a complete
+ * assistant entry, session idle, ADVANCE_DONE — instead of being sent to the
+ * provider to 400. */
 static void test_context_budget_cuts_turn(void) {
     sqlite3 *db = open_seeded(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
@@ -131,7 +133,7 @@ static void test_context_budget_cuts_turn(void) {
     char *leaf = db_scalar_text(db,
         "SELECT content FROM entries WHERE session_id=? AND role=2"
         " ORDER BY id DESC LIMIT 1;", sid);
-    assert(leaf && strstr(leaf, "context budget reached"));
+    assert(leaf && strstr(leaf, "context limit reached"));
     free(leaf);
     char *state = db_scalar_text(db, "SELECT state FROM sessions WHERE id=?;", sid);
     assert(state && strcmp(state, "idle") == 0);

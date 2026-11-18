@@ -28,10 +28,6 @@ int llm_worker_read(int64_t *session_id);
 /* Shut down worker threads. */
 void llm_worker_stop(void);
 
-/* Submit a session for compaction (summarization).
- * Returns 0 on success, -1 on error. */
-int llm_worker_submit_compact(sqlite3 *db, int64_t session_id, const char *agent_name);
-
 /* Submit a media_jobs row for transcription. The media_jobs row itself is the
  * crash-recovery record (no llm_jobs row). Returns 0 on success, -1 on error. */
 int llm_worker_submit_transcribe(sqlite3 *db, int64_t media_job_id,

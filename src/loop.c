@@ -14,11 +14,11 @@
 #include "context.h"
 #include "db.h"
 #include "dispatch.h"
-#include "llm_worker.h"
 #include "log.h"
 #include "proc.h"
 #include "resolve.h"
 #include "settle.h"
+#include "turn_edit.h"
 #include "types.h"
 
 /* Effective iteration cap for a session: agents.max_iterations (if > 0)
@@ -53,22 +53,23 @@ static const char *advance_action_name(AdvanceResult a) {
     case ADVANCE_DONE:           return "done";
     case ADVANCE_WAITING:        return "waiting";
     case ADVANCE_ERROR:          return "error";
+    case ADVANCE_RUN_HOOKS:      return "run_hooks";
     }
     return "?";
 }
 
-int turn_end_compact(int64_t session_id, const char *agent_name) {
-    if (!(proc_cfg()->compaction && llm_worker_alive() &&
-          session_needs_compaction(proc_db(), session_id, proc_cfg())))
-        return 0;
-    if (session_set_state(proc_db(), session_id, "compacting") != 0)
-        return 0;
-    if (llm_worker_submit_compact(proc_db(), session_id, agent_name) != 0) {
-        session_set_state(proc_db(), session_id, "idle");
-        return 0;
-    }
-    return 1;
+void turn_end_trim(int64_t session_id, const char *agent_name) {
+    /* At turn end there is no turn left to stop: a session still over its
+     * threshold after the trim is said in the log, and the next turn's
+     * first iteration meets the same check. */
+    TrimReport tr;
+    ContextLimits lim;
+    if (turn_edit_trim_check(proc_db(), session_id, agent_name, &tr, &lim) == TRIM_OVER)
+        LOG_WARN_("trim at turn end: session=%lld still ~%d tokens, over its %d-token"
+                  " threshold", (long long)session_id, tr.after, lim.threshold);
 }
+
+static void run_output(int64_t session_id, AdvanceOutput out);
 
 void run_advance(int64_t session_id) {
     int max_iter = session_max_iter(session_id);
@@ -81,7 +82,23 @@ void run_advance(int64_t session_id) {
     LOG_INFO_("advance action=%s iter=%d",
               advance_action_name(out.action), out.iteration);
     cclaw_log_set_ctx(session_id, -1, out.agent_name);
+    run_output(session_id, out);
+    cclaw_log_clear_ctx();
+}
 
+void run_iteration_end(int64_t session_id) {
+    cclaw_log_set_ctx(session_id, -1, NULL);
+    AdvanceOutput out = advance_iteration_end(proc_db(), session_id,
+                                              session_max_iter(session_id));
+    LOG_INFO_("advance action=%s iter=%d (iteration end)",
+              advance_action_name(out.action), out.iteration);
+    cclaw_log_set_ctx(session_id, -1, out.agent_name);
+    run_output(session_id, out);
+    cclaw_log_clear_ctx();
+}
+
+/* Do what advance_session (or advance_iteration_end) decided. */
+static void run_output(int64_t session_id, AdvanceOutput out) {
     switch (out.action) {
     case ADVANCE_DISPATCH_LLM:
         if (dispatch_llm_req(session_id, out.agent_name, out.iteration) < 0) {
@@ -148,15 +165,23 @@ void run_advance(int64_t session_id) {
         db_tool_call_free_pending(out.calls, out.tc_count);
         break;
     }
+    case ADVANCE_RUN_HOOKS:
+        /* Between iterations: ContextThreshold hooks when the session is
+         * over its threshold. A hook that is waited for holds the session,
+         * and the rest of the iteration's end runs when that hold ends
+         * (settle.c), against the session as the hook left it. */
+        if (!iteration_settle_begin(session_id, out.agent_name))
+            run_iteration_end(session_id);
+        break;
     case ADVANCE_DONE:
         deliver_response(session_id);
         if (proc_is_daemon()) update_verify_turn_done(proc_db(), session_id);
-        /* Turn end, in order: reply delivered (above) → the agent's
-         * turnSettled hooks → compaction check. A hook that is waited for
-         * holds the session, and the compaction check runs when that hold
-         * ends (settle.c), against the turn as the hook left it. */
+        /* Turn end, in order: reply delivered (above) → the agent's Stop
+         * hooks → its ContextThreshold hooks → the trim check. A hook that
+         * is waited for holds the session, and the trim check runs when that
+         * hold ends (settle.c), against the session as the hooks left it. */
         if (!turn_settle_begin(session_id, out.agent_name))
-            turn_end_compact(session_id, out.agent_name);
+            turn_end_trim(session_id, out.agent_name);
         if (!proc_is_daemon() && session_id == proc_cli_session()) {
             proc_set_cli_turn_active(0);
         }
@@ -171,9 +196,9 @@ void run_advance(int64_t session_id) {
         /* Root turn stays active while its own async work (forked tools or
          * sub-agents) is in flight; awaiting_approval has neither, so the prompt
          * is released for the user's y/n. Sub-agents never touch the root flag. */
-        /* A message typed while a turnSettled hook holds the session is
-         * queued, not lost: the turn it opens starts when the hold ends, so
-         * the prompt stays busy until then. */
+        /* A message typed while a hook holds the session is queued, not
+         * lost: the turn it opens starts when the hold ends, so the prompt
+         * stays busy until then. */
         if (!proc_is_daemon() && session_id == proc_cli_session()
             && !child_has_session(session_id)
             && !child_hook_holds(session_id)
@@ -190,7 +215,6 @@ void run_advance(int64_t session_id) {
         }
         break;
     }
-    cclaw_log_clear_ctx();
 }
 
 void deliver_response(int64_t session_id) {

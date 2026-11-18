@@ -544,20 +544,27 @@ static void usage_attribute(sqlite3 *db, int64_t session_id, int64_t iteration_i
         why = "model changed";
         goto done;
     }
-    if (boundary) {
-        /* Turn ids are minted per session. */
+    /* An edit since the previous report — a script's, the trim's, a
+     * summary, at a turn's end or between two iterations, to any turn —
+     * changed what that request was sent with, so the difference between
+     * the two reports measures nothing. Every edit leaves its record on an
+     * entry at least as new as the newest report whose ground it changed
+     * (turn_edit.c: the leaf after the edit, or the note or summary it
+     * wrote), so one look by id finds them all. Ids are creation order. */
+    {
         sqlite3_stmt *st;
         int edited = 0;
         if (sqlite3_prepare_v2(db,
-                "SELECT EXISTS(SELECT 1 FROM entries WHERE session_id=?1 AND turn_id=?2"
-                "  AND json_valid(data) AND json_type(data,'$.turn_edits')='array');",
+                "SELECT EXISTS(SELECT 1 FROM entries WHERE session_id=?1 AND id >= ?2"
+                "  AND (role=4 OR (json_valid(data)"
+                "                  AND json_type(data,'$.turn_edits')='array')));",
                 -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_int64(st, 1, session_id);
-            sqlite3_bind_int64(st, 2, p->turn_id);
+            sqlite3_bind_int64(st, 2, p->id);
             if (sqlite3_step(st) == SQLITE_ROW) edited = sqlite3_column_int(st, 0);
             sqlite3_finalize(st);
         }
-        if (edited) { why = "the turn before was edited"; goto done; }
+        if (edited) { why = "the session was edited since the previous report"; goto done; }
     }
 
     /* Rows the request did not carry: a response that stopped on an error
@@ -796,10 +803,11 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
 
     /* Cache-read count lands next to usage_in on the assistant entry — that is
      * the row rate_limit_check aggregates, and the archive row it also appears
-     * on may be pruned or disabled entirely. Written only when the provider
-     * reported a non-zero count, so a silent provider leaves the column NULL
-     * and the limiter falls back to full weight. */
-    if (asst_id > 0 && usage.cached_tokens > 0) {
+     * on may be pruned or disabled entirely. Written whenever the provider
+     * reported a count, zero included (-1 = not reported), so NULL means a
+     * silent provider: the limiter falls back to full weight and the cache
+     * view can tell "not reported" from a miss. */
+    if (asst_id > 0 && usage.cached_tokens >= 0) {
         sqlite3_stmt *cu;
         if (sqlite3_prepare_v2(db, "UPDATE entries SET cached_tokens=?1 WHERE id=?2",
                                -1, &cu, NULL) == SQLITE_OK) {

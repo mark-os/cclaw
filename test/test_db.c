@@ -246,10 +246,34 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
-/* Turn a fresh (current) database back into the v66 shape: no stored
- * measure on entries or for the context block. unshape_v66 starts here, so
- * every older patch test replays v67 over a real v66 shape. */
+/* Turn a fresh (current) database back into the v67 shape: agent_models
+ * has no trim numbers and no window triggers, hooks no pos, timeout or
+ * disabled. unshape_v67 starts here, so every older patch test replays v68
+ * over a real v67 shape. */
+static void unshape_v68(sqlite3 *db) {
+    char *err = NULL;
+    int rc = sqlite3_exec(db, "DROP TRIGGER log_agent_models_ins;"
+                              "DROP TRIGGER log_agent_models_upd;"
+                              "DROP TRIGGER log_agent_models_del;"
+                              "DROP TRIGGER agent_models_window_bi;"
+                              "DROP TRIGGER agent_models_window_bu;"
+                              "ALTER TABLE agent_models DROP COLUMN prune_target;"
+                              "ALTER TABLE agent_models DROP COLUMN trim_threshold;"
+                              "ALTER TABLE hooks DROP COLUMN pos;"
+                              "ALTER TABLE hooks DROP COLUMN timeout;"
+                              "ALTER TABLE hooks DROP COLUMN disabled;",
+                          NULL, NULL, &err);
+    if (rc != SQLITE_OK) fprintf(stderr, "unshape_v68: %s\n", err ? err : "?");
+    assert(rc == SQLITE_OK);
+    /* A v67 database's change-log triggers name the columns it has. */
+    assert(change_log_sync(db) == 0);
+}
+
+/* On to the v66 shape: no stored measure on entries or for the context
+ * block. unshape_v66 starts here, so every older patch test replays v67
+ * over a real v66 shape. */
 static void unshape_v67(sqlite3 *db) {
+    unshape_v68(db);
     int rc = sqlite3_exec(db, "ALTER TABLE entries DROP COLUMN tokens;"
                               "ALTER TABLE sessions DROP COLUMN turn_context_tokens;",
                           NULL, NULL, NULL);
@@ -1831,7 +1855,7 @@ static void test_schema_patch_v64(void) {
         " WHERE name IN ('wait','fail_count');", 0, -1) == 0);
     assert(sqlite3_exec(db,
         "INSERT INTO extensions(name, path, published) VALUES('ext','/e',1);"
-        "INSERT INTO hooks(extension_name, event, path) VALUES('ext','turnSettled','/e/r.qjs');"
+        "INSERT INTO hooks(extension_name, event, path) VALUES('ext','Stop','/e/r.qjs');"
         "INSERT INTO sessions(agent_name, state) VALUES(NULL,'compacting');",
         NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 63);
@@ -1843,7 +1867,7 @@ static void test_schema_patch_v64(void) {
         " AND enabled=1 AND path='/e/r.qjs';", 0, -1) == 1);
     /* NOT NULL with defaults: a writer that names neither column still works. */
     assert(sqlite3_exec(db, "INSERT INTO hooks(extension_name, event, path)"
-        " VALUES('ext','turnSettled','/e/later.qjs');", NULL, NULL, NULL) == SQLITE_OK);
+        " VALUES('ext','Stop','/e/later.qjs');", NULL, NULL, NULL) == SQLITE_OK);
     assert(db_scalar_i64(db, "SELECT wait*10 + fail_count FROM hooks"
         " WHERE path='/e/later.qjs';", 0, -1) == 10);
     /* The patched table has the columns where a fresh schema puts them. */
@@ -1853,7 +1877,7 @@ static void test_schema_patch_v64(void) {
         0, -1) == 2);
     /* The primary key survived the column drop and re-add. */
     assert((sqlite3_exec(db, "INSERT INTO hooks(extension_name, event, path)"
-        " VALUES('ext','turnSettled','/e/later.qjs');", NULL, NULL, NULL) & 0xff)
+        " VALUES('ext','Stop','/e/later.qjs');", NULL, NULL, NULL) & 0xff)
         == SQLITE_CONSTRAINT);
     /* Session states are not enumerated in the schema: the new one needs no
      * table change, and an existing row's state is untouched. */
@@ -1955,7 +1979,7 @@ static void test_schema_patch_v66(void) {
     assert(sqlite3_exec(db,
         "INSERT INTO extensions(name, path, published) VALUES('ext','/e',1);"
         "INSERT INTO hooks(extension_name, event, path, enabled, wait, fail_count)"
-        " VALUES('ext','turnSettled','/e/r.qjs',1,0,2);",
+        " VALUES('ext','Stop','/e/r.qjs',1,0,2);",
         NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 65);
 
@@ -1963,7 +1987,7 @@ static void test_schema_patch_v66(void) {
     int uv = 0;
     assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM hooks WHERE extension_name='ext'"
-        " AND event='turnSettled' AND path='/e/r.qjs' AND enabled=1 AND wait=0"
+        " AND event='Stop' AND path='/e/r.qjs' AND enabled=1 AND wait=0"
         " AND fail_count=2 AND input IS NULL;", 0, -1) == 1);
     assert(sqlite3_exec(db, "UPDATE hooks SET input='{\"history\":\"all\"}';",
                         NULL, NULL, NULL) == SQLITE_OK);
@@ -2018,6 +2042,60 @@ static void test_schema_patch_v67(void) {
     test_db_clean(path);
     test_db_clean(fresh_path);
     printf("  PASS test_schema_patch_v67\n");
+}
+
+/* v68: agent_models.trim_threshold / prune_target and the window triggers;
+ * hooks.pos / timeout / disabled. Existing routing rows keep everything and
+ * read NULL — the 50% defaults; existing hooks run first in their
+ * extension, on the default deadline, enabled.
+ * The patched tables (and change-log triggers) are shaped like fresh ones. */
+static void test_schema_patch_v68(void) {
+    const char *path = "/tmp/test_cclaw_schema_v68.sqlite";
+    const char *fresh_path = "/tmp/test_cclaw_schema_v68_fresh.sqlite";
+    test_db_clean(path);
+    test_db_clean(fresh_path);
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    unshape_v68(db);
+    test_seed_agent(db, "Keep");
+    assert(sqlite3_exec(db,
+        "INSERT INTO providers(name, base_url) VALUES ('p','http://p');"
+        "INSERT INTO models(id, provider_name, model, context_window)"
+        " VALUES ('p/m','p','m',8000);"
+        "INSERT INTO agent_models(agent_name, model_id, pos, reasoning_effort)"
+        " VALUES ('Keep','p/m',0,'high');"
+        "INSERT INTO extensions(name, path, published) VALUES('ext','/e',1);"
+        "INSERT INTO hooks(extension_name, event, path, wait, fail_count)"
+        " VALUES('ext','Stop','/e/r.qjs',0,2);", NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 67);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
+    assert(db_scalar_i64(db, "SELECT reasoning_effort='high' AND trim_threshold IS NULL"
+        " AND prune_target IS NULL FROM agent_models WHERE agent_name='Keep'", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT wait=0 AND fail_count=2 AND pos=0 AND timeout IS NULL"
+        " AND disabled=0 FROM hooks WHERE extension_name='ext'", 0, -1) == 1);
+    assert(sqlite3_exec(db, "UPDATE hooks SET timeout=0;", NULL, NULL, NULL) != SQLITE_OK);
+    /* The rules are live on the patched table. */
+    assert(sqlite3_exec(db, "UPDATE agent_models SET trim_threshold=9000;",
+                        NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE agent_models SET trim_threshold=6000, prune_target=6000;",
+                        NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE agent_models SET trim_threshold=6000, prune_target=2000;",
+                        NULL, NULL, NULL) == SQLITE_OK);
+
+    sqlite3 *fresh = db_open(fresh_path);
+    assert(fresh != NULL && db_ensure_schema(fresh) == 0);
+    char *got = schema_shape(db), *want = schema_shape(fresh);
+    if (strcmp(got, want) != 0) fprintf(stderr, "v68 shape differs:\n%s\n---\n%s\n", got, want);
+    assert(strcmp(got, want) == 0);
+    free(got); free(want);
+    db_close(fresh);
+    db_close(db);
+    test_db_clean(path);
+    test_db_clean(fresh_path);
+    printf("  PASS test_schema_patch_v68\n");
 }
 
 static void test_agent_models_capability_gate(void) {
@@ -2108,6 +2186,7 @@ int main(void) {
     test_schema_patch_v65();
     test_schema_patch_v66();
     test_schema_patch_v67();
+    test_schema_patch_v68();
     test_agent_models_capability_gate();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");

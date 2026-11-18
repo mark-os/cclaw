@@ -102,11 +102,12 @@ static void test_promote_parks_apply_approval(void) {
         "\"parameters\":{\"type\":\"object\",\"properties\":"
         "{\"channel\":{\"type\":\"string\"}}},"
         "\"hosts\":[\"api.good.test\"],\"droppable\":true,\"handler\":\"tx.qjs\"}],"
-        "\"hooks\":[{\"event\":\"turnSettled\",\"handler\":\"rev.qjs\"},"
-        "{\"event\":\"turnSettled\",\"handler\":\"log.qjs\",\"wait\":false,"
+        "\"hooks\":[{\"event\":\"Stop\",\"handler\":\"rev.qjs\"},"
+        "{\"event\":\"Stop\",\"handler\":\"log.qjs\",\"async\":true,"
         " \"input\":{\"history\":5,\"history_results\":false,\"max_bytes\":2000000}},"
-        "{\"event\":\"turnSettled\",\"handler\":\"all.qjs\",\"input\":{\"history\":\"all\"}},"
-        "{\"event\":\"turnSettled\",\"handler\":\"one.qjs\",\"input\":{\"history\":1}}]}");
+        "{\"event\":\"SubagentStop\",\"handler\":\"all.qjs\",\"input\":{\"history\":\"all\"}},"
+        "{\"event\":\"ContextThreshold\",\"handler\":\"one.qjs\",\"timeout\":120,"
+        " \"input\":{\"history\":1}}]}");
     write_file(WS "/extensions/goodx/tx.qjs", "'ok'");
     write_file(WS "/extensions/goodx/rev.qjs", "return '{}'");
     write_file(WS "/extensions/goodx/log.qjs", "return '{}'");
@@ -145,16 +146,20 @@ static void test_promote_parks_apply_approval(void) {
      * an awaited one may edit it; a droppable tool's calls are what it may
      * take out. A count ("1 hooks") would say none of that. */
     assert(strstr(args, "hosts=[api.good.test] droppable params="));
-    assert(strstr(args, "- hook turnSettled rev.qjs: runs after every turn, reads it, and may drop"));
-    assert(strstr(args, "- hook turnSettled log.qjs: runs after every turn and reads it; not waited for"));
+    assert(strstr(args, "- hook Stop rev.qjs: runs after every turn, reads the session, and may drop"));
+    assert(strstr(args, "- hook Stop log.qjs: runs after every turn and reads the session;"
+                        " not waited for"));
     /* ...and how much of the conversation each one is sent. */
-    assert(strstr(args, "the session waits for it. It is sent the finished turn\\n"));
-    assert(strstr(args, "cannot change it. It is sent the finished turn and the last 5 turns"
+    assert(strstr(args, "the session waits for it. It is sent the newest turn\\n"));
+    assert(strstr(args, "cannot change it. It is sent the newest turn and the last 5 turns"
                         " before it (their tool results without the text), at most 2000000 bytes"));
-    assert(strstr(args, "- hook turnSettled all.qjs: runs after every turn, reads it, and may"));
-    assert(strstr(args, "It is sent the finished turn and the whole conversation before it\\n"));
-    assert(strstr(args, "It is sent the finished turn and the turn before it\\n") ||
-           strstr(args, "It is sent the finished turn and the turn before it\""));
+    assert(strstr(args, "- hook SubagentStop all.qjs: runs after every turn of a sub-agent,"
+                        " reads the session, and may"));
+    assert(strstr(args, "It is sent the newest turn and the whole conversation before it\\n"));
+    assert(strstr(args, "- hook ContextThreshold one.qjs: runs when a session grows past its"
+                        " trim threshold, reads the session"));
+    assert(strstr(args, "the session waits for it (at most 120 s). It is sent the newest turn"
+                        " and the turn before it"));
     sqlite3_finalize(st);
     /* ...and the session is parked awaiting it. */
     assert(sqlite3_prepare_v2(g_db,

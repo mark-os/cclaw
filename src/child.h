@@ -74,7 +74,9 @@ typedef struct {
                              * script output; NULL for a script-only fire */
     /* HOOK fields */
     char hook_ext[128];     /* the extension the script belongs to */
-    char *hook_path;        /* the script; with hook_ext, the hooks row's key */
+    char *hook_path;        /* the script; with hook_ext and hook_event, the hooks row's key */
+    char hook_event[32];    /* the event it was started for */
+    int hook_pos;           /* hooks.pos, for the walk to the next hook */
     int hook_wait;          /* 1 = its session is held in 'settling' for it */
     /* Background job (blocking-vs-background step 4): the call was answered
      * at dispatch with a synthetic result (tool_calls.status='background');

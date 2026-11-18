@@ -1489,6 +1489,52 @@ static int patch_v65_utility(sqlite3 *db) {
     return change_log_sync(db);
 }
 
+/* v68: session hooks and compaction (plan/projects/session-hooks-and-
+ * compaction.md). v68 is unreleased and the whole project ships as this one
+ * schema version: later stages extend this patch rather than adding v69.
+ * So far: agent_models.trim_threshold / prune_target — when C trims a
+ * session and how far — NULL on every existing row, which is the 50%
+ * defaults; the global context_threshold / compaction_target keys they
+ * replace leave the config table at the next config_registry_sync (as does
+ * turn_settled_timeout, now hook_timeout). And hooks.pos / timeout /
+ * disabled, for the events of stage 1: an existing hook runs first in its
+ * extension, on the default deadline, enabled. The change_log triggers name
+ * every logged column, so they are rebuilt. */
+static int patch_v68_hooks(sqlite3 *db) {
+    static const char sql[] =
+        "ALTER TABLE agent_models ADD COLUMN trim_threshold INTEGER"
+        "  CHECK (trim_threshold IS NULL OR trim_threshold > 0);"
+        "ALTER TABLE agent_models ADD COLUMN prune_target INTEGER"
+        "  CHECK (prune_target IS NULL OR (prune_target > 0"
+        "    AND (trim_threshold IS NULL OR prune_target < trim_threshold)));"
+        "CREATE TRIGGER agent_models_window_bi"
+        " BEFORE INSERT ON agent_models"
+        " WHEN NEW.trim_threshold > (SELECT m.context_window FROM models m WHERE m.id = NEW.model_id)"
+        " BEGIN"
+        "   SELECT RAISE(ABORT, 'agent_models: trim_threshold is larger than the model''s context window');"
+        " END;"
+        "CREATE TRIGGER agent_models_window_bu"
+        " BEFORE UPDATE OF trim_threshold, model_id ON agent_models"
+        " WHEN NEW.trim_threshold > (SELECT m.context_window FROM models m WHERE m.id = NEW.model_id)"
+        " BEGIN"
+        "   SELECT RAISE(ABORT, 'agent_models: trim_threshold is larger than the model''s context window');"
+        " END;"
+        /* Hooks: the manifest's order, its per-hook timeout, and the flag
+         * three failures in a row set. turnSettled is renamed Stop with no
+         * data patch: no deployment has such a row. */
+        "ALTER TABLE hooks ADD COLUMN pos INTEGER NOT NULL DEFAULT 0;"
+        "ALTER TABLE hooks ADD COLUMN timeout INTEGER"
+        "  CHECK (timeout IS NULL OR timeout > 0);"
+        "ALTER TABLE hooks ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;";
+    char *err = NULL;
+    if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
+        LOG_ERROR_("schema v68: %s", err ? err : "?");
+        sqlite3_free(err);
+        return -1;
+    }
+    return change_log_sync(db);
+}
+
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
     /* Frozen at v40 (2026-07-31, D16): entries.turn_id/llm_responses.turn_id
      * were renamed to iteration_id (they always identified one LLM request) and
@@ -1923,6 +1969,8 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "ALTER TABLE entries ADD COLUMN tokens INTEGER;"
       "ALTER TABLE sessions ADD COLUMN turn_context_tokens INTEGER;",
       NULL },
+    /* v68: session hooks and compaction — see patch_v68_hooks. */
+    { 68, NULL, patch_v68_hooks },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
@@ -2668,8 +2716,10 @@ int session_count_active_agents(sqlite3 *db) {
 }
 
 /* Sessions holding a resource right now: an llm_jobs row (a worker thread is
- * running or queued for it — turn or compaction alike) or a running tool
- * child. Deliberately NOT "non-idle sessions": a parent blocked on a blocking
+ * running or queued for it — turn or compaction alike), a running tool
+ * child, or a hook script the session is held for (state 'settling'; a
+ * script is straight-line code, so at most one LLM() call at a time). A hook
+ * nobody waits for holds a child slot, not a gate slot. Deliberately NOT "non-idle sessions": a parent blocked on a blocking
  * launch_agent sits in tool_running consuming nothing, and counting it would
  * deadlock nested delegation — the drain gate would hold back the very
  * children the parent is waiting on. Its 'running' launch_agent call is a
@@ -2683,7 +2733,9 @@ int session_count_resource_holders(sqlite3 *db, int64_t exclude_session_id) {
         " UNION"
         " SELECT session_id FROM tool_calls"
         "  WHERE status='running' AND name != 'launch_agent'"
-        "    AND session_id != ?1);",
+        "    AND session_id != ?1"
+        " UNION"
+        " SELECT id FROM sessions WHERE state='settling' AND id != ?1);",
         exclude_session_id, 0);
 }
 
@@ -2883,9 +2935,10 @@ int64_t entry_append_cron_result(sqlite3 *db, int64_t session_id,
  * idle is reachable from any busy state plus awaiting_approval;
  * awaiting_approval is reachable from llm_running/tool_running;
  * tool_running is also reachable from awaiting_approval (approval resolved).
- * settling (a turnSettled hook is awaited, settle.c) is entered from idle
- * only and left to idle only: nothing that resumes a turn can pull a held
- * session out from under the script. */
+ * settling (a hook at the end of an iteration is awaited, settle.c) is
+ * entered from idle (turn end) or tool_running (between iterations) and left
+ * to idle or tool_running only: nothing that starts or resumes a request can
+ * pull a held session out from under the script. */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     /* Stamp ownership in the same guarded CAS: idle clears the owner (invariant
      * state='idle' ⟺ owner_instance IS NULL), any busy state stamps this
@@ -2900,7 +2953,8 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
         "  (?1 IN ('llm_running','tool_running','compacting','rate_limited')"
         "     AND state IN ('idle','llm_running','tool_running','compacting','rate_limited','awaiting_approval')) OR"
         "  (?1 = 'awaiting_approval' AND state IN ('llm_running','tool_running')) OR"
-        "  (?1 = 'settling' AND state = 'idle') OR"
+        "  (?1 = 'settling' AND state IN ('idle','tool_running')) OR"
+        "  (?1 = 'tool_running' AND state = 'settling') OR"
         "  (?1 = 'idle' AND state IN"
         "     ('llm_running','tool_running','compacting','rate_limited','awaiting_approval',"
         "      'settling'))"
@@ -3079,6 +3133,34 @@ int db_entry_set_network_hosts(sqlite3 *db, int64_t entry_id, const char *hosts_
 }
 
 /* Inbox primitives */
+
+/* Which agent hears about what concerns the operator: the routing default,
+ * the one a human is actually talking to; else the oldest agent. */
+char *db_default_agent_name(sqlite3 *db) {
+    char *name = config_get(db, "default_agent");
+    if (name && name[0]) return name;
+    free(name);
+    sqlite3_stmt *st = NULL;
+    char *out = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT name FROM agents ORDER BY created_at LIMIT 1",
+                           -1, &st, NULL) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW)
+        out = strdup((const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    return out;
+}
+
+int64_t db_recent_session(sqlite3 *db, const char *agent) {
+    sqlite3_stmt *st = NULL;
+    int64_t sid = 0;
+    if (sqlite3_prepare_v2(db, "SELECT id FROM sessions WHERE agent_name=?"
+                               " ORDER BY updated_at DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, agent, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) sid = sqlite3_column_int64(st, 0);
+    }
+    sqlite3_finalize(st);
+    return sid;
+}
 
 int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source,
                      const char *source_ref, const char *payload) {

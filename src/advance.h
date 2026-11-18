@@ -59,7 +59,10 @@ typedef enum {
     ADVANCE_DISPATCH_TOOLS,  /* dispatch pending tool calls */
     ADVANCE_DONE,            /* turn complete — deliver response */
     ADVANCE_WAITING,         /* parked for blocking sub-agent */
-    ADVANCE_ERROR            /* unrecoverable error */
+    ADVANCE_ERROR,           /* unrecoverable error */
+    ADVANCE_RUN_HOOKS        /* an iteration ended and the agent has ContextThreshold
+                              * hooks: run them if the session is over its trim
+                              * threshold (settle.c), then advance_iteration_end */
 } AdvanceResult;
 
 /* Filled by advance_session for the caller to act on */
@@ -81,6 +84,14 @@ typedef struct {
  * Does NOT fork processes — caller acts on the returned AdvanceOutput.
  * max_iterations: cap on turn iterations (0 = 25 default). */
 AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iterations);
+
+/* The rest of an iteration's end, after its ContextThreshold hooks (or
+ * when none ran): the C check (trim to prune_target when still over the
+ * threshold; stop the turn when even that cannot get it under), then the
+ * next request (DISPATCH_LLM) or the cutoff (DONE). Only for a session in
+ * tool_running whose iteration advance_session has already counted; NOOP
+ * otherwise. */
+AdvanceOutput advance_iteration_end(sqlite3 *db, int64_t session_id, int max_iterations);
 
 /* Evaluate every delivery edge of a session at a turn boundary
  * (specs/delivery.md): the one-shot blocking reply edge first (its firing

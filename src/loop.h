@@ -24,11 +24,18 @@ int session_max_iter(int64_t session_id);
  * returns. Self-recursive: an all-inline tool batch re-advances immediately. */
 void run_advance(int64_t session_id);
 
-/* The compaction check that closes a turn: if the idle session needs
- * compacting, mark it 'compacting' and hand it to the worker. Returns 1 when
- * a compaction is now in flight (its completion drains the inbox), 0 when
- * the session was left idle. */
-int turn_end_compact(int64_t session_id, const char *agent_name);
+/* The rest of an iteration's end after its ContextThreshold hooks — the C
+ * check, then the next request or the cutoff (advance_iteration_end) —
+ * executed like run_advance. For a session in tool_running whose iteration
+ * is already counted: settle.c's hold release, or run_advance when no hook
+ * held the session. */
+void run_iteration_end(int64_t session_id);
+
+/* The C check that closes a turn, the same one advance_session runs at the
+ * end of every iteration: if the idle session is over its trim threshold,
+ * trim it to prune_target (turn_edit_trim). Synchronous; the session stays
+ * idle either way. */
+void turn_end_trim(int64_t session_id, const char *agent_name);
 
 /* Turn-final delivery: CLI stdout for the root session, or the daemon's FIFO
  * nudge for whatever advance_deliver_boundary already wrote to the outbox. */

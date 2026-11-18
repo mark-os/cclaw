@@ -1,6 +1,6 @@
 # turn-review
 
-A `turnSettled` hook that tidies a turn after it ends. Once the reply has
+A `Stop` hook that tidies a turn after it ends. Once the reply has
 been delivered, a cheap model reads the finished turn and picks what later
 turns no longer need:
 
@@ -55,13 +55,15 @@ cp -r extensions/turn-review ~/.cclaw/agents/<Agent>/workspace/extensions/
 
 then tell the agent: *promote the extension draft turn-review*. The approval
 reads `promote 'turn-review': adds 0 tools, 1 hooks, … 2 config keys`, then
-`- hook turnSettled review.qjs: runs after every turn, reads it, and may drop
-tool calls, replace results and add notes; the session waits for it. It is
-sent the finished turn`. From
+`- hook Stop review.qjs: runs after every turn, reads the session, and may
+drop tool calls, replace results and add notes; the session waits for it. It
+is sent the newest turn`. From
 the agent's next turn the hook runs; no restart. For a second agent, have the
 owner `extension_publish` it and the other agent `extension_attach` it.
 
-Only top-level sessions are reviewed, never a sub-agent's.
+Only top-level sessions are reviewed: a sub-agent's turns fire
+`SubagentStop`, which this manifest does not register. A copy of the entry
+with `"event": "SubagentStop"` would review those too.
 
 ## Give it a utility model
 
@@ -84,7 +86,7 @@ and costs more.
 |---|---|---|
 | `turn-review.min_tool_tokens` | 4000 | A turn with less tool traffic than this is left alone, and the model is not asked. |
 | `turn-review.max_turn_tokens` | 60000 | A turn bigger than this is not reviewed; ordinary compaction deals with it. |
-| `turn_settled_timeout` | 60 | The runtime's deadline for any hook script, in seconds. The review asks its model with a 45 s limit. |
+| `hook_timeout` | 60 | The runtime's deadline for any hook script, in seconds (a manifest entry's own `"timeout"` overrides it). The review asks its model with a 45 s limit. |
 
 Token counts are the runtime's estimates (chars/3, `entries.token_estimate`), not the provider's count, which can run higher. The prompt, the note length and the
 marker wording are constants at the top of `review.qjs`: edit the draft and
@@ -95,7 +97,7 @@ promote again.
 - **The dashboard**: a session's page marks the turn "edited", shows it as the
   agent now sees it, and under "What was taken out" the dropped calls and the
   original text of each shortened result.
-- **The log**, one line per turn: `hook turnSettled ext=turn-review
+- **The log**, one line per turn: `hook Stop ext=turn-review
   outcome=applied` (or `nothing`, `rejected`, `failed`, with a reason).
 - **The record** on the turn's final assistant entry — what left, what
   replaced what, sizes before and after, and the script's own list of calls:
@@ -127,7 +129,8 @@ UPDATE agent_extensions SET enabled=0
 - A model answer that cannot be read, names a call that does not exist, asks
   to drop a protected call, or gives a line range outside the result changes
   nothing: the script returns no edits. A model that cannot be reached is a
-  failed run; after three in a row the runtime tells the operator once. The
+  failed run; after three in a row the runtime disables the hook and tells the
+  default agent once. Promoting the extension again turns it back on. The
   turn is untouched either way.
 - The agent is told when a result was shortened, and that it had read all of
   it. Without that it tends to distrust its own earlier answer.

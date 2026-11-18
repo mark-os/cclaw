@@ -3,9 +3,13 @@
 #include "db.h"
 #include "llm_proc.h"
 #include "tool_args.h"
+#include "turn_edit.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Who wrote the summary, in its data.source and in the edit's record. */
+#define CONDENSE_SOURCE "tool:session_condense"
 
 static const char *CONDENSE_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
@@ -19,73 +23,25 @@ static const char *CONDENSE_PARAMS =
     " from your context\"}"
     "},\"required\":[\"from_turn\",\"to_turn\",\"summary\"]}";
 
-/* One branch row, root→leaf. Only what the range arithmetic needs. */
-typedef struct {
-    int64_t id;
-    int64_t turn;
-} BranchRow;
-
-/* The active branch (leaf→root by parent_id, returned root→leaf) — the same
- * walk context assembly does, so what we can condense is exactly what the
- * model can see. */
-static BranchRow *branch_load(sqlite3 *db, int64_t session_id, int *out_n) {
-    *out_n = 0;
-    int64_t leaf = db_scalar_i64(db, "SELECT leaf_id FROM sessions WHERE id=?;",
-                                 session_id, -1);
-    if (leaf < 0) return NULL;
-
-    static const char *SQL =
-        "WITH RECURSIVE branch(id, parent_id, turn_id, lvl) AS ("
-        "  SELECT id, parent_id, turn_id, 0 FROM entries"
-        "   WHERE id=?1 AND session_id=?2"
-        "  UNION ALL"
-        "  SELECT e.id, e.parent_id, e.turn_id, b.lvl+1"
-        "    FROM entries e JOIN branch b ON e.id=b.parent_id"
-        "   WHERE b.lvl < 100000"
-        ") SELECT id, COALESCE(turn_id,0) FROM branch ORDER BY lvl DESC;";
-
+/* The edit, as a hook would send it: one summarise of whole turns. Built by
+ * SQLite so the summary's text is escaped by the JSON writer, not by hand. */
+static char *condense_reply(sqlite3 *db, int64_t from_turn, int64_t to_turn,
+                            const char *text) {
     sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db, SQL, -1, &st, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_int64(st, 1, leaf);
-    sqlite3_bind_int64(st, 2, session_id);
-
-    int cap = 64, n = 0;
-    BranchRow *rows = malloc((size_t)cap * sizeof(*rows));
-    while (rows && sqlite3_step(st) == SQLITE_ROW) {
-        if (n == cap) {
-            cap *= 2;
-            BranchRow *tmp = realloc(rows, (size_t)cap * sizeof(*rows));
-            if (!tmp) { free(rows); rows = NULL; break; }
-            rows = tmp;
-        }
-        rows[n].id = sqlite3_column_int64(st, 0);
-        rows[n].turn = sqlite3_column_int64(st, 1);
-        n++;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_object('edits', json_array(json_object('op','summarise',"
+            "  'from_turn',?1,'to_turn',?2,'text',?3)));", -1, &st, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(st, 1, from_turn);
+    sqlite3_bind_int64(st, 2, to_turn);
+    sqlite3_bind_text(st, 3, text, -1, SQLITE_STATIC);
+    char *out = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) out = strdup(v);
     }
     sqlite3_finalize(st);
-    if (!rows) return NULL;
-    *out_n = n;
-    return rows;
-}
-
-/* Insert + reparent as one unit: a summary entry whose successor never got
- * reparented would be an invisible duplicate of the range it replaces. */
-static int64_t condense_commit(sqlite3 *db, int64_t session_id,
-                               int64_t last_kept_id, int64_t first_after_id,
-                               const char *content) {
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK)
-        return -1;
-    int64_t cid = entry_compact(db, session_id, last_kept_id, first_after_id,
-                                content);
-    if (cid <= 0) {
-        sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
-        return -1;
-    }
-    if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) {
-        sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
-        return -1;
-    }
-    return cid;
+    return out;
 }
 
 char *tool_session_condense_handler(const char *arguments, void *user_data,
@@ -129,62 +85,11 @@ char *tool_session_condense_handler(const char *arguments, void *user_data,
     }
     free(owner);
 
-    int n = 0;
-    BranchRow *rows = branch_load(ctx->db, ctx->session_id, &n);
-    if (!rows || n == 0) {
-        free(rows); free(summary);
-        return tool_fail(is_error, "error: session #%lld has no context to "
-                                   "condense", (long long)ctx->session_id);
-    }
-
-    int first = -1, last = -1;
-    for (int i = 0; i < n; i++) {
-        if (rows[i].turn == from_turn && first < 0) first = i;
-        if (rows[i].turn == to_turn) last = i;
-    }
-    int64_t live_turn = rows[n - 1].turn;
-
-    char *err = NULL;
-    if (first < 0 || last < 0)
-        err = tool_fail(is_error, "error: turn %lld is not in this session's "
-                                  "context (turns present: 1..%lld)",
-                        (long long)(first < 0 ? from_turn : to_turn),
-                        (long long)live_turn);
-    else if (to_turn >= live_turn)
-        err = tool_fail(is_error, "error: turn %lld is the live turn — the "
-                                  "turn you are in cannot be condensed; "
-                                  "to_turn must be %lld or earlier",
-                        (long long)live_turn, (long long)(live_turn - 1));
-    else if (first == 0)
-        err = tool_fail(is_error, "error: turn %lld is the oldest turn in "
-                                  "context — there is no earlier entry to "
-                                  "attach the summary to",
-                        (long long)from_turn);
-    if (err) { free(rows); free(summary); return err; }
-
-    /* Whole turns only: everything between the endpoints must belong to the
-     * range, and the range must not straddle its own edges. Turn ids ascend
-     * along the branch, so this holds for any well-formed range — it is the
-     * backstop for a branch the reparenting of an earlier condense left in a
-     * shape we did not anticipate. */
-    for (int i = first; i <= last; i++) {
-        if (rows[i].turn >= from_turn && rows[i].turn <= to_turn) continue;
-        free(rows); free(summary);
-        return tool_fail(is_error, "error: turns %lld-%lld are not a "
-                                   "contiguous range in this session",
-                         (long long)from_turn, (long long)to_turn);
-    }
-
-    int64_t last_kept_id = rows[first - 1].id;
-    int64_t first_after_id = rows[last + 1].id;
-    int condensed = last - first + 1;
-    free(rows);
-
-    /* Same coda as overflow compaction (E2): live commitments — open
-     * approvals, running sub-agents, scheduled one-shots — are carried
-     * mechanically rather than trusted to the summary text. Here the author
-     * is the agent itself, which makes the guarantee more valuable, not less:
-     * it cannot drop state by summarizing carelessly. */
+    /* Live commitments — open approvals, running sub-agents, scheduled
+     * one-shots — are carried mechanically rather than trusted to the
+     * summary text. The author is the agent itself, which makes the
+     * guarantee more valuable, not less: it cannot drop state by summarizing
+     * carelessly. */
     char *coda = compaction_state_coda(ctx->db, ctx->session_id);
     char *content = summary;
     if (coda) {
@@ -197,21 +102,33 @@ char *tool_session_condense_handler(const char *arguments, void *user_data,
         free(coda);
     }
 
-    int64_t cid = condense_commit(ctx->db, ctx->session_id, last_kept_id,
-                                  first_after_id, content);
+    /* The same edit a hook's summarise is — checks, record, write path
+     * (turn_edit.c) — on whole turns before the one this call is part of. */
+    char *reply = condense_reply(ctx->db, from_turn, to_turn, content);
     if (content != summary) free(content);
     free(summary);
-
-    if (cid <= 0)
-        return tool_fail(is_error, "error: could not write the compaction "
-                                   "entry (DB error)");
-
+    if (!reply) return tool_fail(is_error, "error: could not build the edit (DB error)");
+    char *err = NULL;
+    TurnEditResult rc = turn_edit_apply(ctx->db, ctx->session_id, reply,
+                                        CONDENSE_SOURCE, &err);
+    free(reply);
+    if (rc != TURN_EDIT_APPLIED) {
+        /* The edit's reason names the op ("summarise: …"); the agent called
+         * session_condense. */
+        const char *why = err ? err : "nothing to condense";
+        if (strncmp(why, "summarise: ", 11) == 0) why += 11;
+        char *msg = tool_fail(is_error, "error: %s", why);
+        free(err);
+        return msg;
+    }
+    int64_t cid = db_scalar_i64(ctx->db,
+        "SELECT MAX(id) FROM entries WHERE session_id=? AND type='compaction'"
+        "   AND json_extract(data,'$.source')='" CONDENSE_SOURCE "';", ctx->session_id, -1);
     char *out = malloc(192);
     if (!out) return tool_fail(is_error, "error: OOM");
     snprintf(out, 192,
-             "condensed turns %lld-%lld (%d entries) into compaction entry "
-             "#%lld; those turns are no longer in context",
-             (long long)from_turn, (long long)to_turn, condensed,
+             "condensed turns %lld-%lld into compaction entry #%lld; those turns "
+             "are no longer in context", (long long)from_turn, (long long)to_turn,
              (long long)cid);
     return out;
 }

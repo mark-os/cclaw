@@ -158,11 +158,8 @@ typedef struct {
     int web_port;
     int context_window;     /* global default context window (overridden per-model in models table) */
     int max_iterations;     /* agent loop iteration cap */
-    int max_history_tokens; /* token budget for context (0 = 60% of context_window) */
+    int max_history_tokens; /* request cut budget (0 = the governing trim_threshold) */
     int shell_timeout;      /* default shell_exec timeout in seconds (0 = 30) */
-    float context_threshold;  /* trigger compaction/truncation when tokens > this × context_window (default 0.6) */
-    float compaction_target;  /* compact down to this × context_window (default 0.3) */
-    int compaction;           /* 1=summarize via LLM (default), 0=truncate only */
     int token_rate_limit;   /* max tokens/hr (default 1000000, 0=unlimited) */
     int64_t daily_cost_limit_nano; /* max spend/24h in nanodollars (0=unlimited) */
     LogLevel log_level;     /* error|warn|info|debug|trace */

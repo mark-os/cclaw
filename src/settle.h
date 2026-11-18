@@ -1,11 +1,24 @@
 #ifndef CCLAW_SETTLE_H
 #define CCLAW_SETTLE_H
 
-/* The turnSettled event: when a turn has ended and its reply is out, run the
- * agent's turnSettled hooks, and — for a hook that is waited for — hold the
- * session in state 'settling' until the script is gone and its reply has been
- * through turn_edit_apply. The executor side of script hooks, as loop.c is
- * of advance.c; see specs/hooks.md.
+/* The end of an iteration, the executor side of script hooks: start the
+ * agent's hooks for it and — for a hook that is waited for — hold the session
+ * in state 'settling' until the script is gone and its reply has been through
+ * turn_edit_apply. As loop.c is of advance.c; see specs/hooks.md.
+ *
+ * The order (plan: session hooks and compaction, "Order at the end of each
+ * iteration"), one hold for all of it:
+ *
+ *   1. the iteration ended the turn with an answer: Stop (SubagentStop in a
+ *      sub-agent's session) hooks, one at a time;
+ *   2. the session is over its trim threshold: ContextThreshold hooks, one
+ *      at a time, each only while it is still over;
+ *   3. the C check: still over, C trims to prune_target;
+ *   4. the next request (mid-turn) or idle (turn end).
+ *
+ * Hooks nobody waits for ("async") start with their step, all at once, and
+ * cannot change the session. A failure leaves the session as it was and the
+ * order goes on.
  *
  * Event-loop thread only: everything here reads the child table.
  */
@@ -25,15 +38,20 @@ typedef struct {
                          * reporter owns and frees it */
 } SettleChild;
 
-/* A turn has just ended normally on session_id and been delivered. Start the
- * agent's turnSettled hooks if the turn qualifies. Returns 1 when the session
- * is now held ('settling') for an awaited hook — the caller skips the
- * compaction check, which runs when the hold ends — and 0 when nothing holds
- * it: no hook, turn out of range, or nothing could be started. */
+/* A turn has just ended on session_id (idle) and been delivered: steps 1
+ * and 2. Returns 1 when the session is now held ('settling') for an awaited
+ * hook — the caller skips the C check, which runs when the hold ends — and 0
+ * when nothing holds it: the caller runs the C check (turn_end_trim). */
 int turn_settle_begin(int64_t session_id, const char *agent);
 
-/* A hook child ended. Applies an awaited hook's reply, counts the outcome,
- * then starts the agent's next awaited hook or ends the hold. */
+/* An iteration has ended mid-turn (tool_running, counted; advance_session
+ * said ADVANCE_RUN_HOOKS): step 2. Returns 1 when the session is now held;
+ * 0 when not — the caller goes on with run_iteration_end. */
+int iteration_settle_begin(int64_t session_id, const char *agent);
+
+/* A hook child ended. Applies an awaited hook's reply, counts the outcome
+ * (the third failure in a row disables the hook and tells the default
+ * agent), then starts the next awaited hook in the order or ends the hold. */
 void turn_settle_child_done(const SettleChild *sc);
 
 /* Backstop for a hold whose child is gone without this module hearing of it:

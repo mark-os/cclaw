@@ -680,8 +680,6 @@ static int update_install_file(sqlite3 *db, const char *self, const char *path) 
  * exits non-zero. A healthy deployment pays one config read per boot and one
  * per finished turn until the first good one. */
 
-static char *default_agent_name(sqlite3 *db);
-static int64_t recent_session(sqlite3 *db, const char *agent);
 static int rollback_target_ok(const char *snap, const char *prev, int *snap_version,
                               int64_t *snap_max, char *why, size_t cap);
 static void rollback_failed_path(char *out, size_t cap, const char *db_path,
@@ -694,8 +692,8 @@ static int rollback_marker_write(const char *db_path, const char *failed,
 static char g_rollback_tag[64];
 
 static void update_verify_notify(sqlite3 *db, const char *text) {
-    char *agent = default_agent_name(db);
-    int64_t sid = agent ? recent_session(db, agent) : 0;
+    char *agent = db_default_agent_name(db);
+    int64_t sid = agent ? db_recent_session(db, agent) : 0;
     if (sid > 0) inbox_insert(db, sid, "update", "verify", text);
     LOG_ERROR_("%s", text);
     fprintf(stderr, "%s\n", text);
@@ -809,8 +807,8 @@ int update_verify_startup(sqlite3 *db) {
                      "`cclaw rollback` shows what would be discarded and asks.",
                      tag, starts);
             update_verify_notify(db, note);
-            char *agent = default_agent_name(db);
-            int64_t sid = agent ? recent_session(db, agent) : 0;
+            char *agent = db_default_agent_name(db);
+            int64_t sid = agent ? db_recent_session(db, agent) : 0;
             if (sid > 0) channel_notify_operator(db, dbfile, sid, note);
             free(agent);
             return 0;
@@ -918,8 +916,8 @@ void update_verify_serving(sqlite3 *db) {
     /* Nothing proves a build like doing its job, and an idle box may not take
      * a turn for hours. One note makes the first one happen now — and its
      * answer is the operator hearing, in the chat, that the update landed. */
-    char *agent = default_agent_name(db);
-    int64_t sid = agent ? recent_session(db, agent) : 0;
+    char *agent = db_default_agent_name(db);
+    int64_t sid = agent ? db_recent_session(db, agent) : 0;
     if (sid > 0) {
         char text[256];
         snprintf(text, sizeof(text),
@@ -961,34 +959,6 @@ void update_verify_turn_done(sqlite3 *db, int64_t session_id) {
 
 static time_t g_next_check;   /* 0 = not scheduled yet */
 
-/* Which agent hears about it: the routing default, which is the one a human is
- * actually talking to. */
-static char *default_agent_name(sqlite3 *db) {
-    char *name = config_get(db, "default_agent");
-    if (name && name[0]) return name;
-    free(name);
-    sqlite3_stmt *st = NULL;
-    char *out = NULL;
-    if (sqlite3_prepare_v2(db, "SELECT name FROM agents ORDER BY created_at LIMIT 1",
-                           -1, &st, NULL) == SQLITE_OK &&
-        sqlite3_step(st) == SQLITE_ROW)
-        out = strdup((const char *)sqlite3_column_text(st, 0));
-    sqlite3_finalize(st);
-    return out;
-}
-
-static int64_t recent_session(sqlite3 *db, const char *agent) {
-    sqlite3_stmt *st = NULL;
-    int64_t sid = 0;
-    if (sqlite3_prepare_v2(db, "SELECT id FROM sessions WHERE agent_name=?"
-                               " ORDER BY updated_at DESC LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(st, 1, agent, -1, SQLITE_STATIC);
-        if (sqlite3_step(st) == SQLITE_ROW) sid = sqlite3_column_int64(st, 0);
-    }
-    sqlite3_finalize(st);
-    return sid;
-}
-
 /* Tell the default agent a newer build exists, once per tag. Shared by the
  * release check and the channel check. Returns 0 when the agent has been told
  * (now or before), -1 when there was nobody to tell yet — the caller retries. */
@@ -1001,8 +971,8 @@ static int notify_available(sqlite3 *db, const char *tag, const char *what) {
     free(notified);
     if (already) return 0;
 
-    char *agent = default_agent_name(db);
-    int64_t sid = agent ? recent_session(db, agent) : 0;
+    char *agent = db_default_agent_name(db);
+    int64_t sid = agent ? db_recent_session(db, agent) : 0;
     if (sid <= 0) {
         /* Nobody to tell yet. Leave notified_tag unset so the note is
          * delivered once a session exists, rather than being lost. */

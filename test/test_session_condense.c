@@ -1,6 +1,8 @@
-/* session_condense: the sanctioned session-edit op. What matters here is that
- * it produces the *same* branch shape overflow compaction does, and that every
- * refusal is a refusal (nothing written) rather than a partial edit. */
+/* session_condense: the agent's own session edit. It is a summarise of whole
+ * turns through turn_edit.c — the same checks, record and writing a hook's
+ * reply gets — so what matters here is the branch shape it leaves, the
+ * record, and that every refusal is a refusal (nothing written) rather than a
+ * partial edit. */
 #include "agent_config.h"
 #include "config_registry.h"
 #include "db.h"
@@ -96,6 +98,17 @@ static void test_happy_path(void) {
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM entries WHERE session_id=?"
                              " AND content='u2';", sid, 0) == 1);
 
+    /* Written and recorded as any edit is: the summary says who wrote it
+     * and carries the first replaced turn's id; the record, on the leaf,
+     * lists the four entries that left. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM entries WHERE session_id=?"
+                             " AND type='compaction' AND turn_id=2"
+                             " AND json_extract(data,'$.source')='tool:session_condense'",
+                         sid, 0) == 1);
+    assert(db_scalar_i64(db, "SELECT json_array_length(data,'$.turn_edits[0].left_branch')"
+                             " FROM entries WHERE id=(SELECT leaf_id FROM sessions"
+                             " WHERE id=?)", sid, 0) == 4);
+
     teardown(db);
     printf("  PASS test_happy_path\n");
 }
@@ -137,13 +150,6 @@ static void test_refuses_bad_range(void) {
     assert(strstr(r, "not in this session") != NULL);
     free(r);
 
-    /* Oldest turn: nothing to hang the summary off */
-    r = call(db, sid, "{\"from_turn\":1,\"to_turn\":2,\"summary\":\"s\"}",
-             &is_error);
-    assert(is_error == 1);
-    assert(strstr(r, "oldest turn") != NULL);
-    free(r);
-
     /* Empty summary */
     r = call(db, sid, "{\"from_turn\":2,\"to_turn\":3,\"summary\":\"\"}",
              &is_error);
@@ -154,6 +160,43 @@ static void test_refuses_bad_range(void) {
     assert(branch_len(db, sid) == before);
     teardown(db);
     printf("  PASS test_refuses_bad_range\n");
+}
+
+/* The first turn has nothing before it; the summary becomes the root. */
+static void test_from_first_turn(void) {
+    sqlite3 *db = setup();
+    int64_t sid = build_session(db);
+    int is_error = 0;
+    char *r = call(db, sid, "{\"from_turn\":1,\"to_turn\":2,\"summary\":\"s12\"}",
+                   &is_error);
+    assert(is_error == 0);
+    free(r);
+    int n = 0;
+    Entry *b = session_get_branch(db, sid, &n);
+    assert(n == 5);
+    assert(b[0].message.role == ROLE_COMPACTION && strcmp(b[0].message.content, "s12") == 0);
+    assert(strcmp(b[1].message.content, "u3") == 0 && b[1].original_parent_id > 0);
+    entry_branch_free(b, n);
+    assert(db_scalar_i64(db, "SELECT parent_id FROM entries WHERE session_id=?"
+                             " AND type='compaction'", sid, 0) == -1);
+    teardown(db);
+    printf("  PASS test_from_first_turn\n");
+}
+
+/* A secret in the summary refuses it, as any text an edit writes. */
+static void test_refuses_secret(void) {
+    sqlite3 *db = setup();
+    int64_t sid = build_session(db);
+    int before = branch_len(db, sid);
+    int is_error = 0;
+    char *r = call(db, sid, "{\"from_turn\":2,\"to_turn\":3,"
+                            "\"summary\":\"key AKIAIOSFODNN7EXAMPLE\"}", &is_error);
+    assert(is_error == 1);
+    assert(strstr(r, "secret") != NULL);
+    free(r);
+    assert(branch_len(db, sid) == before);
+    teardown(db);
+    printf("  PASS test_refuses_secret\n");
 }
 
 static void test_refuses_other_agents_session(void) {
@@ -208,6 +251,8 @@ int main(void) {
     test_happy_path();
     test_refuses_live_turn();
     test_refuses_bad_range();
+    test_from_first_turn();
+    test_refuses_secret();
     test_refuses_other_agents_session();
     test_not_in_default_baseline();
     printf("PASS session_condense\n");

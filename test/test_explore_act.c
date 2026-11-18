@@ -359,6 +359,31 @@ static void test_models(void) {
     assert(qeq("SELECT count(*) FROM agent_models WHERE agent_name='Beta' AND purpose='utility'", "0"));
     assert(qeq("SELECT group_concat(model_id, ',') FROM (SELECT * FROM agent_models WHERE agent_name='Beta'"
                " AND purpose='chat' ORDER BY pos)", "mock/c,mock/a"));
+    /* Trim numbers: set on the chat list; an entry that leaves them out
+     * keeps them (a page that does not show them cannot reset them); null
+     * clears; the schema's refusals come back as plain words. */
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/c\",\"trim_threshold\":9000,\"prune_target\":3000},"
+             "{\"model_id\":\"mock/a\",\"reasoning_effort\":\"medium\"}]}");
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/a\"},{\"model_id\":\"mock/c\"}]}");
+    assert(qeq("SELECT group_concat(model_id || ':' || COALESCE(trim_threshold, '-') || ':'"
+               " || COALESCE(prune_target, '-'), ',') FROM (SELECT * FROM agent_models"
+               " WHERE agent_name='Beta' AND purpose='chat' ORDER BY pos)",
+               "mock/a:-:-,mock/c:9000:3000"));
+    has(act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+                 "{\"model_id\":\"mock/a\"},{\"model_id\":\"mock/c\"}]}"), "Nothing changed");
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/a\"},{\"model_id\":\"mock/c\",\"prune_target\":null}]}");
+    assert(qeq("SELECT trim_threshold || ':' || COALESCE(prune_target, '-') FROM agent_models"
+               " WHERE agent_name='Beta' AND model_id='mock/c'", "9000:-"));
+    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+                 "{\"model_id\":\"mock/a\",\"trim_threshold\":0}]}"), "token counts");
+    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+                 "{\"model_id\":\"mock/a\",\"trim_threshold\":100,\"prune_target\":200}]}"),
+        "below its trim threshold");
+    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"image\",\"models\":["
+                 "{\"model_id\":\"mock/b\",\"trim_threshold\":100}]}"), "chat list only");
     printf("PASS: test_models\n");
 }
 

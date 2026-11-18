@@ -107,7 +107,7 @@ static void test_cut_point(void) {
     }
 
     Config cfg = {0};
-    cfg.context_window = 200; /* tiny: 120 token budget */
+    cfg.context_window = 200; /* tiny: a 100-token budget (half the window) */
     ContextPlan plan = {0};
     int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan returned error");
@@ -160,48 +160,6 @@ static void test_multi_user_turn_not_split(void) {
         FAIL("cut split a turn that opened with several user messages");
     if (plan.entries[plan.cut].turn_id == plan.entries[plan.cut - 1].turn_id)
         FAIL("cut did not land on a turn boundary");
-
-    context_plan_free(&plan);
-    db_close(db);
-    PASS();
-}
-
-/* Compaction keeps a tail that fits its target — the boundary it summarizes up
- * to is a turn boundary, so a summary never lands inside a turn. */
-static void test_compaction_keep_from_is_turn_boundary(void) {
-    TEST(compaction_keep_from_is_turn_boundary);
-    sqlite3 *db = test_db_open(":memory:");
-    if (!db) FAIL("db_open");
-
-    char pad[401];
-    memset(pad, 'x', sizeof(pad) - 1);
-    pad[sizeof(pad) - 1] = '\0';
-
-    int64_t sid = session_create(db, "test", NULL, -1, 0);
-    /* Six turns, each opening with two drained user entries. */
-    for (int t = 0; t < 6; t++) {
-        inbox_insert(db, sid, "channel", NULL, pad);
-        inbox_insert(db, sid, "job_result", NULL, pad);
-        if (inbox_consume_into_entries(db, sid, 100) != 2) FAIL("inbox drain");
-        append_msg(db, sid, ROLE_ASSISTANT, pad, STOP_REASON_STOP, NULL, 0);
-    }
-
-    Config cfg = {0};
-    cfg.context_window = 128000;
-    ContextPlan plan = {0};
-    if (context_plan(db, sid, &cfg, 0, &plan) != 0) FAIL("context_plan returned error");
-    if (plan.count != 18) FAIL("wrong count");
-
-    /* Target fits ~2 turns' worth (each entry is 104 tokens, 3 per turn). */
-    int keep_from = context_compaction_keep_from(&plan, 700);
-    if (keep_from <= 0) FAIL("expected something to compact");
-    if (keep_from >= plan.count) FAIL("keep_from past the end");
-    if (plan.entries[keep_from].turn_id == plan.entries[keep_from - 1].turn_id)
-        FAIL("compaction boundary landed inside a turn");
-
-    /* A target big enough for the whole branch compacts nothing. */
-    if (context_compaction_keep_from(&plan, 100000) != 0)
-        FAIL("nothing should be compacted when the branch fits");
 
     context_plan_free(&plan);
     db_close(db);
@@ -276,8 +234,8 @@ static void test_plan_no_content_access(void) {
     PASS();
 }
 
-static void test_model_context_window(void) {
-    TEST(model_context_window);
+static void test_context_limits_window(void) {
+    TEST(context_limits_window);
     sqlite3 *db = test_db_open(":memory:");
     if (!db) FAIL("db_open");
 
@@ -292,14 +250,15 @@ static void test_model_context_window(void) {
         "  ('a-null','m-null',0);",
         NULL, NULL, NULL);
 
-    if (model_context_window(db, "a-id", 128000) != 200000)
-        FAIL("window not resolved via the agent's routing head");
-    if (model_context_window(db, "a-null", 128000) != 128000)
-        FAIL("NULL window should fall back to default");
-    if (model_context_window(db, "ghost", 128000) != 128000)
-        FAIL("unknown agent should fall back to default");
-    if (model_context_window(db, NULL, 111) != 111)
-        FAIL("NULL agent should fall back to default");
+    ContextLimits l;
+    context_limits(db, "a-id", 128000, &l);
+    if (l.window != 200000) FAIL("window not resolved via the agent's routing head");
+    context_limits(db, "a-null", 128000, &l);
+    if (l.window != 128000) FAIL("NULL window should fall back to default");
+    context_limits(db, "ghost", 128000, &l);
+    if (l.window != 128000) FAIL("unknown agent should fall back to default");
+    context_limits(db, NULL, 111, &l);
+    if (l.window != 111) FAIL("NULL agent should fall back to default");
 
     db_close(db);
     PASS();
@@ -312,9 +271,8 @@ int main(void) {
     test_v28_filtering();
     test_cut_point();
     test_multi_user_turn_not_split();
-    test_compaction_keep_from_is_turn_boundary();
     test_plan_no_content_access();
-    test_model_context_window();
+    test_context_limits_window();
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

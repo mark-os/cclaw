@@ -173,8 +173,8 @@ the provider gave no figure), `reported_zero`, `hits` (cached > 0),
 and `share` = cached ÷ prompt tokens over those (null when none reported).
 `days` keeps requests of the last N days; gaps are still measured against
 full history. Ingestion (`db_response.c`) writes `entries.cached_tokens`
-only when the count is above zero, so today a reported zero arrives as NULL
-and is counted as not reported.
+whenever the provider reported a count, zero included; rows ingested before
+schema v68 stored a reported zero as NULL and read as not reported.
 
 ```json
 {"days": null, "buckets": [{"key": "first", "label": "first request"}, …],

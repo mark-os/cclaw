@@ -28,7 +28,7 @@ typedef struct {
     int64_t session_id;
     char agent_name[64];
     int recall;
-    int kind;                /* 0 = llm_jobs-backed (turn/compaction), 1 = media transcribe */
+    int kind;                /* 0 = llm_jobs-backed turn, 1 = media transcribe */
 } WorkItem;
 
 /* ── Thread pool ───────────────────────────────────────────────────
@@ -159,36 +159,13 @@ static void *worker_fn(void *arg) {
             continue;
         }
 
-        /* Determine job type from DB */
-        int job_type = 0;
-        sqlite3_stmt *qstmt;
-        if (sqlite3_prepare_v2(db, "SELECT job_type FROM llm_jobs WHERE id=?",
-                               -1, &qstmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(qstmt, 1, item.job_id);
-            if (sqlite3_step(qstmt) == SQLITE_ROW)
-                job_type = sqlite3_column_int(qstmt, 0);
-            sqlite3_finalize(qstmt);
-        }
-
         /* Tag this worker thread's log lines (including llm_req's) with the
          * session and agent for the duration of the job. */
         cclaw_log_set_ctx(item.session_id, -1, item.agent_name);
 
-        LOG_INFO_("llm_job start job=%lld type=%s",
-                 (long long)item.job_id, job_type == 1 ? "compaction" : "turn");
-
-        if (job_type == 1) {
-            /* Compaction job */
-            LOG_DEBUG_("worker: compaction start");
-            llm_compaction(db, curl, item.session_id, item.agent_name);
-        } else {
-            /* LLM turn job */
-            LOG_DEBUG_("worker: model start");
-            llm_req(db, curl, item.session_id, item.recall);
-        }
-
-        LOG_INFO_("llm_job done job=%lld type=%s",
-                 (long long)item.job_id, job_type == 1 ? "compaction" : "turn");
+        LOG_INFO_("llm_job start job=%lld type=turn", (long long)item.job_id);
+        llm_req(db, curl, item.session_id, item.recall);
+        LOG_INFO_("llm_job done job=%lld type=turn", (long long)item.job_id);
 
         cclaw_log_clear_ctx();
 
@@ -312,37 +289,6 @@ void llm_worker_stop(void) {
     pthread_mutex_destroy(&g_pool.mtx);
     pthread_cond_destroy(&g_pool.cond);
     g_started = 0;
-}
-
-int llm_worker_submit_compact(sqlite3 *db, int64_t session_id, const char *agent_name) {
-    if (!g_started) return -1;
-
-    /* Persist job (crash recovery) */
-    sqlite3_stmt *stmt;
-    const char *sql = "INSERT INTO llm_jobs(session_id, agent_name, job_type) VALUES(?,?,1)";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    sqlite3_bind_text(stmt, 2, agent_name ? agent_name : "Assistant", -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    int64_t job_id = sqlite3_last_insert_rowid(db);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) return -1;
-
-    /* Push to thread pool */
-    WorkItem item = {
-        .job_id = job_id,
-        .session_id = session_id,
-        .recall = 0
-    };
-    snprintf(item.agent_name, sizeof(item.agent_name), "%s",
-             agent_name ? agent_name : "Assistant");
-    if (pool_push(&item) != 0) {
-        /* Same leak as llm_worker_submit: a stale compaction row wedges the
-         * 'compacting' state's in-flight check the same way. */
-        job_delete(db, job_id);
-        return -1;
-    }
-    return 0;
 }
 
 int llm_worker_submit_transcribe(sqlite3 *db, int64_t media_job_id,

@@ -41,7 +41,7 @@ stores only definitions and paths.
   ],
   "skills":  [ "skills/my-skill" ],
   "scripts": [ { "name": "cleanup", "handler": "scripts/cleanup.qjs" } ],
-  "hooks":   [ { "event": "turnSettled", "handler": "hooks/settled.qjs", "wait": true } ],
+  "hooks":   [ { "event": "Stop", "handler": "hooks/settled.qjs" } ],
   "config":  [ { "key": "api_base", "default": "https://…", "description": "…",
                  "secret": false, "required": false } ],
   "channel": { "type": "…", "handler": "channel.qjs" },
@@ -53,10 +53,23 @@ All handler paths are bundle-relative; no `..`, no absolute paths. `config[]`
 keys register as `<name>.<key>` in the config registry. `agents[]` entries use
 the agent-definition schema (see the creating-agents skill); an entry whose name
 already exists is skipped, never overwritten. A `hooks[]` entry runs its handler
-after every normally finished top-level turn of an agent the extension is
-attached to (`turnSettled`, the only event); it gets the finished turn as
-`args`, and with `wait: true` the session waits for it (at most
-`turn_settled_timeout` seconds) and its JSON reply may edit that turn:
+when its `event` happens in a session of an agent the extension is attached to:
+
+- `Stop` — a top-level turn ended with an answer (after the reply is out);
+- `SubagentStop` — the same, in a sub-agent's session;
+- `ContextThreshold` — an iteration ended (no call in flight) with the session
+  over its trim threshold; `args.context` carries `tokens`, `window`,
+  `trim_threshold` and `prune_target`, and every entry in `args` its
+  `tokens`. If the session is still over the threshold afterwards, the
+  runtime trims it itself (oldest turns first, down to `prune_target`).
+
+The entry takes `event`, `handler`, `input` (below), `async` and `timeout`,
+nothing else. The session waits for the script (at most `timeout` seconds,
+default config `hook_timeout`) and its JSON reply may edit the session — any
+turn of it, including the one still running when a `ContextThreshold` script
+runs between iterations; with `"async": true` it is not waited for and its
+reply is ignored. Three failures in a row (crash, timeout, refused reply)
+disable the hook until the extension is promoted again. The reply:
 
 ```json
 {"edits":[{"op":"drop","call_id":"c4"},
@@ -65,24 +78,49 @@ attached to (`turnSettled`, the only event); it gets the finished turn as
  "record":{"any":"bookkeeping of yours"}}
 ```
 
-`args` lists the turn's iterations with each call's `call_id`, `tool`, `args`,
-`protected` flag and verbatim `result.text`. By default that is all: the
-finished turn. To read the conversation before it, the entry declares
+| op | fields | does |
+|----|--------|------|
+| `drop` | `call_id`, `turn_id`? | the call and its result leave |
+| `replace` | `call_id`, `turn_id`?, `text` | a new result in the old one's place |
+| `rewrite` | `entry_id`, `text` | new text for a user or assistant message, a note or a summary |
+| `rewrite` | `call_id`, `turn_id`?, `args` | new arguments (an object) for a call |
+| `note` | `text`, `before`? | a note before an iteration (`before`: its `entry_id`); default before the answer, or at the end while the turn runs |
+| `drop_turns` | `from_turn`, `to_turn` | a run of whole turns before the newest leaves |
+| `summarise` | `text`, `from_turn`, `to_turn` | a run of whole turns before the newest is replaced by your text |
+| `summarise` | `text`, `from_iteration`, `to_iteration` | a run of whole iterations of the newest turn (never its answer's) is replaced by your text |
+
+A `call_id` is looked up in the newest turn unless `turn_id` names another
+(providers reuse call ids across turns). `args` lists the newest turn's
+iterations (`iteration_id`, `entry_id` = its first entry, `message_id` = its
+assistant message, `text`, `calls`) with each call's `call_id`, `entry_id`,
+`tool`, `args`, `protected` flag and verbatim `result.text`; `user_messages`
+and `notes` (a summary among them has `"summary": true`) with their
+`entry_id`; the answer as `final` (null while the turn is still running); and
+every entry its `tokens`. By default that is all: the newest turn. To read the
+conversation before it, the entry declares
 `"input": {"history": 5}` (the last five turns) or `{"history": "all"}`; add
 `"history_results": false` to get earlier tool results without their text,
 and `"max_bytes"` (default 1048576, from 1024 to 16777216) to size the whole input
 — when history does not fit, its oldest turns are left out and
-`args.history_omitted` says how many. `args.history` is then oldest first and
-read-only: each earlier turn in the same shape (`turn_id`, `user_messages`,
+`args.history_omitted` says how many. `args.history` is then oldest first:
+each earlier turn in the same shape (`turn_id`, `user_messages`,
 `notes`, `iterations`, `final`, `tokens`), and `{"summary":{"entry_id","text","tokens"}}`
-where a compaction summary stands; `args.input` echoes what was asked for.
-Edits may only name calls and entries of the top-level turn. A `protected` call (one made for
-its effect, `check_session`, or one that saved a secret) cannot be dropped;
-its result text can be replaced. A note may name `before` — the `entry_id` of
-an iteration in `args` — and otherwise lands before the answer; the model sees
-it as `[note from extension <name>] …`. Text containing a secret refuses the
-whole reply; any refusal leaves the turn untouched. Return `"{}"` to leave a
-turn alone.
+where a summary stands between turns; `args.input` echoes what was asked for.
+
+The runtime checks structure, never content: a call leaves only with its
+result (an iteration left with no call leaves whole); a call still pending
+or running cannot leave, not even with its turn; a `protected` call (one made
+for its effect, `check_session`, or one that saved a secret) cannot be
+dropped on its own, but may be rewritten and may leave with its whole turn or
+iteration; the newest turn's answer is never edited; each entry is named by
+one edit at most. Originals are never deleted — the runtime records each
+edit. Text containing a secret refuses the whole reply; any refusal leaves
+the session untouched. Return `"{}"` to leave it alone. The model sees a note
+as `[note from extension <name>] …` and a summary as `[Summary of earlier
+conversation] …`; an edit inside the running turn makes the model re-think
+from that point (its earlier reasoning is not replayed after the edit), and
+the prompt cache restarts at the first changed entry, so edit in one
+worthwhile pass.
 
 ## Handler contract (QuickJS)
 

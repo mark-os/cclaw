@@ -75,42 +75,46 @@ static char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
         "      ' hosts=' || COALESCE((SELECT '[' || group_concat(h.value,',') || ']'"
         "                             FROM json_each(COALESCE(json_extract(tj.value,'$.hosts'),'[]')) h),"
         "                            '(none — runs under your host grants)') ||"
-        /* Droppable is what a turnSettled hook may take out of a session's
+        /* Droppable is what a hook may take out of a session's
          * history; a tool that acts must not carry it. */
         "      CASE WHEN json_extract(tj.value,'$.droppable') THEN ' droppable' ELSE '' END ||"
         "      ' params=' || substr(COALESCE(json_extract(tj.value,'$.parameters'),'{}'),1,400),"
         "      char(10))"
         "    FROM json_each(COALESCE(json_extract(?1,'$.tools'),'[]')) tj), '')"
         /* Per hook: a count says nothing. A hook is a script that runs,
-         * unasked, on every turn of an agent with this extension, sees the
-         * whole turn, and — when the session waits for it — may edit it
-         * (specs/hooks.md). Promotion is the only approval it ever gets. */
+         * unasked, at a moment of every session of an agent with this
+         * extension, sees the session, and — when the session waits for it —
+         * may edit it (specs/hooks.md). Promotion is the only approval it
+         * ever gets. check_hook_events has vetted the fields by now. */
         " || COALESCE((SELECT char(10) || group_concat("
         "      '  - hook ' || COALESCE(json_extract(hj.value,'$.event'),'?') || ' ' ||"
-        "      COALESCE(json_extract(hj.value,'$.handler'),'?') ||"
-        "      CASE WHEN json_extract(hj.value,'$.event') IS NOT 'turnSettled' THEN ''"
-        "           WHEN COALESCE(json_extract(hj.value,'$.wait'),1)"
-        "           THEN ': runs after every turn, reads it, and may drop tool calls,'"
-        "                || ' replace results and add notes; the session waits for it'"
-        "           ELSE ': runs after every turn and reads it; not waited for,'"
-        "                || ' cannot change it' END ||"
-        /* ...and how much of the conversation it reads: the turn alone, or
-         * that and some or all of what came before (check_hook_input has
-         * vetted the values by now). */
-        "      CASE WHEN json_extract(hj.value,'$.event') IS NOT 'turnSettled' THEN ''"
-        "           ELSE '. It is sent the finished turn' ||"
-        "             CASE COALESCE(json_extract(hj.value,'$.input.history'),'none')"
-        "               WHEN 'none' THEN ''"
-        "               WHEN 'all' THEN ' and the whole conversation before it'"
-        "               WHEN 1 THEN ' and the turn before it'"
-        "               ELSE ' and the last ' || json_extract(hj.value,'$.input.history')"
-        "                    || ' turns before it' END ||"
-        "             CASE WHEN COALESCE(json_extract(hj.value,'$.input.history'),'none')"
-        "                       IS NOT 'none'"
-        "                   AND json_extract(hj.value,'$.input.history_results') = 0"
-        "                  THEN ' (their tool results without the text)' ELSE '' END ||"
-        "             COALESCE(', at most ' || json_extract(hj.value,'$.input.max_bytes')"
-        "                      || ' bytes', '') END,"
+        "      COALESCE(json_extract(hj.value,'$.handler'),'?') || ': ' ||"
+        "      CASE json_extract(hj.value,'$.event')"
+        "        WHEN 'Stop' THEN 'runs after every turn'"
+        "        WHEN 'SubagentStop' THEN 'runs after every turn of a sub-agent'"
+        "        WHEN 'ContextThreshold'"
+        "          THEN 'runs when a session grows past its trim threshold'"
+        "        ELSE 'runs' END ||"
+        "      CASE WHEN COALESCE(json_extract(hj.value,'$.async'),0)"
+        "           THEN ' and reads the session; not waited for, cannot change it'"
+        "           ELSE ', reads the session, and may drop tool calls, replace results'"
+        "                || ' and add notes; the session waits for it' END ||"
+        "      COALESCE(' (at most ' || json_extract(hj.value,'$.timeout') || ' s)', '') ||"
+        /* ...and how much of the conversation it reads: the newest turn
+         * alone, or that and some or all of what came before. */
+        "      '. It is sent the newest turn' ||"
+        "      CASE COALESCE(json_extract(hj.value,'$.input.history'),'none')"
+        "        WHEN 'none' THEN ''"
+        "        WHEN 'all' THEN ' and the whole conversation before it'"
+        "        WHEN 1 THEN ' and the turn before it'"
+        "        ELSE ' and the last ' || json_extract(hj.value,'$.input.history')"
+        "             || ' turns before it' END ||"
+        "      CASE WHEN COALESCE(json_extract(hj.value,'$.input.history'),'none')"
+        "                IS NOT 'none'"
+        "            AND json_extract(hj.value,'$.input.history_results') = 0"
+        "           THEN ' (their tool results without the text)' ELSE '' END ||"
+        "      COALESCE(', at most ' || json_extract(hj.value,'$.input.max_bytes')"
+        "               || ' bytes', ''),"
         "      char(10))"
         "    FROM json_each(COALESCE(json_extract(?1,'$.hooks'),'[]')) hj), ''))"
         "SELECT CASE WHEN length(t) > 4000"

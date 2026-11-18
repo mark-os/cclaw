@@ -36,7 +36,8 @@ static const char *PARAMS_JSON =
     "{grants:{tools:[names],hosts:[hostnames],read_paths:[abs paths],write_paths:[abs paths],"
     "secrets:[SECRET_NAME],"
     "remove:{tools:[],hosts:[],read_paths:[],write_paths:[],secrets:[]}}, "
-    "agent:{models?:[canonical model id or {id,effort?:off|minimal|low|medium|high}, "
+    "agent:{models?:[canonical model id or {id,effort?:off|minimal|low|medium|high,"
+    "trim_threshold?:tokens,prune_target?:tokens}, "
     "in routing order],max_iterations?,shell_timeout?}, "
     "routes:['channel:chat_id',...], "
     "config:{key:value-string,...}, provider:{provider,base_url?,api_key_env?}, "
@@ -538,14 +539,33 @@ static char *validate_agent(sqlite3 *db, const char *changes,
                       "model id string or an {id, effort} object");
     bad = q1_text(db,
         "SELECT k.key FROM json_each(?1,'$.agent.models') e, json_each(e.value) k"
-        " WHERE e.type='object' AND k.key NOT IN ('id','effort') LIMIT 1",
+        " WHERE e.type='object'"
+        "   AND k.key NOT IN ('id','effort','trim_threshold','prune_target') LIMIT 1",
         changes);
     if (bad) {
-        char *m = errf("error: unknown agent.models key '%s' (use id, effort)",
-                       bad);
+        char *m = errf("error: unknown agent.models key '%s' (use id, effort, "
+                       "trim_threshold, prune_target)", bad);
         free(bad);
         return m;
     }
+    /* The trim numbers (tokens) are checked here so the agent hears why; the
+     * schema refuses the same things on every other write path. */
+    bad = q1_text(db,
+        "SELECT k.key FROM json_each(?1,'$.agent.models') e, json_each(e.value) k"
+        " WHERE e.type='object' AND k.key IN ('trim_threshold','prune_target')"
+        "   AND (k.type <> 'integer' OR k.value < 1) LIMIT 1", changes);
+    if (bad) {
+        char *m = errf("error: agent.models %s must be a positive integer "
+                       "(tokens), or omitted for the default", bad);
+        free(bad);
+        return m;
+    }
+    if (q1_true(db, "SELECT 1 FROM json_each(?1,'$.agent.models') e"
+                    " WHERE e.type='object'"
+                    "   AND json_extract(e.value,'$.prune_target') >="
+                    "       json_extract(e.value,'$.trim_threshold')", changes))
+        return strdup("error: agent.models prune_target must be below its "
+                      "trim_threshold — the trim cuts the session down to it");
     bad = q1_text(db,
         "SELECT json_extract(e.value,'$.effort')"
         " FROM json_each(?1,'$.agent.models') e"
@@ -1462,7 +1482,9 @@ static const char *RECEIPT_SQL =
     "  SELECT 'your settings now: models='"
     "         ||COALESCE((SELECT group_concat(m,' > ')"
     "             FROM (SELECT model_id"
-    "                   ||COALESCE(' (effort '||reasoning_effort||')','') m"
+    "                   ||COALESCE(' (effort '||reasoning_effort||')','')"
+    "                   ||COALESCE(' (trim at '||trim_threshold||')','')"
+    "                   ||COALESCE(' (prune to '||prune_target||')','') m"
     "                   FROM agent_models"
     "                   WHERE agent_name=?2 AND purpose='chat'"
     "                   ORDER BY pos)),'(none)')"
@@ -1654,15 +1676,26 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             if (rc == 0) {
                 if (sqlite3_prepare_v2(db,
                         "INSERT INTO agent_models(agent_name, model_id, pos,"
-                        " reasoning_effort)"
+                        " reasoning_effort, trim_threshold, prune_target)"
                         " SELECT ?1, " AM_ENTRY_ID("") ", key,"
                         " CASE WHEN type='object'"
-                        " THEN json_extract(value,'$.effort') END"
+                        " THEN json_extract(value,'$.effort') END,"
+                        " CASE WHEN type='object'"
+                        " THEN json_extract(value,'$.trim_threshold') END,"
+                        " CASE WHEN type='object'"
+                        " THEN json_extract(value,'$.prune_target') END"
                         " FROM json_each(?2,'$.changes.agent.models')",
                         -1, &ms, NULL) == SQLITE_OK) {
                     sqlite3_bind_text(ms, 1, agent, -1, SQLITE_STATIC);
                     sqlite3_bind_text(ms, 2, args_json, -1, SQLITE_STATIC);
-                    if (sqlite3_step(ms) != SQLITE_DONE) rc = -1;
+                    if (sqlite3_step(ms) != SQLITE_DONE) {
+                        rc = -1;
+                        /* The schema's window check: say which rule, not
+                         * just that the write failed. */
+                        if (strstr(sqlite3_errmsg(db), "trim_threshold"))
+                            apply_detail(detail_out, "failed applying agent.models: %s",
+                                         sqlite3_errmsg(db));
+                    }
                     sqlite3_finalize(ms);
                 } else rc = -1;
             }
@@ -1839,7 +1872,9 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
         "(agent: models — your full replacement routing order, first entry is "
         "primary; an entry is a canonical id or {id,effort} to set that "
         "model's reasoning effort (off|minimal|low|medium|high, omit for the "
-        "provider default) — max_iterations/shell_timeout), "
+        "provider default), plus trim_threshold/prune_target in tokens on the "
+        "first entry to set when your session is trimmed and how far (omit for "
+        "50% of the window / 50% of the threshold) — max_iterations/shell_timeout), "
         "channel send routes (routes: ['channel:chat_id']), config values "
         "(registered keys — discover with search_config), and/or an LLM "
         "provider definition (openrouter, gemini, anthropic, openai, deepseek, groq, "

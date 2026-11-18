@@ -34,6 +34,7 @@ CClaw shamelessly borrows ideas from these projects:
 - Simple over clever. Blocking I/O. Threads over callbacks.
 - Single-file SQLite backbone — cclaw.db (all state: sessions, entries, config, memory, channels).
 - Self-augmenting via QuickJS plugin system — agents load JS extensions from workspace at startup.
+- **Policy lives in QuickJS; C holds the mechanism and the hard lines.** C fires events, supplies facts, validates structure and keeps a small backstop that cannot fail. Deciding *when* and *how* (thresholds, summarising, what to keep) belongs to an extension. CClaw ships first-class extensions that do it the way we think is right; an operator may replace them. A bad script may make an agent behave badly; it may not corrupt the session, escape the sandbox or take the daemon down, and one that keeps failing is disabled with a notice to the operator. When a feature could be C or a script, it is a script, and C shrinks.
 - One tool at a time during development. Prove each layer works before adding the next.
 - No backward compatibility in code — delete old code, don't version it. DB schema changes are the one exception: they ship as forward-only patches (see Running).
 - **The standard for a feature is the average person running an agent.** Think about what they would want from it and build that, well. CClaw has one operator today; that is not the bar. Before adding, keeping or cutting a feature, ask whether that person would want it and whether it is good enough for them.

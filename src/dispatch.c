@@ -1988,6 +1988,8 @@ int hook_script_spawn(const HookRef *h, const char *agent_name,
     if (!c) { free(path); return -1; }
     snprintf(c->hook_ext, sizeof(c->hook_ext), "%s", h->extension);
     c->hook_path = path;
+    snprintf(c->hook_event, sizeof(c->hook_event), "%s", h->event);
+    c->hook_pos = h->pos;
     c->hook_wait = h->wait;
     return 0;
 }
@@ -2005,6 +2007,8 @@ static void hook_child_report(ChildProc *c, int status, int timed_out,
     snprintf(sc->hook.extension, sizeof(sc->hook.extension), "%s", c->hook_ext);
     snprintf(sc->hook.path, sizeof(sc->hook.path), "%s",
              c->hook_path ? c->hook_path : "");
+    snprintf(sc->hook.event, sizeof(sc->hook.event), "%s", c->hook_event);
+    sc->hook.pos = c->hook_pos;
     sc->hook.wait = c->hook_wait;
 
     if (timed_out) {
@@ -2043,7 +2047,7 @@ static void hook_child_report(ChildProc *c, int status, int timed_out,
         else if (strncmp(said, "error: tool timed out", 21) == 0)
             /* The broker's own timer: say it in this feature's terms. */
             snprintf(sc->why, sizeof(sc->why),
-                     "timed out after %ds (config turn_settled_timeout)",
+                     "timed out after %ds (hook timeout)",
                      c->timeout_sec - HOOK_KILL_GRACE);
         else
             snprintf(sc->why, sizeof(sc->why), "script failed: %s", said);

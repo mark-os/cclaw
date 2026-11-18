@@ -335,9 +335,6 @@ Config *config_load(sqlite3 *db) {
     /* config_get_double reads the env layer too, so no separate override */
     cfg->daily_cost_limit_nano =
         (int64_t)(config_get_double(db, "daily_cost_limit") * 1e9 + 0.5);
-    cfg->context_threshold = (float)config_get_double(db, "context_threshold");
-    cfg->compaction_target = (float)config_get_double(db, "compaction_target");
-    cfg->compaction = config_get_int(db, "compaction");
     cfg->auto_recall = config_get_int(db, "auto_recall");
     cfg->recall_max_tokens = config_get_int(db, "recall_max_tokens");
 
@@ -369,16 +366,6 @@ Config *config_load(sqlite3 *db) {
         else if (v && v[0])
             LOG_WARN_("CCLAW_PROVIDER_ENDPOINT_TYPE='%s' is not 'openai', "
                       "'gemini' or 'anthropic' — ignored", v);
-    }
-
-    /* compaction env overrides */
-    {
-        const char *v = getenv("CCLAW_CONTEXT_THRESHOLD");
-        if (v) cfg->context_threshold = (float)atof(v);
-        v = getenv("CCLAW_COMPACTION_TARGET");
-        if (v) cfg->compaction_target = (float)atof(v);
-        v = getenv("CCLAW_COMPACTION");
-        if (v) cfg->compaction = atoi(v);
     }
 
     /* auto-recall env overrides */

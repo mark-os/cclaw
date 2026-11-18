@@ -1066,6 +1066,83 @@ static void test_agent_models_effort(void) {
 }
 
 
+/* agent.models entries carry trim_threshold / prune_target: validated
+ * (positive integers, prune below trim), applied to the routing row, and the
+ * schema's window check reported by name when the threshold is too big. */
+static char *last_args(sqlite3 *db, int64_t sid) {
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT args_json FROM approvals WHERE session_id=?1"
+        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    char *a = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    return a;
+}
+
+static void test_agent_models_trim(void) {
+    sqlite3 *db = test_db_open_seeded(":memory:");
+    assert(db);
+    config_registry_sync(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    assert(sqlite3_exec(db, "UPDATE models SET context_window=100000"
+                            " WHERE id='openrouter/deepseek/deepseek-v4-flash';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+    RequestConfigCtx ctx = {
+        .db = db, .agent_name = "test", .session_id = sid,
+        .agents_dir = NULL, .current_tool_call_id = "tr1"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+    assert(session_set_state(db, sid, "tool_running") == 0);
+
+    char *r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"trim_threshold\":0}]}}}");
+    assert(r && strstr(r, "trim_threshold must be a positive integer"));
+    free(r);
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"prune_target\":\"9\"}]}}}");
+    assert(r && strstr(r, "prune_target must be a positive integer"));
+    free(r);
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"trim_threshold\":5000,"
+        "\"prune_target\":5000}]}}}");
+    assert(r && strstr(r, "prune_target must be below its trim_threshold"));
+    free(r);
+
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"trim_threshold\":60000,"
+        "\"prune_target\":20000}]}}}");
+    assert(r == NULL); /* parked */
+    char *args = last_args(db, sid);
+    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, NULL) == 0);
+    free(args);
+    assert(db_scalar_i64(db, "SELECT trim_threshold*1000000 + prune_target FROM agent_models"
+                             " WHERE agent_name='test' AND purpose='chat'", 0, -1)
+           == 60000LL * 1000000 + 20000);
+
+    /* Over the model's window: refused by the schema, said by name. */
+    ctx.current_tool_call_id = "tr2";
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"trim_threshold\":200000}]}}}");
+    assert(r == NULL);
+    args = last_args(db, sid);
+    char *detail = NULL;
+    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, &detail) == -1);
+    assert(detail && strstr(detail, "larger than the model's context window"));
+    free(detail);
+    free(args);
+    assert(db_scalar_i64(db, "SELECT trim_threshold FROM agent_models"
+                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 60000);
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_agent_models_trim\n");
+}
+
+
 /* 7. Rollback: hand-craft args_json with an unregistered config key, call
  *    request_config_changes_apply, assert -1 AND none of the doc's grants
  *    landed. */
@@ -1509,6 +1586,7 @@ int main(void) {
     test_batch_apply();
     test_agent_routes_sections();
     test_agent_models_effort();
+    test_agent_models_trim();
     test_apply_rollback();
     test_redundant_filtered();
     test_secret_bindings_section();

@@ -41,7 +41,7 @@ general egress.
 
 ## turn-review
 
-A `turnSettled` hook: after a turn ends, a utility model picks the tool calls
+A `Stop` hook: after a turn ends, a utility model picks the tool calls
 later turns no longer need. Dead-end calls are dropped, long results are cut
 to the lines that mattered, and one short note says what the removed material
 established. The model only selects — the script builds each excerpt from the

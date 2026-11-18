@@ -505,11 +505,12 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
              " WHERE agent_name=?2"),
             ("INSERT OR IGNORE INTO agent_extensions(agent_name, extension_name, enabled)"
              " SELECT ?1, extension_name, enabled FROM agent_extensions WHERE agent_name=?2"),
-            /* Every purpose, effort included: a clone is a copy of the whole
-             * routing setup. */
-            ("INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort)"
-             " SELECT ?1, purpose, model_id, pos, reasoning_effort FROM agent_models"
-             " WHERE agent_name=?2"),
+            /* Every purpose, effort and trim numbers included: a clone is a
+             * copy of the whole routing setup. */
+            ("INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort,"
+             " trim_threshold, prune_target)"
+             " SELECT ?1, purpose, model_id, pos, reasoning_effort, trim_threshold,"
+             " prune_target FROM agent_models WHERE agent_name=?2"),
         };
         for (size_t i = 0; rc == 0 && i < 4; i++) {
             if (sqlite3_prepare_v2(db, copies[i], -1, &st, NULL) != SQLITE_OK) { rc = -1; break; }

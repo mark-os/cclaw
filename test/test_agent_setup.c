@@ -79,7 +79,7 @@ static void test_all_tools_registered(void) {
 
     /* The sync carried each recipe's droppable flag into the tools table,
      * where turn_edit.c reads it. This is the whole list of built-in tools
-     * whose calls a turnSettled hook may take out of context; every other one
+     * whose calls a hook may take out of context; every other one
      * — and any tool added without the flag — is protected. check_session is
      * not on it: on an idle child it returns the child's answer and advances
      * the delivery cursor, so its result may be the only copy. */

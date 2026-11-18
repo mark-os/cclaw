@@ -1,7 +1,9 @@
 /* Script hooks, the database side (src/hook.c) and the 'settling' state's
- * guards: which hooks an agent runs and in what order, when a finished turn
- * gets its turnSettled hooks, the failure count, and what may move a session
- * into and out of the hold. No forks here — test_turn_settle runs the scripts. */
+ * guards: which events exist, which hooks an agent runs and in what order,
+ * when a finished turn gets its Stop or SubagentStop hooks, the failure count
+ * and the flag it sets, what may move a session into and out of the hold,
+ * and the hold as a held resource. No forks here — test_turn_settle runs the
+ * scripts. */
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
 #include "config_registry.h"
@@ -13,7 +15,7 @@
 #include <string.h>
 
 static const char *DB_PATH = "/tmp/test_cclaw_hook.db";
-#define EV HOOK_EVENT_TURN_SETTLED
+#define EV HOOK_EVENT_STOP
 
 static void run(sqlite3 *db, const char *sql) {
     char *err = NULL;
@@ -37,10 +39,10 @@ static sqlite3 *open_seeded(void) {
         " ('ext_a','/s/ext_a','Other',1),('ext_b','/s/ext_b','Main',0),"
         " ('ext_c','/s/ext_c','Other',0);"
         "INSERT INTO hooks(extension_name, event, path, wait) VALUES"
-        " ('ext_b','turnSettled','/s/ext_b/z.qjs',1),"
-        " ('ext_b','turnSettled','/s/ext_b/a.qjs',0),"
-        " ('ext_a','turnSettled','/s/ext_a/r.qjs',1),"
-        " ('ext_c','turnSettled','/s/ext_c/r.qjs',1);"
+        " ('ext_b','Stop','/s/ext_b/z.qjs',1),"
+        " ('ext_b','Stop','/s/ext_b/a.qjs',0),"
+        " ('ext_a','Stop','/s/ext_a/r.qjs',1),"
+        " ('ext_c','Stop','/s/ext_c/r.qjs',1);"
         "INSERT INTO agent_extensions(agent_name, extension_name) VALUES"
         " ('Main','ext_a'),('Main','ext_b'),('Main','ext_c'),"
         " ('Other','ext_c');");
@@ -80,7 +82,25 @@ static void test_resolution(void) {
     expect_chain(db, "Bare", -1, "");
     /* Another event's rows are not this event's. */
     HookRef h;
-    assert(hook_next(db, "Main", "turnStart", -1, NULL, &h) == 0);
+    assert(hook_next(db, "Main", HOOK_EVENT_CONTEXT_THRESHOLD, -1, NULL, &h) == 0);
+    assert(hook_any(db, "Main", EV) && !hook_any(db, "Main", HOOK_EVENT_SUBAGENT_STOP));
+    assert(hook_next(db, "Main", EV, 1, NULL, &h) == 1 && strcmp(h.event, EV) == 0);
+
+    /* Within an extension, the manifest's order (pos) comes before the
+     * path; the cursor walks it one hook at a time. */
+    run(db, "UPDATE hooks SET pos=1 WHERE path='/s/ext_b/a.qjs';"
+            "UPDATE hooks SET pos=0 WHERE path='/s/ext_b/z.qjs';");
+    expect_chain(db, "Main", -1, "ext_a:r.qjs:1 ext_b:z.qjs:1 ext_b:a.qjs:0");
+    run(db, "UPDATE hooks SET pos=0;");
+    /* A hook's own timeout rides along; none is the configured default. */
+    run(db, "UPDATE hooks SET timeout=7 WHERE extension_name='ext_a';");
+    assert(hook_next(db, "Main", EV, 1, NULL, &h) == 1 && h.timeout == 7);
+    run(db, "UPDATE hooks SET timeout=NULL;");
+    assert(hook_next(db, "Main", EV, 1, NULL, &h) == 1 && h.timeout == 0);
+    /* A hook disabled by its failures is passed over like a switched-off one. */
+    run(db, "UPDATE hooks SET disabled=1 WHERE extension_name='ext_a';");
+    expect_chain(db, "Main", 1, "ext_b:z.qjs:1");
+    run(db, "UPDATE hooks SET disabled=0;");
 
     /* Read live: attach, and the next call sees it — no restart, no cache. */
     run(db, "INSERT INTO agent_extensions(agent_name, extension_name)"
@@ -139,7 +159,7 @@ static int64_t seed_turn(sqlite3 *db, const char *agent, int64_t parent,
 static void expect_due(sqlite3 *db, int64_t sid, const char *agent, int want,
                        const char *why_has) {
     char why[96];
-    int got = hook_turn_settled_due(db, sid, agent, why, sizeof(why));
+    int got = hook_stop_due(db, sid, agent, why, sizeof(why));
     if (got != want || (why_has && !strstr(why, why_has))) {
         fprintf(stderr, "FAIL due session=%lld: got %d (%s), want %d (%s)\n",
                 (long long)sid, got, why, want, why_has ? why_has : "");
@@ -150,16 +170,27 @@ static void expect_due(sqlite3 *db, int64_t sid, const char *agent, int want,
 static void test_eligibility(void) {
     sqlite3 *db = open_seeded();
     /* The deadline is the one setting; a turn's size is the script's call. */
-    assert(config_default_int("turn_settled_timeout") == 60);
+    assert(config_default_int("hook_timeout") == 60);
 
     int64_t top = seed_turn(db, "Main", -1, 30000, STOP_REASON_NONE);
     expect_due(db, top, "Main", 1, NULL);
     /* A small turn is handed over too: nothing in C judges its worth. */
     int64_t small = seed_turn(db, "Main", -1, 4, STOP_REASON_NONE);
     expect_due(db, small, "Main", 1, NULL);
-    /* A sub-agent's session, however large its turn. */
+    /* A sub-agent's session fires SubagentStop, not Stop: Main has only
+     * Stop hooks, so its sub-agent's turn has none... */
     int64_t sub = seed_turn(db, "Main", top, 30000, STOP_REASON_NONE);
-    expect_due(db, sub, "Main", 0, "sub-agent");
+    assert(strcmp(hook_stop_event(db, sub), HOOK_EVENT_SUBAGENT_STOP) == 0);
+    assert(strcmp(hook_stop_event(db, top), HOOK_EVENT_STOP) == 0);
+    expect_due(db, sub, "Main", 0, "no hook");
+    /* ...until it has a SubagentStop one; and that one is not a Stop hook. */
+    run(db, "INSERT INTO hooks(extension_name, event, path) VALUES"
+            " ('ext_a','SubagentStop','/s/ext_a/sub.qjs');");
+    expect_due(db, sub, "Main", 1, NULL);
+    run(db, "UPDATE hooks SET enabled=0 WHERE event='Stop';");
+    expect_due(db, top, "Main", 0, "no hook");
+    expect_due(db, sub, "Main", 1, NULL);
+    run(db, "UPDATE hooks SET enabled=1; DELETE FROM hooks WHERE event='SubagentStop';");
     /* A turn that stopped on an error (provider failure, cutoff). */
     int64_t err = seed_turn(db, "Main", -1, 30000, STOP_REASON_ERROR);
     expect_due(db, err, "Main", 0, "did not end");
@@ -193,23 +224,38 @@ static void test_failure_count(void) {
     assert(hook_next(db, "Main", EV, 1, NULL, &h) == 1);           /* ext_a */
     assert(hook_next(db, "Main", EV, 1, &h, &other) == 1);         /* ext_b z */
 
-    /* The third failure in a row is the one that notifies — once. */
-    assert(hook_record_outcome(db, &h, EV, 1) == 0);
-    assert(hook_record_outcome(db, &h, EV, 1) == 0);
-    assert(hook_record_outcome(db, &h, EV, 1) == 1);
-    assert(hook_record_outcome(db, &h, EV, 1) == 0);
-    assert(hook_record_outcome(db, &h, EV, 1) == 0);
-    assert(fail_count(db, h.path) == 5);
+    #define DISABLED(path) db_scalar_i64(db, "SELECT disabled FROM hooks WHERE path='" \
+                                         path "' AND ?1", 1, -1)
+    /* A run that works starts the streak over: fail, work, fail, fail is
+     * two in a row, not four. */
+    assert(hook_record_outcome(db, &h, 1) == 0);
+    assert(hook_record_outcome(db, &h, 0) == 0);
+    assert(fail_count(db, h.path) == 0);
+    assert(hook_record_outcome(db, &h, 1) == 0);
+    assert(hook_record_outcome(db, &h, 1) == 0);
+    assert(fail_count(db, h.path) == 2 && DISABLED("/s/ext_a/r.qjs") == 0);
+    /* The third failure in a row disables the hook, and says so once. */
+    assert(hook_record_outcome(db, &h, 1) == 1);
+    assert(DISABLED("/s/ext_a/r.qjs") == 1);
+    assert(hook_record_outcome(db, &h, 1) == 0);    /* a run already under way */
+    assert(fail_count(db, h.path) == 4);
+    HookRef next;
+    assert(hook_next(db, "Main", EV, 1, NULL, &next) == 1 &&
+           strcmp(next.path, other.path) == 0);
     /* Counted per hook, not per session or per agent. */
     assert(fail_count(db, other.path) == 0);
-    /* A run that works starts the streak over. */
-    assert(hook_record_outcome(db, &h, EV, 0) == 0);
-    assert(fail_count(db, h.path) == 0);
-    assert(hook_record_outcome(db, &h, EV, 1) == 0);
-    assert(hook_record_outcome(db, &h, EV, 0) == 0);
-    assert(hook_record_outcome(db, &h, EV, 1) == 0);
-    assert(hook_record_outcome(db, &h, EV, 1) == 0);
-    assert(hook_record_outcome(db, &h, EV, 1) == 1);
+    /* The operator's way back: clear the flag. The next failure trips it
+     * again at once (the count is still past the limit) and says so again;
+     * a success in between would have started the count over. */
+    run(db, "UPDATE hooks SET disabled=0 WHERE path='/s/ext_a/r.qjs';");
+    assert(hook_next(db, "Main", EV, 1, NULL, &next) == 1 &&
+           strcmp(next.path, h.path) == 0);
+    assert(hook_record_outcome(db, &h, 1) == 1);
+    run(db, "UPDATE hooks SET disabled=0, fail_count=0 WHERE path='/s/ext_a/r.qjs';");
+    assert(hook_record_outcome(db, &h, 1) == 0);
+    assert(hook_record_outcome(db, &h, 1) == 0);
+    assert(hook_record_outcome(db, &h, 1) == 1);
+    #undef DISABLED
 
     db_close(db);
     printf("  PASS test_failure_count\n");
@@ -229,15 +275,17 @@ static void expect_state(sqlite3 *db, int64_t sid, const char *want) {
     sqlite3_finalize(st);
 }
 
-/* 'settling' is entered from idle and left to idle, and nothing else. */
+/* 'settling' is entered from idle (turn end) or tool_running (between
+ * iterations) and left to idle or tool_running, and nothing else. */
 static void test_state_guard(void) {
     sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "g", "Main", -1, 0);
 
     assert(session_set_state(db, sid, "settling") == 0);
     expect_state(db, sid, "settling");
-    /* Nothing that resumes or starts a turn can take a held session. */
-    static const char *const busy[] = { "llm_running", "tool_running", "compacting",
+    /* Nothing that starts or resumes a request can take a held session
+     * (tool_running is how a hold between iterations ends, below). */
+    static const char *const busy[] = { "llm_running", "compacting",
                                         "rate_limited", "awaiting_approval", "settling" };
     for (size_t i = 0; i < sizeof(busy) / sizeof(busy[0]); i++) {
         assert(session_set_state(db, sid, busy[i]) != 0);
@@ -246,13 +294,23 @@ static void test_state_guard(void) {
     assert(session_set_state(db, sid, "idle") == 0);
     expect_state(db, sid, "idle");
 
-    /* A session mid-turn cannot be put into the hold. */
-    for (size_t i = 0; i < 5; i++) {
+    /* Between iterations: from tool_running into the hold and back. */
+    assert(session_set_state(db, sid, "llm_running") == 0);
+    assert(session_set_state(db, sid, "tool_running") == 0);
+    assert(session_set_state(db, sid, "settling") == 0);
+    expect_state(db, sid, "settling");
+    assert(session_set_state(db, sid, "llm_running") != 0);
+    assert(session_set_state(db, sid, "tool_running") == 0);
+    expect_state(db, sid, "tool_running");
+
+    /* Any other busy state cannot be put into the hold. */
+    static const char *const no_hold[] = { "llm_running", "compacting", "rate_limited",
+                                           "awaiting_approval" };
+    for (size_t i = 0; i < sizeof(no_hold) / sizeof(no_hold[0]); i++) {
         run(db, "UPDATE sessions SET state='idle';");
         assert(session_set_state(db, sid, "llm_running") == 0);
-        if (strcmp(busy[i], "llm_running") != 0)
-            assert(session_set_state(db, sid, busy[i]) == 0 ||
-                   strcmp(busy[i], "awaiting_approval") == 0);
+        if (strcmp(no_hold[i], "llm_running") != 0)
+            assert(session_set_state(db, sid, no_hold[i]) == 0);
         assert(session_set_state(db, sid, "settling") != 0);
     }
     db_close(db);
@@ -287,6 +345,39 @@ static void test_recovery(void) {
 
     db_close(db);
     printf("  PASS test_recovery\n");
+}
+
+/* A session held for a hook holds a resource for session_max_concurrent,
+ * like one with a worker job or a running tool child; the session asking
+ * is never counted. */
+static void test_resource_holder(void) {
+    sqlite3 *db = open_seeded();
+    int64_t a = session_create(db, "a", "Main", -1, 0);
+    int64_t b = session_create(db, "b", "Main", -1, 0);
+    assert(session_count_resource_holders(db, b) == 0);
+    assert(session_set_state(db, a, "settling") == 0);
+    assert(session_count_resource_holders(db, b) == 1);
+    assert(session_count_resource_holders(db, a) == 0);
+    assert(session_set_state(db, a, "idle") == 0);
+    assert(session_count_resource_holders(db, b) == 0);
+    db_close(db);
+    printf("  PASS test_resource_holder\n");
+}
+
+/* The events a manifest may name: the three this build fires; the ones it
+ * knows of but does not fire yet are refused by name; anything else is no
+ * event at all. */
+static void test_events(void) {
+    assert(hook_event_refusal("Stop") == NULL);
+    assert(hook_event_refusal("SubagentStop") == NULL);
+    assert(hook_event_refusal("ContextThreshold") == NULL);
+    assert(strstr(hook_event_refusal("CacheExpiring"), "not available yet"));
+    assert(strstr(hook_event_refusal("PreToolUse"), "stage 2"));
+    assert(strstr(hook_event_refusal("PostToolUse"), "stage 2"));
+    assert(strstr(hook_event_refusal("turnSettled"), "not an event"));
+    assert(strstr(hook_event_refusal("stop"), "not an event"));
+    assert(hook_event_refusal(NULL) != NULL);
+    printf("  PASS test_events\n");
 }
 
 /* hooks.input as the hook runs with it: what a row names, each option it
@@ -327,12 +418,14 @@ static void test_input(void) {
 int main(void) {
     TEST_INIT();
     printf("test_hook:\n");
+    test_events();
     test_resolution();
     test_input();
     test_eligibility();
     test_failure_count();
     test_state_guard();
     test_recovery();
+    test_resource_holder();
     test_db_clean(DB_PATH);
     printf("All hook tests passed.\n");
     return 0;

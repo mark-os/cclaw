@@ -369,7 +369,7 @@ static void test_row_keys(void) {
 
 /* ── an edited turn (specs/turn-edit.md), as the pages find it ─────────── */
 
-/* A turnSettled script's edit leaves a record on the turn's answer and the
+/* A Stop script's edit leaves a record on the turn's answer and the
  * originals in the table, off the branch. Both pages read that with the
  * generic calls: the turn's assistant entries (session, turn, type) with
  * whole values, or the answer's own row — a record is longer than a list

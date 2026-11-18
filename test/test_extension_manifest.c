@@ -233,9 +233,10 @@ static void test_tool_droppable(void) {
     printf("  PASS test_tool_droppable\n");
 }
 
-/* $.hooks[]: a turnSettled entry becomes a hooks row pointing into the store,
- * with `wait` as declared (waited for when it does not say), and a re-promote
- * replaces the rows — the failure count starts over with the new code. */
+/* $.hooks[]: each entry becomes a hooks row pointing into the store, waited
+ * for unless it says "async": true, with its place in the manifest and its
+ * own timeout, and a re-promote replaces the rows — the failure count starts
+ * over with the new code, and a hook its failures disabled is enabled again. */
 static void test_hook_ingest(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
@@ -246,27 +247,36 @@ static void test_hook_ingest(void) {
     write_file(BUNDLE "/observe.qjs", "return '{}';");
     write_file(BUNDLE "/extension.json",
         "{\"name\":\"nws\",\"hooks\":["
-        "{\"event\":\"turnSettled\",\"handler\":\"review.qjs\","
+        "{\"event\":\"Stop\",\"handler\":\"review.qjs\",\"timeout\":90,"
         " \"input\":{\"history\":3, \"max_bytes\":2000}},"
-        "{\"event\":\"turnSettled\",\"handler\":\"observe.qjs\",\"wait\":false}]}");
+        "{\"event\":\"Stop\",\"handler\":\"observe.qjs\",\"async\":true},"
+        "{\"event\":\"ContextThreshold\",\"handler\":\"review.qjs\",\"async\":false}]}");
     assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     assert(qint(db, "SELECT count(*) FROM hooks WHERE extension_name='nws'"
-                    " AND event='turnSettled' AND enabled=1 AND fail_count=0") == 2);
-    assert(qint(db, "SELECT wait FROM hooks WHERE path='" STORE "/review.qjs'") == 1);
+                    " AND event='Stop' AND enabled=1 AND fail_count=0 AND disabled=0") == 2);
+    assert(qint(db, "SELECT wait FROM hooks WHERE path='" STORE "/review.qjs'"
+                    " AND event='Stop'") == 1);
     assert(qint(db, "SELECT wait FROM hooks WHERE path='" STORE "/observe.qjs'") == 0);
+    assert(qint(db, "SELECT wait FROM hooks WHERE event='ContextThreshold'") == 1);
+    assert(qint(db, "SELECT group_concat(pos, ',') = '0,1,2' FROM (SELECT pos FROM hooks"
+                    " WHERE extension_name='nws' ORDER BY pos)") == 1);
+    assert(qint(db, "SELECT timeout FROM hooks WHERE event='Stop' AND path='" STORE
+                    "/review.qjs'") == 90);
+    assert(qint(db, "SELECT timeout IS NULL FROM hooks WHERE path='" STORE "/observe.qjs'") == 1);
     /* `input` is stored as declared; a hook that declares none has NULL —
      * the runtime's defaults. */
     assert(qint(db, "SELECT input IS NULL FROM hooks WHERE path='" STORE "/observe.qjs'") == 1);
     assert(qint(db, "SELECT input = '{\"history\":3,\"max_bytes\":2000}'"
                     " FROM hooks WHERE path='" STORE "/review.qjs'") == 1);
 
-    sqlite3_exec(db, "UPDATE hooks SET fail_count=7", NULL, NULL, NULL);
+    sqlite3_exec(db, "UPDATE hooks SET fail_count=7, disabled=1", NULL, NULL, NULL);
     write_file(BUNDLE "/extension.json",
         "{\"name\":\"nws\",\"hooks\":["
-        "{\"event\":\"turnSettled\",\"handler\":\"review.qjs\",\"wait\":true}]}");
+        "{\"event\":\"Stop\",\"handler\":\"review.qjs\",\"async\":false}]}");
     assert(extension_install(db, BUNDLE, "default", 0, &err) == 0);
     assert(qint(db, "SELECT count(*) FROM hooks WHERE extension_name='nws'") == 1);
-    assert(qint(db, "SELECT wait*10 + fail_count FROM hooks WHERE extension_name='nws'") == 10);
+    assert(qint(db, "SELECT wait*100 + fail_count*10 + disabled FROM hooks"
+                    " WHERE extension_name='nws'") == 100);
 
     db_close(db);
     printf("  PASS test_hook_ingest\n");
@@ -354,31 +364,39 @@ static void test_validate_rejects_bad_sections(void) {
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
     free(err); err = NULL;
 
-    /* One hook event exists — turnSettled. Any other name is refused: a
-     * registered hook that never fires is a silent no-op. An empty section
-     * is fine. */
+    /* The events: Stop, SubagentStop, ContextThreshold. Any other name is
+     * refused: a registered hook that never fires is a silent no-op. Names
+     * this build knows of but does not fire yet are refused by name, with
+     * the reason. An empty section is fine. */
     write_file("/tmp/test_ext_badsec/h.qjs", "({})");
-    static const char *const hook_events[] = {
-        "preAdvance", "postAdvance", "beforeToolCall", "afterToolCall",
-        "turnStart", "turnsettled", "bogusEvent" };
-    for (size_t i = 0; i < sizeof(hook_events) / sizeof(hook_events[0]); i++) {
+    static const struct { const char *event, *why; } bad_events[] = {
+        { "turnSettled",   "is not an event" },
+        { "stop",          "is not an event" },
+        { "preAdvance",    "is not an event" },
+        { "bogusEvent",    "is not an event" },
+        { "CacheExpiring", "is not available yet" },
+        { "PreToolUse",    "not available until stage 2" },
+        { "PostToolUse",   "not available until stage 2" } };
+    for (size_t i = 0; i < sizeof(bad_events) / sizeof(bad_events[0]); i++) {
         char mf[160];
         snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"%s\","
-                 "\"handler\":\"h.qjs\"}]}", hook_events[i]);
+                 "\"handler\":\"h.qjs\"}]}", bad_events[i].event);
         write_file("/tmp/test_ext_badsec/extension.json", mf);
         assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
-        assert(err && strstr(err, "the only hook event is 'turnSettled'"));
-        assert(strstr(err, hook_events[i]));
+        if (!err || !strstr(err, bad_events[i].why) || !strstr(err, bad_events[i].event)) {
+            fprintf(stderr, "FAIL event %s: %s\n", bad_events[i].event, err ? err : "(none)");
+            abort();
+        }
         free(err); err = NULL;
     }
     /* An entry with no event at all, and a bad one hiding behind a good one. */
     write_file("/tmp/test_ext_badsec/extension.json",
         "{\"name\":\"b\",\"hooks\":[{\"handler\":\"h.qjs\"}]}");
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
-    assert(err && strstr(err, "(missing)"));
+    assert(err && strstr(err, "needs \"event\""));
     free(err); err = NULL;
     write_file("/tmp/test_ext_badsec/extension.json",
-        "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnSettled\",\"handler\":\"h.qjs\"},"
+        "{\"name\":\"b\",\"hooks\":[{\"event\":\"Stop\",\"handler\":\"h.qjs\"},"
         "{\"event\":\"preAdvance\",\"handler\":\"h.qjs\"}]}");
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
     assert(err && strstr(err, "preAdvance"));
@@ -387,33 +405,64 @@ static void test_validate_rejects_bad_sections(void) {
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == 0);
     free(err); err = NULL;
 
-    /* turnSettled is accepted, with or without `wait`; `wait` is a boolean
-     * and nothing else. The handler is checked like any other. */
-    static const char *const good_wait[] = { "", ",\"wait\":true", ",\"wait\":false" };
-    for (size_t i = 0; i < 3; i++) {
-        char mf[200];
-        snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnSettled\","
-                 "\"handler\":\"h.qjs\"%s}]}", good_wait[i]);
+    /* Each event is accepted, with or without `async` and `timeout`. The
+     * handler is checked like any other. */
+    static const char *const good_hooks[] = {
+        "\"event\":\"Stop\"", "\"event\":\"SubagentStop\"",
+        "\"event\":\"ContextThreshold\"",
+        "\"event\":\"Stop\",\"async\":true", "\"event\":\"Stop\",\"async\":false",
+        "\"event\":\"ContextThreshold\",\"timeout\":1",
+        "\"event\":\"Stop\",\"timeout\":3600,\"async\":true,\"input\":{}" };
+    for (size_t i = 0; i < sizeof(good_hooks) / sizeof(good_hooks[0]); i++) {
+        char mf[240];
+        snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{%s,\"handler\":\"h.qjs\"}]}",
+                 good_hooks[i]);
         write_file("/tmp/test_ext_badsec/extension.json", mf);
-        assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == 0);
+        if (extension_manifest_validate("/tmp/test_ext_badsec", &err) != 0) {
+            fprintf(stderr, "FAIL hook {%s} refused: %s\n", good_hooks[i], err ? err : "?");
+            abort();
+        }
         free(err); err = NULL;
     }
-    static const char *const bad_wait[] = { "1", "0", "\"true\"", "null", "[]" };
-    for (size_t i = 0; i < sizeof(bad_wait) / sizeof(bad_wait[0]); i++) {
-        char mf[200];
-        snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnSettled\","
-                 "\"handler\":\"h.qjs\",\"wait\":%s}]}", bad_wait[i]);
+    /* The fields a hook does not take, by name: `wait` is gone (async is its
+     * inverse), `matcher` waits for stage 2, anything else is unknown; and
+     * the two optional ones are checked for type and range. */
+    static const struct { const char *fields, *why; } bad_hooks[] = {
+        { "\"wait\":true",      "\"wait\" is gone" },
+        { "\"wait\":false",     "\"async\": true" },
+        { "\"matcher\":\"Bash\"", "\"matcher\" is not available until stage 2" },
+        { "\"when\":\"always\"",  "unknown key \"when\"" },
+        { "\"may\":[\"edit\"]",    "unknown key \"may\"" },
+        { "\"async\":1",        "\"async\" must be true or false" },
+        { "\"async\":\"true\"", "\"async\" must be true or false" },
+        { "\"async\":null",     "\"async\" must be true or false" },
+        { "\"timeout\":0",      "\"timeout\" must be a whole number of seconds from 1 to 3600" },
+        { "\"timeout\":3601",   "from 1 to 3600" },
+        { "\"timeout\":1.5",    "\"timeout\" must be" },
+        { "\"timeout\":\"60\"", "\"timeout\" must be" } };
+    for (size_t i = 0; i < sizeof(bad_hooks) / sizeof(bad_hooks[0]); i++) {
+        char mf[240];
+        snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"Stop\","
+                 "\"handler\":\"h.qjs\",%s}]}", bad_hooks[i].fields);
         write_file("/tmp/test_ext_badsec/extension.json", mf);
-        assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
-        assert(err && strstr(err, "'wait' must be true or false"));
+        if (extension_manifest_validate("/tmp/test_ext_badsec", &err) != -1 ||
+            !err || !strstr(err, bad_hooks[i].why)) {
+            fprintf(stderr, "FAIL hook {%s}: got \"%s\", want \"%s\"\n", bad_hooks[i].fields,
+                    err ? err : "(none)", bad_hooks[i].why);
+            abort();
+        }
         free(err); err = NULL;
     }
     write_file("/tmp/test_ext_badsec/extension.json",
-        "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnSettled\",\"handler\":\"nope.qjs\"}]}");
+        "{\"name\":\"b\",\"hooks\":[\"Stop\"]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    free(err); err = NULL;
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"hooks\":[{\"event\":\"Stop\",\"handler\":\"nope.qjs\"}]}");
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
     free(err); err = NULL;
 
-    /* `input` — what a turnSettled script asks to be sent. Each option alone
+    /* `input` — what a hook's script asks to be sent. Each option alone
      * and all together are accepted; anything else is refused, by name, and
      * max_bytes stops at the most the hook vehicle carries. */
     static const char *const good_input[] = {
@@ -422,7 +471,7 @@ static void test_validate_rejects_bad_sections(void) {
         "{\"history_results\":true}", "{\"max_bytes\":16777216}", "{\"max_bytes\":1024}" };
     for (size_t i = 0; i < sizeof(good_input) / sizeof(good_input[0]); i++) {
         char mf[300];
-        snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnSettled\","
+        snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"Stop\","
                  "\"handler\":\"h.qjs\",\"input\":%s}]}", good_input[i]);
         write_file("/tmp/test_ext_badsec/extension.json", mf);
         if (extension_manifest_validate("/tmp/test_ext_badsec", &err) != 0) {
@@ -453,8 +502,8 @@ static void test_validate_rejects_bad_sections(void) {
     };
     for (size_t i = 0; i < sizeof(bad_input) / sizeof(bad_input[0]); i++) {
         char mf[300];
-        snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnSettled\","
-                 "\"handler\":\"h.qjs\"},{\"event\":\"turnSettled\",\"handler\":\"h.qjs\","
+        snprintf(mf, sizeof(mf), "{\"name\":\"b\",\"hooks\":[{\"event\":\"Stop\","
+                 "\"handler\":\"h.qjs\"},{\"event\":\"Stop\",\"handler\":\"h.qjs\","
                  "\"input\":%s}]}", bad_input[i].input);
         write_file("/tmp/test_ext_badsec/extension.json", mf);
         if (extension_manifest_validate("/tmp/test_ext_badsec", &err) != -1 ||

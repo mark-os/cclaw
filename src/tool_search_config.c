@@ -89,12 +89,17 @@ static const char SQL_CONFIG_DOC[] =
     " 'agent', json_object("
     "   'name', ?1,"
     "   'sandbox_profile', (SELECT sandbox_profile FROM agents WHERE name=?1),"
-    /* An entry with a reasoning effort shows as {id, effort} — the same union
-     * shape request_config accepts, so the doc round-trips as a patch base. */
+    /* An entry with a reasoning effort or trim numbers shows as an object
+     * {id, effort?, trim_threshold?, prune_target?} — the same union shape
+     * request_config accepts, so the doc round-trips as a patch base. */
     "   'models', json((SELECT json_group_array(json("
-    "     CASE WHEN reasoning_effort IS NULL THEN json_quote(model_id)"
-    "          ELSE json_object('id', model_id, 'effort', reasoning_effort)"
-    "     END)) FROM (SELECT model_id, reasoning_effort FROM agent_models"
+    "     CASE WHEN reasoning_effort IS NULL AND trim_threshold IS NULL"
+    "               AND prune_target IS NULL THEN json_quote(model_id)"
+    "          ELSE json_patch(json_object('id', model_id), json_object("
+    "            'effort', reasoning_effort, 'trim_threshold', trim_threshold,"
+    "            'prune_target', prune_target))"
+    "     END)) FROM (SELECT model_id, reasoning_effort, trim_threshold, prune_target"
+    "                  FROM agent_models"
     "                  WHERE agent_name=?1 AND purpose='chat' ORDER BY pos))),"
     "   'max_iterations', (SELECT max_iterations FROM agents WHERE name=?1),"
     "   'shell_timeout', (SELECT shell_timeout FROM agents WHERE name=?1),"
@@ -231,7 +236,9 @@ static char *render_text(SearchConfigCtx *ctx, const char *query,
     int rc = sqlite3_prepare_v2(ctx->db,
         "SELECT COALESCE((SELECT group_concat(m, ' > ')"
         "                 FROM (SELECT model_id"
-        "                         ||COALESCE(' (effort '||reasoning_effort||')','') m"
+        "                         ||COALESCE(' (effort '||reasoning_effort||')','')"
+        "                         ||COALESCE(' (trim at '||trim_threshold||')','')"
+        "                         ||COALESCE(' (prune to '||prune_target||')','') m"
         "                       FROM agent_models"
         "                       WHERE agent_name=?1 AND purpose='chat'"
         "                       ORDER BY pos)),"

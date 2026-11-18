@@ -7,6 +7,7 @@
 #include "config.h"
 #include "config_registry.h"
 #include "context.h"
+#include "turn_edit.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2150,6 +2151,214 @@ static void test_batch_pairing_and_off_plan_rows(void) {
     printf("  PASS test_batch_pairing_and_off_plan_rows\n");
 }
 
+/* ── Thinking after a session edit (turn_edit.c) ───────────────────── */
+
+/* One Anthropic tool iteration of the running turn: thinking signed SIG<n>,
+ * text, a call c<n>, and its result. */
+static int64_t anth_step(sqlite3 *db, int64_t sid, int n) {
+    char body[1024], cid[16];
+    int64_t it = db_next_iteration_id(db, sid);
+    snprintf(body, sizeof(body),
+             "{\"type\":\"message\",\"content\":["
+             "{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"SIG%d\"},"
+             "{\"type\":\"text\",\"text\":\"step %d\"},"
+             "{\"type\":\"tool_use\",\"id\":\"c%d\",\"name\":\"shell_exec\",\"input\":{\"n\":%d}}],"
+             "\"stop_reason\":\"tool_use\",\"usage\":{\"input_tokens\":5,\"output_tokens\":7}}",
+             n, n, n, n);
+    assert(db_ingest_response(db, sid, it, "claude@anthropic", ENDPOINT_ANTHROPIC, body,
+                              NULL, 0, NULL) == LLM_RESP_OK);
+    snprintf(cid, sizeof(cid), "c%d", n);
+    entry_append_typed(db, sid, it, "tool_result", 0, "res", cid, "shell_exec", 0,
+                       STOP_REASON_NONE, NULL, 0, 0, 0);
+    assert(sqlite3_exec(db, "UPDATE tool_calls SET status='done';", NULL, NULL, NULL)
+           == SQLITE_OK);
+    return it;
+}
+
+/* The signatures replayed, in message order, as "SIG1,SIG2,…" ("" for none). */
+static char *anth_signatures(sqlite3 *db, int64_t sid) {
+    LlmPayload p;
+    build_body_routed(db, sid, (char *)"claude-sonnet-5-5", (char *)"claude@anthropic",
+                      ENDPOINT_ANTHROPIC, &p);
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COALESCE(group_concat(json_extract(b.value,'$.signature'), ','),'')"
+        "  FROM json_each(?1,'$.messages') m, json_each(m.value,'$.content') b"
+        " WHERE json_extract(b.value,'$.type')='thinking'", -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, p.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    char *r = strdup((const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    llm_payload_release(&p);
+    return r;
+}
+
+static void expect_sigs(sqlite3 *db, int64_t sid, const char *want) {
+    char *got = anth_signatures(db, sid);
+    if (strcmp(got, want) != 0) {
+        fprintf(stderr, "FAIL thinking replayed: got \"%s\", want \"%s\"\n", got, want);
+        abort();
+    }
+    free(got);
+}
+
+static void edit(sqlite3 *db, int64_t sid, const char *reply) {
+    char *err = NULL;
+    TurnEditResult rc = turn_edit_apply(db, sid, reply, "hook:t", &err);
+    if (rc != TURN_EDIT_APPLIED) {
+        fprintf(stderr, "FAIL edit %s: %d %s\n", reply, (int)rc, err ? err : "");
+        abort();
+    }
+}
+
+/* An edit between iterations of the running turn stops the replay of every
+ * thinking block it overtook: those of iterations at or after its first
+ * changed entry that existed when it was made. Blocks before that point,
+ * and blocks produced after the edit, go back as before — so what is left
+ * out is always a trailing run, never a gap. The trim, C's own edit, is the
+ * same. */
+static void test_anthropic_thinking_after_edit(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = session_create(db, "strip", "default", -1, 0);
+    Message user = {.role = ROLE_USER, .content = "go"};
+    entry_append_with_iteration(db, sid, &user, 1);
+    int64_t it1 = anth_step(db, sid, 1);
+    anth_step(db, sid, 2);
+    anth_step(db, sid, 3);
+    expect_sigs(db, sid, "SIG1,SIG2,SIG3");
+
+    /* Iteration 2's result shortened: the edit begins after its thinking. */
+    edit(db, sid, "{\"edits\":[{\"op\":\"replace\",\"call_id\":\"c2\",\"text\":\"R2\"}]}");
+    expect_sigs(db, sid, "SIG1,SIG2");
+    /* Reasoning made after the edit was made against the edited branch. */
+    anth_step(db, sid, 4);
+    expect_sigs(db, sid, "SIG1,SIG2,SIG4");
+    /* The stripped iteration is rebuilt from its entries. */
+    LlmPayload p;
+    build_body_routed(db, sid, (char *)"claude-sonnet-5-5", (char *)"claude@anthropic",
+                      ENDPOINT_ANTHROPIC, &p);
+    expect_path(db, p.body, "$.messages[5].content[0].text", "step 3");
+    expect_path(db, p.body, "$.messages[5].content[1].id", "c3");
+    expect_path(db, p.body, "$.messages[4].content[0].content", "R2");
+    llm_payload_release(&p);
+
+    /* A note before the first iteration: everything that existed goes. */
+    int64_t rs1 = db_scalar_i64(db, "SELECT id FROM entries WHERE session_id=? AND"
+                                    " type='reasoning' ORDER BY id LIMIT 1", sid, -1);
+    assert(db_scalar_i64(db, "SELECT iteration_id FROM entries WHERE id=?", rs1, -1) == it1);
+    char r[160];
+    snprintf(r, sizeof(r), "{\"edits\":[{\"op\":\"note\",\"text\":\"n\",\"before\":%lld}]}",
+             (long long)rs1);
+    edit(db, sid, r);
+    expect_sigs(db, sid, "");
+    anth_step(db, sid, 5);
+    expect_sigs(db, sid, "SIG5");
+
+    /* C's trim drops the older iterations and keeps the newest: its block
+     * predates the trim and stands after the trim's note. */
+    anth_step(db, sid, 6);
+    expect_sigs(db, sid, "SIG5,SIG6");
+    ContextLimits lim = { .window = 1000000, .threshold = 10, .target = 5 };
+    TrimReport rep;
+    assert(turn_edit_trim(db, sid, 0, &lim, &rep) != TRIM_ERROR && rep.iterations > 0);
+    expect_sigs(db, sid, "");
+
+    /* The next turn starts clean either way: no earlier turn's thinking. */
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_anthropic_thinking_after_edit\n");
+}
+
+/* Gemini: a call an edit kept keeps its thoughtSignature (a replayed call
+ * without one is a 400), even though dropping its batch-mate took the
+ * iteration's reasoning entry off the branch. Nothing is stripped there
+ * after an edit — the signature is never checked against the history. The
+ * OpenAI-compatible replay is not stripped either: DeepSeek requires its
+ * reasoning inside a tool loop, and reasoning_details carries Gemini's
+ * signatures through OpenRouter. */
+static void test_gemini_and_openai_after_edit(void) {
+    sqlite3 *db = open_seeded();
+    assert(sqlite3_exec(db, "INSERT OR REPLACE INTO tools(name, droppable) VALUES"
+                            " ('look',1),('look2',1);", NULL, NULL, NULL) == SQLITE_OK);
+    int64_t sid = session_create(db, "gem", "default", -1, 0);
+    Message user = {.role = ROLE_USER, .content = "go"};
+    entry_append_with_iteration(db, sid, &user, 1);
+    int64_t it = db_next_iteration_id(db, sid);
+    assert(db_ingest_response(db, sid, it, "gemini-3-pro", ENDPOINT_GEMINI,
+        "{\"candidates\":[{\"content\":{\"parts\":["
+        "{\"functionCall\":{\"name\":\"look\",\"args\":{\"a\":1}},\"thoughtSignature\":\"G1\"},"
+        "{\"functionCall\":{\"name\":\"look2\",\"args\":{\"b\":2}}}]},\"finishReason\":\"STOP\"}],"
+        "\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}",
+        NULL, 0, NULL) == LLM_RESP_OK);
+    char c_look[64], c_look2[64];
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db, "SELECT tool_call_id FROM entries WHERE session_id=?1"
+                                  " AND type='tool_call' ORDER BY id", -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(st, 1, sid);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    snprintf(c_look, sizeof(c_look), "%s", sqlite3_column_text(st, 0));
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    snprintf(c_look2, sizeof(c_look2), "%s", sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    entry_append_typed(db, sid, it, "tool_result", 0, "A", c_look, "look", 0,
+                       STOP_REASON_NONE, NULL, 0, 0, 0);
+    entry_append_typed(db, sid, it, "tool_result", 0, "B", c_look2, "look2", 0,
+                       STOP_REASON_NONE, NULL, 0, 0, 0);
+    assert(sqlite3_exec(db, "UPDATE tool_calls SET status='done';", NULL, NULL, NULL)
+           == SQLITE_OK);
+
+    char r[160];
+    snprintf(r, sizeof(r), "{\"edits\":[{\"op\":\"drop\",\"call_id\":\"%s\"}]}", c_look2);
+    edit(db, sid, r);
+    /* The batch kept a subset: its reasoning entry left the branch. */
+    assert(db_scalar_i64(db, "WITH RECURSIVE b(id) AS (SELECT leaf_id FROM sessions"
+                             " WHERE id=?1 UNION ALL SELECT e.parent_id FROM entries e"
+                             " JOIN b ON e.id=b.id) SELECT COUNT(*) FROM b JOIN entries e"
+                             " ON e.id=b.id WHERE e.type='reasoning'", sid, -1) == 0);
+    LlmPayload p;
+    build_body(db, sid, (char *)"gemini-3-pro", ENDPOINT_GEMINI, &p);
+    expect_path(db, p.body, "$.contents[1].parts[0].functionCall.name", "look");
+    expect_path(db, p.body, "$.contents[1].parts[0].thoughtSignature", "G1");
+    expect_path(db, p.body, "$.contents[1].parts[1]", NULL);
+    expect_path(db, p.body, "$.contents[2].parts[0].functionResponse.response.content", "A");
+    expect_path(db, p.body, "$.contents[3]", NULL);
+    llm_payload_release(&p);
+    /* Another model's signature still never goes. */
+    build_body(db, sid, (char *)"gemini-2.5-pro", ENDPOINT_GEMINI, &p);
+    expect_path(db, p.body, "$.contents[1].parts[0].thoughtSignature", NULL);
+    llm_payload_release(&p);
+
+    /* OpenAI-compatible: two iterations with reasoning_details; an edit at
+     * the first one's result leaves the second's replayed. */
+    int64_t s2 = session_create(db, "oa", "default", -1, 0);
+    entry_append_with_iteration(db, s2, &user, 1);
+    for (int i = 1; i <= 2; i++) {
+        char body[1024], cid[16];
+        snprintf(cid, sizeof(cid), "o%d", i);
+        snprintf(body, sizeof(body),
+            "{\"choices\":[{\"message\":{\"content\":\"s%d\",\"reasoning_details\":"
+            "[{\"type\":\"reasoning.text\",\"text\":\"why%d\"}],\"tool_calls\":[{\"id\":\"%s\","
+            "\"type\":\"function\",\"function\":{\"name\":\"look\",\"arguments\":\"{}\"}}]},"
+            "\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":1,"
+            "\"completion_tokens\":1}}", i, i, cid);
+        int64_t oit = db_next_iteration_id(db, s2);
+        assert(db_ingest_response(db, s2, oit, "ds", ENDPOINT_OPENAI, body, NULL, 0, NULL)
+               == LLM_RESP_OK);
+        entry_append_typed(db, s2, oit, "tool_result", 0, "res", cid, "look", 0,
+                           STOP_REASON_NONE, NULL, 0, 0, 0);
+    }
+    assert(sqlite3_exec(db, "UPDATE tool_calls SET status='done';", NULL, NULL, NULL)
+           == SQLITE_OK);
+    edit(db, s2, "{\"edits\":[{\"op\":\"replace\",\"call_id\":\"o1\",\"text\":\"short\"}]}");
+    build_body(db, s2, (char *)"ds", ENDPOINT_OPENAI, &p);
+    expect_path(db, p.body, "$.messages[2].reasoning_details[0].text", "why1");
+    expect_path(db, p.body, "$.messages[3].content", "short");
+    expect_path(db, p.body, "$.messages[4].reasoning_details[0].text", "why2");
+    llm_payload_release(&p);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_gemini_and_openai_after_edit\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_llm_payload:\n");
@@ -2181,6 +2390,8 @@ int main(void) {
     test_gemini_thought_signature_replay();
     test_gemini_thought_signature_replay_routed();
     test_gemini_call_ids_unique_per_session();
+    test_anthropic_thinking_after_edit();
+    test_gemini_and_openai_after_edit();
     printf("All payload tests passed.\n");
     return 0;
 }

@@ -1,5 +1,5 @@
 /* turn_edit.c: the finished turn as a hook's input, and the edits a
- * turnSettled script sends back — checked, then applied all or nothing — on a
+ * Stop or ContextThreshold script sends back — checked, then applied all or nothing — on a
  * real temp DB, with the requests built afterwards on all three wire formats. */
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
@@ -121,22 +121,25 @@ static void expect_id_at(sqlite3 *db, const char *json, const char *path, int64_
     expect_at(db, json, path, w);
 }
 
+/* What a Stop hook is sent. */
+static const TurnEditInputFor STOP = { .event = "Stop", .need_answer = 1 };
+
 /* The input as a hook that declares nothing gets it: the finished turn. */
 static char *input_turn(sqlite3 *db, int64_t sid) {
     TurnEditInputSpec spec = TURN_EDIT_INPUT_DEFAULTS;
-    return turn_edit_input(db, sid, &spec, NULL);
+    return turn_edit_input(db, sid, &spec, &STOP, NULL);
 }
 
 /* ...and as one that asked for everything, with room for it. */
 static char *input_all(sqlite3 *db, int64_t sid) {
     TurnEditInputSpec spec = { TURN_EDIT_HISTORY_ALL, 1, TURN_EDIT_INPUT_MAX_BYTES };
-    return turn_edit_input(db, sid, &spec, NULL);
+    return turn_edit_input(db, sid, &spec, &STOP, NULL);
 }
 
 static char *input_as(sqlite3 *db, int64_t sid, int history, int results, int max_bytes,
                       int *too_big) {
     TurnEditInputSpec spec = { history, results, max_bytes };
-    return turn_edit_input(db, sid, &spec, too_big);
+    return turn_edit_input(db, sid, &spec, &STOP, too_big);
 }
 
 static int64_t add_user(sqlite3 *db, int64_t sid, const char *text) {
@@ -442,16 +445,20 @@ static void expect_rec_ids(sqlite3 *db, const T *t, const char *path, ...) {
 }
 #define REC_IDS(db, t, path, ...) expect_rec_ids(db, t, path, __VA_ARGS__, (int64_t)0)
 
-static int64_t turn_tokens(sqlite3 *db, const T *t) {
+/* The size of turn 2, or (turn 0) of the whole branch from the answer back —
+ * what an edit's record measures. */
+static int64_t tokens_of(sqlite3 *db, const T *t, int turn) {
     char *v = q(db,
         "WITH RECURSIVE b(id, lvl) AS (SELECT %lld, 0 UNION ALL"
         "  SELECT e.parent_id, b.lvl+1 FROM entries e JOIN b ON e.id=b.id WHERE b.lvl<1000)"
-        " SELECT SUM(e.token_estimate) FROM b JOIN entries e ON e.id=b.id WHERE e.turn_id=2",
-        (long long)t->fin);
+        " SELECT SUM(e.token_estimate) FROM b JOIN entries e ON e.id=b.id"
+        "  WHERE %d=0 OR e.turn_id=%d", (long long)t->fin, turn, turn);
     int64_t n = v ? atoll(v) : -1;
     free(v);
     return n;
 }
+#define turn_tokens(db, t) tokens_of(db, t, 2)
+#define branch_tokens(db, t) tokens_of(db, t, 0)
 
 /* ── Tests ─────────────────────────────────────────────────────────*/
 
@@ -466,7 +473,8 @@ static void test_input(void) {
     char *in = input_turn(db, t.sid);
     assert(in);
     #define IN(path, want) expect_at(db, in, path, want)
-    IN("$.event", "turnSettled");
+    IN("$.event", "Stop");
+    expect_json(db, in, "json_type(?1,'$.context')", NULL);
     /* What it was given, so a script can tell "no history asked for" from "a
      * first turn": nothing declared is the turn alone. The turn before it
      * (u0, a0) is not sent and not counted as left out. */
@@ -663,9 +671,9 @@ static void test_rejections(void) {
     REJECT(E("{\"op\":\"note\"}"), "needs \"text\"");
     REJECT(E("{\"op\":\"note\",\"text\":[\"a\"]}"), "needs \"text\"");
     REJECT(E("{\"op\":\"note\",\"text\":\"x\",\"before\":\"5\"}"),
-           "\"before\" must be an entry id");
+           "\"before\" must be an entry");
     REJECT(E("{\"op\":\"note\",\"text\":\"x\",\"before\":1.5}"),
-           "\"before\" must be an entry id");
+           "\"before\" must be an entry");
 
     /* Call ids. */
     REJECT(E(DROP("zz")), "drop: \"zz\" is not a tool call of this turn");
@@ -677,7 +685,6 @@ static void test_rejections(void) {
     /* A valid drop beside a bad one is refused with it. */
     REJECT(E(DROP("c2") "," DROP("c3")), "drop: call \"c3\" is protected");
     REJECT(E(DROP("c5")), "\"c5\" is not finished (background)");
-    REJECT(E("{\"op\":\"replace\",\"call_id\":\"c5\",\"text\":\"x\"}"), "not finished");
     REJECT(E("{\"op\":\"replace\",\"call_id\":\"c6\",\"text\":\"x\"}"),
            "replace: call \"c6\" has no result to replace");
 
@@ -700,7 +707,6 @@ static void test_rejections(void) {
     REJECT(NOTE_BEFORE(t.c1), "is not the first entry of an iteration");
     REJECT(NOTE_BEFORE(t.r1), "is not the first entry of an iteration");
     REJECT(NOTE_BEFORE(t.u), "is not the first entry of an iteration");
-    REJECT(NOTE_BEFORE(t.a0), "is not the first entry of an iteration");  /* earlier turn */
     REJECT(NOTE_BEFORE(t.fin), "is not the first entry of an iteration");
     REJECT(NOTE_BEFORE(99999), "is not the first entry of an iteration");
     /* (A note before an iteration the reply empties: on a turn of its own
@@ -723,25 +729,20 @@ static void test_rejections(void) {
     free(err);
     run(db, "ROLLBACK");
 
-    /* The turn itself: not finished. */
+    /* Check 2: a call still running blocks whatever would remove it —
+     * itself, its result's stand-in, a rewrite, its whole iteration. */
     run(db, "UPDATE tool_calls SET status='running' WHERE call_id='c4'");
-    REJECT(E(DROP("c2")), "\"c4\" is still running");
+    REJECT(E(DROP("c4")), "drop: call \"c4\" is not finished (running)");
+    REJECT(E("{\"op\":\"replace\",\"call_id\":\"c4\",\"text\":\"x\"}"),
+           "replace: call \"c4\" is not finished (running)");
+    REJECT(E("{\"op\":\"rewrite\",\"call_id\":\"c4\",\"args\":{}}"),
+           "rewrite: call \"c4\" is not finished (running)");
+    snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"s\",\"from_iteration\":%lld,"
+             "\"to_iteration\":%lld}"), (long long)t.it1, (long long)t.it2);
+    REJECT(r, "summarise: call \"c4\" is still running and cannot leave the branch");
     run(db, "UPDATE tool_calls SET status='done' WHERE call_id='c4'");
-    run(db, "UPDATE sessions SET leaf_id=%lld WHERE id=%lld", (long long)t.r4,
-        (long long)t.sid);
-    REJECT(E(DROP("c2")), "not an assistant message");
-    REJECT(E("{\"op\":\"note\",\"text\":\"n\"}"), "not an assistant message");
-    run(db, "UPDATE sessions SET leaf_id=%lld WHERE id=%lld", (long long)t.fin,
-        (long long)t.sid);
-    /* The next turn has opened: its calls are not this reply's to name. */
-    int64_t s2 = session_create(db, "moved-on", "default", -1, 0);
-    add_user(db, s2, "one");
-    add_typed(db, s2, db_next_iteration_id(db, s2), "assistant_message", "a", NULL, NULL);
-    add_user(db, s2, "two");
-    expect_untouched(db, s2, E("{\"op\":\"note\",\"text\":\"n\"}"), NO,
-                     "not an assistant message");
     expect_untouched(db, 99999, E("{\"op\":\"note\",\"text\":\"n\"}"), NO,
-                     "not an assistant message");
+                     "no turn to edit");
 
     /* One call id on two calls, one call with two results. */
     int64_t s3 = session_create(db, "dups", "default", -1, 0);
@@ -778,7 +779,7 @@ static void test_rejections(void) {
 static void test_drop_one_of_batch(void) {
     sqlite3 *db = open_seeded();
     T t = seed_turn(db, "drop1", 0);
-    int64_t before = turn_tokens(db, &t);
+    int64_t before = branch_tokens(db, &t);
     char *c2_row = q(db, "SELECT json_array(parent_id, original_parent_id, content)"
                          " FROM entries WHERE id=%lld", (long long)t.c2);
 
@@ -813,8 +814,8 @@ static void test_drop_one_of_batch(void) {
                       " AND json_type(data,'$.turn_edits[0].at')='integer'"
                       " AND json_type(data,'$.turn_edits[0].record') IS NULL"
                       " AND json_array_length(data,'$.turn_edits')=1 FROM entries WHERE id=%lld",
-             (long long)before, (long long)turn_tokens(db, &t), (long long)t.fin);
-    assert(turn_tokens(db, &t) < before);
+             (long long)before, (long long)branch_tokens(db, &t), (long long)t.fin);
+    assert(branch_tokens(db, &t) < before);
 
     /* Legal on every format, and the dropped pair is gone from all of them. */
     expect_shape(db, t.sid, O,
@@ -1068,11 +1069,11 @@ static void test_record(void) {
     T t = seed_turn(db, "record", 0);
     run(db, "UPDATE entries SET data='{\"keep\":\"me\",\"n\":[1,2]}' WHERE id=%lld",
         (long long)t.fin);
-    int64_t before1 = turn_tokens(db, &t);
+    int64_t before1 = branch_tokens(db, &t);
 
     apply_ok(db, &t, "{\"edits\":[" DROP("c4") "],"
                      "\"record\":{\"score\":3,\"why\":[\"long grep\"]}}");
-    int64_t after1 = turn_tokens(db, &t);
+    int64_t after1 = branch_tokens(db, &t);
     /* rs3 was re-pointed past the emptied iteration. */
     expect_q(db, "1", "SELECT original_parent_id=%lld AND parent_id=%lld FROM entries"
                       " WHERE id=%lld", (long long)t.r4, (long long)t.r3, (long long)t.rs3);
@@ -1109,7 +1110,7 @@ static void test_record(void) {
                       " AND json_extract(data,'$.turn_edits[1].tokens.before')=%lld"
                       " AND json_extract(data,'$.turn_edits[1].tokens.after')=%lld"
                       " FROM entries WHERE id=%lld", (long long)before1, (long long)after1,
-             (long long)after1, (long long)turn_tokens(db, &t), (long long)t.fin);
+             (long long)after1, (long long)branch_tokens(db, &t), (long long)t.fin);
     REC_IDS(db, &t, ".left_branch", t.r1);
     REC_IDS(db, &t, ".notes", note);
     /* The record never reaches the model. */
@@ -1231,15 +1232,18 @@ static void test_history(void) {
     expect_json(db, in, "json_type(?1,'$.history[1].final')", "null");
     free(in);
 
-    /* Edits stop at the finished turn. A call only an earlier turn made is
-     * not there to name; an earlier turn's entry is no place for a note. */
+    /* A call id names a call of the newest turn unless turn_id says which:
+     * a call only an earlier turn made is not there to name without it. A
+     * user message is no place for a note, in any turn. */
     char r[160];
     const TurnEditResult NO = TURN_EDIT_REJECTED;
     expect_untouched(db, sid, E(DROP("only1")), NO,
                      "drop: \"only1\" is not a tool call of this turn");
     expect_untouched(db, sid, E("{\"op\":\"replace\",\"call_id\":\"only1\",\"text\":\"x\"}"),
                      NO, "replace: \"only1\" is not a tool call of this turn");
-    int64_t not_here[] = { a1, f1, u1, u2, boom };
+    expect_untouched(db, sid, E("{\"op\":\"drop\",\"call_id\":\"only1\",\"turn_id\":2}"), NO,
+                     "drop: \"only1\" is not a tool call of turn 2");
+    int64_t not_here[] = { u1, u2 };
     for (size_t k = 0; k < sizeof(not_here) / sizeof(not_here[0]); k++) {
         snprintf(r, sizeof(r), E("{\"op\":\"note\",\"text\":\"n\",\"before\":%lld}"),
                  (long long)not_here[k]);
@@ -1295,7 +1299,7 @@ static void test_history(void) {
     expect_id_at(db, in, "$.history[1].tokens.turn", turn_tokens(db, &t));
     free(in);
 
-    /* Compaction, as llm_compaction does it: the branch keeps its first
+    /* Compaction, as entry_compact leaves it: the branch keeps its first
      * entry, then the summary, then whole turns. History is that branch —
      * what is left of the first turn, the summary where it stands, and
      * nothing of what it replaced. */
@@ -1434,7 +1438,9 @@ static void test_input_options(void) {
 
     /* Fitting to max_bytes. The branch: what compaction left of turn 1 (one
      * long user message), the summary, three turns of ~1 KB (turn ids 3-5), the
-     * finished turn. Each row is priced at its stored text + 128, the head at 512. */
+     * finished turn. What decides is the text as written out: `alone` is the
+     * input with no history, each earlier unit costs its own length and a
+     * comma, and SPLICE bytes are kept for the history's frame. */
     char *k2 = repeat('k', 2000), *x = repeat('x', 1000), *sum = repeat('s', 300);
     int64_t cs = session_create(db, "fit", "default", -1, 0);
     int64_t u0 = add_user(db, cs, k2);
@@ -1446,15 +1452,33 @@ static void test_input_options(void) {
     add_plain_turn(db, cs, "q6", x);
     add_plain_turn(db, cs, "go", "done");
     assert(entry_compact(db, cs, u0, u4, sum) > 0);
-    const int TURN0 = 2 + 4 + 256, TURN = 2 + 1000 + 256, SUMMARY = 300 + 128,
-              HEAD = 512;
+    const int SPLICE = 64;
 
     in = input_all(db, cs);
     TURN_IDS("1,S,3,4,5");
+    /* Each unit's length as written out, history[0] (turn 1) to [4] (turn 5). */
+    int unit[5];
+    for (int i = 0; i < 5; i++) {
+        char expr[96];
+        snprintf(expr, sizeof(expr), "octet_length(json_extract(?1,'$.history[%d]'))", i);
+        sqlite3_stmt *st;
+        char sql[160];
+        snprintf(sql, sizeof(sql), "SELECT %s", expr);
+        assert(sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK);
+        sqlite3_bind_text(st, 1, in, -1, SQLITE_STATIC);
+        assert(sqlite3_step(st) == SQLITE_ROW);
+        unit[i] = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+        assert(unit[i] > 0);
+    }
     free(in);
+    in = input_as(db, cs, 0, 1, TURN_EDIT_INPUT_MAX_BYTES, NULL);
+    const int alone = (int)strlen(in);
+    free(in);
+    #define ROOM(a, b) (alone + SPLICE + (a) + (b))
     /* Room for the three turns and the summary, not for the long remnant of
      * turn 1, which is older than the summary: it goes first. */
-    int max = HEAD + TURN0 + 3 * TURN + SUMMARY + 1000;
+    int max = ROOM(unit[1] + unit[2] + unit[3] + unit[4] + 4, 40);
     in = input_as(db, cs, TURN_EDIT_HISTORY_ALL, 1, max, NULL);
     assert(in && (int)strlen(in) <= max);
     TURN_IDS("S,3,4,5");
@@ -1463,7 +1487,7 @@ static void test_input_options(void) {
     free(in);
     /* Room for two turns: the summary goes with everything older than them,
      * and only turns are counted as left out. */
-    max = HEAD + TURN0 + 2 * TURN + 500;
+    max = ROOM(unit[3] + unit[4] + 2, 40);
     in = input_as(db, cs, TURN_EDIT_HISTORY_ALL, 1, max, NULL);
     assert(in && (int)strlen(in) <= max);
     TURN_IDS("4,5");
@@ -1492,31 +1516,36 @@ static void test_input_options(void) {
     free(in);
     /* No room for any history: the turn alone, every earlier turn counted. */
     int too_big = -1;
-    in = input_as(db, cs, TURN_EDIT_HISTORY_ALL, 1, 1500, &too_big);
-    assert(in && strlen(in) <= 1500 && too_big == 0);
+    max = ROOM(0, 10);
+    in = input_as(db, cs, TURN_EDIT_HISTORY_ALL, 1, max, &too_big);
+    assert(in && (int)strlen(in) <= max && too_big == 0);
     LEN("$.history", "0");
     IN("$.history_omitted", "4");
     IN("$.final.text", "done");
     free(in);
     /* The finished turn alone over the limit: nothing is built, and the
      * caller is told why. */
-    assert(input_as(db, cs, 0, 1, 600, &too_big) == NULL && too_big == 1);
-    assert(input_as(db, cs, TURN_EDIT_HISTORY_ALL, 1, 600, &too_big) == NULL && too_big == 1);
+    assert(input_as(db, cs, 0, 1, alone - 40, &too_big) == NULL && too_big == 1);
+    assert(input_as(db, cs, TURN_EDIT_HISTORY_ALL, 1, alone - 40, &too_big) == NULL &&
+           too_big == 1);
     /* No finished turn is not "too big". */
     add_user(db, cs, "pending");
     assert(input_as(db, cs, 0, 1, TURN_EDIT_INPUT_MAX_BYTES, &too_big) == NULL &&
            too_big == 0);
     free(k2); free(x); free(sum);
 
-    /* max_bytes bounds the text handed over, not the estimate. Control
-     * characters are written out six bytes each (\u0001): the estimate
+    /* max_bytes bounds the text handed over, not what is stored. Control
+     * characters are written out six bytes each (\u0001): the stored length
      * admits the earlier turn, the text does not fit, and it is left out. */
     int64_t es = session_create(db, "escape", "default", -1, 0);
     int64_t ea = add_plain_turn(db, es, "q1", "a1");
     run(db, "UPDATE entries SET content=replace(printf('%%.*c',600,'x'),'x',char(1)),"
             " content_bytes=600 WHERE id=%lld", (long long)ea);
     int64_t eb = add_plain_turn(db, es, "go", "done");
-    max = HEAD + TURN0 + (2 + 600 + 256) + 200;
+    in = input_as(db, es, 0, 1, TURN_EDIT_INPUT_MAX_BYTES, NULL);
+    const int es_alone = (int)strlen(in);
+    free(in);
+    max = es_alone + SPLICE + 600 + 400;
     in = input_as(db, es, TURN_EDIT_HISTORY_ALL, 1, max, &too_big);
     assert(in && (int)strlen(in) <= max && too_big == 0);
     LEN("$.history", "0");
@@ -1530,12 +1559,96 @@ static void test_input_options(void) {
     run(db, "UPDATE entries SET content=replace(printf('%%.*c',600,'x'),'x',char(1)),"
             " content_bytes=600 WHERE id=%lld", (long long)eb);
     assert(input_as(db, es, 0, 1, 1500, &too_big) == NULL && too_big == 1);
+    #undef ROOM
 
     #undef IN
     #undef LEN
     #undef TURN_IDS
     db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_input_options\n");
+}
+
+/* Stage 0: a system note after a turn's answer (the streak guard's, which
+ * hangs off the leaf and so inherits the turn) does not hide the answer —
+ * the turn's end is its newest row that is not a note. */
+static void test_note_after_answer(void) {
+    sqlite3 *db = open_seeded();
+    #define IN(path, want) expect_at(db, in, path, want)
+    int64_t sid = session_create(db, "streak", "default", -1, 0);
+    int64_t f1 = add_plain_turn(db, sid, "q1", "answer one");
+    int64_t note = add_system(db, sid, "autonomous-turn limit reached");
+    assert(db_scalar_i64(db, "SELECT turn_id FROM entries WHERE id=?", note, -1) ==
+           db_scalar_i64(db, "SELECT turn_id FROM entries WHERE id=?", f1, -1));
+    /* As history, one turn later. */
+    int64_t f2 = add_plain_turn(db, sid, "q2", "answer two");
+    char *in = input_all(db, sid);
+    assert(in);
+    expect_id_at(db, in, "$.final.entry_id", f2);
+    expect_id_at(db, in, "$.history[0].final.entry_id", f1);
+    IN("$.history[0].final.text", "answer one");
+    expect_id_at(db, in, "$.history[0].notes[0].entry_id", note);
+    expect_json(db, in, "json_type(?1,'$.history[0].notes[0].before_iteration')", "null");
+    free(in);
+    /* As the newest turn, to an event that does not need the answer to be
+     * the leaf (a stop event never fires on such a turn). */
+    add_plain_turn(db, sid, "q3", "answer three");
+    int64_t f3 = db_scalar_i64(db, "SELECT leaf_id FROM sessions WHERE id=?", sid, -1);
+    add_system(db, sid, "another note");
+    TurnEditInputSpec spec = TURN_EDIT_INPUT_DEFAULTS;
+    TurnEditInputFor ct = { .event = "ContextThreshold", .need_answer = 0 };
+    in = turn_edit_input(db, sid, &spec, &ct, NULL);
+    assert(in);
+    expect_id_at(db, in, "$.final.entry_id", f3);
+    free(in);
+    #undef IN
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_note_after_answer\n");
+}
+
+/* What a ContextThreshold script is sent: the turn still running, as it
+ * stands (no answer yet, "final" null), the numbers it decides on as
+ * "context", and every entry's size. */
+static void test_input_context(void) {
+    sqlite3 *db = open_seeded();
+    #define IN(path, want) expect_at(db, in, path, want)
+    int64_t sid = session_create(db, "ctx", "default", -1, 0);
+    add_plain_turn(db, sid, "q1", "a1");
+    int64_t u = add_user(db, sid, "go");
+    int64_t it = db_next_iteration_id(db, sid);
+    int64_t a = add_typed(db, sid, it, "assistant_message", "looking", NULL, NULL);
+    int64_t c = add_call(db, sid, it, "x1", "look", "{}", "done");
+    int64_t r = add_typed(db, sid, it, "tool_result", "found it", "x1", "look");
+    run(db, "UPDATE entries SET tokens=777 WHERE id=%lld", (long long)r);
+
+    TurnEditInputSpec spec = { 1, 1, TURN_EDIT_INPUT_DEFAULT_BYTES };
+    /* A stop event needs the answer: nothing is built mid-turn. */
+    assert(turn_edit_input(db, sid, &spec, &STOP, NULL) == NULL);
+    TurnEditInputFor ct = { .event = "ContextThreshold", .need_answer = 0,
+        .context = "{\"tokens\":9000,\"window\":10000,\"trim_threshold\":5000,"
+                   "\"prune_target\":2500}" };
+    char *in = turn_edit_input(db, sid, &spec, &ct, NULL);
+    assert(in);
+    IN("$.event", "ContextThreshold");
+    IN("$.context", "{\"tokens\":9000,\"window\":10000,\"trim_threshold\":5000,"
+                    "\"prune_target\":2500}");
+    expect_json(db, in, "json_type(?1,'$.final')", "null");
+    expect_id_at(db, in, "$.user_messages[0].entry_id", u);
+    expect_id_at(db, in, "$.user_messages[0].tokens",
+                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", u, -1));
+    expect_id_at(db, in, "$.iterations[0].entry_id", a);
+    expect_id_at(db, in, "$.iterations[0].tokens",
+                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", a, -1));
+    expect_id_at(db, in, "$.iterations[0].calls[0].entry_id", c);
+    expect_id_at(db, in, "$.iterations[0].calls[0].tokens",
+                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", c, -1));
+    /* A measured count wins over the estimate. */
+    IN("$.iterations[0].calls[0].result.tokens", "777");
+    IN("$.history[0].final.text", "a1");
+    expect_json(db, in, "json_type(?1,'$.history[0].final.tokens')", "integer");
+    free(in);
+    #undef IN
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_input_context\n");
 }
 
 /* Around the edges of a turn: an earlier compaction already re-pointed the
@@ -1590,10 +1703,435 @@ static void test_turn_edges(void) {
     printf("  PASS test_turn_edges\n");
 }
 
+/* ── The operations on any turn ────────────────────────────────────*/
+
+static int64_t leaf_of(sqlite3 *db, int64_t sid) {
+    return db_scalar_i64(db, "SELECT leaf_id FROM sessions WHERE id=?", sid, -1);
+}
+
+/* Apply, and (want_leaf > 0) say where the leaf must be afterwards. */
+static void apply_to(sqlite3 *db, int64_t sid, const char *reply, int64_t want_leaf) {
+    char *err = NULL;
+    TurnEditResult rc = turn_edit_apply(db, sid, reply, LABEL, &err);
+    if (rc != TURN_EDIT_APPLIED) {
+        fprintf(stderr, "FAIL apply %s: rc=%d %s\n", reply, (int)rc, err ? err : "");
+        abort();
+    }
+    if (want_leaf > 0) assert(leaf_of(db, sid) == want_leaf);
+    assert(sqlite3_get_autocommit(db));
+}
+
+/* The newest record on the session's leaf, at `path` within it. */
+static int64_t leaf_rec_id(sqlite3 *db, int64_t sid, const char *path) {
+    char *v = q(db, "SELECT json_extract(data,'$.turn_edits[#-1]%s') FROM entries"
+                    " WHERE id=(SELECT leaf_id FROM sessions WHERE id=%lld)", path,
+                (long long)sid);
+    int64_t n = v ? atoll(v) : -1;
+    free(v);
+    return n;
+}
+
+static int64_t parent_of(sqlite3 *db, int64_t id) {
+    return db_scalar_i64(db, "SELECT parent_id FROM entries WHERE id=?", id, -2);
+}
+
+/* Turn 3 of a seeded session, still running: two iterations, each a
+ * reasoning entry, a message, one call and its result. */
+typedef struct { int64_t u, it4, rs4, a4, k1, rk1, it5, rs5, a5, k2, rk2; } R;
+
+static R add_running(sqlite3 *db, int64_t sid) {
+    R r;
+    r.u = add_user(db, sid, "more");
+    r.it4 = db_next_iteration_id(db, sid);
+    r.rs4 = add_reasoning(db, sid, r.it4, "why4");
+    r.a4 = add_typed(db, sid, r.it4, "assistant_message", "four", NULL, NULL);
+    r.k1 = add_call(db, sid, r.it4, "k1", "look", "{}", "done");
+    r.rk1 = add_typed(db, sid, r.it4, "tool_result", "rk1", "k1", "look");
+    r.it5 = db_next_iteration_id(db, sid);
+    r.rs5 = add_reasoning(db, sid, r.it5, "why5");
+    r.a5 = add_typed(db, sid, r.it5, "assistant_message", "five", NULL, NULL);
+    r.k2 = add_call(db, sid, r.it5, "k2", "look", "{}", "done");
+    r.rk2 = add_typed(db, sid, r.it5, "tool_result", "rk2", "k2", "look");
+    assert(db_scalar_i64(db, "SELECT turn_id FROM entries WHERE id=?", r.rk2, -1) == 3);
+    return r;
+}
+
+/* drop / replace / note / rewrite on a turn that is neither the newest nor
+ * running, named by turn_id; check 3 holds there too, and a rewrite cannot
+ * launder a call that stored a credential into a droppable one. */
+static void test_past_turn(void) {
+    sqlite3 *db = open_seeded();
+    T t = seed_turn(db, "past", 0);
+    int64_t f3 = add_plain_turn(db, t.sid, "next", "sure"), u3 = parent_of(db, f3);
+    char r[512];
+    snprintf(r, sizeof(r), E(
+        "{\"op\":\"drop\",\"call_id\":\"c2\",\"turn_id\":2},"
+        "{\"op\":\"replace\",\"call_id\":\"c1\",\"turn_id\":2,\"text\":\"R-ONE\"},"
+        "{\"op\":\"note\",\"text\":\"past note\",\"before\":%lld}"), (long long)t.rs2);
+    apply_to(db, t.sid, r, f3);
+    int64_t n1 = leaf_rec_id(db, t.sid, ".replaced[0].replacement");
+    int64_t note = leaf_rec_id(db, t.sid, ".notes[0]");
+    BRANCH(db, t.sid, t.u0, t.a0, t.u, t.a1, t.c1, t.c3, n1, t.r3, note, t.rs2, t.a2, t.c4,
+           t.r4, t.rs3, t.fin, u3, f3);
+    /* The record is on the leaf — the newest turn's answer — and names the
+     * first entry the edit changed. */
+    expect_q(db, "1", "SELECT json_extract(data,'$.turn_edits[0].left_branch')"
+                      " = json_array(%lld,%lld,%lld,%lld)"
+                      " AND json_extract(data,'$.turn_edits[0].thinking_cut')=%lld"
+                      " FROM entries WHERE id=%lld", (long long)t.rs1, (long long)t.c2,
+             (long long)t.r2, (long long)t.r1, (long long)t.a1, (long long)f3);
+    /* What was written says so (P4): source, and the original it stands for. */
+    expect_q(db, "1", "SELECT json_extract(data,'$.source')='" LABEL "'"
+                      " AND json_extract(data,'$.replaces')=%lld AND turn_id=2"
+                      " AND " TURN_EDIT_SQL_STANDS_IN("data") " FROM entries WHERE id=%lld",
+             (long long)t.r1, (long long)n1);
+    expect_q(db, "2", "SELECT turn_id FROM entries WHERE id=%lld", (long long)note);
+    expect_shape(db, t.sid, O,
+        "user:hi|assistant:hello|user:go|assistant:one,=c1,=c3|tool:R-ONE,<c1|tool:r3,<c3"
+        "|user:" NOTE_TAG "past note|assistant:two,=c4|tool:r4,<c4|assistant:done"
+        "|user:next|assistant:sure");
+
+    /* Check 3 on a past turn: the effect call stays, but may be rewritten. */
+    const TurnEditResult NO = TURN_EDIT_REJECTED;
+    expect_untouched(db, t.sid, E("{\"op\":\"drop\",\"call_id\":\"c3\",\"turn_id\":2}"), NO,
+                     "drop: call \"c3\" is protected");
+    apply_to(db, t.sid, E("{\"op\":\"rewrite\",\"call_id\":\"c3\",\"turn_id\":2,"
+                          "\"args\":{\"k\":30}}"), f3);
+    int64_t c3n = leaf_rec_id(db, t.sid, ".replaced[0].replacement");
+    expect_q(db, "{\"k\":30}|c3|act|2", "SELECT concat_ws('|', content, tool_call_id,"
+             " tool_name, turn_id) FROM entries WHERE id=%lld", (long long)c3n);
+    expect_untouched(db, t.sid, E("{\"op\":\"drop\",\"call_id\":\"c3\",\"turn_id\":2}"), NO,
+                     "drop: call \"c3\" is protected");
+    expect_shape(db, t.sid, A,
+        "user:hi|assistant:hello*|user:go|assistant:one,=c1,=c3|user:<c1,<c3"
+        "|user:" NOTE_TAG "past note|assistant:two,=c4|user:<c4|assistant:done*"
+        "|user:next|assistant:sure");
+    expect_body(db, t.sid, O, "$.messages[3].tool_calls[1].function.arguments", "{\"k\":30}");
+    /* A past turn's answer is a message like any other. */
+    snprintf(r, sizeof(r), E("{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"done, briefly\"}"),
+             (long long)t.fin);
+    apply_to(db, t.sid, r, f3);
+    expect_text(db, t.sid, "done, briefly", 1);
+
+    /* A retrieving tool that saved a secret is protected; rewriting its
+     * arguments does not change what the call did. */
+    int64_t sid = session_create(db, "secret", "default", -1, 0);
+    add_user(db, sid, "store it");
+    int64_t it = db_next_iteration_id(db, sid);
+    add_call(db, sid, it, "s1", "fetch", "{\"url\":\"u\",\"save_secret\":\"K\"}", "done");
+    add_typed(db, sid, it, "tool_result", "saved", "s1", "fetch");
+    int64_t fin = add_typed(db, sid, db_next_iteration_id(db, sid), "assistant_message",
+                            "ok", NULL, NULL);
+    apply_to(db, sid, E("{\"op\":\"rewrite\",\"call_id\":\"s1\",\"args\":{\"url\":\"u\"}}"), fin);
+    char *in = input_turn(db, sid);
+    assert(in);
+    expect_json(db, in, "json_type(?1,'$.iterations[0].calls[0].protected')", "true");
+    expect_at(db, in, "$.iterations[0].calls[0].args.url", "u");
+    free(in);
+    expect_untouched(db, sid, E(DROP("s1")), NO, "drop: call \"s1\" is protected");
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_past_turn\n");
+}
+
+/* drop_turns and summarise by turn: whole turns before the newest, written
+ * as one summary entry; the checks on the range; check 2 across a turn. */
+static void test_whole_turns(void) {
+    sqlite3 *db = open_seeded();
+    T t = seed_turn(db, "turns", 0);
+    int64_t f3 = add_plain_turn(db, t.sid, "three", "3"), u3 = parent_of(db, f3);
+    int64_t f4 = add_plain_turn(db, t.sid, "four", "4"), u4 = parent_of(db, f4);
+    const TurnEditResult NO = TURN_EDIT_REJECTED;
+    #define REJECT(reply, why) expect_untouched(db, t.sid, reply, NO, why)
+    REJECT(E("{\"op\":\"drop_turns\",\"from_turn\":3,\"to_turn\":4}"),
+           "drop_turns: turn 4 is the live turn");
+    REJECT(E("{\"op\":\"drop_turns\",\"from_turn\":3,\"to_turn\":2}"), "is after to_turn 2");
+    REJECT(E("{\"op\":\"drop_turns\",\"from_turn\":9,\"to_turn\":9}"),
+           "drop_turns: turn 9 is not in this session's context");
+    REJECT(E("{\"op\":\"drop_turns\",\"from_turn\":1}"), "needs \"from_turn\" and \"to_turn\"");
+    REJECT(E("{\"op\":\"drop_turns\",\"from_turn\":1,\"to_turn\":1,\"text\":\"x\"}"),
+           "has a field its op does not take");
+    REJECT(E("{\"op\":\"summarise\",\"from_turn\":1,\"to_turn\":1}"), "needs \"text\"");
+    REJECT(E("{\"op\":\"summarise\",\"text\":\"s\",\"from_turn\":1,\"to_iteration\":1}"),
+           "needs \"from_turn\" and \"to_turn\", or \"from_iteration\" and \"to_iteration\"");
+    REJECT(E("{\"op\":\"summarise\",\"text\":\"s\",\"from_turn\":\"1\",\"to_turn\":1}"),
+           "\"from_turn\" must be an entry, turn or iteration id");
+
+    /* Turns 1-2 become one summary at the root; the protected call left
+     * with its whole turn (check 3). */
+    apply_to(db, t.sid, E("{\"op\":\"summarise\",\"from_turn\":1,\"to_turn\":2,"
+                          "\"text\":\"S12\"}"), f4);
+    int64_t sum = leaf_rec_id(db, t.sid, ".summaries[0]");
+    BRANCH(db, t.sid, sum, u3, f3, u4, f4);
+    expect_q(db, "compaction|4|1|-1|" LABEL, "SELECT concat_ws('|', type, role, turn_id,"
+             " parent_id, json_extract(data,'$.source')) FROM entries WHERE id=%lld"
+             " AND iteration_id IS NULL", (long long)sum);
+    expect_q(db, "17", "SELECT json_array_length(data,'$.turn_edits[0].left_branch')"
+                       " FROM entries WHERE id=%lld", (long long)f4);
+    expect_q(db, "1", "SELECT json_extract(data,'$.turn_edits[0].thinking_cut')=%lld"
+                      " FROM entries WHERE id=%lld", (long long)sum, (long long)f4);
+    expect_shape(db, t.sid, O, "user:[Summary of earlier conversation]\nS12|user:three"
+                               "|assistant:3|user:four|assistant:4");
+    expect_shape(db, t.sid, G, "user:[Summary of earlier conversation]\nS12|user:three"
+                               "|model:3|user:four|model:4");
+    expect_text(db, t.sid, "hello", 0);
+    /* Read back as a summary unit standing before turn 3. */
+    char *in = input_all(db, t.sid);
+    assert(in);
+    expect_json(db, in, "json_array_length(?1,'$.history')", "2");
+    expect_at(db, in, "$.history[0].summary.text", "S12");
+    expect_at(db, in, "$.history[1].turn_id", "3");
+    expect_at(db, in, "$.history_omitted", "0");
+    free(in);
+    TurnEditInputSpec one = { 1, 1, TURN_EDIT_INPUT_MAX_BYTES };
+    in = turn_edit_input(db, t.sid, &one, &STOP, NULL);
+    expect_json(db, in, "json_array_length(?1,'$.history')", "1");
+    expect_at(db, in, "$.history[0].turn_id", "3");
+    free(in);
+
+    /* drop_turns: turn 3 leaves; turn 4 hangs off the summary and remembers
+     * its first parent. */
+    apply_to(db, t.sid, E("{\"op\":\"drop_turns\",\"from_turn\":3,\"to_turn\":3}"), f4);
+    BRANCH(db, t.sid, sum, u4, f4);
+    expect_q(db, "1", "SELECT original_parent_id=%lld FROM entries WHERE id=%lld",
+             (long long)f3, (long long)u4);
+    #undef REJECT
+
+    /* Check 2: a pending call keeps its whole turn; a background job does not. */
+    int64_t sid = session_create(db, "pending", "default", -1, 0);
+    add_user(db, sid, "go");
+    int64_t it = db_next_iteration_id(db, sid);
+    add_typed(db, sid, it, "assistant_message", "starting", NULL, NULL);
+    add_call(db, sid, it, "p1", "look", "{}", "pending");
+    int64_t fin = add_plain_turn(db, sid, "and", "then");
+    expect_untouched(db, sid, E("{\"op\":\"drop_turns\",\"from_turn\":1,\"to_turn\":1}"), NO,
+                     "drop_turns: call \"p1\" is still pending and cannot leave the branch");
+    run(db, "UPDATE tool_calls SET status='background' WHERE call_id='p1'");
+    apply_to(db, sid, E("{\"op\":\"drop_turns\",\"from_turn\":1,\"to_turn\":1}"), fin);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_whole_turns\n");
+}
+
+/* The last finished turn: rewrite, and summarise by iteration — never its
+ * answer. Overlapping edits and a bad edit beside good ones: refused whole. */
+static void test_finished_turn_ops(void) {
+    sqlite3 *db = open_seeded();
+    T t = seed_turn(db, "fin", 0);
+    const TurnEditResult NO = TURN_EDIT_REJECTED;
+    char r[512];
+    #define REJECT(reply, why) expect_untouched(db, t.sid, reply, NO, why)
+    snprintf(r, sizeof(r), E("{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"x\"}"),
+             (long long)t.fin);
+    REJECT(r, "is the turn's answer, which is never edited");
+    snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"s\",\"from_iteration\":%lld,"
+             "\"to_iteration\":%lld}"), (long long)t.it1, (long long)t.it3);
+    REJECT(r, "holds the turn's answer");
+    snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"s\",\"from_iteration\":%lld,"
+             "\"to_iteration\":%lld}"), (long long)t.it2, (long long)t.it1);
+    REJECT(r, "is after to_iteration");
+    REJECT(E("{\"op\":\"summarise\",\"text\":\"s\",\"from_iteration\":1,\"to_iteration\":1}"),
+           "iteration 1 is not an iteration of the newest turn");
+    snprintf(r, sizeof(r), E("{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"x\"}"),
+             (long long)t.r1);
+    REJECT(r, "is not a user or assistant message, a note or a summary");
+    REJECT(E("{\"op\":\"rewrite\",\"entry_id\":99999,\"text\":\"x\"}"),
+           "rewrite: entry 99999 is not on the session's branch");
+    REJECT(E("{\"op\":\"rewrite\",\"call_id\":\"c1\",\"text\":\"x\"}"),
+           "with \"call_id\" takes \"args\", an object, and no \"text\"");
+    REJECT(E("{\"op\":\"rewrite\",\"call_id\":\"c1\",\"args\":[1]}"), "takes \"args\", an object");
+    REJECT(E("{\"op\":\"rewrite\",\"entry_id\":3,\"call_id\":\"c1\",\"text\":\"x\"}"),
+           "needs \"entry_id\" (a message) or \"call_id\" (a call), one of them");
+    REJECT(E("{\"op\":\"rewrite\",\"entry_id\":3,\"text\":\"x\",\"turn_id\":2}"),
+           "with \"entry_id\" takes \"text\", not \"args\" or \"turn_id\"");
+    REJECT(E("{\"op\":\"rewrite\",\"call_id\":\"c1\",\"args\":{\"k\":\"ghp_aB3kL9mXp7qR2wNv4jH8sT5uY1cF6gW0eDzQ\"}}"),
+           "edits[0]: text contains a secret");
+    /* Overlaps: each entry is named by one edit at most. */
+    snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"s\",\"from_iteration\":%lld,"
+             "\"to_iteration\":%lld}," DROP("c1")), (long long)t.it1, (long long)t.it1);
+    REJECT(r, "drop: call \"c1\" is named by two edits");
+    snprintf(r, sizeof(r), E("{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"x\"},"
+             "{\"op\":\"drop_turns\",\"from_turn\":1,\"to_turn\":1}"), (long long)t.a0);
+    REJECT(r, "is already named by edits[0]");
+    snprintf(r, sizeof(r), E("{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"x\"}," DROP("c4")),
+             (long long)t.a2);
+    REJECT(r, "leaves with the iteration a drop empties");
+    /* Atomicity: good edits beside one bad one leave nothing behind. */
+    snprintf(r, sizeof(r), E("{\"op\":\"note\",\"text\":\"fine\"},"
+             "{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"fine\"},"
+             "{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"fine\"},"
+             "{\"op\":\"rewrite\",\"entry_id\":99999,\"text\":\"bad\"}"), (long long)t.u);
+    REJECT(r, "not on the session's branch");
+    #undef REJECT
+
+    /* A user message and an iteration's text, rewritten; the iteration whose
+     * text changed loses its reasoning (its blob is the response as written). */
+    snprintf(r, sizeof(r), E("{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"GO!\"},"
+             "{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"ONE!\"}"),
+             (long long)t.u, (long long)t.a1);
+    apply_ok(db, &t, r);
+    int64_t un = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[0].replaced[0].replacement')"
+                                   " FROM entries WHERE id=?", t.fin, -1);
+    int64_t an = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[0].replaced[1].replacement')"
+                                   " FROM entries WHERE id=?", t.fin, -1);
+    BRANCH(db, t.sid, t.u0, t.a0, un, an, t.c1, t.c2, t.c3, t.r2, t.r1, t.r3, t.rs2, t.a2,
+           t.c4, t.r4, t.rs3, t.fin);
+    expect_q(db, "user_message|1|2|GO!", "SELECT concat_ws('|', type, role, turn_id, content)"
+             " FROM entries WHERE id=%lld", (long long)un);
+    expect_q(db, "assistant_message|2|2", "SELECT concat_ws('|', type, role, iteration_id - %lld"
+             " + 2) FROM entries WHERE id=%lld", (long long)t.it1, (long long)an);
+    expect_shape(db, t.sid, O,
+        "user:hi|assistant:hello|user:GO!|assistant:ONE!,=c1,=c2,=c3|tool:r2,<c2|tool:r1,<c1"
+        "|tool:r3,<c3|assistant:two,=c4|tool:r4,<c4|assistant:done");
+    expect_body(db, t.sid, O, "$.messages[3].reasoning_details", NULL);
+    expect_body(db, t.sid, O, "$.messages[7].reasoning_details[0].text", "why2");
+    /* A rewritten message is not delivered again: it is the original's. */
+    expect_q(db, "0", "SELECT COUNT(*) FROM entries WHERE id=%lld AND "
+             "CASE WHEN json_valid(data) THEN json_extract(data,'$.replaces') END IS NULL",
+             (long long)an);
+
+    /* Summarise the two working iterations of the finished turn. */
+    snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"worked\",\"from_iteration\":%lld,"
+             "\"to_iteration\":%lld}"), (long long)t.it1, (long long)t.it2);
+    apply_ok(db, &t, r);
+    int64_t sum = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[1].summaries[0]')"
+                                    " FROM entries WHERE id=?", t.fin, -1);
+    BRANCH(db, t.sid, t.u0, t.a0, un, sum, t.rs3, t.fin);
+    expect_q(db, "2", "SELECT turn_id FROM entries WHERE id=%lld", (long long)sum);
+    expect_shape(db, t.sid, O, "user:hi|assistant:hello|user:GO!"
+                               "|user:[Summary of earlier conversation]\nworked|assistant:done");
+    /* In the input it stands with the turn's notes, marked. */
+    char *in = input_turn(db, t.sid);
+    assert(in);
+    expect_json(db, in, "json_array_length(?1,'$.iterations')", "0");
+    expect_id_at(db, in, "$.notes[0].entry_id", sum);
+    expect_json(db, in, "json_type(?1,'$.notes[0].summary')", "true");
+    expect_id_at(db, in, "$.notes[0].before_iteration", t.it3);
+    free(in);
+    /* ...and as an earlier turn, still one turn. */
+    int64_t f3 = add_plain_turn(db, t.sid, "next", "sure");
+    in = input_all(db, t.sid);
+    expect_json(db, in, "json_array_length(?1,'$.history')", "2");
+    expect_at(db, in, "$.history[1].turn_id", "2");
+    expect_json(db, in, "json_type(?1,'$.history[1].notes[0].summary')", "true");
+    expect_id_at(db, in, "$.history[1].final.entry_id", t.fin);
+    free(in);
+    (void)f3;
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_finished_turn_ops\n");
+}
+
+/* The running turn, between iterations: a ContextThreshold reply edits it,
+ * the leaf may move, a note lands at the end, and the record says where the
+ * edit began. */
+static void test_running_turn(void) {
+    sqlite3 *db = open_seeded();
+    T t = seed_turn(db, "running", 0);
+    R w = add_running(db, t.sid);
+    TurnEditInputSpec spec = TURN_EDIT_INPUT_DEFAULTS;
+    TurnEditInputFor ct = { .event = "ContextThreshold", .need_answer = 0 };
+    char *in = turn_edit_input(db, t.sid, &spec, &ct, NULL);
+    assert(in);
+    expect_json(db, in, "json_type(?1,'$.final')", "null");
+    expect_json(db, in, "json_array_length(?1,'$.iterations')", "2");
+    expect_id_at(db, in, "$.iterations[0].iteration_id", w.it4);
+    expect_id_at(db, in, "$.iterations[0].entry_id", w.rs4);
+    expect_id_at(db, in, "$.iterations[0].message_id", w.a4);
+    free(in);
+
+    /* The oldest iteration summarised, the newest result shortened: the
+     * stand-in is the new leaf. */
+    char r[512];
+    snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"step four\",\"from_iteration\":%lld,"
+             "\"to_iteration\":%lld},{\"op\":\"replace\",\"call_id\":\"k2\",\"text\":\"short\"}"),
+             (long long)w.it4, (long long)w.it4);
+    apply_to(db, t.sid, r, 0);
+    int64_t sum = leaf_rec_id(db, t.sid, ".summaries[0]");
+    int64_t rk2n = leaf_rec_id(db, t.sid, ".replaced[0].replacement");
+    assert(leaf_of(db, t.sid) == rk2n && rk2n > sum && sum > w.rk2);
+    BRANCH(db, t.sid, t.u0, t.a0, t.u, t.rs1, t.a1, t.c1, t.c2, t.c3, t.r2, t.r1, t.r3, t.rs2,
+           t.a2, t.c4, t.r4, t.rs3, t.fin, w.u, sum, w.rs5, w.a5, w.k2, rk2n);
+    expect_q(db, "3", "SELECT turn_id FROM entries WHERE id=%lld AND iteration_id IS NULL",
+             (long long)sum);
+    assert(leaf_rec_id(db, t.sid, ".thinking_cut") == sum);
+    expect_shape(db, t.sid, O,
+        "user:hi|assistant:hello|user:go|assistant:one,=c1,=c2,=c3|tool:r2,<c2|tool:r1,<c1"
+        "|tool:r3,<c3|assistant:two,=c4|tool:r4,<c4|assistant:done|user:more"
+        "|user:[Summary of earlier conversation]\nstep four|assistant:five,=k2|tool:short,<k2");
+    expect_shape(db, t.sid, A,
+        "user:hi|assistant:hello*|user:go|assistant:one,=c1,=c2,=c3|user:<c2,<c1,<c3"
+        "|assistant:two,=c4|user:<c4|assistant:done*|user:more"
+        "|user:[Summary of earlier conversation]\nstep four|assistant:five,=k2|user:<k2");
+    in = turn_edit_input(db, t.sid, &spec, &ct, NULL);
+    expect_json(db, in, "json_array_length(?1,'$.iterations')", "1");
+    expect_json(db, in, "json_type(?1,'$.notes[0].summary')", "true");
+    expect_id_at(db, in, "$.notes[0].before_iteration", w.it5);
+    free(in);
+
+    /* A note with no "before", while the turn runs, goes at the end. */
+    apply_to(db, t.sid, E("{\"op\":\"note\",\"text\":\"keep going\"}"), 0);
+    int64_t note = leaf_of(db, t.sid);
+    assert(parent_of(db, note) == rk2n);
+    expect_q(db, "1", "SELECT json_extract(data,'$.turn_edits[0].notes[0]')=id AND turn_id=3"
+                      " FROM entries WHERE id=%lld", (long long)note);
+    /* Dropping the newest call empties its iteration: it leaves whole, the
+     * leaf stays the note. */
+    apply_to(db, t.sid, E(DROP("k2")), note);
+    BRANCH(db, t.sid, t.u0, t.a0, t.u, t.rs1, t.a1, t.c1, t.c2, t.c3, t.r2, t.r1, t.r3, t.rs2,
+           t.a2, t.c4, t.r4, t.rs3, t.fin, w.u, sum, note);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_running_turn\n");
+}
+
+/* Accounting of what an edit writes: a stand-in for a measured entry keeps
+ * its count scaled by length, a short or unmeasured one and a new entry take
+ * the estimate; and a report older than an edit no longer measures the head. */
+static void test_written_tokens(void) {
+    sqlite3 *db = open_seeded();
+    T t = seed_turn(db, "acct", 0);
+    run(db, "UPDATE entries SET content=printf('%%.600c','x'), content_bytes=600, tokens=150"
+            " WHERE id=%lld", (long long)t.r1);
+    run(db, "UPDATE entries SET tokens=10 WHERE id=%lld", (long long)t.r4);
+    run(db, "UPDATE entries SET content=printf('%%.400c','u'), content_bytes=400, tokens=100"
+            " WHERE id=%lld", (long long)t.u);
+    run(db, "UPDATE entries SET usage_in=100000 WHERE id=%lld", (long long)t.fin);
+    ContextPlan m = {0};
+    assert(context_measure(db, t.sid, 77, &m) == 0);
+    assert(m.head > 77);                    /* measured from the answer's report */
+    context_plan_free(&m);
+
+    char text300[301], text200[201], r[1024];
+    memset(text300, 'y', 300); text300[300] = 0;
+    memset(text200, 'v', 200); text200[200] = 0;
+    snprintf(r, sizeof(r), E("{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"%s\"},"
+             "{\"op\":\"replace\",\"call_id\":\"c4\",\"text\":\"tiny\"},"
+             "{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"%s\"},"
+             "{\"op\":\"note\",\"text\":\"a note\"}"), text300, (long long)t.u, text200);
+    apply_ok(db, &t, r);
+    expect_q(db, "75|-|50", "SELECT group_concat(COALESCE(n.tokens,'-'),'|') FROM"
+             " (SELECT json_extract(value,'$.replacement') AS id, key FROM json_each("
+             "   (SELECT data FROM entries WHERE id=%lld),'$.turn_edits[0].replaced')) x"
+             " JOIN entries n ON n.id=x.id ORDER BY x.key", (long long)t.fin);
+    expect_q(db, "1", "SELECT tokens IS NULL AND token_estimate=%d FROM entries"
+                      " WHERE id=(SELECT json_extract(data,'$.turn_edits[0].notes[0]')"
+                      " FROM entries WHERE id=%lld)", TOKEN_ESTIMATE(6), (long long)t.fin);
+    /* The answer now carries the record: its report predates the edit. */
+    assert(context_measure(db, t.sid, 77, &m) == 0);
+    assert(m.head == 77);
+    context_plan_free(&m);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_written_tokens\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_turn_edit:\n");
     test_input();
+    test_note_after_answer();
+    test_input_context();
     test_rejections();
     test_drop_one_of_batch();
     test_drop_whole_iteration();
@@ -1603,6 +2141,11 @@ int main(void) {
     test_history();
     test_input_options();
     test_turn_edges();
+    test_past_turn();
+    test_whole_turns();
+    test_finished_turn_ops();
+    test_running_turn();
+    test_written_tokens();
     printf("All turn edit tests passed.\n");
     return 0;
 }

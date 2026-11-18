@@ -503,7 +503,8 @@ static int act_models_set(Act *a) {
                      strcmp(purpose, "audio") != 0 && strcmp(purpose, "utility") != 0))
         return refuse(a, 400, "The purpose must be chat, image, audio or utility.");
     if (!list || qi(a, "SELECT json_type(?1) = 'array'", list, NULL, NULL) != 1)
-        return refuse(a, 400, "models must be a list of {model_id, reasoning_effort} in order.");
+        return refuse(a, 400, "models must be a list of {model_id, reasoning_effort,"
+                              " trim_threshold, prune_target} in order.");
     /* Media lists (image, audio) take only models with that capability and
      * no effort; chat and utility take any model, with an effort level. */
     int is_chat = strcmp(purpose, "chat") == 0;
@@ -514,8 +515,22 @@ static int act_models_set(Act *a) {
     if (qi(a, "SELECT 1 FROM json_each(?1) WHERE type <> 'object'"
               " OR json_type(value, '$.model_id') IS NOT 'text'"
               " OR EXISTS (SELECT 1 FROM json_each(value) k WHERE k.key NOT IN"
-              "            ('model_id', 'reasoning_effort'))", list, NULL, NULL) == 1)
-        return refuse(a, 400, "Each entry needs a model_id, and may have a reasoning_effort.");
+              "            ('model_id', 'reasoning_effort', 'trim_threshold', 'prune_target'))",
+              list, NULL, NULL) == 1)
+        return refuse(a, 400, "Each entry needs a model_id, and may have a reasoning_effort,"
+                              " a trim_threshold and a prune_target.");
+    /* The trim numbers: tokens, or null for the default. An entry that does
+     * not name one keeps what that model's row has now, so a list saved by a
+     * page that does not show them does not reset them. */
+    if (qi(a, "SELECT 1 FROM json_each(?1) j, json_each(j.value) k"
+              " WHERE k.key IN ('trim_threshold', 'prune_target') AND k.type <> 'null'"
+              "   AND (k.type <> 'integer' OR k.value < 1)", list, NULL, NULL) == 1)
+        return refuse(a, 400, "trim_threshold and prune_target are token counts (whole numbers"
+                              " above 0), or empty for the default.");
+    if (!is_chat && qi(a, "SELECT 1 FROM json_each(?1) j, json_each(j.value) k"
+                          " WHERE k.key IN ('trim_threshold', 'prune_target')"
+                          "   AND k.type <> 'null'", list, NULL, NULL) == 1)
+        return refuse(a, 400, "Trim numbers apply to the chat list only.");
     char *dup = qs(a, "SELECT value ->> 'model_id' FROM json_each(?1) GROUP BY value ->> 'model_id'"
                       " HAVING count(*) > 1", list, NULL, NULL);
     if (dup) return refuse(a, 400, "%s is in the list twice. Keep one.", dup);
@@ -541,12 +556,23 @@ static int act_models_set(Act *a) {
                                bad, purpose_word(purpose), purpose);
     }
     if (tx_begin(a) != 0) return busy(a);
+    /* What is asked for, with the trim numbers an entry left out taken from
+     * that model's current row. */
+    list = qs(a, "SELECT json_group_array(json_object('model_id', j.value ->> 'model_id',"
+                 " 'reasoning_effort', j.value ->> 'reasoning_effort',"
+                 " 'trim_threshold', CASE WHEN json_type(j.value, '$.trim_threshold') IS NULL"
+                 "   THEN c.trim_threshold ELSE j.value ->> 'trim_threshold' END,"
+                 " 'prune_target', CASE WHEN json_type(j.value, '$.prune_target') IS NULL"
+                 "   THEN c.prune_target ELSE j.value ->> 'prune_target' END) ORDER BY j.key)"
+                 " FROM json_each(?1) j LEFT JOIN agent_models c ON c.agent_name=?2"
+                 "  AND c.purpose=?3 AND c.model_id = j.value ->> 'model_id'",
+              list, agent, purpose);
+    if (!list) { tx_end(a, 0); return refuse(a, 500, "The list could not be saved."); }
     char *cur = qs(a, "SELECT json_group_array(json_object('model_id', model_id, 'reasoning_effort',"
-                      " reasoning_effort)) FROM (SELECT * FROM agent_models WHERE agent_name=?1"
+                      " reasoning_effort, 'trim_threshold', trim_threshold, 'prune_target',"
+                      " prune_target)) FROM (SELECT * FROM agent_models WHERE agent_name=?1"
                       " AND purpose=?2 ORDER BY pos)", agent, purpose, NULL);
-    char *want = qs(a, "SELECT json_group_array(json_object('model_id', value ->> 'model_id',"
-                       " 'reasoning_effort', value ->> 'reasoning_effort')) FROM json_each(?1)",
-                    list, NULL, NULL);
+    char *want = list;
     if (cur && want && strcmp(cur, want) == 0) {
         tx_end(a, 0);
         return done(a, NULL, "Nothing changed: that is already %s's %s list.", agent, purpose_word(purpose));
@@ -555,8 +581,10 @@ static int act_models_set(Act *a) {
                 agent, purpose, NULL, NULL) >= 0;
     if (ok) {
         sqlite3_stmt *st = prep(a,
-            "INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort)"
-            " SELECT ?1, ?2, value ->> 'model_id', key, value ->> 'reasoning_effort'"
+            "INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort,"
+            " trim_threshold, prune_target)"
+            " SELECT ?1, ?2, value ->> 'model_id', key, value ->> 'reasoning_effort',"
+            " value ->> 'trim_threshold', value ->> 'prune_target'"
             " FROM json_each(?3)", agent, purpose, list, NULL);
         ok = st && sqlite3_step(st) == SQLITE_DONE;
         char err[256] = "";
@@ -567,6 +595,11 @@ static int act_models_set(Act *a) {
             if (strstr(err, "capabilities do not include"))
                 return refuse(a, 400, "One of these models cannot be used for %s: its capabilities"
                                       " do not include %s.", purpose_word(purpose), purpose);
+            if (strstr(err, "trim_threshold is larger"))
+                return refuse(a, 400, "A trim threshold is larger than its model's context"
+                                      " window. Lower it, or leave it empty for half the window.");
+            if (strstr(err, "CHECK constraint"))
+                return refuse(a, 400, "A prune target must be below its trim threshold.");
             return refuse(a, 500, "The list could not be saved.");
         }
     }

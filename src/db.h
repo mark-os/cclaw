@@ -303,6 +303,12 @@ typedef struct {
  * source_ref (NULL-able) is provenance whose meaning belongs to source —
  * 'cron' → job name, 'agent_result' → child session id — and the drain
  * turns it into a [tag] on the entry content. */
+/* The default agent (config default_agent, else the oldest agent; caller
+ * frees; NULL when there is none) and an agent's most recently updated
+ * session (0 when none) — where a note for the operator goes. */
+char *db_default_agent_name(sqlite3 *db);
+int64_t db_recent_session(sqlite3 *db, const char *agent);
+
 int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source,
                      const char *source_ref, const char *payload);
 

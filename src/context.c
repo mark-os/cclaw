@@ -91,26 +91,6 @@ static int plan_find_cut(const PlanEntry *entries, int count, int budget) {
     return snap_to_turn_start(entries, cut);
 }
 
-int context_compaction_keep_from(const ContextPlan *plan, int target_tokens) {
-    if (!plan || plan->count <= 0) return 0;
-
-    /* Walk backwards from the tail, accumulating until the target is spent. */
-    int keep_from = 0;
-    int cumulative = 0;
-    for (int i = plan->count - 1; i >= 0; i--) {
-        cumulative += plan->entries[i].tokens;
-        if (cumulative > target_tokens) { keep_from = i + 1; break; }
-    }
-    /* Even the newest entry alone exceeds the target: keep just the leaf. */
-    if (keep_from >= plan->count) keep_from = plan->count - 1;
-
-    keep_from = snap_to_turn_start(plan->entries, keep_from);
-    /* 0 = the whole branch fits, or the tail turn reaches back to the root —
-     * either way there is no prefix to summarize without splitting a turn.
-     * 1 leaves a single entry, which entry_compact cannot straddle. */
-    return keep_from <= 1 ? 0 : keep_from;
-}
-
 /* ── Measuring the branch ─────────────────────────────────────────
  *
  * An entry's size is entries.tokens — the provider's count, written once
@@ -123,9 +103,11 @@ int context_compaction_keep_from(const ContextPlan *plan, int target_tokens) {
  * block and the JSON around everything. It is measured from one report
  * alone, never a difference of two: the newest usable report's usage_in,
  * less the entries that request was sent with. A report is usable when it
- * was written after every compaction on the branch and its turn has not
- * been edited since (either changes what "the entries before it" are). If
- * that request had been cut it reads low, and the estimate passed in stands. */
+ * was written after every edit on the branch — every summary, and every
+ * entry carrying an edit's record, which turn_edit.c always puts on an entry
+ * at least as new as the newest report it changed the ground under (each
+ * edit changes what "the entries before it" are). If that request had been
+ * cut it reads low, and the estimate passed in stands. */
 static int segment_start(const PlanEntry *e, int a) {
     /* The response begins at its first part (a reasoning entry precedes the
      * assistant_message): that is where the request that produced it ended. */
@@ -138,7 +120,7 @@ static int segment_start(const PlanEntry *e, int a) {
 static int plan_head(const PlanEntry *e, int n, int head) {
     int r = -1;
     for (int i = n - 1; i >= 0 && r < 0; i--)
-        if (e[i].usage_in > 0 && e[i].fresh && !e[i].turn_edited) r = i;
+        if (e[i].usage_in > 0 && e[i].fresh) r = i;
     if (r < 0) return head;
     int sent = 0, start = segment_start(e, r);
     for (int j = 0; j < start; j++)
@@ -147,19 +129,14 @@ static int plan_head(const PlanEntry *e, int n, int head) {
     return measured > head ? measured : head;
 }
 
-/* What the per-row query leaves to a pass over the branch: fresh (written
- * after the newest compaction — ids are creation order, branch order is
- * not), and turn_edited spread over the whole turn (turns are contiguous). */
+/* What the per-row query leaves to a pass over the branch: fresh, written
+ * after the newest edit marker (ids are creation order, branch order is
+ * not). */
 static void branch_marks(PlanEntry *e, int n) {
     int64_t newest = -1;
     for (int i = 0; i < n; i++)
-        if (e[i].role == ROLE_COMPACTION && e[i].id > newest) newest = e[i].id;
+        if (e[i].reset && e[i].id > newest) newest = e[i].id;
     for (int i = 0; i < n; i++) e[i].fresh = e[i].id > newest;
-    for (int i = 0; i < n;) {
-        int j = i, edited = 0;
-        for (; j < n && e[j].turn_id == e[i].turn_id; j++) edited |= e[j].turn_edited;
-        for (; i < j; i++) e[i].turn_edited = (unsigned char)edited;
-    }
 }
 
 /* The branch as the next request would send it — error/aborted responses
@@ -169,23 +146,18 @@ static int branch_load(sqlite3 *db, int64_t session_id, int head, ContextPlan *o
     /* Level counter for path ordering (compaction entries may have higher
      * ids). A response is a report when it carries usage_in. */
     const char *sql =
-        "WITH RECURSIVE branch(id, parent_id, role, stop_reason, tokens,"
-        "                      tool_call_count, turn_id, iteration_id, usage_in,"
-        "                      edited, lvl) AS ("
-        "  SELECT id, parent_id, role, stop_reason, COALESCE(tokens, token_estimate),"
-        "         tool_call_count, turn_id, iteration_id, usage_in,"
-        "         CASE WHEN json_valid(data) THEN json_type(data,'$.turn_edits') END IS 'array', 0"
+        "WITH RECURSIVE branch(id, parent_id, lvl) AS ("
+        "  SELECT id, parent_id, 0"
         "    FROM entries WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1) AND session_id=?1"
         "  UNION ALL"
-        "  SELECT e.id, e.parent_id, e.role, e.stop_reason,"
-        "         COALESCE(e.tokens, e.token_estimate),"
-        "         e.tool_call_count, e.turn_id, e.iteration_id, e.usage_in,"
-        "         CASE WHEN json_valid(e.data) THEN json_type(e.data,'$.turn_edits') END"
-        "           IS 'array', b.lvl+1"
+        "  SELECT e.id, e.parent_id, b.lvl+1"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
-        ") SELECT id, role, stop_reason, tokens, tool_call_count, turn_id, iteration_id,"
-        "         CASE WHEN role=2 AND stop_reason NOT IN (4,5) THEN usage_in END, edited"
-        "    FROM branch ORDER BY lvl DESC;";
+        ") SELECT e.id, e.role, e.stop_reason, COALESCE(e.tokens, e.token_estimate),"
+        "         e.tool_call_count, e.turn_id, e.iteration_id,"
+        "         CASE WHEN e.role=2 AND e.stop_reason NOT IN (4,5) THEN e.usage_in END,"
+        "         e.role=4 OR CASE WHEN json_valid(e.data)"
+        "           THEN json_type(e.data,'$.turn_edits') END IS 'array'"
+        "    FROM branch b JOIN entries e ON e.id=b.id ORDER BY b.lvl DESC;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -219,7 +191,7 @@ static int branch_load(sqlite3 *db, int64_t session_id, int head, ContextPlan *o
         pe->turn_id = sqlite3_column_int64(stmt, 5);
         pe->iteration_id = sqlite3_column_int64(stmt, 6);
         pe->usage_in = sqlite3_column_int(stmt, 7);
-        pe->turn_edited = (unsigned char)sqlite3_column_int(stmt, 8);
+        pe->reset = (unsigned char)sqlite3_column_int(stmt, 8);
         raw_count++;
     }
     sqlite3_finalize(stmt);
@@ -251,15 +223,29 @@ static int branch_load(sqlite3 *db, int64_t session_id, int head, ContextPlan *o
     return 0;
 }
 
+int context_measure(sqlite3 *db, int64_t session_id, int head, ContextPlan *out) {
+    if (!db || !out) return -1;
+    return branch_load(db, session_id, head, out);
+}
+
 int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhead, ContextPlan *out) {
     if (!db || !cfg || !out) return -1;
     if (branch_load(db, session_id, overhead, out) != 0) return -1;
 
-    /* compute budget from context_threshold */
-    int budget = cfg->max_history_tokens > 0
-        ? cfg->max_history_tokens
-        : (int)((cfg->context_threshold > 0 ? cfg->context_threshold : 0.6f)
-                * (float)cfg->context_window);
+    /* The request is cut at the same line the trim keeps the session under
+     * (turn_edit.c): the governing entry's trim_threshold. Between
+     * iterations the trim has already brought the session below it, so in
+     * practice this acts only on a turn's first request, when the messages
+     * that opened it pushed the session over; the trim at the end of that
+     * iteration then makes the stored branch agree. */
+    int budget = cfg->max_history_tokens;
+    if (budget <= 0) {
+        char *agent = session_get_agent_name(db, session_id);
+        ContextLimits lim;
+        context_limits(db, agent, cfg->context_window, &lim);
+        free(agent);
+        budget = lim.threshold;
+    }
     if (budget <= 0) budget = 8000;
 
     /* History gets what the head leaves: budget and head are both in the
@@ -586,36 +572,44 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
     return out;
 }
 
-/* Resolve the effective context window for an agent's model.
- * Looks up the agent's model preference, finds the matching models row,
- * returns its context_window if non-NULL. Falls back to global_default. */
-int model_context_window(sqlite3 *db, const char *agent_name, int global_default) {
-    if (!db || !agent_name || !agent_name[0]) return global_default;
-
-    /* Agent's model preference → matching models row's context_window */
-    const char *sql =
-        "SELECT m.context_window FROM agent_models am"
-        " JOIN models m ON m.id = am.model_id"
-        " WHERE am.agent_name = ? AND am.purpose = 'chat'"
-        "   AND m.status != 'disabled'"
-        " ORDER BY am.pos LIMIT 1;";
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK)
-        return global_default;
-    sqlite3_bind_text(s, 1, agent_name, -1, SQLITE_STATIC);
-    int result = global_default;
-    if (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_type(s, 0) != SQLITE_NULL)
-        result = sqlite3_column_int(s, 0);
-    sqlite3_finalize(s);
-    return result > 0 ? result : global_default;
+/* The governing routing entry — the agent's first enabled chat model
+ * (decision 19: a smaller fallback is never trimmed for) — supplies the
+ * window and the two trim numbers. The 50% defaults below are the only copy
+ * of them: an empty trim_threshold is half the window, an empty
+ * prune_target half the threshold. The schema refuses nonsense at write
+ * time, but nothing here relies on it: the trim works whatever these are. */
+void context_limits(sqlite3 *db, const char *agent_name, int default_window,
+                    ContextLimits *out) {
+    out->window = default_window;
+    out->threshold = out->target = -1;
+    if (db && agent_name && agent_name[0]) {
+        sqlite3_stmt *s;
+        if (sqlite3_prepare_v2(db,
+                "SELECT m.context_window, am.trim_threshold, am.prune_target"
+                "  FROM agent_models am JOIN models m ON m.id = am.model_id"
+                " WHERE am.agent_name = ?1 AND am.purpose = 'chat'"
+                "   AND m.status != 'disabled'"
+                " ORDER BY am.pos LIMIT 1;", -1, &s, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(s, 1, agent_name, -1, SQLITE_STATIC);
+            if (sqlite3_step(s) == SQLITE_ROW) {
+                if (sqlite3_column_int(s, 0) > 0) out->window = sqlite3_column_int(s, 0);
+                if (sqlite3_column_type(s, 1) != SQLITE_NULL)
+                    out->threshold = sqlite3_column_int(s, 1);
+                if (sqlite3_column_type(s, 2) != SQLITE_NULL)
+                    out->target = sqlite3_column_int(s, 2);
+            }
+            sqlite3_finalize(s);
+        }
+    }
+    if (out->threshold <= 0) out->threshold = out->window / 2;
+    if (out->target <= 0) out->target = out->threshold / 2;
 }
 
 /* Head of a request: the tools array plus the system prompt, neither of
- * which is an entry. The cut has always budgeted for it (llm_req passes it
- * as `overhead`); the trigger must see the same number or it loses the race
- * to the cut by exactly the head's size and history gets dropped rather
- * than summarized. system_prompt may be NULL — then it is built and freed
- * here (the post-turn trigger); llm_req passes the one it already holds. */
+ * which is an entry. The cut budgets for it (llm_req passes it as
+ * `overhead`), and the trim must see the same number, or the two disagree
+ * on what history may occupy. system_prompt may be NULL — then it is built
+ * and freed here (the trim check); llm_req passes the one it already holds. */
 int context_head_estimate(sqlite3 *db, const char *agent_name, int64_t session_id,
                           const Config *cfg, const char *system_prompt) {
     int head = 0;
@@ -636,106 +630,4 @@ int context_head_estimate(sqlite3 *db, const char *agent_name, int64_t session_i
     if (system_prompt) head += (int)strlen(system_prompt) / CHARS_PER_TOKEN;
     free(built);
     return head;
-}
-
-/* Compaction trigger. The size of the context is the larger of:
- *   1. the measured branch (branch_load): head + every entry's size, the
- *      provider's count where it reported and the estimate elsewhere. With
- *      no edit since the newest report that is at least that report plus
- *      what came after it; with no report at all it is the estimate.
- *   2. the request body we actually sent, /3 (llm_responses.request_body)
- *      for the newest response, less the estimate of what a turn edit has
- *      removed since (the $.turn_edits record on that response).
- * 2 is our own count of a whole request, framing included; absent or pruned
- * it drops out, and it is ignored when it predates the newest compaction (a
- * just-compacted session would otherwise re-read its pre-compaction bill and
- * compact again) — as is any report, by branch_load.
- *
- * The limit is threshold × window, the same ceiling the cut enforces, less
- * the size of the turn just completed: compaction only runs at a turn
- * boundary, so it must fire while the *next* turn (assumed to be like the
- * last) can still fit under the cut. That keeps compaction — one cache
- * invalidation, then append-only — ahead of the cut, which invalidates the
- * prompt-cache prefix on every request it moves. */
-int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg) {
-    if (!db || !cfg || !cfg->compaction) return 0;
-    float threshold = cfg->context_threshold > 0 ? cfg->context_threshold : 0.6f;
-
-    char *agent = session_get_agent_name(db, session_id);
-    int window = model_context_window(db, agent, cfg->context_window);
-    int head = context_head_estimate(db, agent ? agent : "Assistant", session_id, cfg, NULL);
-    free(agent);
-    int token_limit = (int)(threshold * (float)window);
-    if (token_limit <= 0) token_limit = 8000;
-
-    ContextPlan b;
-    if (branch_load(db, session_id, head, &b) != 0) return 0;
-    int branch = 0, last_turn = 0, newest = -1;
-    for (int i = 0; i < b.count; i++) {
-        branch += b.entries[i].tokens;
-        if (b.entries[i].turn_id == b.entries[b.count - 1].turn_id)
-            last_turn += b.entries[i].tokens;
-        if (b.entries[i].role == ROLE_ASSISTANT && b.entries[i].fresh) newest = i;
-    }
-
-    int sent = 0;
-    if (newest >= 0) {
-        /* Turn edits record on the answer itself (turn-edit.md, "The
-         * record"), so the ones on the newest response are exactly those
-         * made since that request was sent. */
-        const char *sql =
-            "SELECT (SELECT COALESCE(length(json(request_body)),0) FROM llm_responses"
-            "         WHERE session_id=?1 AND request_body IS NOT NULL AND iteration_id=?2"
-            "         ORDER BY id DESC LIMIT 1),"
-            "       (SELECT COALESCE(SUM(json_extract(j.value,'$.tokens.before')"
-            "                          - json_extract(j.value,'$.tokens.after')),0)"
-            "          FROM entries n, json_each(CASE WHEN json_valid(n.data) THEN n.data END,"
-            "                                    '$.turn_edits') j"
-            "         WHERE n.id=?3);";
-        sqlite3_stmt *stmt;
-        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(stmt, 1, session_id);
-            sqlite3_bind_int64(stmt, 2, b.entries[newest].iteration_id);
-            sqlite3_bind_int64(stmt, 3, b.entries[newest].id);
-            if (sqlite3_step(stmt) == SQLITE_ROW) {
-                int body = sqlite3_column_int(stmt, 0);
-                if (body > 0) sent = body / CHARS_PER_TOKEN - sqlite3_column_int(stmt, 1);
-            }
-            sqlite3_finalize(stmt);
-        }
-    }
-    context_plan_free(&b);
-
-    int size = b.head + branch;
-    if (sent > size) size = sent;
-    int fire = size > token_limit - last_turn;
-    LOG_DEBUG_("compaction check session=%lld size=%d head=%d (estimate %d) branch=%d"
-               " sent=%d last_turn=%d limit=%d fire=%d",
-               (long long)session_id, size, b.head, head, branch, sent, last_turn,
-               token_limit, fire);
-    return fire;
-}
-
-/* Mid-turn overflow probe: the cut can only drop whole turns, so once the
- * current turn's own entries exceed what the window can hold beside the
- * head, no cut fits and the next request would 400 (E5). Compared against
- * the window itself, not the threshold — the threshold is a cost margin,
- * this is the wall. The turn's size is the sum of its entries as
- * branch_load sizes them — the provider's count for each one a report has
- * measured, the estimate for the results since — and so is the head. Returns 1 when
- * the turn no longer fits; *turn_tokens gets the turn's size either way (0
- * when nothing is known). */
-int context_turn_overflows(sqlite3 *db, int64_t session_id, int window, int head,
-                           int *turn_tokens) {
-    if (turn_tokens) *turn_tokens = 0;
-    if (!db || window <= 0) return 0;
-    ContextPlan b;
-    if (branch_load(db, session_id, head, &b) != 0) return 0;
-    int turn = 0;
-    for (int i = 0; i < b.count; i++)
-        if (b.entries[i].turn_id == b.entries[b.count - 1].turn_id)
-            turn += b.entries[i].tokens;
-    context_plan_free(&b);
-    if (turn_tokens) *turn_tokens = turn;
-    return turn > window - b.head;
 }

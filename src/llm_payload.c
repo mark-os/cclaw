@@ -67,6 +67,11 @@ static int populate_plan(sqlite3 *db, const ContextPlan *plan) {
  *          that iteration, if it is on the plan. Reasoning is a property of
  *          the assistant message, never a row of its own, and an iteration
  *          whose reasoning entry was taken off the branch replays nothing.
+ *   sig_id the reasoning entry Gemini's thoughtSignature is read from: as
+ *          reasoning_id, and in the newest turn also one an edit took off
+ *          the branch (see SQL_GEMINI_CONTENTS).
+ *   stale  1 when an edit since that reasoning was produced changed the
+ *          branch at or before it (SQL_TRANSCRIPT_STALE).
  *
  * A temp table rather than a view or a shared CTE: a view cannot take the
  * bound context text, and a CTE pasted into three queries would be
@@ -81,7 +86,7 @@ static const char SQL_TRANSCRIPT_CREATE[] =
     "  role TEXT NOT NULL, kind TEXT NOT NULL, text TEXT,"
     "  call_id TEXT, tool_name TEXT, args TEXT, is_error INTEGER NOT NULL,"
     "  entry_id INTEGER, iteration_id INTEGER, turn_id INTEGER,"
-    "  reasoning_id INTEGER);";
+    "  reasoning_id INTEGER, sig_id INTEGER, stale INTEGER NOT NULL DEFAULT 0);";
 
 /* Query-time untrusted-content wrap: a tool_result whose entry carries a
  * network_hosts tag came (at least partly) from the network. Both tags carry
@@ -122,7 +127,8 @@ static const char SQL_TRANSCRIPT_CREATE[] =
 
 /* ?1 = session id. Entry types not named in the WHERE are not sent. */
 static const char SQL_TRANSCRIPT_PARTS[] =
-    "INSERT INTO _transcript"
+    "INSERT INTO _transcript(pos, grp, role, kind, text, call_id, tool_name, args,"
+    "  is_error, entry_id, iteration_id, turn_id, reasoning_id, sig_id)"
     " SELECT 2*p.pos,"
     /* An entry with no iteration_id stands alone rather than pooling with
      * every other such entry. */
@@ -155,10 +161,45 @@ static const char SQL_TRANSCRIPT_PARTS[] =
     "    (SELECT r.id FROM entries r"
     "      WHERE r.session_id=e.session_id AND r.iteration_id=e.iteration_id"
     "        AND r.type='reasoning' AND r.id IN (SELECT entry_id FROM _plan)"
-    "      LIMIT 1) END"
+    "      LIMIT 1) END,"
+    "  CASE WHEN e.type = 'tool_call' THEN"
+    "    (SELECT r.id FROM entries r"
+    "      WHERE r.session_id=e.session_id AND r.iteration_id=e.iteration_id"
+    "        AND r.type='reasoning'"
+    "        AND (r.id IN (SELECT entry_id FROM _plan) OR e.turn_id ="
+    "             (SELECT MAX(x.turn_id) FROM _plan q JOIN entries x ON x.id=q.entry_id))"
+    "      ORDER BY r.id IN (SELECT entry_id FROM _plan) DESC LIMIT 1) END"
     " FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
     " WHERE e.type IN ('system','compaction','user_message','assistant_message',"
     "                  'cron_result','tool_call','tool_result');";
+
+/* Reasoning an edit has overtaken. A thinking signature is bound to
+ * everything before it (Anthropic), so an edit that changed the branch at or
+ * before an iteration's reasoning, after that reasoning was produced, leaves
+ * it bound to a conversation that is no longer sent. Every edit's record
+ * (turn_edit.c, $.turn_edits) names its thinking_cut — the first entry of the
+ * new branch that is new or re-pointed — and sits on an entry at least as new
+ * as everything the edit found, so "produced before the edit" is "an id
+ * below the record's host". Reasoning produced after an edit was made
+ * against the edited branch and stays good, as does reasoning before the
+ * cut. What is stale is therefore always a trailing run of the blocks that
+ * existed when the edit was made, never a gap in the middle (the
+ * preserved-thinking models refuse a block whose predecessor was removed).
+ * A cut no longer on the plan stands before everything. data is free-form:
+ * a value that is not JSON is read as having no records. */
+static const char SQL_TRANSCRIPT_STALE[] =
+    "WITH cut(host, pos) AS ("
+    "  SELECT e.id, COALESCE((SELECT 2*q.pos FROM _plan q"
+    "           WHERE q.entry_id = json_extract(j.value,'$.thinking_cut')), -1)"
+    "    FROM _plan p JOIN entries e ON e.id = p.entry_id,"
+    "         json_each(CASE WHEN json_valid(e.data) THEN e.data ELSE '{}' END,"
+    "                   '$.turn_edits') j"
+    "   WHERE e.data IS NOT NULL AND json_type(j.value,'$.thinking_cut') = 'integer')"
+    " UPDATE _transcript SET stale = 1"
+    "  WHERE reasoning_id IS NOT NULL AND EXISTS (SELECT 1 FROM cut"
+    "    WHERE cut.host > _transcript.reasoning_id"
+    "      AND cut.pos <= (SELECT 2*q.pos FROM _plan q"
+    "                       WHERE q.entry_id = _transcript.reasoning_id));";
 
 /* The user context block (clock, recall, live state) rides at the turn
  * boundary: right before the first entry of the newest turn on the plan. A
@@ -198,6 +239,7 @@ static int build_transcript(sqlite3 *db, int64_t session_id, const ContextPlan *
     if (populate_plan(db, plan) != 0) return -1;
     if (sqlite3_exec(db, SQL_TRANSCRIPT_CREATE, NULL, NULL, NULL) != SQLITE_OK) return -1;
     if (run_bound(db, SQL_TRANSCRIPT_PARTS, session_id, NULL) != 0) return -1;
+    if (sqlite3_exec(db, SQL_TRANSCRIPT_STALE, NULL, NULL, NULL) != SQLITE_OK) return -1;
     if (!user_context || !user_context[0]) return 0;
     return run_bound(db, SQL_TRANSCRIPT_CONTEXT, 0, user_context);
 }
@@ -228,7 +270,11 @@ static int build_transcript(sqlite3 *db, int64_t session_id, const ContextPlan *
  * OpenRouter's reasoning_details array verbatim (order and every field matter:
  * it is how Gemini's thoughtSignature survives the OpenAI-shaped envelope),
  * or DeepSeek's bare reasoning_content string (documented 400 / a silently
- * invalidated cache prefix when it goes missing after a tool-call turn). */
+ * invalidated cache prefix when it goes missing after a tool-call turn).
+ * Neither is stripped after a session edit (stale): DeepSeek requires its
+ * reasoning back inside a tool loop and does not check it against the
+ * history, and a Gemini signature inside reasoning_details is required on
+ * the call it rode on. */
 #define SQL_OPENAI_REASONING \
     "CASE json_extract(r.reasoning_meta,'$.format')" \
     "  WHEN 'reasoning_details' THEN" \
@@ -335,7 +381,11 @@ static const char SQL_GEMINI_CONTENTS[] =
      * signature is matched by tool name (part_index counts only the parts we
      * kept, so it can't index back into the wire parts array), and only when
      * the producing model is the one we're calling now. No captured
-     * signature → the part goes out bare. */
+     * signature → the part goes out bare. Gemini checks the signature's
+     * presence on the current turn's calls and never compares it with the
+     * history, so a call an edit kept keeps its signature even when the
+     * edit took its iteration's reasoning entry off the branch (sig_id), and
+     * no strip applies here. */
     "            json_patch("
     "              json_object('functionCall',json_object('name',t.tool_name,"
     "                'args',CASE WHEN json_valid(t.args) THEN json(t.args)"
@@ -357,7 +407,9 @@ static const char SQL_GEMINI_CONTENTS[] =
     "      ELSE json_object('role','user','parts',"
     "             json_array(json_object('text',t.text)))"
     "    END AS content_obj"
-    "  FROM _transcript t" SQL_REPLAY_JOIN
+    "  FROM _transcript t"
+    "  LEFT JOIN entries r ON r.id = t.sig_id"
+    "    AND json_extract(r.reasoning_meta,'$.model') = ?1"
        SQL_GROUP_RESULTS_APART
     ");";
 
@@ -419,11 +471,15 @@ static const char SQL_ANTHROPIC_MESSAGES[] =
      * Only within the turn that produced it: the user context block moves at
      * every turn boundary, which is an edit to the prefix those signatures
      * cover, while inside a turn the prefix is byte-stable (the mid-turn
-     * invariant). Dropping the blocks of earlier turns is a leading run,
-     * which the API allows. A model switch falls through to the
+     * invariant) — until a session edit between two iterations changes it:
+     * then the blocks it overtook are stale (SQL_TRANSCRIPT_STALE) and the
+     * model re-thinks. Dropping the blocks of earlier turns is a leading
+     * run, and dropping stale ones a trailing run of those that existed,
+     * both of which the API allows. A model switch falls through to the
      * reconstruction below, as does any iteration that carried no thinking. */
     "        MAX(CASE WHEN json_extract(r.reasoning_meta,'$.format')='anthropic_content'"
     "                  AND r.turn_id = (SELECT MAX(turn_id) FROM _transcript)"
+    "                  AND NOT t.stale"
     "                 THEN json_extract(r.reasoning_meta,'$.blob') END),"
     "        json_group_array(json("
     "          CASE t.kind WHEN 'tool_call' THEN"

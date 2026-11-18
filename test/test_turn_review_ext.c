@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include "buf.h"
 #include "db.h"
+#include "extension_manifest.h"
 #include "llm_bridge.h"
 #include "qjs_helpers.h"
 #include "test_util.h"
@@ -220,12 +221,15 @@ static char *review(const Turn *t, const char *said, const char *config, int *is
     Mock m;
     pthread_t tid;
     mock_start(&m, &tid, said);
-    /* The shipped manifest declares no "input": the script is sent what the
-     * runtime sends by default, the finished turn alone. */
+    /* The shipped manifest is a Stop hook the session waits for, and
+     * declares no "input": the script is sent what the runtime sends by
+     * default, the finished turn alone. */
     char *manifest = util_read_file("extensions/turn-review/extension.json", NULL);
     assert(manifest);
     sqlite3_stmt *st;
     assert(sqlite3_prepare_v2(g_db, "SELECT json_type(?1,'$.hooks[0]')='object'"
+                                    " AND json_extract(?1,'$.hooks[0].event')='Stop'"
+                                    " AND json_type(?1,'$.hooks[0].async') IS NULL"
                                     " AND json_type(?1,'$.hooks[0].input') IS NULL",
                               -1, &st, NULL) == SQLITE_OK);
     sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
@@ -233,7 +237,8 @@ static char *review(const Turn *t, const char *said, const char *config, int *is
     sqlite3_finalize(st);
     free(manifest);
     TurnEditInputSpec spec = TURN_EDIT_INPUT_DEFAULTS;
-    char *args = turn_edit_input(g_db, t->sid, &spec, NULL);
+    TurnEditInputFor what = { .event = "Stop", .need_answer = 1 };
+    char *args = turn_edit_input(g_db, t->sid, &spec, &what, NULL);
     assert(args);
     LlmBridge *b = llm_bridge_start(BRIDGE_DIR, DB_PATH, "t", "hook:turn-review", t->sid, 0);
     assert(b);
@@ -449,6 +454,14 @@ int main(void) {
     mkdir(BRIDGE_DIR, 0755);
     g_db = test_db_open(DB_PATH);
     assert(g_db);
+    /* The shipped bundle promotes as it stands: its hook names an event this
+     * build fires, in the fields a hook takes. */
+    char *verr = NULL;
+    if (extension_manifest_validate("extensions/turn-review", &verr) != 0) {
+        fprintf(stderr, "FAIL: extensions/turn-review does not validate: %s\n",
+                verr ? verr : "?");
+        return 1;
+    }
     setenv("TEST_LLM_KEY", "k-test", 1);
     /* The chat model is unreachable on purpose: the script must go to the
      * utility list. Tool facts as tools_sync_to_db leaves them. */

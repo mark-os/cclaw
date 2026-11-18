@@ -1,9 +1,9 @@
 {
   "name": "turn-review",
   "version": "0.1.0",
-  "description": "After a turn ends, a utility model picks the tool calls later turns no longer need: dead-end calls are dropped, long results are cut down to the lines that mattered. Reference example for turnSettled hooks.",
+  "description": "After a turn ends, a utility model picks the tool calls later turns no longer need: dead-end calls are dropped, long results are cut down to the lines that mattered. Reference example for Stop hooks.",
   "hooks": [
-    { "event": "turnSettled", "handler": "review.qjs", "wait": true }
+    { "event": "Stop", "handler": "review.qjs" }
   ],
   "config": [
     { "key": "min_tool_tokens", "default": "4000",

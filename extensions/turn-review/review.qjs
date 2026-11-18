@@ -1,4 +1,4 @@
-// turn-review — a turnSettled hook. After a turn's reply has been delivered,
+// turn-review — a Stop hook. After a turn's reply has been delivered,
 // a cheap model looks at the finished turn and picks what later turns no
 // longer need: tool calls that were not on the path to the answer are
 // dropped, and long results are cut down to the lines that mattered.
@@ -20,7 +20,7 @@ var MAX_TURN_TOKENS = setting("max_turn_tokens", 60000);  // above this: skip, l
 var NOTE_MAX_CHARS  = 400;   // a longer note from the model is a bad answer
 var SHOW_LINE_CHARS = 240;   // the reviewer sees long lines cut to this
 var SHOW_ARGS_CHARS = 400;   // …and long call arguments cut to this
-var REVIEW_TIMEOUT  = 45;    // seconds; keep under turn_settled_timeout (60)
+var REVIEW_TIMEOUT  = 45;    // seconds; keep under the hook's deadline (hook_timeout, 60)
 var REVIEW_MAX_TOKENS = 2000;
 
 var INSTRUCTIONS = [

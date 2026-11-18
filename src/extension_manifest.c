@@ -2,6 +2,7 @@
 #include "extension_manifest.h"
 #include "agent_define.h"
 #include "cron.h"
+#include "hook.h"
 #include "validate.h"
 #include "log.h"
 #include "skills.h"
@@ -289,7 +290,7 @@ static int check_policies(sqlite3 *db, const char *manifest, char **err_out) {
     return rc;
 }
 
-/* $.tools[].droppable says a turnSettled hook may take the tool's calls out of
+/* $.tools[].droppable says a hook may take the tool's calls out of
  * context. It must be a JSON boolean: the ingest stores the value as it
  * stands, and "yes" or 2 would not mean what the author thought. */
 static int check_tool_droppable(sqlite3 *db, const char *manifest, char **err_out) {
@@ -516,43 +517,72 @@ static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_di
     return rc;
 }
 
-/* Verify every $.hooks[] entry names an event this build fires and, when it
- * says whether the session waits for it, says so with a boolean. A hook
- * registered under an event that never fires would be a silent lie, so an
- * unknown name is refused rather than stored. The one event: turnSettled
- * (specs/hooks.md). */
+/* Verify every $.hooks[] entry: an object of the mainstream fields only
+ * (event, matcher, handler, input, async, timeout), naming an event this
+ * build fires. A hook registered under an event that never fires would be a
+ * silent lie, so an unknown or not-yet-fired name is refused rather than
+ * stored (hook_event_refusal says which, and why). `matcher` belongs to the
+ * tool events of stage 2 and is refused until they exist. `wait` is gone —
+ * `async: true` is its inverse — and a manifest still saying it is told so
+ * rather than having it read as an unknown key. */
 static int check_hook_events(sqlite3 *db, const char *manifest, char **err_out) {
     if (check_array_shape(db, manifest, "'$.hooks'",
                           "manifest '$.hooks' must be an array", err_out) != 0)
         return -1;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "SELECT COALESCE(json_extract(value,'$.event'),'(missing)'),"
-            "       COALESCE(json_extract(value,'$.event'),'') = 'turnSettled'"
-            " FROM json_each(COALESCE(json_extract(?1,'$.hooks'),'[]'))"
-            " WHERE COALESCE(json_extract(value,'$.event'),'') != 'turnSettled'"
-            "    OR COALESCE(json_type(value,'$.wait'),'true')"
-            "       NOT IN ('true','false')"
-            " LIMIT 1", -1, &st, NULL) != SQLITE_OK)
+            "SELECT CASE WHEN hj.type='object' THEN json_extract(hj.value,'$.event') END,"
+            "       CASE WHEN hj.type='object' THEN json_type(hj.value,'$.event') END, CASE"
+            "  WHEN hj.type <> 'object' THEN 'must be an object'"
+            "  WHEN json_type(hj.value,'$.wait') IS NOT NULL"
+            "    THEN '\"wait\" is gone — a hook the session does not wait for says"
+            " \"async\": true'"
+            "  WHEN json_type(hj.value,'$.matcher') IS NOT NULL"
+            "    THEN '\"matcher\" is not available until stage 2 of hooks"
+            " (PreToolUse, PostToolUse)'"
+            "  WHEN EXISTS (SELECT 1 FROM json_each(hj.value) k WHERE k.key NOT IN"
+            "       ('event','matcher','handler','input','async','timeout'))"
+            "    THEN 'unknown key \"' || (SELECT k.key FROM json_each(hj.value) k"
+            "         WHERE k.key NOT IN ('event','matcher','handler','input','async','timeout')"
+            "         LIMIT 1) || '\" (a hook takes event, handler, input, async, timeout)'"
+            "  WHEN COALESCE(json_type(hj.value,'$.async'),'false') NOT IN ('true','false')"
+            "    THEN '\"async\" must be true or false'"
+            "  WHEN json_type(hj.value,'$.timeout') IS NOT NULL"
+            "   AND NOT (json_type(hj.value,'$.timeout') = 'integer'"
+            "            AND json_extract(hj.value,'$.timeout') BETWEEN 1 AND ?2)"
+            "    THEN '\"timeout\" must be a whole number of seconds from 1 to ' || ?2"
+            "  END"
+            " FROM json_each(COALESCE(json_extract(?1,'$.hooks'),'[]')) hj"
+            " ORDER BY hj.key", -1, &st, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
-    int rc = 0;
-    if (sqlite3_step(st) == SQLITE_ROW) {
+    sqlite3_bind_int(st, 2, HOOK_TIMEOUT_MAX);
+    int rc = 0, step = SQLITE_DONE;
+    while (rc == 0 && (step = sqlite3_step(st)) == SQLITE_ROW) {
         const char *ev = (const char *)sqlite3_column_text(st, 0);
-        char m[256];
-        if (sqlite3_column_int(st, 1))
-            snprintf(m, sizeof(m), "hook '%s': 'wait' must be true or false", ev);
-        else
-            snprintf(m, sizeof(m), "hook event '%.80s' rejected — the only hook "
-                     "event is 'turnSettled'", ev);
+        const char *type = (const char *)sqlite3_column_text(st, 1);
+        const char *bad = (const char *)sqlite3_column_text(st, 2);
+        if (!bad && (!type || strcmp(type, "text") != 0)) bad = "needs \"event\", a string";
+        char m[320];
+        if (bad) {
+            snprintf(m, sizeof(m), "hook '%.80s': %s", ev ? ev : "?", bad);
+        } else if ((bad = hook_event_refusal(ev)) != NULL) {
+            snprintf(m, sizeof(m), "hook event '%.80s' rejected — it %s", ev, bad);
+        } else {
+            continue;
+        }
         xerr(err_out, m);
+        rc = -1;
+    }
+    if (rc == 0 && step != SQLITE_DONE) {
+        xerr(err_out, "manifest '$.hooks' entries must be objects");
         rc = -1;
     }
     sqlite3_finalize(st);
     return rc;
 }
 
-/* Verify each hook's "input" — what a turnSettled script asks to be sent
+/* Verify each hook's "input" — what its script asks to be sent
  * (specs/turn-edit.md#input): an object of at most `history` ("none", "all"
  * or a positive count of turns), `history_results` (boolean) and
  * `max_bytes` (an integer from TURN_EDIT_INPUT_MIN_BYTES to what the hook
@@ -906,18 +936,21 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
         "WHERE json_extract(t.value,'$.name') IS NOT NULL",
         manifest, name, store, owner_agent);
 
-    /* hooks: one row per $.hooks[] entry; an entry that does not say whether
-     * the session waits for it does (check_hook_events admits booleans only).
-     * `input` is stored as declared (check_hook_input), NULL when absent —
-     * the defaults are the runtime's, filled in at each run (hook_next).
-     * The rows were deleted above, so a re-promote starts the failure count
-     * over — new code has not failed yet. */
+    /* hooks: one row per $.hooks[] entry; the session waits for it unless
+     * it says "async": true (check_hook_events admits booleans only). `pos`
+     * is its place in the manifest, the order an extension's hooks for one
+     * event run in. `input` is stored as declared (check_hook_input), NULL
+     * when absent, and `timeout` likewise — the defaults are the runtime's,
+     * filled in at each run (hook_next). The rows were deleted above, so a
+     * re-promote starts the failure count over and clears a hook disabled
+     * by its failures — new code has not failed yet. */
     rc |= run_ingest(db,
-        "INSERT INTO hooks(extension_name, event, path, enabled, wait, input) "
+        "INSERT INTO hooks(extension_name, event, path, enabled, wait, input,"
+        "                  pos, timeout) "
         "SELECT :name, json_extract(value,'$.event'), "
         "       :store || '/' || json_extract(value,'$.handler'), 1, "
-        "       COALESCE(json_extract(value,'$.wait'), 1), "
-        "       json_extract(value,'$.input') "
+        "       CASE WHEN json_extract(value,'$.async') THEN 0 ELSE 1 END, "
+        "       json_extract(value,'$.input'), key, json_extract(value,'$.timeout') "
         "FROM json_each(COALESCE(json_extract(:m,'$.hooks'),'[]')) "
         "WHERE json_extract(value,'$.event') IS NOT NULL",
         manifest, name, store, owner_agent);

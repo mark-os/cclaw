@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS models (
 -- capability pick (llm_proc.c model_pick_for_media). A media row is refused
 -- unless the model's capabilities include that purpose (trigger below).
 -- 'utility' is the list a script's LLM(prompt, {purpose:"utility"}) walks —
--- cheap side work such as a turnSettled hook's review. An agent with no
+-- cheap side work such as a Stop hook's review. An agent with no
 -- utility rows is served from its chat list. Any model may be on it.
 CREATE TABLE IF NOT EXISTS agent_models (
   agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,  -- whose list this is
@@ -93,6 +93,16 @@ CREATE TABLE IF NOT EXISTS agent_models (
   -- models.effort_map, clamping to the nearest supported level.
   reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN
     ('off','minimal','low','medium','high')),
+  -- When this agent's session is trimmed, read off the first enabled chat
+  -- entry (the governing one). Over trim_threshold tokens at the end of an
+  -- iteration, the session is cut to prune_target (turn_edit.c, the trim).
+  -- NULL trim_threshold = 50% of the model's context_window; NULL
+  -- prune_target = 50% of the threshold (context.c, context_limits — the only
+  -- copy of those defaults). Opting out of trimming is trim_threshold set to
+  -- the window. The threshold may not exceed the window (trigger below).
+  trim_threshold INTEGER CHECK (trim_threshold IS NULL OR trim_threshold > 0),
+  prune_target INTEGER CHECK (prune_target IS NULL OR (prune_target > 0
+    AND (trim_threshold IS NULL OR prune_target < trim_threshold))),
   PRIMARY KEY (agent_name, purpose, pos)
 );
 -- Every write path goes through these, so the rule cannot be skipped by a
@@ -114,6 +124,18 @@ WHEN NEW.purpose IN ('image','audio') AND NOT EXISTS (
    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)
 BEGIN
   SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose');
+END;
+CREATE TRIGGER IF NOT EXISTS agent_models_window_bi
+BEFORE INSERT ON agent_models
+WHEN NEW.trim_threshold > (SELECT m.context_window FROM models m WHERE m.id = NEW.model_id)
+BEGIN
+  SELECT RAISE(ABORT, 'agent_models: trim_threshold is larger than the model''s context window');
+END;
+CREATE TRIGGER IF NOT EXISTS agent_models_window_bu
+BEFORE UPDATE OF trim_threshold, model_id ON agent_models
+WHEN NEW.trim_threshold > (SELECT m.context_window FROM models m WHERE m.id = NEW.model_id)
+BEGIN
+  SELECT RAISE(ABORT, 'agent_models: trim_threshold is larger than the model''s context window');
 END;
 
 -- Availability probe cache: what a provider says it can serve, as opposed to
@@ -335,8 +357,8 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- anything itself. A chat's filter is not copied
                                             -- here: channel_chats.tool_filter is read live.
   state TEXT NOT NULL DEFAULT 'idle',         -- idle | llm_running | tool_running | awaiting_approval |
-                                              -- compacting | rate_limited | settling (a turnSettled
-                                              -- hook is being awaited; the inbox queues)
+                                              -- compacting | rate_limited | settling (a hook at the end of
+                                              -- an iteration is awaited; the inbox queues)
   owner_instance TEXT,                      -- live owner (processes.instance_id); NULL ⟺ state='idle'
   turn_iteration INTEGER NOT NULL DEFAULT 0,  -- LLM requests made so far in the current turn
   turn_context TEXT,                        -- <RELEVANT_CONTEXT> block, materialized once at turn
@@ -619,7 +641,7 @@ CREATE TABLE IF NOT EXISTS tools (
                                              -- calls of this tool (Q1); NULL = the tool
                                              -- runs under the agent's grants. Only a
                                              -- promoted extension tool can carry one.
-  droppable INTEGER NOT NULL DEFAULT 0        -- 1 = a turnSettled hook may take a call of this
+  droppable INTEGER NOT NULL DEFAULT 0        -- 1 = a hook may take a call of this
                                              -- tool out of context. 0 = the call exists for
                                              -- its effect and always stays (it can still be
                                              -- trimmed). Built-in: the C recipe's flag.
@@ -629,24 +651,31 @@ CREATE TABLE IF NOT EXISTS tools (
 
 -- ═══ Hooks ═══
 -- Same provenance model as tools. A hook is a script the runtime forks, in
--- the agent's sandbox, when its event happens (specs/hooks.md). One event
--- exists: turnSettled.
+-- the agent's sandbox, when its event happens (specs/hooks.md). Events:
+-- Stop, SubagentStop, ContextThreshold.
 CREATE TABLE IF NOT EXISTS hooks (
   extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,
-  event TEXT NOT NULL,                        -- event name: 'turnSettled'
+  event TEXT NOT NULL,                        -- event name: 'Stop', 'SubagentStop', 'ContextThreshold'
   path TEXT NOT NULL,                         -- handler file (in the shared store)
   enabled INTEGER NOT NULL DEFAULT 1,
   wait INTEGER NOT NULL DEFAULT 1,            -- 1 = the session is held until the script ends and
-                                              -- its reply is applied; 0 = started and not awaited,
-                                              -- its output discarded
+                                              -- its reply is applied; 0 = the manifest's
+                                              -- "async": started and not awaited, output discarded
   fail_count INTEGER NOT NULL DEFAULT 0,      -- consecutive failed runs, any session; zeroed by a
-                                              -- run that works. At 3 the operator gets one notice
-                                              -- (settle.c) — the agent is never told.
-  input TEXT,                                 -- JSON: what a turnSettled script is sent besides the
-                                              -- finished turn — the manifest's $.hooks[].input
+                                              -- run that works
+  input TEXT,                                 -- JSON: what the script is sent besides the newest
+                                              -- turn — the manifest's $.hooks[].input
                                               -- ({history, history_results, max_bytes}), validated
                                               -- at promote. NULL = nothing declared: the turn alone,
                                               -- at most 1 MB (specs/turn-edit.md#input)
+  pos INTEGER NOT NULL DEFAULT 0,             -- v68. its index in the manifest's hooks[]: an
+                                              -- extension's hooks for one event run in this order
+  timeout INTEGER                             -- v68. seconds the script may run; NULL = config
+    CHECK (timeout IS NULL OR timeout > 0),   -- hook_timeout
+  disabled INTEGER NOT NULL DEFAULT 0,        -- v68. 1 = turned off after 3 failures in a row
+                                              -- (crash, timeout, refused reply); the default
+                                              -- agent was told once. Set back to 0, or promote
+                                              -- the extension again, to re-enable it
   PRIMARY KEY (extension_name, event, path)
 );
 

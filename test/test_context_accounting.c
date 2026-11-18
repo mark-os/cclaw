@@ -1,5 +1,5 @@
-/* Context accounting: the compaction trigger must see the whole request —
- * head (system prompt + tools) and provider/sent measures — not just the
+/* Context accounting: the size the trim reads must see the whole request —
+ * head (system prompt + tools) and the provider's measures — not just the
  * entries' own estimates; rescaled estimates must err high (chars/3); and an
  * entry's size is the provider's count, stored once when a response reports
  * it (db_response.c, usage_attribute), its estimate until then. */
@@ -40,85 +40,68 @@ static void add_tool(sqlite3 *db, const char *name, int param_bytes) {
     free(params);
 }
 
-/* Small entries, huge head: the old trigger (entries only) never fired and
- * the provider 400'd with the head alone over budget. */
-static void test_large_head_triggers(void) {
+/* The session's size as the trim reads it: head (measured when a usable
+ * report says so, else the estimate given) plus every entry it would send. */
+static int size_of(sqlite3 *db, int64_t sid, int head_estimate, int *head_out) {
+    ContextPlan m = {0};
+    assert(context_measure(db, sid, head_estimate, &m) == 0);
+    int t = m.head;
+    for (int i = 0; i < m.count; i++) t += m.entries[i].tokens;
+    if (head_out) *head_out = m.head;
+    context_plan_free(&m);
+    return t;
+}
+
+/* Small entries, huge head: a size that counts entries only never sees it,
+ * and the provider 400s with the head alone over budget. The trim counts it. */
+static void test_large_head_counts(void) {
     sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "s", "default", -1, 0);
     Config cfg = {0};
-    cfg.compaction = 1;
-    cfg.context_window = 10000;      /* limit = 6000 tokens */
+    cfg.context_window = 10000;
     int64_t it = db_next_iteration_id(db, sid);
     append(db, sid, ROLE_USER, "hi", 0, it);
     append(db, sid, ROLE_ASSISTANT, "hello", 0, it);
-    assert(session_needs_compaction(db, sid, &cfg) == 0);
+    ContextLimits lim = { .window = 10000, .threshold = 6000, .target = 3000 };
+    TrimReport r;
+    int head = context_head_estimate(db, "default", sid, &cfg, "");
+    assert(turn_edit_trim(db, sid, head, &lim, &r) == TRIM_UNDER);
 
     add_tool(db, "fat", 30000);      /* ~10000 head tokens */
-    int head = context_head_estimate(db, "default", sid, &cfg, "");
+    head = context_head_estimate(db, "default", sid, &cfg, "");
     assert(head >= 10000);
-    assert(session_needs_compaction(db, sid, &cfg) == 1);
+    assert(size_of(db, sid, head, NULL) > 6000);
+    assert(turn_edit_trim(db, sid, head, &lim, &r) == TRIM_OVER);
     db_close(db);
-    printf("  PASS test_large_head_triggers\n");
+    printf("  PASS test_large_head_counts\n");
 }
 
-/* The provider's prompt_tokens is trusted when fresh — it lifts the size
- * above our under-estimate — and ignored once a compaction post-dates it,
- * or the freshly compacted session would re-fire forever. */
+/* The provider's prompt_tokens measures the head when fresh — it lifts it
+ * above our estimate — and is ignored once a compaction post-dates it: that
+ * request was sent entries the branch no longer has. */
 static void test_provider_floor_and_staleness(void) {
     sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "s", "default", -1, 0);
-    Config cfg = {0};
-    cfg.compaction = 1;
-    cfg.context_window = 10000;
     int64_t it = db_next_iteration_id(db, sid);
     int64_t e1 = append(db, sid, ROLE_USER, "hi", 0, it);
     append(db, sid, ROLE_ASSISTANT, "hello", 0, it);
     it = db_next_iteration_id(db, sid);
     int64_t e3 = append(db, sid, ROLE_USER, "more", 0, it);
     append(db, sid, ROLE_ASSISTANT, "sure", 9000, it);   /* provider says 9000 */
-    assert(session_needs_compaction(db, sid, &cfg) == 1);
+    int head = 0;
+    assert(size_of(db, sid, 0, &head) > 8900 && head > 8900);
 
     /* Compact away the middle: the 9000 figure predates the summary. */
     assert(entry_compact(db, sid, e1, e3, "summary") > 0);
-    assert(session_needs_compaction(db, sid, &cfg) == 0);
+    assert(size_of(db, sid, 0, &head) < 100 && head == 0);
 
     /* A new post-compaction response reinstates the provider term. */
     it = db_next_iteration_id(db, sid);
     append(db, sid, ROLE_USER, "again", 0, it);
     append(db, sid, ROLE_ASSISTANT, "ok", 9500, it);
-    assert(session_needs_compaction(db, sid, &cfg) == 1);
+    assert(size_of(db, sid, 0, &head) > 9400 && head > 9300);
     db_close(db);
     printf("  PASS test_provider_floor_and_staleness\n");
-}
-
-/* The sent payload (llm_responses.request_body) bounds the estimate too. */
-static void test_sent_payload_floor(void) {
-    sqlite3 *db = open_seeded();
-    int64_t sid = session_create(db, "s", "default", -1, 0);
-    Config cfg = {0};
-    cfg.compaction = 1;
-    cfg.context_window = 10000;
-    int64_t it = db_next_iteration_id(db, sid);
-    append(db, sid, ROLE_USER, "hi", 0, it);
-    append(db, sid, ROLE_ASSISTANT, "hello", 0, it);
-    assert(session_needs_compaction(db, sid, &cfg) == 0);
-
-    char *body = malloc(30010);
-    strcpy(body, "{\"x\":\"");
-    memset(body + 6, 'y', 30000); strcpy(body + 30006, "\"}");
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "INSERT INTO llm_responses(session_id, iteration_id, status, request_body)"
-        " VALUES(?, ?, 'ok', jsonb(?))", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    sqlite3_bind_int64(s, 2, it);
-    sqlite3_bind_text(s, 3, body, -1, SQLITE_STATIC);
-    assert(sqlite3_step(s) == SQLITE_DONE);
-    sqlite3_finalize(s);
-    free(body);
-    assert(session_needs_compaction(db, sid, &cfg) == 1);
-    db_close(db);
-    printf("  PASS test_sent_payload_floor\n");
 }
 
 /* Estimates use chars/3 + 4, and the stored content_bytes lets a schema
@@ -138,24 +121,6 @@ static void test_estimate_divisor(void) {
 
 
 /* ── Stored sizes ─────────────────────────────────────────────────── */
-
-/* The archived request body for one iteration: JSON text of exactly n bytes. */
-static void add_body(sqlite3 *db, int64_t sid, int64_t it, int n) {
-    char *body = malloc((size_t)n + 1);
-    memcpy(body, "{\"x\":\"", 6);
-    memset(body + 6, 'y', (size_t)n - 8);
-    memcpy(body + n - 2, "\"}", 3);
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "INSERT INTO llm_responses(session_id, iteration_id, status, request_body)"
-        " VALUES(?, ?, 'ok', jsonb(?))", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    sqlite3_bind_int64(s, 2, it);
-    sqlite3_bind_text(s, 3, body, -1, SQLITE_STATIC);
-    assert(sqlite3_step(s) == SQLITE_DONE);
-    sqlite3_finalize(s);
-    free(body);
-}
 
 static void exec_id(sqlite3 *db, const char *sql, int64_t id) {
     sqlite3_stmt *s;
@@ -491,10 +456,7 @@ static void test_plan_reads_stored(void) {
     assert(head == 2000);
     assert(measured(db, sid, a - 1, a, NULL) == 400);    /* reasoning, replayed */
     assert(measured(db, sid, r, b, NULL) == 900);
-    int turn = 0;
-    assert(context_turn_overflows(db, sid, 2000 + 304 + 440 + 900 + 30 + 1004, 0, &turn) == 0);
-    assert(turn == 304 + 440 + 900 + 30 + 1004);
-    assert(context_turn_overflows(db, sid, 2000 + turn - 1, 0, NULL) == 1);
+    assert(size_of(db, sid, 0, NULL) == 2000 + 304 + 440 + 900 + 30 + 1004);
     (void)r2;
     db_close(db);
     printf("  PASS test_plan_reads_stored\n");
@@ -506,7 +468,7 @@ static void test_plan_reads_stored(void) {
 static void test_cut_keeps_fewer_turns(void) {
     sqlite3 *db = open_seeded();
     Config cfg = {0};
-    cfg.context_window = 12000;                          /* budget 7200 */
+    cfg.context_window = 14400;                          /* budget: half, 7200 */
     for (int reported = 0; reported <= 1; reported++) {
         int64_t sid = new_session(db);
         int turn = 0;
@@ -530,67 +492,15 @@ static void test_cut_keeps_fewer_turns(void) {
     printf("  PASS test_cut_keeps_fewer_turns\n");
 }
 
-/* What the trigger measured before the provider's count was the measure
- * (pre-05a69dc): max(branch estimate + head, newest usage_in, sent / 3)
- * against the limit less the last turn's estimate. */
-static int old_trigger_margin(sqlite3 *db, int64_t sid, int head, int64_t newest_it,
-                              int newest_in, int *last_turn) {
-    int branch = (int)db_scalar_i64(db,
-        "SELECT SUM(token_estimate) FROM entries WHERE session_id=?", sid, 0);
-    *last_turn = (int)db_scalar_i64(db,
-        "SELECT SUM(token_estimate) FROM entries WHERE session_id=?1 AND turn_id="
-        "(SELECT MAX(turn_id) FROM entries WHERE session_id=?1)", sid, 0);
-    int sent = (int)db_scalar_i64(db,
-        "SELECT COALESCE(MAX(length(json(request_body))),0)/3 FROM llm_responses"
-        " WHERE iteration_id=?", newest_it, 0);
-    int size = branch + head;
-    if (newest_in > size) size = newest_in;
-    if (sent > size) size = sent;
-    return size + *last_turn;                            /* fires when > limit */
-}
-
-static void set_window_just_under(Config *cfg, int need) {
-    /* limit = 0.6 x window must be < need for the old trigger to fire */
-    cfg->context_window = (int)((float)(need - 1) / 0.6f);
-    while ((int)(0.6f * (float)cfg->context_window) >= need) cfg->context_window--;
-}
-
-/* Without a turn edit the trigger reads no lower than before: whichever of
- * the old measures dominated — the estimate, the provider's count, the
- * sent body — a limit the old trigger fired at, the new one fires at too. */
-static void test_trigger_not_lower_without_edit(void) {
-    for (int which = 0; which < 3; which++) {
-        sqlite3 *db = open_seeded();
-        int64_t sid = new_session(db);
-        Config cfg = {0};
-        cfg.compaction = 1;
-        int head = context_head_estimate(db, "default", sid, &cfg, NULL);
-        user_msg(db, sid, 9000);
-        int64_t r1 = respond(db, sid, "m", which == 1 ? 3 * 5000 : 0, 0, 6000);
-        user_msg(db, sid, 600);
-        int64_t r2 = respond(db, sid, "m", which == 1 ? 3 * 5000 + 9000 : 0, 0, 0);
-        int64_t it = db_scalar_i64(db, "SELECT iteration_id FROM entries WHERE id=?", r2, 0);
-        if (which == 2) add_body(db, sid, it, 3 * 40000);
-        (void)r1;
-        int last = 0;
-        int need = old_trigger_margin(db, sid, head, it, which == 1 ? 3 * 5000 + 9000 : 0, &last);
-        set_window_just_under(&cfg, need);
-        assert(session_needs_compaction(db, sid, &cfg) == 1);
-        db_close(db);
-    }
-    printf("  PASS test_trigger_not_lower_without_edit\n");
-}
-
 /* A turn edit that drops the turn's big tool output takes its stored count
- * with it: the trigger that follows sees the shrink at once, with no
- * request in between. A replaced result keeps its measure, scaled. */
+ * with it: the size the trim reads sees the shrink at once, with no request
+ * in between. A replaced result keeps its measure, scaled. */
 static void test_edit_changes_sizes(void) {
     sqlite3 *db = open_seeded();
     assert(sqlite3_exec(db, "INSERT INTO tools(name, droppable) VALUES ('look',1);",
                         NULL, NULL, NULL) == SQLITE_OK);
     int64_t sid = new_session(db), it;
     Config cfg = {0};
-    cfg.compaction = 1;
     int head = context_head_estimate(db, "default", sid, &cfg, NULL);
 
     user_msg(db, sid, 30);
@@ -604,10 +514,9 @@ static void test_edit_changes_sizes(void) {
     assert(tok(db, big) + tok(db, small) == 17000 && tok(db, big) > 15000);
     int was_small = tok(db, small);
 
-    /* Limit sits between the measured size (~17k) and what is left after
-     * the drop; the estimate alone (~9k) was always under it. */
-    cfg.context_window = (int)((head + 13000) / 0.6f);
-    assert(session_needs_compaction(db, sid, &cfg) == 1);
+    /* The measured size (~17k over the head) is over a line that what is
+     * left after the drop is under; the estimate alone (~9k) always was. */
+    assert(size_of(db, sid, head, NULL) > head + 13000);
 
     char edits[1024], *err = NULL;
     snprintf(edits, sizeof(edits),
@@ -615,7 +524,7 @@ static void test_edit_changes_sizes(void) {
              "{\"op\":\"replace\",\"call_id\":\"c%lld_1\",\"text\":\"%0600d\"}]}",
              (long long)it, (long long)it, 7);
     assert(turn_edit_apply(db, sid, edits, "hook:t", &err) == TURN_EDIT_APPLIED);
-    assert(session_needs_compaction(db, sid, &cfg) == 0);
+    assert(size_of(db, sid, head, NULL) < head + 13000);
     int64_t repl = db_scalar_i64(db, "SELECT id FROM entries WHERE session_id=?1"
                                      " AND type='tool_result' ORDER BY id DESC LIMIT 1", sid, 0);
     assert(repl > small && tok(db, repl) == was_small * 600 / 3000);
@@ -634,7 +543,7 @@ static void test_edit_changes_sizes(void) {
 }
 
 /* No report anywhere: every size is the estimate and the head the estimate
- * passed in — the cut, the probe and the trigger read as they always have. */
+ * passed in. */
 static void test_no_reports_unchanged(void) {
     sqlite3 *db = open_seeded();
     int64_t sid = new_session(db);
@@ -655,13 +564,7 @@ static void test_no_reports_unchanged(void) {
     }
     assert(p.head == 700);
     context_plan_free(&p);
-    int last = (int)db_scalar_i64(db,
-        "SELECT SUM(token_estimate) FROM entries WHERE session_id=?1 AND turn_id="
-        "(SELECT MAX(turn_id) FROM entries WHERE session_id=?1)", sid, 0);
-    int turn = 0;
-    assert(total > last);
-    assert(context_turn_overflows(db, sid, last + 700, 700, &turn) == 0 && turn == last);
-    assert(context_turn_overflows(db, sid, last + 699, 700, &turn) == 1);
+    assert(size_of(db, sid, 700, NULL) == total + 700);
     db_close(db);
     printf("  PASS test_no_reports_unchanged\n");
 }
@@ -669,9 +572,8 @@ static void test_no_reports_unchanged(void) {
 int main(void) {
     TEST_INIT();
     printf("test_context_accounting:\n");
-    test_large_head_triggers();
+    test_large_head_counts();
     test_provider_floor_and_staleness();
-    test_sent_payload_floor();
     test_estimate_divisor();
     test_output_shared();
     test_appended_shared();
@@ -681,7 +583,6 @@ int main(void) {
     test_untrusted_difference();
     test_plan_reads_stored();
     test_cut_keeps_fewer_turns();
-    test_trigger_not_lower_without_edit();
     test_edit_changes_sizes();
     test_no_reports_unchanged();
     printf("All context accounting tests passed.\n");

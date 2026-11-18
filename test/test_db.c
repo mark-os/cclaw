@@ -258,6 +258,12 @@ static void unshape_v68(sqlite3 *db) {
                               "DROP TRIGGER log_agent_models_del;"
                               "DROP TRIGGER agent_models_window_bi;"
                               "DROP TRIGGER agent_models_window_bu;"
+                              "DROP TRIGGER agent_models_lifetime_bi;"
+                              "DROP TRIGGER agent_models_lifetime_bu;"
+                              "DROP TRIGGER agent_models_lifetime_ai;"
+                              "ALTER TABLE agent_models DROP COLUMN cache_lifetime;"
+                              "DROP INDEX idx_sessions_cache_armed;"
+                              "ALTER TABLE sessions DROP COLUMN cache_armed_at;"
                               "ALTER TABLE agent_models DROP COLUMN prune_target;"
                               "ALTER TABLE agent_models DROP COLUMN trim_threshold;"
                               "ALTER TABLE hooks DROP COLUMN pos;"
@@ -2052,6 +2058,8 @@ static void test_schema_patch_v67(void) {
 }
 
 /* v68: agent_models.trim_threshold / prune_target and the window triggers;
+ * agent_models.cache_lifetime (3600 on existing Anthropic chat entries) and
+ * its triggers, sessions.cache_armed_at;
  * hooks.pos / timeout / disabled, and wait turned into async. Existing
  * routing rows keep everything and read NULL — the 50% defaults; existing
  * hooks run first in their extension, on the default deadline, enabled. The
@@ -2073,6 +2081,13 @@ static void test_schema_patch_v68(void) {
         " VALUES ('p/m','p','m',8000);"
         "INSERT INTO agent_models(agent_name, model_id, pos, reasoning_effort)"
         " VALUES ('Keep','p/m',0,'high');"
+        /* An Anthropic chat entry and an Anthropic utility entry. */
+        "INSERT INTO providers(name, base_url, endpoint_type)"
+        " VALUES ('a','http://a','anthropic');"
+        "INSERT INTO models(id, provider_name, model, context_window)"
+        " VALUES ('a/c','a','c',200000);"
+        "INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+        " VALUES ('Keep','chat','a/c',1), ('Keep','utility','a/c',0);"
         "INSERT INTO extensions(name, path, published) VALUES('ext','/e',1);"
         "INSERT INTO hooks(extension_name, event, path, wait, fail_count)"
         " VALUES('ext','Stop','/e/r.qjs',0,2), ('ext','Stop','/e/w.qjs',1,0);"
@@ -2089,7 +2104,16 @@ static void test_schema_patch_v68(void) {
     int uv = 0;
     assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
     assert(db_scalar_i64(db, "SELECT reasoning_effort='high' AND trim_threshold IS NULL"
-        " AND prune_target IS NULL FROM agent_models WHERE agent_name='Keep'", 0, -1) == 1);
+        " AND prune_target IS NULL AND cache_lifetime IS NULL FROM agent_models"
+        " WHERE agent_name='Keep' AND model_id='p/m'", 0, -1) == 1);
+    /* Existing Anthropic chat entries move to the 1-hour cache; others stay
+     * unknown. No session is armed. */
+    assert(db_scalar_i64(db, "SELECT cache_lifetime FROM agent_models"
+        " WHERE model_id='a/c' AND purpose='chat'", 0, -1) == 3600);
+    assert(db_scalar_i64(db, "SELECT cache_lifetime IS NULL FROM agent_models"
+        " WHERE model_id='a/c' AND purpose='utility'", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sessions WHERE cache_armed_at IS NOT NULL",
+                         0, -1) == 0);
     assert(db_scalar_i64(db, "SELECT async=1 AND fail_count=2 AND pos=0 AND timeout IS NULL"
         " AND disabled=0 FROM hooks WHERE path='/e/r.qjs'", 0, -1) == 1);
     assert(db_scalar_i64(db, "SELECT async FROM hooks WHERE path='/e/w.qjs'", 0, -1) == 0);
@@ -2106,7 +2130,13 @@ static void test_schema_patch_v68(void) {
                         NULL, NULL, NULL) != SQLITE_OK);
     assert(sqlite3_exec(db, "UPDATE agent_models SET trim_threshold=6000, prune_target=6000;",
                         NULL, NULL, NULL) != SQLITE_OK);
-    assert(sqlite3_exec(db, "UPDATE agent_models SET trim_threshold=6000, prune_target=2000;",
+    assert(sqlite3_exec(db, "UPDATE agent_models SET trim_threshold=6000, prune_target=2000"
+                        " WHERE model_id='p/m';", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE agent_models SET cache_lifetime=600 WHERE model_id='a/c';",
+                        NULL, NULL, NULL) != SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE agent_models SET cache_lifetime=300 WHERE model_id='a/c';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(db, "UPDATE agent_models SET cache_lifetime=600 WHERE model_id='p/m';",
                         NULL, NULL, NULL) == SQLITE_OK);
 
     sqlite3 *fresh = db_open(fresh_path);
@@ -2120,6 +2150,66 @@ static void test_schema_patch_v68(void) {
     test_db_clean(path);
     test_db_clean(fresh_path);
     printf("  PASS test_schema_patch_v68\n");
+}
+
+/* cache_lifetime on an Anthropic entry: 300 or 3600 only, on insert and on
+ * update (also when the model under it changes); a new Anthropic chat entry
+ * that says nothing — omitted or NULL — gets 3600; a utility entry and other
+ * providers keep what they are given. The change log records it. */
+static void test_agent_models_cache_lifetime(void) {
+    const char *path = "/tmp/test_cclaw_db_lifetime.sqlite";
+    test_db_clean(path);
+    sqlite3 *db = test_db_open(path);
+    assert(db != NULL);
+    assert(sqlite3_exec(db,
+        "INSERT INTO agents(name) VALUES('A');"
+        "INSERT INTO providers(name, base_url, endpoint_type) VALUES"
+        " ('p','http://p','openai'), ('a','http://a','anthropic');"
+        "INSERT INTO models(id, provider_name, model) VALUES"
+        " ('m@p','p','m'), ('c@a','a','c'), ('d@a','a','d');",
+        NULL, NULL, NULL) == SQLITE_OK);
+#define LT(sql) sqlite3_exec(db, sql, NULL, NULL, NULL)
+    assert(LT("INSERT INTO agent_models(agent_name, model_id, pos) VALUES('A','c@a',0);")
+           == SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT cache_lifetime FROM agent_models WHERE pos=0"
+                             " AND purpose='chat'", 0, -1) == 3600);
+    assert(LT("INSERT INTO agent_models(agent_name, model_id, pos, cache_lifetime)"
+              " VALUES('A','d@a',1,NULL);") == SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT cache_lifetime FROM agent_models WHERE pos=1", 0, -1)
+           == 3600);
+    assert(LT("INSERT INTO agent_models(agent_name, model_id, pos, cache_lifetime)"
+              " VALUES('A','c@a',2,300);") == SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT cache_lifetime FROM agent_models WHERE pos=2", 0, -1)
+           == 300);
+    assert(LT("INSERT INTO agent_models(agent_name, model_id, pos, cache_lifetime)"
+              " VALUES('A','c@a',3,600);") != SQLITE_OK);
+    assert(strstr(sqlite3_errmsg(db), "cache_lifetime on an Anthropic model is 300 or 3600"));
+    assert(LT("INSERT INTO agent_models(agent_name, model_id, pos, cache_lifetime)"
+              " VALUES('A','m@p',3,600);") == SQLITE_OK);
+    assert(LT("INSERT INTO agent_models(agent_name, model_id, pos) VALUES('A','m@p',4);")
+           == SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT cache_lifetime IS NULL FROM agent_models WHERE pos=4",
+                         0, -1) == 1);
+    assert(LT("INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
+              " VALUES('A','utility','c@a',0);") == SQLITE_OK);
+    assert(db_scalar_i64(db, "SELECT cache_lifetime IS NULL FROM agent_models"
+                             " WHERE purpose='utility'", 0, -1) == 1);
+    assert(LT("INSERT INTO agent_models(agent_name, model_id, pos, cache_lifetime)"
+              " VALUES('A','m@p',5,0);") != SQLITE_OK);   /* CHECK: above 0 */
+    /* Updates: the value, and the model under a value. */
+    assert(LT("UPDATE agent_models SET cache_lifetime=1800 WHERE pos=0 AND purpose='chat';")
+           != SQLITE_OK);
+    assert(LT("UPDATE agent_models SET cache_lifetime=300 WHERE pos=0 AND purpose='chat';")
+           == SQLITE_OK);
+    assert(LT("UPDATE agent_models SET model_id='c@a' WHERE pos=3;") != SQLITE_OK);
+    assert(LT("UPDATE agent_models SET cache_lifetime=NULL WHERE pos=0 AND purpose='chat';")
+           == SQLITE_OK);   /* unknown: the plain marker, no CacheExpiring */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM change_log WHERE table_name='agent_models'"
+                             " AND new_values ->> 'cache_lifetime' = 300", 0, -1) >= 1);
+#undef LT
+    db_close(db);
+    test_db_clean(path);
+    printf("  PASS test_agent_models_cache_lifetime\n");
 }
 
 static void test_agent_models_capability_gate(void) {
@@ -2212,6 +2302,7 @@ int main(void) {
     test_schema_patch_v67();
     test_schema_patch_v68();
     test_agent_models_capability_gate();
+    test_agent_models_cache_lifetime();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");
     return 0;

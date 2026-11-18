@@ -18,6 +18,8 @@
 #define HOOK_EVENT_STOP              "Stop"             /* a top-level turn ended with an answer */
 #define HOOK_EVENT_SUBAGENT_STOP     "SubagentStop"     /* the same, in a sub-agent session */
 #define HOOK_EVENT_CONTEXT_THRESHOLD "ContextThreshold" /* an iteration ended over trim_threshold */
+#define HOOK_EVENT_CACHE_EXPIRING    "CacheExpiring"    /* an idle session's prompt cache is about
+                                                         * to lapse (cache_expiring.h) */
 
 /* Is `event` a name a manifest may register? NULL when it is; otherwise
  * the reason it is refused, for the promote error. A name this build knows

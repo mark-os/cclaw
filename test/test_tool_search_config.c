@@ -243,6 +243,17 @@ static void test_format_json(void) {
     assert(v == NULL);                              /* unfiltered = json null */
     free(doc);
 
+    /* A cache lifetime makes the entry an object, the shape request_config
+     * takes back. */
+    assert(sqlite3_exec(db, "UPDATE agent_models SET cache_lifetime=900"
+                            " WHERE agent_name='default';", NULL, NULL, NULL) == SQLITE_OK);
+    doc = call_handler(&reg, "{\"format\":\"json\"}");
+    v = doc_get(db, doc, "$.agent.models[0].cache_lifetime");
+    assert(v && strcmp(v, "900") == 0); free(v);
+    v = doc_get(db, doc, "$.agent.models[0].id");
+    assert(v && strcmp(v, "claude-opus-4.5@gw") == 0); free(v);
+    free(doc);
+
     /* An unknown format is refused rather than silently rendered as prose. */
     char *bad = call_handler(&reg, "{\"format\":\"yaml\"}");
     assert(bad && strstr(bad, "error"));

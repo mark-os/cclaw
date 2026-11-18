@@ -18,8 +18,10 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include "buf.h"
+#include "cache_expiring.h"
 #include "db.h"
 #include "extension_manifest.h"
 #include "llm_bridge.h"
@@ -256,6 +258,36 @@ static char *hook_args(int64_t sid, int threshold, int target, int *tokens) {
     return a;
 }
 
+/* The input settle.c would build for CacheExpiring on this idle session:
+ * the trim numbers set first, the session's depth set, its context from
+ * cache_expiring_context. NULL when it is not above its prune target. */
+static char *cache_args(int64_t sid, int threshold, int target, int depth, int *tokens) {
+    char sql[256];
+    snprintf(sql, sizeof(sql), "UPDATE agent_models SET trim_threshold=%d, prune_target=%d,"
+                               " cache_lifetime=3600 WHERE agent_name='t' AND purpose='chat'",
+             threshold, target);
+    run(sql);
+    snprintf(sql, sizeof(sql), "UPDATE sessions SET depth=%d WHERE id=%lld", depth,
+             (long long)sid);
+    run(sql);
+    ContextLimits lim;
+    int total = turn_edit_measure(g_db, sid, "t", &lim);
+    if (tokens) *tokens = total;
+    if (total <= lim.target) return NULL;
+    char *ctx = cache_expiring_context(g_db, sid, time(NULL), total, &lim);
+    assert(ctx);
+    TurnEditInputSpec spec = {
+        .history = TURN_EDIT_HISTORY_ALL,
+        .history_results = (int)qn("SELECT json_extract(?1,'$.history_results')", g_manifest_input),
+        .max_bytes = (int)qn("SELECT json_extract(?1,'$.max_bytes')", g_manifest_input),
+    };
+    TurnEditInputFor what = { .event = "CacheExpiring", .need_answer = 0, .context = ctx };
+    char *a = turn_edit_input(g_db, sid, &spec, &what, NULL);
+    free(ctx);
+    assert(a);
+    return a;
+}
+
 /* Run the shipped script on `args`. `said` is the summariser's answer (NULL:
  * the provider fails). *asked gets the request the provider saw, NULL when
  * none was sent. */
@@ -326,13 +358,20 @@ static void test_embedded(void) {
     if (!man || strcmp(man, TPL_EXT_COMPACTION_EXTENSION_JSON) != 0) FAIL("manifest differs");
     char *err = NULL;
     if (extension_manifest_validate(BUNDLE, &err) != 0) FAIL(err ? err : "invalid");
-    /* One ContextThreshold hook the session waits for; history sized by the
-     * script, not left at the default. */
-    if (qn("SELECT json_array_length(?1,'$.hooks')=1"
+    /* A ContextThreshold and a CacheExpiring hook, both the same script,
+     * both waited for, both over all history (sized by the script, not left
+     * at the default). */
+    if (qn("SELECT json_array_length(?1,'$.hooks')=2"
            " AND json_extract(?1,'$.hooks[0].event')='ContextThreshold'"
+           " AND json_extract(?1,'$.hooks[1].event')='CacheExpiring'"
+           " AND json_extract(?1,'$.hooks[0].handler')='compact.qjs'"
+           " AND json_extract(?1,'$.hooks[1].handler')='compact.qjs'"
            " AND json_type(?1,'$.hooks[0].async') IS NULL"
+           " AND json_type(?1,'$.hooks[1].async') IS NULL"
+           " AND json_extract(?1,'$.hooks[0].input') = json_extract(?1,'$.hooks[1].input')"
            " AND json_extract(?1,'$.hooks[0].input.history')='all'", man) != 1)
-        FAIL("the manifest is not one awaited ContextThreshold hook over all history");
+        FAIL("the manifest is not an awaited ContextThreshold and CacheExpiring hook"
+             " over all history");
     g_manifest_input = qs("SELECT json_extract(?1,'$.hooks[0].input')", man, NULL);
     free(file); free(man);
     PASS();
@@ -569,6 +608,94 @@ static void test_hopeless(void) {
     PASS();
 }
 
+/* CacheExpiring on an idle top-level session above its prune target: down
+ * to half the target — the whole of the last turn's steps may go, its
+ * answer stays — so the next firing needs the session to double. */
+static void test_cache_expiring_halves(void) {
+    TEST("cache_expiring_summarises_to_half_the_prune_target");
+    int64_t sid = session_create(g_db, "idle", "t", -1, 0);
+    /* Enough earlier turns that they alone cover what has to go: one
+     * summary, one model call (the mock answers once). */
+    const char *tags[] = { "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9" };
+    for (int i = 0; i < 9; i++) turn(sid, tags[i]);
+    user(sid, "the last one");
+    step(sid, "d1", 1);
+    step(sid, "d2", 0);
+    add(sid, db_next_iteration_id(g_db, sid), "assistant_message", "All fixed.", NULL, NULL);
+
+    int total = 0;
+    char *probe = cache_args(sid, 150000, 500, 0, &total);
+    free(probe);
+    /* Above the target, and under the threshold: only CacheExpiring could
+     * fire here. */
+    int target = total * 9 / 10;
+    char *args = cache_args(sid, total + 1000, target, 0, NULL);
+    if (!args) FAIL("not above its prune target");
+    if (qn("SELECT json_extract(?1,'$.event')='CacheExpiring'"
+           " AND json_extract(?1,'$.context.depth')=0"
+           " AND json_extract(?1,'$.context.cache_lifetime')=3600"
+           " AND json_extract(?1,'$.final.text')='All fixed.'", args) != 1)
+        FAIL("the input is not a CacheExpiring input");
+    int is_error = 0;
+    char *asked = NULL;
+    char *out = compact(sid, args, "IDLE-SUMMARY: fixed c1 to c9.", &is_error, &asked);
+    if (is_error || !asked) FAIL(out);
+    free(asked);
+    char *err = NULL;
+    if (turn_edit_apply(g_db, sid, out, "hook:compaction", &err) != TURN_EDIT_APPLIED)
+        FAIL(err ? err : "not applied");
+    free(out); free(args);
+    ContextLimits lim;
+    int after = turn_edit_measure(g_db, sid, "t", &lim);
+    if (after > target / 2) {
+        printf("(%d > %d, from %d) ", after, target / 2, total);
+        FAIL("the session is not at half its prune target");
+    }
+    /* The answer and the request it answered stay; the oldest turn left. */
+    if (on_branch(sid, "All fixed.") != 1 || on_branch(sid, "please fix c1") != 0)
+        FAIL("the wrong part of the session left");
+    /* At or under the target now: the event has nothing to fire on. */
+    args = cache_args(sid, total + 1000, target, 0, NULL);
+    if (args) FAIL("still above the prune target");
+    PASS();
+}
+
+/* A sub-agent's session is left alone, without a model call. */
+static void test_cache_expiring_subagent(void) {
+    TEST("cache_expiring_skips_a_subagent_without_a_model_call");
+    int64_t sid = session_create(g_db, "sub", "t", -1, 0);
+    for (int i = 0; i < 4; i++) turn(sid, "z");
+    int total = 0;
+    char *args = cache_args(sid, 150000, 500, 1, &total);
+    if (!args) FAIL("not above its prune target");
+    int is_error = 0;
+    char *asked = NULL;
+    char *out = compact(sid, args, "should not be asked", &is_error, &asked);
+    if (is_error || strcmp(out, "{}") != 0 || asked) FAIL(out);
+    free(out); free(args);
+    PASS();
+}
+
+/* Nothing it may take would bring the session under its prune target (the
+ * answer alone is bigger): "{}" without a model call — and nothing follows. */
+static void test_cache_expiring_hopeless(void) {
+    TEST("cache_expiring_hopeless_returns_no_edits_without_a_model_call");
+    int64_t sid = session_create(g_db, "idle-hopeless", "t", -1, 0);
+    user(sid, "write it all out");
+    step(sid, "w", 0);
+    char *big = output("answer");
+    add(sid, db_next_iteration_id(g_db, sid), "assistant_message", big, NULL, NULL);
+    free(big);
+    char *args = cache_args(sid, 1000, 500, 0, NULL);
+    if (!args) FAIL("not above its prune target");
+    int is_error = 0;
+    char *asked = NULL;
+    char *out = compact(sid, args, "should not be asked", &is_error, &asked);
+    if (is_error || strcmp(out, "{}") != 0 || asked) FAIL(out);
+    free(out); free(args);
+    PASS();
+}
+
 /* The most the manifest asks for — a session far over what fits, with a
  * window large enough to send it all to the summariser — still runs on the
  * default heap (js_heap_mb 8): the input arrives at its max_bytes, history
@@ -639,6 +766,9 @@ int main(void) {
     test_running_turn();
     test_model_failure();
     test_hopeless();
+    test_cache_expiring_halves();
+    test_cache_expiring_subagent();
+    test_cache_expiring_hopeless();
     test_full_input_fits_the_heap();
 
     sqlite3_close(g_db);

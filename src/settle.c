@@ -4,7 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
+#include "cache_expiring.h"
 #include "child.h"
 #include "config_registry.h"
 #include "db.h"
@@ -129,6 +131,33 @@ static int context_step(int64_t session_id, const char *agent, const HookRef *af
     return start_awaited(session_id, agent, HOOK_EVENT_CONTEXT_THRESHOLD, after, ctx);
 }
 
+/* Is the idle session above its prune target? When it is, the JSON
+ * "context" a CacheExpiring script decides on (caller frees). A session that
+ * cannot be measured is not above: nothing follows this event either way. */
+static char *above_target(int64_t session_id, const char *agent) {
+    ContextLimits lim;
+    int total = turn_edit_measure(proc_db(), session_id, agent, &lim);
+    if (total < 0 || total <= lim.target) {
+        LOG_DEBUG_("hook %s skipped reason=at or under prune_target (%d <= %d)",
+                   HOOK_EVENT_CACHE_EXPIRING, total, lim.target);
+        return NULL;
+    }
+    return cache_expiring_context(proc_db(), session_id, time(NULL), total, &lim);
+}
+
+/* The CacheExpiring step, from `after` (NULL = the step starts). Each hook
+ * fires only while the session is above its prune target. Nothing follows
+ * it: C never trims an idle session (decision 23). */
+static int cache_step(int64_t session_id, const char *agent, const HookRef *after) {
+    if (!hook_any(proc_db(), agent, HOOK_EVENT_CACHE_EXPIRING)) return 0;
+    char *ctx = above_target(session_id, agent);
+    if (!ctx) return 0;
+    if (!after) start_async(session_id, agent, HOOK_EVENT_CACHE_EXPIRING, ctx);
+    int started = start_awaited(session_id, agent, HOOK_EVENT_CACHE_EXPIRING, after, ctx);
+    free(ctx);
+    return started;
+}
+
 /* Mark the session held for the awaited child just started. The child is
  * started before the session is marked: if nothing starts, the session
  * never moved. */
@@ -159,6 +188,30 @@ int iteration_settle_begin(int64_t session_id, const char *agent) {
     return settle_hold(session_id, "tool_running");
 }
 
+int cache_settle_begin(int64_t session_id, const char *agent) {
+    if (!proc_db() || !agent || !agent[0]) return 0;
+    if (!cache_step(session_id, agent, NULL)) return 0;
+    return settle_hold(session_id, "idle");
+}
+
+void cache_expiring_tick(void) {
+    sqlite3 *db = proc_db();
+    if (!db) return;
+    CacheDue due[16];
+    int n = cache_expiring_take(db, time(NULL), due, 16);
+    for (int i = 0; i < n; i++) {
+        /* A session with a hook child already (an async Stop script still
+         * running) is left alone: its period is spent, nothing is lost. */
+        if (child_hook_holds(due[i].session_id) || child_has_session(due[i].session_id))
+            continue;
+        cclaw_log_set_ctx(due[i].session_id, -1, due[i].agent);
+        LOG_INFO_("hook %s due depth=%d lifetime=%ds", HOOK_EVENT_CACHE_EXPIRING,
+                  due[i].depth, due[i].lifetime);
+        cache_settle_begin(due[i].session_id, due[i].agent);
+        cclaw_log_clear_ctx();
+    }
+}
+
 /* End the hold: steps 3 and 4. Between iterations (the iteration count is
  * kept while held; going idle at turn end zeroed it) the session goes back
  * to tool_running and advance_iteration_end runs the C check and sends the
@@ -167,7 +220,7 @@ int iteration_settle_begin(int64_t session_id, const char *agent) {
  * it from there — gates, inbox drain, next turn. A flip that fails leaves
  * the session 'settling' with no child, which is exactly what the sweep
  * looks for. */
-static void settle_release(int64_t session_id, const char *agent) {
+static void settle_release(int64_t session_id, const char *agent, int check) {
     int mid_turn = db_scalar_i64(proc_db(),
         "SELECT turn_iteration > 0 FROM sessions WHERE id=?1;", session_id, 0) == 1;
     const char *next = mid_turn ? "tool_running" : "idle";
@@ -181,7 +234,7 @@ static void settle_release(int64_t session_id, const char *agent) {
         run_iteration_end(session_id);
         return;
     }
-    turn_end_trim(session_id, agent);
+    if (check) turn_end_trim(session_id, agent);
     run_advance(session_id);
 }
 
@@ -205,6 +258,8 @@ static void notify_disabled(const SettleChild *sc, const char *outcome, const ch
              strcmp(sc->hook.event, HOOK_EVENT_CONTEXT_THRESHOLD) == 0
                  ? "Until then sessions over their trim threshold are cut by the"
                    " runtime's fallback, which drops the oldest turns."
+                 : strcmp(sc->hook.event, HOOK_EVENT_CACHE_EXPIRING) == 0
+                 ? "Until then idle sessions are left as they are."
                  : "Turns are left as they are.", sc->hook.extension);
     if (sid > 0 && inbox_insert_scanned(db, sid, "system", "hook", text) > 0) {
         wake_session(sid);
@@ -274,10 +329,12 @@ void turn_settle_child_done(const SettleChild *sc) {
     cclaw_log_clear_ctx();
 
     if (!held) return;
+    int cache = strcmp(event, HOOK_EVENT_CACHE_EXPIRING) == 0;
     int next = is_stop_event(event)
         ? stop_step(sid, sc->agent, &sc->hook) || context_step(sid, sc->agent, NULL)
+        : cache ? cache_step(sid, sc->agent, &sc->hook)
         : context_step(sid, sc->agent, &sc->hook);
-    if (!next) settle_release(sid, sc->agent);
+    if (!next) settle_release(sid, sc->agent, !cache);
 }
 
 void turn_settle_sweep(void) {
@@ -307,6 +364,6 @@ void turn_settle_sweep(void) {
         if (child_hook_holds(held[i].id)) continue;
         LOG_WARN_("settle sweep: session=%lld held with no hook child — releasing",
                   (long long)held[i].id);
-        settle_release(held[i].id, held[i].agent);
+        settle_release(held[i].id, held[i].agent, 1);
     }
 }

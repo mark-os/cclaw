@@ -57,6 +57,7 @@ const ChangeLogColumn CHANGE_LOG_COLUMNS[] = {
     { "agent_models", "reasoning_effort", COL_SETTING },
     { "agent_models", "trim_threshold",   COL_SETTING },
     { "agent_models", "prune_target",     COL_SETTING },
+    { "agent_models", "cache_lifetime",   COL_SETTING },
 
     { "providers", "name",           COL_SETTING },
     { "providers", "base_url",       COL_SETTING },

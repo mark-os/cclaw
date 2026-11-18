@@ -433,6 +433,44 @@ static void test_rate_limit_cache_discount(void) {
     printf(" OK\n");
 }
 
+/* Test: a 1-hour cache write is a cache write. The API reports it twice:
+ * split by lifetime under cache_creation, and summed in
+ * cache_creation_input_tokens — the sum is what is stored, so the hour's
+ * tokens land in cache_write_tokens and in the prompt count beside the
+ * 5-minute ones (shape from the prompt-caching docs, checked 2026-11-18). */
+static void test_ingest_anthropic_1h_write(void) {
+    printf("  test_ingest_anthropic_1h_write...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    const char *body =
+        "{\"type\":\"message\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],"
+        "\"stop_reason\":\"end_turn\","
+        "\"usage\":{\"input_tokens\":2048,\"cache_read_input_tokens\":1800,"
+        " \"cache_creation_input_tokens\":248,\"output_tokens\":503,"
+        " \"cache_creation\":{\"ephemeral_5m_input_tokens\":148,"
+        "                     \"ephemeral_1h_input_tokens\":100}}}";
+    TypedIngestResult ir;
+    assert(db_ingest_response(db, sid, 30, "claude@anthropic", ENDPOINT_ANTHROPIC,
+                              body, NULL, 0, &ir) == LLM_RESP_OK);
+    assert(ir.prompt_tokens == 2048 + 1800 + 248);
+    assert(usage_col_i(db, "cached_tokens", 30) == 1800);
+    assert(usage_col_i(db, "cache_write_tokens", 30) == 248);   /* 148 + 100 */
+    /* A response with only a 1-hour write. */
+    const char *hour =
+        "{\"type\":\"message\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],"
+        "\"stop_reason\":\"end_turn\","
+        "\"usage\":{\"input_tokens\":5,\"cache_read_input_tokens\":0,"
+        " \"cache_creation_input_tokens\":9000,\"output_tokens\":3,"
+        " \"cache_creation\":{\"ephemeral_5m_input_tokens\":0,"
+        "                     \"ephemeral_1h_input_tokens\":9000}}}";
+    assert(db_ingest_response(db, sid, 31, "claude@anthropic", ENDPOINT_ANTHROPIC,
+                              hour, NULL, 0, &ir) == LLM_RESP_OK);
+    assert(ir.prompt_tokens == 9005);
+    assert(usage_col_i(db, "cache_write_tokens", 31) == 9000);
+    db_close(db);
+    printf(" OK\n");
+}
+
 /* Test: Anthropic Messages — content blocks flatten into the same entries,
  * usage is normalized to cache-inclusive, and a response that thought keeps
  * its whole content array for replay. */
@@ -528,6 +566,7 @@ int main(void) {
     test_usage_deepseek_spelling();
     test_usage_gemini();
     test_ingest_anthropic();
+    test_ingest_anthropic_1h_write();
     test_rate_limit_cache_discount();
     printf("  ALL PASSED\n");
     return 0;

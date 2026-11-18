@@ -14,7 +14,7 @@ static const struct { const char *name, *refused; } EVENTS[] = {
     { HOOK_EVENT_STOP,              NULL },
     { HOOK_EVENT_SUBAGENT_STOP,     NULL },
     { HOOK_EVENT_CONTEXT_THRESHOLD, NULL },
-    { "CacheExpiring",    "is not available yet — this build does not fire it" },
+    { HOOK_EVENT_CACHE_EXPIRING,    NULL },
     { "PreToolUse",       "is not available until stage 2 of hooks" },
     { "PostToolUse",      "is not available until stage 2 of hooks" },
 };
@@ -23,7 +23,8 @@ const char *hook_event_refusal(const char *event) {
     if (!event) return "is missing";
     for (size_t i = 0; i < sizeof(EVENTS) / sizeof(EVENTS[0]); i++)
         if (strcmp(event, EVENTS[i].name) == 0) return EVENTS[i].refused;
-    return "is not an event — the events are Stop, SubagentStop and ContextThreshold";
+    return "is not an event — the events are Stop, SubagentStop, ContextThreshold and"
+           " CacheExpiring";
 }
 
 /* hooks.input as JSON json_extract can read: promote stores a validated

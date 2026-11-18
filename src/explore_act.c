@@ -504,7 +504,7 @@ static int act_models_set(Act *a) {
         return refuse(a, 400, "The purpose must be chat, image, audio or utility.");
     if (!list || qi(a, "SELECT json_type(?1) = 'array'", list, NULL, NULL) != 1)
         return refuse(a, 400, "models must be a list of {model_id, reasoning_effort,"
-                              " trim_threshold, prune_target} in order.");
+                              " trim_threshold, prune_target, cache_lifetime} in order.");
     /* Media lists (image, audio) take only models with that capability and
      * no effort; chat and utility take any model, with an effort level. */
     int is_chat = strcmp(purpose, "chat") == 0;
@@ -515,10 +515,11 @@ static int act_models_set(Act *a) {
     if (qi(a, "SELECT 1 FROM json_each(?1) WHERE type <> 'object'"
               " OR json_type(value, '$.model_id') IS NOT 'text'"
               " OR EXISTS (SELECT 1 FROM json_each(value) k WHERE k.key NOT IN"
-              "            ('model_id', 'reasoning_effort', 'trim_threshold', 'prune_target'))",
+              "            ('model_id', 'reasoning_effort', 'trim_threshold', 'prune_target',"
+              "             'cache_lifetime'))",
               list, NULL, NULL) == 1)
         return refuse(a, 400, "Each entry needs a model_id, and may have a reasoning_effort,"
-                              " a trim_threshold and a prune_target.");
+                              " a trim_threshold, a prune_target and a cache_lifetime.");
     /* The trim numbers: tokens, or null for the default. An entry that does
      * not name one keeps what that model's row has now, so a list saved by a
      * page that does not show them does not reset them. */
@@ -527,10 +528,15 @@ static int act_models_set(Act *a) {
               "   AND (k.type <> 'integer' OR k.value < 1)", list, NULL, NULL) == 1)
         return refuse(a, 400, "trim_threshold and prune_target are token counts (whole numbers"
                               " above 0), or empty for the default.");
+    if (qi(a, "SELECT 1 FROM json_each(?1) j, json_each(j.value) k"
+              " WHERE k.key = 'cache_lifetime' AND k.type <> 'null'"
+              "   AND (k.type <> 'integer' OR k.value < 1)", list, NULL, NULL) == 1)
+        return refuse(a, 400, "cache_lifetime is a number of seconds (a whole number above 0),"
+                              " or empty for the default.");
     if (!is_chat && qi(a, "SELECT 1 FROM json_each(?1) j, json_each(j.value) k"
-                          " WHERE k.key IN ('trim_threshold', 'prune_target')"
+                          " WHERE k.key IN ('trim_threshold', 'prune_target', 'cache_lifetime')"
                           "   AND k.type <> 'null'", list, NULL, NULL) == 1)
-        return refuse(a, 400, "Trim numbers apply to the chat list only.");
+        return refuse(a, 400, "Trim numbers and the cache lifetime apply to the chat list only.");
     char *dup = qs(a, "SELECT value ->> 'model_id' FROM json_each(?1) GROUP BY value ->> 'model_id'"
                       " HAVING count(*) > 1", list, NULL, NULL);
     if (dup) return refuse(a, 400, "%s is in the list twice. Keep one.", dup);
@@ -563,14 +569,17 @@ static int act_models_set(Act *a) {
                  " 'trim_threshold', CASE WHEN json_type(j.value, '$.trim_threshold') IS NULL"
                  "   THEN c.trim_threshold ELSE j.value ->> 'trim_threshold' END,"
                  " 'prune_target', CASE WHEN json_type(j.value, '$.prune_target') IS NULL"
-                 "   THEN c.prune_target ELSE j.value ->> 'prune_target' END) ORDER BY j.key)"
+                 "   THEN c.prune_target ELSE j.value ->> 'prune_target' END,"
+                 " 'cache_lifetime', CASE WHEN json_type(j.value, '$.cache_lifetime') IS NULL"
+                 "   THEN c.cache_lifetime ELSE j.value ->> 'cache_lifetime' END) ORDER BY j.key)"
                  " FROM json_each(?1) j LEFT JOIN agent_models c ON c.agent_name=?2"
                  "  AND c.purpose=?3 AND c.model_id = j.value ->> 'model_id'",
               list, agent, purpose);
     if (!list) { tx_end(a, 0); return refuse(a, 500, "The list could not be saved."); }
     char *cur = qs(a, "SELECT json_group_array(json_object('model_id', model_id, 'reasoning_effort',"
                       " reasoning_effort, 'trim_threshold', trim_threshold, 'prune_target',"
-                      " prune_target)) FROM (SELECT * FROM agent_models WHERE agent_name=?1"
+                      " prune_target, 'cache_lifetime', cache_lifetime))"
+                      " FROM (SELECT * FROM agent_models WHERE agent_name=?1"
                       " AND purpose=?2 ORDER BY pos)", agent, purpose, NULL);
     char *want = list;
     if (cur && want && strcmp(cur, want) == 0) {
@@ -582,9 +591,9 @@ static int act_models_set(Act *a) {
     if (ok) {
         sqlite3_stmt *st = prep(a,
             "INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort,"
-            " trim_threshold, prune_target)"
+            " trim_threshold, prune_target, cache_lifetime)"
             " SELECT ?1, ?2, value ->> 'model_id', key, value ->> 'reasoning_effort',"
-            " value ->> 'trim_threshold', value ->> 'prune_target'"
+            " value ->> 'trim_threshold', value ->> 'prune_target', value ->> 'cache_lifetime'"
             " FROM json_each(?3)", agent, purpose, list, NULL);
         ok = st && sqlite3_step(st) == SQLITE_DONE;
         char err[256] = "";
@@ -598,6 +607,9 @@ static int act_models_set(Act *a) {
             if (strstr(err, "trim_threshold is larger"))
                 return refuse(a, 400, "A trim threshold is larger than its model's context"
                                       " window. Lower it, or leave it empty for half the window.");
+            if (strstr(err, "cache_lifetime on an Anthropic"))
+                return refuse(a, 400, "On an Anthropic model the cache lifetime is 300 (the"
+                                      " 5-minute cache) or 3600 (the 1-hour cache, the default).");
             if (strstr(err, "CHECK constraint"))
                 return refuse(a, 400, "A prune target must be below its trim threshold.");
             return refuse(a, 500, "The list could not be saved.");

@@ -48,6 +48,7 @@ typedef struct {
     int window;     /* models.context_window, or the global default */
     int threshold;  /* agent_models.trim_threshold, or 50% of window */
     int target;     /* agent_models.prune_target, or 50% of threshold */
+    int lifetime;   /* agent_models.cache_lifetime in seconds, 0 = unknown */
 } ContextLimits;
 
 /* Plan which entries to include in LLM request (pass 1).

@@ -364,14 +364,14 @@ static void test_resource_holder(void) {
     printf("  PASS test_resource_holder\n");
 }
 
-/* The events a manifest may name: the three this build fires; the ones it
+/* The events a manifest may name: the four this build fires; the ones it
  * knows of but does not fire yet are refused by name; anything else is no
  * event at all. */
 static void test_events(void) {
     assert(hook_event_refusal("Stop") == NULL);
     assert(hook_event_refusal("SubagentStop") == NULL);
     assert(hook_event_refusal("ContextThreshold") == NULL);
-    assert(strstr(hook_event_refusal("CacheExpiring"), "not available yet"));
+    assert(hook_event_refusal("CacheExpiring") == NULL);
     assert(strstr(hook_event_refusal("PreToolUse"), "stage 2"));
     assert(strstr(hook_event_refusal("PostToolUse"), "stage 2"));
     assert(strstr(hook_event_refusal("turnSettled"), "not an event"));

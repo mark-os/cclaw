@@ -1,9 +1,10 @@
-// compaction — a ContextThreshold hook. When a session has grown past its
-// trim threshold, the oldest part of it is replaced by a summary the agent's
-// own model writes: whole earlier turns first, oldest first, then the oldest
-// steps (iterations) of the turn still running. The user messages that opened
-// that turn and its newest step always stay — the model is in the middle of
-// answering them.
+// compaction — a ContextThreshold and CacheExpiring hook. When a session has
+// grown past its trim threshold (or sits idle above its prune target with
+// its prompt cache about to lapse — see "Decide"), the oldest part of it is
+// replaced by a summary the agent's own model writes: whole earlier turns
+// first, oldest first, then the oldest steps (iterations) of the turn still
+// running. The user messages that opened that turn and its newest step
+// always stay — the model is in the middle of answering them.
 //
 // Two things are not left to the model. The actions already taken (calls the
 // runtime marks `protected`: a file written, a message sent, a job scheduled)
@@ -62,10 +63,26 @@ var INSTRUCTIONS = [
 ].join("\n");
 
 // ── Decide ─────────────────────────────────────────────────────────────────
-// One parameter: the size the session should come down to, in tokens.
-return compact(args.context.prune_target);
+// Over the trim threshold: down to the prune target, and a run that cannot
+// get the session under the threshold is not worth a model call.
+//
+// The cache about to lapse on an idle session (CacheExpiring): the next
+// request will pay full price for everything anyway, so this is the cheap
+// moment to summarise. Only top-level sessions — a sub-agent's session is
+// short-lived and its parent reads its result, not its history. Down to half
+// the prune target, so each run removes at least half of what is there and
+// cannot fire again until the session has doubled; a run that cannot get it
+// under the prune target is not worth a model call. Nothing follows this
+// event: returning "{}" leaves the session as it is.
+if (args.event === "CacheExpiring") {
+  if (args.context.depth > 0) return "{}";
+  return compact(Math.floor(args.context.prune_target / 2), args.context.prune_target);
+}
+return compact(args.context.prune_target, args.context.trim_threshold);
 
-function compact(target) {
+// target: the size to come down to; ceiling: the most the session may be
+// afterwards for the run to be worth it.
+function compact(target, ceiling) {
   var ctx = args.context;
   var summaryTokens = Math.min(SUMMARY_MAX, Math.max(SUMMARY_MIN,
                                Math.round(target * SUMMARY_SHARE)));
@@ -77,10 +94,10 @@ function compact(target) {
   var steps = pickSteps(short > 0 && hist.turns.length ? short + summaryTokens : short);
   var written = (hist.turns.length ? 1 : 0) + (steps.its.length ? 1 : 0);
   if (!written) return "{}";
-  // Not even everything there is to take would get it under the threshold:
-  // a model call for nothing. The runtime's trim copes (at worst it stops
-  // the turn).
-  if (ctx.tokens - hist.removed - steps.removed + written * summaryTokens > ctx.trim_threshold)
+  // Not even everything there is to take would get it under the ceiling: a
+  // model call for nothing. Over the threshold the runtime's trim copes (at
+  // worst it stops the turn); on an idle session nothing happens.
+  if (ctx.tokens - hist.removed - steps.removed + written * summaryTokens > ceiling)
     return "{}";
 
   var edits = [], record = { model: null, turns: null, iterations: null, actions: 0 };

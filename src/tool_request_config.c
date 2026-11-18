@@ -37,7 +37,7 @@ static const char *PARAMS_JSON =
     "secrets:[SECRET_NAME],"
     "remove:{tools:[],hosts:[],read_paths:[],write_paths:[],secrets:[]}}, "
     "agent:{models?:[canonical model id or {id,effort?:off|minimal|low|medium|high,"
-    "trim_threshold?:tokens,prune_target?:tokens}, "
+    "trim_threshold?:tokens,prune_target?:tokens,cache_lifetime?:seconds}, "
     "in routing order],max_iterations?,shell_timeout?}, "
     "routes:['channel:chat_id',...], "
     "config:{key:value-string,...}, provider:{provider,base_url?,api_key_env?}, "
@@ -540,11 +540,12 @@ static char *validate_agent(sqlite3 *db, const char *changes,
     bad = q1_text(db,
         "SELECT k.key FROM json_each(?1,'$.agent.models') e, json_each(e.value) k"
         " WHERE e.type='object'"
-        "   AND k.key NOT IN ('id','effort','trim_threshold','prune_target') LIMIT 1",
+        "   AND k.key NOT IN ('id','effort','trim_threshold','prune_target',"
+        "                     'cache_lifetime') LIMIT 1",
         changes);
     if (bad) {
         char *m = errf("error: unknown agent.models key '%s' (use id, effort, "
-                       "trim_threshold, prune_target)", bad);
+                       "trim_threshold, prune_target, cache_lifetime)", bad);
         free(bad);
         return m;
     }
@@ -552,11 +553,15 @@ static char *validate_agent(sqlite3 *db, const char *changes,
      * schema refuses the same things on every other write path. */
     bad = q1_text(db,
         "SELECT k.key FROM json_each(?1,'$.agent.models') e, json_each(e.value) k"
-        " WHERE e.type='object' AND k.key IN ('trim_threshold','prune_target')"
+        " WHERE e.type='object'"
+        "   AND k.key IN ('trim_threshold','prune_target','cache_lifetime')"
         "   AND (k.type <> 'integer' OR k.value < 1) LIMIT 1", changes);
     if (bad) {
-        char *m = errf("error: agent.models %s must be a positive integer "
-                       "(tokens), or omitted for the default", bad);
+        char *m = errf(strcmp(bad, "cache_lifetime") == 0
+                       ? "error: agent.models %s must be a positive integer "
+                         "(seconds), or omitted for the default"
+                       : "error: agent.models %s must be a positive integer "
+                         "(tokens), or omitted for the default", bad);
         free(bad);
         return m;
     }
@@ -566,6 +571,22 @@ static char *validate_agent(sqlite3 *db, const char *changes,
                     "       json_extract(e.value,'$.trim_threshold')", changes))
         return strdup("error: agent.models prune_target must be below its "
                       "trim_threshold — the trim cuts the session down to it");
+    /* The schema refuses the same on apply, for a model this document
+     * registers; said here for the ones that exist. */
+    bad = q1_text(db,
+        "SELECT m.id FROM json_each(?1,'$.agent.models') e"
+        " JOIN models m ON m.id = json_extract(e.value,'$.id')"
+        " JOIN providers p ON p.name = m.provider_name"
+        " WHERE e.type='object' AND p.endpoint_type='anthropic'"
+        "   AND json_extract(e.value,'$.cache_lifetime') NOT IN (300, 3600) LIMIT 1",
+        changes);
+    if (bad) {
+        char *m = errf("error: agent.models %s is an Anthropic model: its "
+                       "cache_lifetime is 300 (the 5-minute cache) or 3600 (the "
+                       "1-hour cache, the default)", bad);
+        free(bad);
+        return m;
+    }
     bad = q1_text(db,
         "SELECT json_extract(e.value,'$.effort')"
         " FROM json_each(?1,'$.agent.models') e"
@@ -1484,7 +1505,8 @@ static const char *RECEIPT_SQL =
     "             FROM (SELECT model_id"
     "                   ||COALESCE(' (effort '||reasoning_effort||')','')"
     "                   ||COALESCE(' (trim at '||trim_threshold||')','')"
-    "                   ||COALESCE(' (prune to '||prune_target||')','') m"
+    "                   ||COALESCE(' (prune to '||prune_target||')','')"
+    "                   ||COALESCE(' (cache '||cache_lifetime||'s)','') m"
     "                   FROM agent_models"
     "                   WHERE agent_name=?2 AND purpose='chat'"
     "                   ORDER BY pos)),'(none)')"
@@ -1676,14 +1698,17 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             if (rc == 0) {
                 if (sqlite3_prepare_v2(db,
                         "INSERT INTO agent_models(agent_name, model_id, pos,"
-                        " reasoning_effort, trim_threshold, prune_target)"
+                        " reasoning_effort, trim_threshold, prune_target,"
+                        " cache_lifetime)"
                         " SELECT ?1, " AM_ENTRY_ID("") ", key,"
                         " CASE WHEN type='object'"
                         " THEN json_extract(value,'$.effort') END,"
                         " CASE WHEN type='object'"
                         " THEN json_extract(value,'$.trim_threshold') END,"
                         " CASE WHEN type='object'"
-                        " THEN json_extract(value,'$.prune_target') END"
+                        " THEN json_extract(value,'$.prune_target') END,"
+                        " CASE WHEN type='object'"
+                        " THEN json_extract(value,'$.cache_lifetime') END"
                         " FROM json_each(?2,'$.changes.agent.models')",
                         -1, &ms, NULL) == SQLITE_OK) {
                     sqlite3_bind_text(ms, 1, agent, -1, SQLITE_STATIC);
@@ -1692,7 +1717,8 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                         rc = -1;
                         /* The schema's window check: say which rule, not
                          * just that the write failed. */
-                        if (strstr(sqlite3_errmsg(db), "trim_threshold"))
+                        if (strstr(sqlite3_errmsg(db), "trim_threshold") ||
+                            strstr(sqlite3_errmsg(db), "cache_lifetime"))
                             apply_detail(detail_out, "failed applying agent.models: %s",
                                          sqlite3_errmsg(db));
                     }
@@ -1874,7 +1900,9 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
         "model's reasoning effort (off|minimal|low|medium|high, omit for the "
         "provider default), plus trim_threshold/prune_target in tokens on the "
         "first entry to set when your session is trimmed and how far (omit for "
-        "50% of the window / 50% of the threshold) — max_iterations/shell_timeout), "
+        "50% of the window / 50% of the threshold) and cache_lifetime in seconds "
+        "(how long the provider keeps the prompt cache; on an Anthropic model "
+        "300 or 3600, default 3600) — max_iterations/shell_timeout), "
         "channel send routes (routes: ['channel:chat_id']), config values "
         "(registered keys — discover with search_config), and/or an LLM "
         "provider definition (openrouter, gemini, anthropic, openai, deepseek, groq, "

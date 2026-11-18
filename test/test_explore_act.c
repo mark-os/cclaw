@@ -384,6 +384,37 @@ static void test_models(void) {
         "below its trim threshold");
     has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"image\",\"models\":["
                  "{\"model_id\":\"mock/b\",\"trim_threshold\":100}]}"), "chat list only");
+    /* The cache lifetime the same way: set, kept when left out, cleared by
+     * null; on an Anthropic model only 300 or 3600, and 3600 when a new
+     * entry says nothing. */
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/a\",\"cache_lifetime\":600},{\"model_id\":\"mock/c\"}]}");
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\"}]}");
+    assert(qeq("SELECT cache_lifetime FROM agent_models WHERE agent_name='Beta' AND model_id='mock/a'",
+               "600"));
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\",\"cache_lifetime\":null}]}");
+    assert(qeq("SELECT COALESCE(cache_lifetime, '-') FROM agent_models WHERE agent_name='Beta'"
+               " AND model_id='mock/a'", "-"));
+    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+                 "{\"model_id\":\"mock/a\",\"cache_lifetime\":0}]}"), "seconds");
+    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"image\",\"models\":["
+                 "{\"model_id\":\"mock/b\",\"cache_lifetime\":300}]}"), "chat list only");
+    exec("INSERT INTO providers(name, base_url, endpoint_type) VALUES ('cachetest','http://x','anthropic');"
+         "INSERT INTO models(id, provider_name, model) VALUES ('cachetest/c','cachetest','c');");
+    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+                 "{\"model_id\":\"cachetest/c\",\"cache_lifetime\":600}]}"), "300 (the");
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/c\"},{\"model_id\":\"cachetest/c\"}]}");
+    assert(qeq("SELECT cache_lifetime FROM agent_models WHERE agent_name='Beta' AND model_id='cachetest/c'",
+               "3600"));
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/c\"},{\"model_id\":\"cachetest/c\",\"cache_lifetime\":300}]}");
+    assert(qeq("SELECT cache_lifetime FROM agent_models WHERE agent_name='Beta' AND model_id='cachetest/c'",
+               "300"));
+    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
+             "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\"}]}");
     printf("PASS: test_models\n");
 }
 

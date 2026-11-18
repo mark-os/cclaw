@@ -16,6 +16,11 @@
  *   3. the C check: still over, C trims to prune_target;
  *   4. the next request (mid-turn) or idle (turn end).
  *
+ * CacheExpiring is not part of that order. It fires from the timer in the
+ * database (cache_expiring.h) on an idle session above its prune target, is
+ * held the same way, and is followed by nothing: no C check, no trim
+ * (decision 23). A message arriving meanwhile waits for it, as for any hold.
+ *
  * Hooks nobody waits for ("async") start with their step, all at once, and
  * cannot change the session. A failure leaves the session as it was and the
  * order goes on.
@@ -48,6 +53,15 @@ int turn_settle_begin(int64_t session_id, const char *agent);
  * said ADVANCE_RUN_HOOKS): step 2. Returns 1 when the session is now held;
  * 0 when not — the caller goes on with run_iteration_end. */
 int iteration_settle_begin(int64_t session_id, const char *agent);
+
+/* The cache of idle session_id is about to lapse (the timer claimed it):
+ * when the agent has CacheExpiring hooks and the session is above its prune
+ * target, start them. Returns 1 when the session is now held. */
+int cache_settle_begin(int64_t session_id, const char *agent);
+
+/* The timer: claim the sessions due at this moment (cache_expiring_take) and
+ * start their CacheExpiring hooks. Daemon event loop, every turn of it. */
+void cache_expiring_tick(void);
 
 /* A hook child ended. Applies an awaited hook's reply, counts the outcome
  * (the third failure in a row disables the hook and tells the default

@@ -457,7 +457,19 @@ static const char SQL_GEMINI_FULL[] =
  * two formats. Empty text blocks are a 400, hence the guards: an assistant
  * message with nothing to say has no blocks and is dropped. */
 
-#define SQL_CACHE_MARK "json('{\"type\":\"ephemeral\"}')"
+/* The cache marker, one for all three places it goes (the system prompt, the
+ * two turn-boundary breakpoints, the request's own): :cache_lifetime is the
+ * routing entry's agent_models.cache_lifetime. 3600 asks for the 1-hour
+ * cache; 300 or nothing is the plain marker, which is the 5-minute one. They
+ * move together because the API requires a longer-lived entry never to follow
+ * a shorter one. No beta header: the 1-hour TTL is part of the API (checked
+ * 2026-11-18), and the write is billed at 2x base input instead of 1.25x —
+ * reported as cache_creation.ephemeral_1h_input_tokens, which
+ * cache_creation_input_tokens (what db_response.c stores) already sums. */
+#define SQL_CACHE_MARK \
+    "(CASE WHEN :cache_lifetime = 3600" \
+    " THEN json('{\"type\":\"ephemeral\",\"ttl\":\"1h\"}')" \
+    " ELSE json('{\"type\":\"ephemeral\"}') END)"
 
 static const char SQL_ANTHROPIC_MESSAGES[] =
     "WITH grouped(pos, role, content) AS MATERIALIZED ("
@@ -721,12 +733,21 @@ static char *json_intersect(sqlite3 *db, const char *a, const char *b) {
     return r ? r : strdup("[]");
 }
 
+/* The routing entry's cache lifetime, where the statement has a cache
+ * marker (SQL_CACHE_MARK); unbound, it reads NULL — the plain marker. */
+static void bind_cache_lifetime(sqlite3_stmt *s, int lifetime) {
+    int i = sqlite3_bind_parameter_index(s, ":cache_lifetime");
+    if (i > 0 && lifetime > 0) sqlite3_bind_int(s, i, lifetime);
+}
+
 /* One of the wire projections of _transcript. model (?1) is the requesting
  * model, which reasoning replay matches on. */
-static char *query_text(sqlite3 *db, const char *sql, const char *model) {
+static char *query_text(sqlite3 *db, const char *sql, const char *model,
+                        int cache_lifetime) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
     if (model && model[0]) sqlite3_bind_text(s, 1, model, -1, SQLITE_STATIC);
+    bind_cache_lifetime(s, cache_lifetime);
     char *r = NULL;
     if (sqlite3_step(s) == SQLITE_ROW) {
         const char *t = (const char *)sqlite3_column_text(s, 0);
@@ -912,7 +933,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
                                                       : cfg->provider.model;
 
     if (gemini) {
-        char *contents = query_text(db, SQL_GEMINI_CONTENTS, replay_model);
+        char *contents = query_text(db, SQL_GEMINI_CONTENTS, replay_model, 0);
         char *tools_json = query_tools(db, SQL_GEMINI_TOOLS, agent_name,
                                        allowed_tools, worker_tools);
 
@@ -949,7 +970,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         int anthropic = (cfg->provider.endpoint_type == ENDPOINT_ANTHROPIC);
         char *messages = query_text(db, anthropic ? SQL_ANTHROPIC_MESSAGES
                                                   : SQL_OPENAI_MESSAGES,
-                                    replay_model);
+                                    replay_model, cfg->provider.cache_lifetime);
         if (!messages) messages = strdup("[]");
         char *tools_json = query_tools(db, anthropic ? SQL_ANTHROPIC_TOOLS
                                                      : SQL_OPENAI_TOOLS,
@@ -977,6 +998,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         sqlite3_bind_text(full, 8, effort ? effort : "{}", -1, SQLITE_TRANSIENT);
         if (anthropic && cfg->provider.model_id)
             sqlite3_bind_text(full, 9, cfg->provider.model_id, -1, SQLITE_STATIC);
+        bind_cache_lifetime(full, cfg->provider.cache_lifetime);
 
         free(messages); free(tools_json);
 

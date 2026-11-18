@@ -1,9 +1,12 @@
 {
   "name": "compaction",
   "version": "1.0.0",
-  "description": "When a session grows past its trim threshold, the oldest part of it is replaced by a summary the agent's own model writes, with the actions already taken listed beside it. Shipped in the binary and attached to every agent; disable it for an agent to fall back to the runtime's plain trim. Reference example for ContextThreshold hooks.",
+  "description": "When a session grows past its trim threshold, or sits idle above its prune target while its prompt cache is about to lapse, the oldest part of it is replaced by a summary the agent's own model writes, with the actions already taken listed beside it. Shipped in the binary and attached to every agent; disable it for an agent to fall back to the runtime's plain trim. Reference example for ContextThreshold and CacheExpiring hooks.",
   "hooks": [
     { "event": "ContextThreshold", "handler": "compact.qjs",
+      "input": { "history": "all", "history_results": true, "max_bytes": 2097152 },
+      "timeout": 600 },
+    { "event": "CacheExpiring", "handler": "compact.qjs",
       "input": { "history": "all", "history_results": true, "max_bytes": 2097152 },
       "timeout": 600 }
   ]

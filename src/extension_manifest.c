@@ -1412,7 +1412,7 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
     rc |= install_channel_builtin(db, base, "whatsapp", whatsapp_files,
                                   sizeof(whatsapp_files)/sizeof(*whatsapp_files));
 
-    /* ── compaction (the ContextThreshold hook; source extensions/compaction) ── */
+    /* ── compaction (the ContextThreshold and CacheExpiring hooks; source extensions/compaction) ── */
     rc |= install_hook_builtin(db, base, "compaction", compaction_files,
                                sizeof(compaction_files)/sizeof(*compaction_files));
 

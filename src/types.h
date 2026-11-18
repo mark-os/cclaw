@@ -141,6 +141,10 @@ typedef struct {
      * reasoning_effort means no effort field goes on the wire at all. */
     char *model_id;
     char *reasoning_effort;
+    /* The routing entry's agent_models.cache_lifetime, seconds; 0 = unknown.
+     * On the Anthropic wire 3600 sends the 1-hour cache marker, anything
+     * else the plain 5-minute one. */
+    int cache_lifetime;
 } ProviderConfig;
 
 /* Top-level config */

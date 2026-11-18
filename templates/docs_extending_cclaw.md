@@ -66,12 +66,23 @@ when its `event` happens in a session of an agent the extension is attached to:
   which summarises the oldest part of the session with your own model. An
   agent without it (its attachment switched off) is on the runtime's trim
   alone; another extension's `ContextThreshold` hook may replace it.
+- `CacheExpiring` — the session has sat idle for 90% of its model's prompt
+  cache lifetime (`cache_lifetime` on the agent's first chat model; none set,
+  never) and is above its `prune_target`: the next request will pay full
+  price for the whole session, so this is the cheap moment to shrink it.
+  Once per idle period, in any session (sub-agents too). `args.context`
+  carries what `ContextThreshold` gets plus `depth` (0 = top level),
+  `cache_lifetime`, `idle_seconds` (since the last answer came back) and that
+  answer's `cache_read_tokens` / `cache_write_tokens` (null when not
+  reported). Nothing follows it: no edits or a failed run leave the session
+  as it was. The bundled `compaction` subscribes too: top-level sessions
+  only, down to half the prune target.
 
 The entry takes `event`, `handler`, `input` (below), `async` and `timeout`,
 nothing else. The session waits for the script (at most `timeout` seconds,
 default config `hook_timeout`) and its JSON reply may edit the session — any
 turn of it, including the one still running when a `ContextThreshold` script
-runs between iterations; with `"async": true` it is not waited for and its
+runs between iterations (a message arriving meanwhile waits for the script); with `"async": true` it is not waited for and its
 reply is ignored. Three failures in a row (crash, timeout, refused reply)
 disable the hook until the extension is promoted again (or the operator
 clears `hooks.disabled`). The reply:

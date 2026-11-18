@@ -574,7 +574,7 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
 
 /* The governing routing entry — the agent's first enabled chat model
  * (decision 19: a smaller fallback is never trimmed for) — supplies the
- * window and the two trim numbers. The 50% defaults below are the only copy
+ * window, the two trim numbers and the cache lifetime. The 50% defaults below are the only copy
  * of them: an empty trim_threshold is half the window, an empty
  * prune_target half the threshold. The schema refuses nonsense at write
  * time, but nothing here relies on it: the trim works whatever these are. */
@@ -582,10 +582,12 @@ void context_limits(sqlite3 *db, const char *agent_name, int default_window,
                     ContextLimits *out) {
     out->window = default_window;
     out->threshold = out->target = -1;
+    out->lifetime = 0;
     if (db && agent_name && agent_name[0]) {
         sqlite3_stmt *s;
         if (sqlite3_prepare_v2(db,
-                "SELECT m.context_window, am.trim_threshold, am.prune_target"
+                "SELECT m.context_window, am.trim_threshold, am.prune_target,"
+                "       am.cache_lifetime"
                 "  FROM agent_models am JOIN models m ON m.id = am.model_id"
                 " WHERE am.agent_name = ?1 AND am.purpose = 'chat'"
                 "   AND m.status != 'disabled'"
@@ -597,6 +599,7 @@ void context_limits(sqlite3 *db, const char *agent_name, int default_window,
                     out->threshold = sqlite3_column_int(s, 1);
                 if (sqlite3_column_type(s, 2) != SQLITE_NULL)
                     out->target = sqlite3_column_int(s, 2);
+                if (sqlite3_column_int(s, 3) > 0) out->lifetime = sqlite3_column_int(s, 3);
             }
             sqlite3_finalize(s);
         }

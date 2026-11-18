@@ -2,6 +2,7 @@
 #define _DEFAULT_SOURCE   /* explicit_bzero */
 #include "llm_proc.h"
 #include "agent_config.h"
+#include "cache_expiring.h"
 #include "buf.h"
 #include "config.h"
 #include "config_registry.h"
@@ -94,7 +95,7 @@ static int load_candidates(sqlite3 *db, const char *agent_name,
 
     const char *sql =
         "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type,"
-        "       m.context_window, p.name, am.reasoning_effort"
+        "       m.context_window, p.name, am.reasoning_effort, am.cache_lifetime"
         " FROM agent_models am"
         " JOIN models m ON m.id = am.model_id"
         " JOIN providers p ON p.name = m.provider_name"
@@ -121,6 +122,7 @@ static int load_candidates(sqlite3 *db, const char *agent_name,
         snprintf(c->provider_name, sizeof(c->provider_name), "%s", v ? v : "");
         v = (const char *)sqlite3_column_text(s, 7);
         snprintf(c->reasoning_effort, sizeof(c->reasoning_effort), "%s", v ? v : "");
+        c->cache_lifetime = sqlite3_column_int(s, 8);
         /* A named candidate dropped for a missing key is the 2026-08-10
          * silent-reroute: it never reached the request, so nothing recorded
          * it. Record it through the degrade machinery instead (A8). */
@@ -1190,6 +1192,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
          * on the wire. Unset level = no effort field in the body (M5). */
         route_prov.model_id = m->id[0] ? m->id : NULL;
         route_prov.reasoning_effort = m->reasoning_effort[0] ? m->reasoning_effort : NULL;
+        route_prov.cache_lifetime = m->cache_lifetime;
         /* env → encrypted kv → cfg. Re-reading kv here (not mutating cfg,
          * which worker threads share) picks up keys set after startup.
          * cfg->provider.api_key is only reachable for the synthetic candidate
@@ -1244,6 +1247,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
          *   our-side fatal (E14) -> abort the turn. */
         HttpResponse resp = {0};
         struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+        time_t started = time(NULL);   /* the cache lifetime counts from here */
 
         HttpRequestOpts opts = {
             .url = url, .method = "POST", .headers = headers,
@@ -1345,6 +1349,9 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
             if (st == LLM_RESP_OK) {
                 model_stat_success(db, m->id, ir.prompt_tokens, ir.completion_tokens, ir.cost_nano);
+                /* CacheExpiring counts from the start of the last request
+                 * that was answered (cache_expiring.h). */
+                cache_expiring_arm(db, session_id, agent_name, started);
                 snprintf(served_id, sizeof(served_id), "%s", m->id);
                 llm_ok = 1;
             } else if (st == LLM_RESP_DBERR) {

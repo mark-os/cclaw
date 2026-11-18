@@ -574,9 +574,12 @@ int main(void) {
     int failed = count_in_log(LOG2, "hook ContextThreshold ext=compaction outcome=failed");
     if (failed < 1 || mock_server_rule_hits() != failed ||
         db_count("SELECT (disabled=1) = (fail_count>=3) FROM hooks"
-                 " WHERE extension_name='compaction'") != 1 ||
-        (failed >= 3 && db_count("SELECT disabled FROM hooks"
-                                 " WHERE extension_name='compaction'") != 1)) {
+                 " WHERE extension_name='compaction' AND event='ContextThreshold'") != 1 ||
+        (failed >= 3 && db_count("SELECT disabled FROM hooks WHERE extension_name='compaction'"
+                                 " AND event='ContextThreshold'") != 1) ||
+        /* Its CacheExpiring hook is a hook of its own: never run here. */
+        db_count("SELECT disabled = 0 AND fail_count = 0 FROM hooks"
+                 " WHERE extension_name='compaction' AND event='CacheExpiring'") != 1) {
         fprintf(stderr, "FAIL (f): %d failed runs, %d summariser calls\n", failed,
                 mock_server_rule_hits());
         dump_log(LOG2);

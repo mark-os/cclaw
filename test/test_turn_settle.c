@@ -735,6 +735,129 @@ static void test_hold_is_a_resource(void) {
     printf("  PASS test_hold_is_a_resource\n");
 }
 
+/* CacheExpiring, fired from the timer (cache_expiring_tick at the real
+ * clock: the arm is written into the past, so nothing sleeps). The session is
+ * idle and over even its trim threshold, which proves the point of decision
+ * 23: whatever the script does, C never trims an idle session after it. */
+static void arm_due(int64_t sid) {
+    char sql[160];
+    snprintf(sql, sizeof(sql), "UPDATE sessions SET cache_armed_at=unixepoch()-3300"
+             " WHERE id=%lld;", (long long)sid);
+    run(sql);
+}
+
+static int64_t seed_cache(const char *agent) {
+    int64_t sid = seed_long(agent);
+    int total = measure(sid, agent);
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "DELETE FROM agent_models WHERE agent_name='%s';"
+             "INSERT INTO agent_models(agent_name, model_id, pos, trim_threshold,"
+             " prune_target, cache_lifetime) VALUES('%s','p/m',0,%d,%d,3600);",
+             agent, agent, total / 2, total / 4);
+    run(sql);
+    arm_due(sid);
+    return sid;
+}
+
+#define ARMED "SELECT cache_armed_at IS NOT NULL FROM sessions WHERE id=?1"
+
+static void test_cache_expiring(void) {
+    /* No script: nothing happens, and the period is spent. */
+    int64_t sid = seed_cache("CeNone");
+    int before = measure(sid, "CeNone");
+    cache_expiring_tick();
+    assert(is_state(sid, "idle") && child_count() == 0);
+    assert(count(ARMED, sid) == 0);
+    assert(measure(sid, "CeNone") == before && count(N_TRIMS, sid) == 0);
+
+    /* A failed script: nothing it did, no trim, counted against it. Fired
+     * once: the next tick finds nothing armed. */
+    install_hook("ceboom", "CeBoom", "CacheExpiring", "", "throw new Error('summary died');");
+    sid = seed_cache("CeBoom");
+    before = measure(sid, "CeBoom");
+    cache_expiring_tick();
+    assert(is_state(sid, "settling") && child_count() == 1);
+    pump_until_idle(sid);
+    assert(fail_count("ceboom") == 1);
+    assert(count(N_EDITS, sid) == 0 && count(N_TRIMS, sid) == 0);
+    assert(measure(sid, "CeBoom") == before);
+    cache_expiring_tick();
+    assert(is_state(sid, "idle") && child_count() == 0 && fail_count("ceboom") == 1);
+
+    /* A reply with no edits: nothing, and a success. */
+    install_hook("cenil", "CeNil", "CacheExpiring", "", "return '{}';");
+    sid = seed_cache("CeNil");
+    before = measure(sid, "CeNil");
+    cache_expiring_tick();
+    pump_until_idle(sid);
+    assert(fail_count("cenil") == 0 && count(N_EDITS, sid) == 0 && count(N_TRIMS, sid) == 0);
+    assert(measure(sid, "CeNil") == before);
+
+    /* What the script is sent, and an edit applied while a message waits:
+     * the hold is a hold like any other — the message queues, the session
+     * counts as holding a resource — and the message opens the next turn
+     * when it ends. */
+    install_hook("ceok", "CeOk", "CacheExpiring", ",\"input\":{\"history\":\"all\"}",
+        "var c = args.context;"
+        "if (args.event !== 'CacheExpiring' || c.depth !== 0 || c.cache_lifetime !== 3600"
+        "    || !(c.tokens > c.prune_target) || !(c.trim_threshold > c.prune_target)"
+        "    || !(c.window >= c.trim_threshold) || c.cache_read_tokens !== 1800"
+        "    || c.cache_write_tokens !== 248 || !(c.idle_seconds >= 0)"
+        "    || args.final.text !== 'done' || args.history.length !== 1)"
+        "  throw new Error('unexpected input ' + JSON.stringify(c));"
+        "return JSON.stringify({edits:[{op:'note',text:'ce saw ' + c.tokens}]});");
+    sid = seed_cache("CeOk");
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO llm_responses(session_id, iteration_id, model, status,"
+             " cached_tokens, cache_write_tokens) VALUES (%lld, 1, 'p/m', 'ok', 1800, 248);",
+             (long long)sid);
+    run(sql);
+    cache_expiring_tick();
+    assert(is_state(sid, "settling") && child_hook_holds(sid));
+    assert(session_count_resource_holders(g_db, 0) >= 1);
+    assert(inbox_insert(g_db, sid, "cli", NULL, "still there?") > 0);
+    AdvanceOutput out = advance_session(g_db, sid, 0);
+    assert(out.action == ADVANCE_WAITING && is_state(sid, "settling"));
+    for (int i = 0; i < 240 && child_count() > 0; i++) {
+        reap_children();
+        usleep(50 * 1000);
+    }
+    assert(child_count() == 0 && !is_state(sid, "settling"));
+    assert(fail_count("ceok") == 0);
+    assert(count("SELECT COUNT(*) FROM entries WHERE session_id=?1 AND type='system'"
+                 " AND content LIKE 'ce saw %' AND json_extract(data,'$.source')='hook:ceok'",
+                 sid) == 1);
+    assert(count(N_TRIMS, sid) == 0);
+    assert(count("SELECT type='user_message' AND content='still there?' FROM entries"
+                 " WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1)", sid) == 1);
+
+    /* At or under the prune target: no hook, nothing held. */
+    sid = seed_cache("CeOk");
+    snprintf(sql, sizeof(sql), "UPDATE agent_models SET trim_threshold=NULL, prune_target=%d"
+             " WHERE agent_name='CeOk';", measure(sid, "CeOk") + 10);
+    run(sql);
+    cache_expiring_tick();
+    assert(is_state(sid, "idle") && child_count() == 0 && count(ARMED, sid) == 0);
+    assert(count(N_NOTES, sid) == 0);
+
+    /* A sub-agent's session fires too: the depth is the script's business. */
+    install_hook("cesub", "CeSub", "CacheExpiring", "",
+        "if (args.context.depth !== 1) throw new Error('depth ' + args.context.depth);"
+        "return '{}';");
+    int64_t parent = seed_turn("CeSub", 10);
+    sid = seed_cache("CeSub");
+    snprintf(sql, sizeof(sql), "UPDATE sessions SET parent_session_id=%lld, depth=1"
+             " WHERE id=%lld;", (long long)parent, (long long)sid);
+    run(sql);
+    cache_expiring_tick();
+    assert(is_state(sid, "settling"));
+    pump_until_idle(sid);
+    assert(fail_count("cesub") == 0);
+    printf("  PASS test_cache_expiring\n");
+}
+
 /* Three failures in a row disable the hook: one note to the default agent,
  * the hook passed over from then on, until the extension is promoted
  * again. */
@@ -794,7 +917,8 @@ int main(int argc, char *argv[]) {
     static const char *const agents[] = { "Rv", "Junk", "Boom", "Nil", "Slow", "Slow1",
                                           "Chain", "Obs", "Gone", "Big", "Hist", "Pass",
                                           "Sub", "Ord", "OrdX", "OrdS", "Mid", "MidEdit",
-                                          "MidSlow", "Res", "Trip" };
+                                          "MidSlow", "Res", "Trip", "CeNone", "CeBoom",
+                                          "CeNil", "CeOk", "CeSub" };
     for (size_t i = 0; i < sizeof(agents) / sizeof(agents[0]); i++)
         db_agent_upsert(g_db, agents[i], NULL, NULL);
     run("INSERT INTO tools(name, droppable) VALUES('look',1);"
@@ -827,6 +951,7 @@ int main(int argc, char *argv[]) {
     test_turn_end_order();
     test_iteration_hold();
     test_hold_is_a_resource();
+    test_cache_expiring();
     test_disabled();
 
     agent_setup_destroy(&setup);

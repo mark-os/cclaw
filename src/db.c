@@ -1494,7 +1494,9 @@ static int patch_v65_utility(sqlite3 *db) {
  * schema version: later stages extend this patch rather than adding v69.
  * So far: agent_models.trim_threshold / prune_target — when C trims a
  * session and how far — NULL on every existing row, which is the 50%
- * defaults; the global context_threshold / compaction_target keys they
+ * defaults; agent_models.cache_lifetime (3600 on existing Anthropic chat
+ * entries, unknown elsewhere) and sessions.cache_armed_at, for
+ * CacheExpiring; the global context_threshold / compaction_target keys they
  * replace leave the config table at the next config_registry_sync (as does
  * turn_settled_timeout, now hook_timeout). And hooks.pos / timeout /
  * disabled, for the events of stage 1: an existing hook runs first in its
@@ -1530,6 +1532,44 @@ static int patch_v68_hooks(sqlite3 *db) {
         " BEGIN"
         "   SELECT RAISE(ABORT, 'agent_models: trim_threshold is larger than the model''s context window');"
         " END;"
+        /* cache_lifetime, and the CacheExpiring arm on sessions. Existing
+         * Anthropic chat entries move to the 1-hour marker (decision 25: the
+         * default, with its higher write cost stated in the release notes);
+         * every other entry stays unknown until its operator enters a
+         * figure. No session is armed: the first request after the upgrade
+         * arms it. */
+        "ALTER TABLE agent_models ADD COLUMN cache_lifetime INTEGER"
+        "  CHECK (cache_lifetime IS NULL OR cache_lifetime > 0);"
+        "UPDATE agent_models SET cache_lifetime = 3600"
+        " WHERE purpose = 'chat' AND model_id IN (SELECT m.id FROM models m"
+        "   JOIN providers p ON p.name = m.provider_name WHERE p.endpoint_type = 'anthropic');"
+        "CREATE TRIGGER agent_models_lifetime_bi"
+        " BEFORE INSERT ON agent_models"
+        " WHEN NEW.cache_lifetime NOT IN (300, 3600) AND EXISTS ("
+        "   SELECT 1 FROM models m JOIN providers p ON p.name = m.provider_name"
+        "    WHERE m.id = NEW.model_id AND p.endpoint_type = 'anthropic')"
+        " BEGIN"
+        "   SELECT RAISE(ABORT, 'agent_models: cache_lifetime on an Anthropic model is 300 or 3600');"
+        " END;"
+        "CREATE TRIGGER agent_models_lifetime_bu"
+        " BEFORE UPDATE OF cache_lifetime, model_id ON agent_models"
+        " WHEN NEW.cache_lifetime NOT IN (300, 3600) AND EXISTS ("
+        "   SELECT 1 FROM models m JOIN providers p ON p.name = m.provider_name"
+        "    WHERE m.id = NEW.model_id AND p.endpoint_type = 'anthropic')"
+        " BEGIN"
+        "   SELECT RAISE(ABORT, 'agent_models: cache_lifetime on an Anthropic model is 300 or 3600');"
+        " END;"
+        "CREATE TRIGGER agent_models_lifetime_ai"
+        " AFTER INSERT ON agent_models"
+        " WHEN NEW.cache_lifetime IS NULL AND NEW.purpose = 'chat' AND EXISTS ("
+        "   SELECT 1 FROM models m JOIN providers p ON p.name = m.provider_name"
+        "    WHERE m.id = NEW.model_id AND p.endpoint_type = 'anthropic')"
+        " BEGIN"
+        "   UPDATE agent_models SET cache_lifetime = 3600 WHERE rowid = NEW.rowid;"
+        " END;"
+        "ALTER TABLE sessions ADD COLUMN cache_armed_at INTEGER;"
+        "CREATE INDEX idx_sessions_cache_armed ON sessions(cache_armed_at)"
+        "  WHERE cache_armed_at IS NOT NULL;"
         /* Hooks: the manifest's order, its per-hook timeout, and the flag
          * three failures in a row set. turnSettled is renamed Stop with no
          * data patch: no deployment has such a row. */

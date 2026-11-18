@@ -49,6 +49,8 @@
 #include "install.h"
 #include "wake.h"
 #include "advance.h"
+#include "cache_expiring.h"
+#include "settle.h"
 #include "channel.h"
 #include "channel_api.h"
 #include "channel_runner.h"
@@ -198,6 +200,12 @@ static int compute_timeout_ms(void) {
         time_t cd = channel_next_deadline();
         if (cd > 0 && cd < nearest)
             nearest = cd;
+        /* The CacheExpiring timer lives in the sessions table: wake when the
+         * next idle session falls due, not up to a poll interval late — a
+         * 5-minute cache leaves 30 seconds between due and lapsed. */
+        time_t ce = cache_expiring_next(proc_db(), now);
+        if (ce > 0 && ce < nearest)
+            nearest = ce;
     }
 
     /* Tier 2: periodic DB poll */
@@ -466,6 +474,7 @@ static int run_daemon(char *db_path) {
 
         child_sweep_deadlines();
         channel_tick(proc_db());
+        cache_expiring_tick();
 
         /* DB periodic work — gated on interval */
         time_t now = time(NULL);

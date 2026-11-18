@@ -61,7 +61,11 @@ one approval covers the whole document:
 - `agent`: your own settings — `models` (your FULL replacement routing order:
   an array of canonical model ids exactly as `search_config` lists them, or
   ids this same document's `models` section registers; first entry is primary;
-  bare model names are refused with the id you probably meant),
+  bare model names are refused with the id you probably meant; an entry may
+  be an object `{"id", "effort", "trim_threshold", "prune_target",
+  "cache_lifetime"}` — effort level, when your session is trimmed and how
+  far in tokens, and how long the provider keeps its prompt cache in
+  seconds, 300 or 3600 on an Anthropic model, 3600 when omitted there),
   `max_iterations`, `shell_timeout`.
 - `routes`: `"channel:chat_id"` strings authorizing `channel_send` to that
   chat. First-come: a chat routed to another agent is refused. Wildcards are

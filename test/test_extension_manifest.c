@@ -376,7 +376,6 @@ static void test_validate_rejects_bad_sections(void) {
         { "stop",          "is not an event" },
         { "preAdvance",    "is not an event" },
         { "bogusEvent",    "is not an event" },
-        { "CacheExpiring", "is not available yet" },
         { "PreToolUse",    "not available until stage 2" },
         { "PostToolUse",   "not available until stage 2" } };
     for (size_t i = 0; i < sizeof(bad_events) / sizeof(bad_events[0]); i++) {
@@ -790,11 +789,15 @@ static void test_install_builtin_compaction(void) {
                     " AND event='ContextThreshold' AND async=0 AND timeout=600"
                     " AND json_extract(input,'$.history')='all'"
                     " AND path='/tmp/extensions/compaction/compact.qjs'") == 1);
+    assert(qint(db, "SELECT COUNT(*) FROM hooks WHERE extension_name='compaction'"
+                    " AND event='CacheExpiring' AND async=0 AND timeout=600 AND pos=1"
+                    " AND path='/tmp/extensions/compaction/compact.qjs'") == 1);
     /* Every agent there was has it, and runs it. */
     assert(qint(db, "SELECT COUNT(*) FROM agents a WHERE NOT EXISTS (SELECT 1 FROM"
                     " agent_extensions ae WHERE ae.agent_name=a.name"
                     " AND ae.extension_name='compaction' AND ae.enabled=1)") == 0);
     assert(hook_any(db, "default", HOOK_EVENT_CONTEXT_THRESHOLD) == 1);
+    assert(hook_any(db, "default", HOOK_EVENT_CACHE_EXPIRING) == 1);
 
     /* Opt-outs survive a restart: switched off, and detached. */
     assert(sqlite3_exec(db,

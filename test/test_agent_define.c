@@ -178,7 +178,10 @@ static void test_clone_from(void) {
         "INSERT INTO models(id,provider_name,model,capabilities)"
         " VALUES('p/ears','p','ears','[\"audio\"]');"
         "INSERT INTO agent_models(agent_name,purpose,model_id,pos)"
-        " VALUES('Template','audio','p/ears',0);", NULL, NULL, NULL) == SQLITE_OK);
+        " VALUES('Template','audio','p/ears',0);"
+        /* and the chat entry's trim numbers and cache lifetime */
+        "UPDATE agent_models SET trim_threshold=9000, prune_target=3000, cache_lifetime=300"
+        " WHERE agent_name='Template' AND purpose='chat';", NULL, NULL, NULL) == SQLITE_OK);
 
     char *err = NULL;
     int rc = agent_definition_apply(g_db,
@@ -204,6 +207,9 @@ static void test_clone_from(void) {
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "audio:p/ears chat:p/m") == 0);
     sqlite3_finalize(s);
+    assert(db_scalar_i64(g_db, "SELECT trim_threshold = 9000 AND prune_target = 3000"
+                               " AND cache_lifetime = 300 FROM agent_models"
+                               " WHERE agent_name='Copy' AND purpose='chat'", 0, -1) == 1);
 
     /* Clone laundering refused: creator without the source's grants. */
     seed_creator("Poor", "standard");

@@ -1931,6 +1931,82 @@ static void test_anthropic_thinking_replay(void) {
     printf("  PASS test_anthropic_thinking_replay\n");
 }
 
+/* The cache marker follows the routing entry's cache_lifetime, at every
+ * place it goes: 3600 is the 1-hour marker on all of them (system prompt,
+ * the turn-boundary breakpoint, the request's own), 300 or none the plain
+ * one. The other two formats send no marker, and the lifetime changes not
+ * one byte of theirs. */
+static char *build_with_lifetime(sqlite3 *db, int64_t sid, EndpointType ep, int lifetime) {
+    Config cfg = {0};
+    cfg.provider.model = (char *)"claude-sonnet-5-5";
+    cfg.provider.model_id = (char *)"claude@anthropic";
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ep;
+    cfg.provider.cache_lifetime = lifetime;
+    cfg.context_window = 128000;
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    LlmPayload p;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &p) == 0);
+    context_plan_free(&plan);
+    char *body = strdup(p.body);
+    llm_payload_release(&p);
+    return body;
+}
+
+/* "markers/with ttl/with 1h" over every cache_control object in the body. */
+static char *markers(sqlite3 *db, const char *body) {
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT count(*) || '/' || count(json_extract(value,'$.ttl')) || '/'"
+        "    || COALESCE(sum(json_extract(value,'$.ttl') = '1h'), 0)"
+        "  FROM json_tree(?1) WHERE key = 'cache_control'", -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    char *r = strdup((const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    return r;
+}
+
+static void test_cache_marker_lifetime(void) {
+    sqlite3 *db = open_seeded();
+    int64_t sid = seed_tool_iteration(db, (char *)"claude@anthropic", ENDPOINT_ANTHROPIC,
+                                      ANTHROPIC_TOOL_RESPONSE);
+    Message next = {.role = ROLE_USER, .content = "and now?"};
+    entry_append_with_iteration(db, sid, &next, 3);
+
+    char *plain = build_with_lifetime(db, sid, ENDPOINT_ANTHROPIC, 0);
+    char *m = markers(db, plain);
+    if (strcmp(m, "3/0/0") != 0) { fprintf(stderr, "FAIL plain markers %s\n", m); abort(); }
+    free(m);
+    expect_path(db, plain, "$.cache_control", "{\"type\":\"ephemeral\"}");
+    char *five = build_with_lifetime(db, sid, ENDPOINT_ANTHROPIC, 300);
+    assert(strcmp(five, plain) == 0);   /* 300 is today's marker, byte for byte */
+    char *hour = build_with_lifetime(db, sid, ENDPOINT_ANTHROPIC, 3600);
+    m = markers(db, hour);
+    if (strcmp(m, "3/3/3") != 0) { fprintf(stderr, "FAIL 1h markers %s\n", m); abort(); }
+    free(m);
+    expect_path(db, hour, "$.system[0].cache_control", "{\"type\":\"ephemeral\",\"ttl\":\"1h\"}");
+    expect_path(db, hour, "$.messages[2].content[#-1].cache_control.ttl", "1h");
+    expect_path(db, hour, "$.cache_control.ttl", "1h");
+    /* Nothing else moved, and the parameter did not land on another one. */
+    expect_path(db, hour, "$.model", "claude-sonnet-5-5");
+    expect_path(db, hour, "$.messages[3].content[0].text", "and now?");
+    free(plain); free(five); free(hour);
+
+    static const EndpointType others[] = { ENDPOINT_OPENAI, ENDPOINT_GEMINI };
+    for (size_t i = 0; i < 2; i++) {
+        char *a = build_with_lifetime(db, sid, others[i], 0);
+        char *b = build_with_lifetime(db, sid, others[i], 3600);
+        assert(strcmp(a, b) == 0);
+        m = markers(db, b);
+        assert(strcmp(m, "0/0/0") == 0);
+        free(m); free(a); free(b);
+    }
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_cache_marker_lifetime\n");
+}
+
 /* ── The transcript: anchor, plan scoping, batch pairing ─────────── */
 
 /* A body's message sequence as one line, the same notation for all three
@@ -2378,6 +2454,7 @@ int main(void) {
     test_compaction_entry_in_payload();
     test_midturn_system_entry_converts_to_user();
     test_anthropic_payload();
+    test_cache_marker_lifetime();
     test_anthropic_thinking_replay();
     test_cron_result_in_payload();
     test_network_hosts_query_time_wrap();

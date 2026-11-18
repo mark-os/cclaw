@@ -103,6 +103,17 @@ CREATE TABLE IF NOT EXISTS agent_models (
   trim_threshold INTEGER CHECK (trim_threshold IS NULL OR trim_threshold > 0),
   prune_target INTEGER CHECK (prune_target IS NULL OR (prune_target > 0
     AND (trim_threshold IS NULL OR prune_target < trim_threshold))),
+  -- How long the provider keeps this model's prompt cache, in seconds, read
+  -- off the governing entry like the two above. NULL = unknown: no
+  -- CacheExpiring hook fires. At 90% of it after a session's last request
+  -- started, an idle session above prune_target fires CacheExpiring
+  -- (settle.c). On an Anthropic-format entry it also selects the cache
+  -- marker sent (llm_payload.c): 3600 = the 1-hour marker, 300 or NULL = the
+  -- plain 5-minute one. There a value is 300 or 3600, and a new chat entry
+  -- that gives none gets 3600 (triggers below); NULL is reached only by
+  -- clearing it afterwards. For other providers it is the documented figure,
+  -- entered by the operator.
+  cache_lifetime INTEGER CHECK (cache_lifetime IS NULL OR cache_lifetime > 0),
   PRIMARY KEY (agent_name, purpose, pos)
 );
 -- Every write path goes through these, so the rule cannot be skipped by a
@@ -136,6 +147,34 @@ BEFORE UPDATE OF trim_threshold, model_id ON agent_models
 WHEN NEW.trim_threshold > (SELECT m.context_window FROM models m WHERE m.id = NEW.model_id)
 BEGIN
   SELECT RAISE(ABORT, 'agent_models: trim_threshold is larger than the model''s context window');
+END;
+-- Anthropic's cache lives 5 minutes or an hour; any other lifetime would
+-- arm CacheExpiring for a cache that is not there. A new Anthropic chat entry
+-- that says nothing gets the hour: the marker that matches the cadence of an
+-- agent that waits on people (the write costs 2x base input, not 1.25x).
+CREATE TRIGGER IF NOT EXISTS agent_models_lifetime_bi
+BEFORE INSERT ON agent_models
+WHEN NEW.cache_lifetime NOT IN (300, 3600) AND EXISTS (
+  SELECT 1 FROM models m JOIN providers p ON p.name = m.provider_name
+   WHERE m.id = NEW.model_id AND p.endpoint_type = 'anthropic')
+BEGIN
+  SELECT RAISE(ABORT, 'agent_models: cache_lifetime on an Anthropic model is 300 or 3600');
+END;
+CREATE TRIGGER IF NOT EXISTS agent_models_lifetime_bu
+BEFORE UPDATE OF cache_lifetime, model_id ON agent_models
+WHEN NEW.cache_lifetime NOT IN (300, 3600) AND EXISTS (
+  SELECT 1 FROM models m JOIN providers p ON p.name = m.provider_name
+   WHERE m.id = NEW.model_id AND p.endpoint_type = 'anthropic')
+BEGIN
+  SELECT RAISE(ABORT, 'agent_models: cache_lifetime on an Anthropic model is 300 or 3600');
+END;
+CREATE TRIGGER IF NOT EXISTS agent_models_lifetime_ai
+AFTER INSERT ON agent_models
+WHEN NEW.cache_lifetime IS NULL AND NEW.purpose = 'chat' AND EXISTS (
+  SELECT 1 FROM models m JOIN providers p ON p.name = m.provider_name
+   WHERE m.id = NEW.model_id AND p.endpoint_type = 'anthropic')
+BEGIN
+  UPDATE agent_models SET cache_lifetime = 3600 WHERE rowid = NEW.rowid;
 END;
 
 -- Availability probe cache: what a provider says it can serve, as opposed to
@@ -368,12 +407,20 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- measured request carried (usage_attribute); the
                                             -- next turn's first report subtracts it. NULL = none yet.
   leaf_id INTEGER DEFAULT -1,                 -- the newest entry of the active branch; -1 = none
+  cache_armed_at INTEGER,                   -- CacheExpiring is armed: when the session's last
+                                            -- request started (a response came back and the
+                                            -- governing entry has a cache_lifetime). Cleared
+                                            -- when it fires or the cache has lapsed, so it
+                                            -- fires once per idle period (settle.c). NULL =
+                                            -- not armed.
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   FOREIGN KEY (channel_name, chat_id) REFERENCES channel_chats(channel_name, chat_id)
     ON UPDATE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_cache_armed ON sessions(cache_armed_at)
+  WHERE cache_armed_at IS NOT NULL;
 
 -- ═══ Delivery edges (specs/delivery.md) ═══
 -- Every outbound edge of a session is a row: the standing parent edge every

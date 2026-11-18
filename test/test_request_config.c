@@ -1137,6 +1137,39 @@ static void test_agent_models_trim(void) {
     free(args);
     assert(db_scalar_i64(db, "SELECT trim_threshold FROM agent_models"
                              " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 60000);
+
+    /* cache_lifetime: seconds, applied; on an Anthropic model 300 or 3600,
+     * said at request time, and 3600 when the entry leaves it out. */
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"cache_lifetime\":-5}]}}}");
+    assert(r && strstr(r, "cache_lifetime must be a positive integer (seconds)"));
+    free(r);
+    ctx.current_tool_call_id = "tr3";
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"cache_lifetime\":600}]}}}");
+    assert(r == NULL);
+    args = last_args(db, sid);
+    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, NULL) == 0);
+    free(args);
+    assert(db_scalar_i64(db, "SELECT cache_lifetime FROM agent_models"
+                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 600);
+    assert(sqlite3_exec(db,
+        "INSERT INTO providers(name, base_url, endpoint_type) VALUES"
+        " ('anthx','http://a','anthropic');"
+        "INSERT INTO models(id, provider_name, model) VALUES ('anthx/c','anthx','c');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"anthx/c\",\"cache_lifetime\":600}]}}}");
+    assert(r && strstr(r, "is an Anthropic model") && strstr(r, "300"));
+    free(r);
+    ctx.current_tool_call_id = "tr4";
+    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":[\"anthx/c\"]}}}");
+    assert(r == NULL);
+    args = last_args(db, sid);
+    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, NULL) == 0);
+    free(args);
+    assert(db_scalar_i64(db, "SELECT cache_lifetime FROM agent_models"
+                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 3600);
     tools_free(&reg);
     db_close(db);
     printf("  PASS test_agent_models_trim\n");

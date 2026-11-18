@@ -1,8 +1,8 @@
 # compaction
 
-A `ContextThreshold` hook, on for every agent. When a session grows past its
-trim threshold (`agent_models.trim_threshold`, half the model's window unless
-set), the oldest part of it is replaced by a summary the agent's own model
+A `ContextThreshold` and `CacheExpiring` hook, on for every agent. When a
+session grows past its trim threshold (`agent_models.trim_threshold`, half
+the model's window unless set), the oldest part of it is replaced by a summary the agent's own model
 writes, down to the prune target (`prune_target`, half the threshold unless
 set):
 
@@ -28,11 +28,34 @@ Two things are the script's, not the model's:
   summarised is folded into the new one: its prose goes to the model, its
   list of actions is carried over line for line.
 
+## When the cache is about to lapse
+
+The same script is also a `CacheExpiring` hook. A session that has sat idle
+for 90% of its model's cache lifetime (`agent_models.cache_lifetime`; on
+Anthropic 3600 seconds unless set to 300) while above its prune target is
+about to lose its prompt cache, so the next message will pay full price for
+the whole session anyway: the cheapest moment to summarise it. Then:
+
+- a sub-agent's session (`args.context.depth` above 0) is left alone — it is
+  short-lived, and its parent reads its result, not its history;
+- a top-level session is summarised down to **half** the prune target, the
+  same way as above (oldest turns first; on an idle session every step of
+  the last turn may go, never its answer). Each run removes at least half of
+  what is there, so it cannot fire again until the session has doubled.
+
+If nothing it may take would bring the session under its prune target, it
+returns no edits. On this event nothing follows the script: no edits, a
+failed run or no script at all leave the session exactly as it was — the
+runtime never trims an idle session. An entry with no `cache_lifetime` never
+fires it.
+
+## When it fails to summarise
+
 If the model cannot be reached, the script throws: a failed run. If nothing it
 may take would bring the session under the threshold, it returns no edits
-without asking the model. Either way the runtime's own trim runs next and cuts
-the session to its target without a summary (oldest turns, then oldest steps,
-and a one-line note). Nothing is deleted: the originals stay in the database.
+without asking the model. Either way, on `ContextThreshold`, the runtime's
+own trim runs next and cuts the session to its target without a summary
+(oldest turns, then oldest steps, and a one-line note). Nothing is deleted: the originals stay in the database.
 
 ## How it ships
 
@@ -88,8 +111,10 @@ not sent, and the runtime's trim reaches them.
 ## When it fails
 
 Three failed runs in a row (the model unreachable, a crash, a reply the
-runtime refuses, the deadline) turn the hook off: the default agent is told
-once, and the agents are on the runtime's trim until it is turned back on.
+runtime refuses, the deadline) turn the hook off — each of the two hooks
+counts its own: the default agent is told once, and the agents are on the
+runtime's trim (or, for `CacheExpiring`, idle sessions are left as they are)
+until it is turned back on.
 A restart does not turn it back on; a new version of the bundle does, as does
 the operator:
 
@@ -100,7 +125,8 @@ UPDATE hooks SET disabled=0, fail_count=0 WHERE extension_name='compaction';
 ## See what it did
 
 - **The log**, one line per run: `hook ContextThreshold ext=compaction
-  outcome=applied` (or `nothing`, `failed`, `rejected`, with a reason), and a
+  outcome=applied` (or `nothing`, `failed`, `rejected`, with a reason; the
+  same with `CacheExpiring`, after a `hook CacheExpiring due` line), and a
   `trim session=…` line when the runtime's trim ran after it.
 - **The record**, on the session's newest entry after each run: what left,
   the summary written, sizes before and after, and the script's own

@@ -2929,6 +2929,12 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t iteration_id
     sqlite3_bind_int(stmt, 16, clen);
 
     int rc = sqlite3_step(stmt);
+    /* SQLite's own log hook is silent for a BUSY, so say it here: the
+     * extended code tells contention (5) from a stale snapshot (517). */
+    if (rc != SQLITE_DONE)
+        LOG_WARN_("entries: %s entry not written session=%lld: %s (sqlite %d)",
+                  type, (long long)session_id, sqlite3_errmsg(db),
+                  sqlite3_extended_errcode(db));
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
 

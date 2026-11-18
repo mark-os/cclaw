@@ -670,14 +670,16 @@ int route_main(int argc, char *argv[]) {
 /* Print one llm_responses row: header + body rendered as JSON. Bodies are
  * stored as JSONB, which system sqlite3 CLIs older than 3.45 (e.g. Debian
  * bookworm's 3.40) can't decode — the vendored SQLite in this binary is the
- * one guaranteed reader. `which` is "body" or "request_body". */
+ * one guaranteed reader. Requests are stored as the JSON text that was sent
+ * (JSONB on rows written before v0.8); json_valid's 9 accepts either.
+ * `which` is "body" or "request_body". */
 static int resp_print(sqlite3 *db, const char *where, int64_t id, const char *which) {
     char sql[512];
     snprintf(sql, sizeof(sql),
         "SELECT id, status, model, session_id, iteration_id,"
         "       datetime(created_at,'unixepoch','localtime'), provider_id,"
         "       CASE WHEN %s IS NULL THEN NULL"
-        "            WHEN json_valid(%s, 8) THEN json_pretty(%s)"
+        "            WHEN json_valid(%s, 9) THEN json_pretty(%s)"
         "            ELSE CAST(%s AS TEXT) END"
         " FROM llm_responses WHERE %s ORDER BY id DESC LIMIT 1",
         which, which, which, which, where);

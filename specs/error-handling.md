@@ -52,7 +52,7 @@ Three outcome classes exist:
 | E11 | auth failure | HTTP 401/403 | skip + degrade w/ cooldown | — | "authentication failed" |
 | E12 | model not found | HTTP 404 | skip + degrade w/ cooldown | — | "model not available" |
 | E13 | other 4xx | remaining non-2xx | skip candidate (400: also degrade) | no | "provider rejected the request" |
-| E14 | DB error during ingest | SQLITE_BUSY on our side | **turn aborts** | no | "DB contention during response ingest (SQLITE_BUSY) — check logs" |
+| E14 | DB error during ingest | a write of the ingest failed on our side (the ingest is one `BEGIN IMMEDIATE` transaction, undone as a whole; the body is archived as `ingest_error` and the failing write is logged with its SQLite code) | **turn aborts** | no | "the response arrived but could not be saved (database error) — check logs" |
 
 ### Operator notices
 

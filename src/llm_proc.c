@@ -1374,8 +1374,8 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                 snprintf(served_id, sizeof(served_id), "%s", m->id);
                 llm_ok = 1;
             } else if (st == LLM_RESP_DBERR) {
-                /* Our DB failed (SQLITE_BUSY) — body was valid. Diagnostics
-                 * already logged by db_ingest_response. */
+                /* Our DB failed — body was valid. The failing write and its
+                 * SQLite code are already logged by db_ingest_response. */
                 had_dberr = 1;
             } else {
                 /* EMPTY (zero-usage stop, archived 'empty'), MALFORMED (bad
@@ -1439,7 +1439,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
     if (!llm_ok) {
         const char *err_text = had_dberr
-            ? "error: DB contention during response ingest (SQLITE_BUSY) — check logs"
+            ? "error: the response arrived but could not be saved (database error) — check logs"
             : fail_text;
         /* Cite the archived llm_responses row so the operator can pull the exact
          * request + provider reply with `cclaw resp <id>`. */
@@ -1458,8 +1458,8 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
          * when archiving is on; resp #0 means it isn't, so this line is the only
          * trail). Metadata only: the body can be large and may carry secrets. */
         if (had_dberr)
-            LOG_ERROR_("llm_req: response ingest failed (DB contention) "
-                       "session=%lld turn=%lld resp=#%lld — response discarded",
+            LOG_ERROR_("llm_req: response ingest failed (database error, see the line above) "
+                       "session=%lld iteration=%lld resp=#%lld — response discarded",
                        (long long)session_id, (long long)iteration_id, (long long)resp_id);
         char err_buf[160];
         if (resp_id > 0)

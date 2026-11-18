@@ -246,7 +246,7 @@ Raw LLM response archive for forensics and debugging. One row per HTTP response 
 | `provider_id` | TEXT | provider's own response id (`$.id`), NULL if absent |
 | `upstream_provider` | TEXT | upstream backend that served it (`$.provider`, e.g. OpenRouter's `StreamLake`), NULL if absent — a different field from `provider_id` |
 | `body` | BLOB | JSONB when parseable, raw text otherwise |
-| `request_body` | BLOB | JSONB of the payload sent, on every archived row (ok and failure); subject to the same retention pruning |
+| `request_body` | BLOB | The payload sent, as the JSON text that went on the wire (JSONB on rows written before v0.8), on every archived row (ok and failure); subject to the same retention pruning |
 | `cached_tokens` | INTEGER | prompt tokens served from cache; NULL when unreported |
 | `cache_write_tokens` | INTEGER | prompt tokens written to cache; NULL when unreported |
 | `reasoning_tokens` | INTEGER | subset of completion tokens spent thinking |

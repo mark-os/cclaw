@@ -637,6 +637,81 @@ static void test_ingest_anthropic(void) {
     printf(" OK\n");
 }
 
+/* Another handle tries to commit while an ingest is between its reads and its
+ * writes. The Gemini and Anthropic scalar queries read through json_each,
+ * which opens a read transaction on the handle; held open across the writes
+ * with no write lock, a commit from elsewhere left the ingest on a stale
+ * snapshot and its writes failed at once (SQLITE_BUSY_SNAPSHOT, which never
+ * reaches the busy handler) — a valid, paid-for response discarded. The
+ * ingest now takes the write lock before it reads, so the other handle is the
+ * one that waits. The trace hook fires the second handle's write at the
+ * tool-call count, which runs after the scalar read and before any write. */
+typedef struct { sqlite3 *other; int fired; int other_rc; } SnapProbe;
+
+static int snap_trace(unsigned t, void *ctx, void *p, void *x) {
+    (void)t; (void)x;
+    SnapProbe *pr = ctx;
+    const char *sql = sqlite3_sql((sqlite3_stmt *)p);
+    if (pr->fired || !sql || strncmp(sql, "SELECT json_extract(value,'$.id')", 33) != 0) return 0;
+    pr->fired = 1;
+    pr->other_rc = sqlite3_exec(pr->other, "INSERT INTO other_writer VALUES(1);",
+                                NULL, NULL, NULL);
+    return 0;
+}
+
+static void test_ingest_concurrent_commit(void) {
+    printf("  test_ingest_concurrent_commit...");
+    const char *path = "/tmp/cclaw_test_db_response_snap.db";
+    remove(path);
+    remove("/tmp/cclaw_test_db_response_snap.db-wal");
+    remove("/tmp/cclaw_test_db_response_snap.db-shm");
+    sqlite3 *db = test_db_open(path);
+    assert(db);
+    sqlite3_exec(db, "CREATE TABLE other_writer(x);", NULL, NULL, NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    Message msg = {.role = ROLE_USER, .content = "do it"};
+    entry_append_with_iteration(db, sid, &msg, 1);
+
+    /* The second handle does not wait: it reports what it met. */
+    sqlite3 *other = db_open(path);
+    assert(other);
+    sqlite3_busy_handler(other, NULL, NULL);
+    SnapProbe pr = { other, 0, -1 };
+    sqlite3_trace_v2(db, SQLITE_TRACE_STMT, snap_trace, &pr);
+
+    const char *body =
+        "{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+        "{\"type\":\"text\",\"text\":\"Checking.\"},"
+        "{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"shell_exec\","
+        " \"input\":{\"command\":\"ls\"}}],"
+        "\"stop_reason\":\"tool_use\","
+        "\"usage\":{\"input_tokens\":40,\"output_tokens\":9}}";
+    TypedIngestResult ir;
+    LlmRespStatus st = db_ingest_response(db, sid, 2, "claude@anthropic", ENDPOINT_ANTHROPIC,
+                                          body, "{\"model\":\"claude\"}", 0, &ir);
+    sqlite3_trace_v2(db, 0, NULL, NULL);
+    assert(pr.fired);
+    assert(st == LLM_RESP_OK);
+    /* The write lock was already held when the other handle tried. */
+    assert((pr.other_rc & 0xff) == SQLITE_BUSY);
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE status='ok'") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM entries WHERE iteration_id=2"
+                          " AND type='assistant_message'") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM tool_calls WHERE call_id='toolu_1'") == 1);
+    /* And it is released: the other handle writes freely afterwards. */
+    assert(sqlite3_exec(other, "INSERT INTO other_writer VALUES(2);", NULL, NULL, NULL) == SQLITE_OK);
+    /* The request is archived as the text that was sent, not re-parsed. */
+    assert(count_rows(db, "SELECT typeof(request_body)='text' AND"
+                          " request_body ->> '$.model' = 'claude' FROM llm_responses") == 1);
+
+    sqlite3_close(other);
+    db_close(db);
+    remove(path);
+    remove("/tmp/cclaw_test_db_response_snap.db-wal");
+    remove("/tmp/cclaw_test_db_response_snap.db-shm");
+    printf(" OK\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_db_response:\n");
@@ -654,6 +729,7 @@ int main(void) {
     test_ingest_anthropic();
     test_ingest_anthropic_1h_write();
     test_rate_limit_cache_discount();
+    test_ingest_concurrent_commit();
     printf("  ALL PASSED\n");
     return 0;
 }

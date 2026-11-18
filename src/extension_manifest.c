@@ -879,7 +879,7 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
     }
 
     int rc = 0;
-    sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+    sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
 
     /* Idempotent re-install: clear this extension's prior tool/hook rows. */
     rc |= run_ingest(db, "DELETE FROM tools WHERE extension_name=:name", manifest, name, store, owner_agent);

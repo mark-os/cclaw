@@ -219,8 +219,8 @@ static void reasoning_meta_set(sqlite3 *db, int64_t entry_id, EndpointType ep,
 
 /* Archive one raw response for forensics. When is_jsonb, body/blen is the
  * parsed JSONB blob (and we can pull the provider's $.id out of it); otherwise
- * body is NUL-terminated text that wasn't valid JSON. Best-effort: errors here
- * never affect ingest. usage (may be NULL) carries the extracted usage block —
+ * body is NUL-terminated text that wasn't valid JSON. Best-effort: a failure
+ * is logged and returned, and never affects ingest. usage (may be NULL) carries the extracted usage block —
  * only the success path has one; failures archive with NULL usage columns. */
 typedef struct {
     int prompt_tokens, completion_tokens;
@@ -228,10 +228,10 @@ typedef struct {
     double cost; int has_cost;
 } RespUsage;
 
-static void archive_store(sqlite3 *db, int64_t session_id, int64_t iteration_id,
-                          const char *model, const char *status,
-                          const void *body, int blen, int is_jsonb,
-                          const char *request_body, const RespUsage *usage) {
+static int archive_store(sqlite3 *db, int64_t session_id, int64_t iteration_id,
+                         const char *model, const char *status,
+                         const void *body, int blen, int is_jsonb,
+                         const char *request_body, const RespUsage *usage) {
     /* Retention cap (config 'llm_response_archive_max'):
      *   > 0  keep the most recent N 'ok' rows and the most recent N failures
      *   == 0 archiving off — write nothing
@@ -246,7 +246,7 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t iteration_id,
             cap = sqlite3_column_int(c, 0);
         sqlite3_finalize(c);
     }
-    if (cap == 0) return;   /* archiving disabled — skip the insert entirely */
+    if (cap == 0) return 0;   /* archiving disabled — skip the insert entirely */
 
     const char *sql =
         "INSERT INTO llm_responses(session_id,iteration_id,model,status,provider_id,"
@@ -260,8 +260,12 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t iteration_id,
          * Recorded on every response, not just failures: it is the audit trail
          * that turns "exclude this backend" into an evidence-backed call. */
         "  CASE WHEN ?5 THEN json_extract(?6,'$.provider') END, ?6,"
-        "  CASE WHEN ?7 IS NOT NULL THEN jsonb(?7) END,?8,?9,?10,?11);";
+        /* The request goes in as the text that was sent. Its one reader is
+         * `cclaw resp <id> req`; converting a whole conversation to JSONB on
+         * every turn, under the write lock, bought nothing. */
+        "  ?7,?8,?9,?10,?11);";
     sqlite3_stmt *s;
+    int rc = -1;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(s, 1, session_id);
         sqlite3_bind_int64(s, 2, iteration_id);
@@ -281,9 +285,12 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t iteration_id,
         }
         if (usage && usage->has_cost) sqlite3_bind_double(s, 11, usage->cost);
         else sqlite3_bind_null(s, 11);
-        sqlite3_step(s);
+        if (sqlite3_step(s) == SQLITE_DONE) rc = 0;
         sqlite3_finalize(s);
     }
+    if (rc != 0)
+        LOG_WARN_("llm_responses: archive row not written (status=%s): %s (sqlite %d)",
+                  status, sqlite3_errmsg(db), sqlite3_extended_errcode(db));
 
     if (cap > 0) {
         /* Prune successes and failures independently: failure rows are what
@@ -299,6 +306,7 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t iteration_id,
             cap, cap);
         sqlite3_exec(db, prune, NULL, NULL, NULL);
     }
+    return rc;
 }
 
 /* Public entry: archive a raw response body (any HTTP outcome) given as text.
@@ -675,6 +683,35 @@ done:
     free(rows);
 }
 
+/* The ingest's transaction. The write lock is taken before the first read:
+ * the Gemini and Anthropic scalar queries read through json_each, which opens
+ * a read transaction on the handle even though no table is named, and they
+ * stay stepped across the writes. Without the lock up front, a commit from
+ * another handle in that window left this one on a stale snapshot and its
+ * writes failed at once with SQLITE_BUSY_SNAPSHOT, which never reaches the
+ * busy handler — a valid response discarded. It also makes the archive row,
+ * the entries, the tool_calls rows and the accounting land together or not at
+ * all. Returns 1 when it opened the transaction, 0 when the caller already
+ * had one (which then decides its fate), -1 when the lock could not be had. */
+static int ingest_begin(sqlite3 *db) {
+    if (!sqlite3_get_autocommit(db)) return 0;
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK) return 1;
+    LOG_WARN_("response ingest: no write lock: %s (sqlite %d)",
+              sqlite3_errmsg(db), sqlite3_extended_errcode(db));
+    return -1;
+}
+
+/* Close it: commit when ok, otherwise undo. 0 when what was asked happened. */
+static int ingest_end(sqlite3 *db, int own, int ok) {
+    if (own != 1) return 0;
+    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK) return 0;
+    if (ok)
+        LOG_WARN_("response ingest: commit failed: %s (sqlite %d)",
+                  sqlite3_errmsg(db), sqlite3_extended_errcode(db));
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    return ok ? -1 : 0;
+}
+
 LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iteration_id,
                                  const char *model, EndpointType ep,
                                  const char *body, const char *request_body,
@@ -707,12 +744,21 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
     const void *blob = sqlite3_column_blob(j, 0);
     int blen = sqlite3_column_bytes(j, 0);
 
+    /* Parsed, and nothing read yet: take the write lock (ingest_begin). */
+    int own = ingest_begin(db);
+    if (own < 0) {
+        archive_store(db, session_id, iteration_id, model, "ingest_error", blob, blen, 1, request_body, NULL);
+        sqlite3_finalize(j);
+        return LLM_RESP_DBERR;
+    }
+
     /* ── Scalar fields: bind the blob, hold the statement open so the
      * extracted column pointers stay valid through the entry inserts. ── */
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, scalar_sql, -1, &s, NULL) != SQLITE_OK) {
         /* Our-side failure — archive the (valid) body for forensics + recovery. */
         archive_store(db, session_id, iteration_id, model, "ingest_error", blob, blen, 1, request_body, NULL);
+        ingest_end(db, own, 1);
         sqlite3_finalize(j);
         return LLM_RESP_DBERR;
     }
@@ -720,6 +766,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
     if (sqlite3_step(s) != SQLITE_ROW) {
         sqlite3_finalize(s);
         archive_store(db, session_id, iteration_id, model, "malformed", blob, blen, 1, request_body, NULL);
+        ingest_end(db, own, 1);
         sqlite3_finalize(j);
         return LLM_RESP_MALFORMED;
     }
@@ -728,6 +775,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
     if (sqlite3_column_type(s, 7) == SQLITE_NULL || sqlite3_column_int(s, 7) == 0) {
         sqlite3_finalize(s);
         archive_store(db, session_id, iteration_id, model, "malformed", blob, blen, 1, request_body, NULL);
+        ingest_end(db, own, 1);
         sqlite3_finalize(j);
         return LLM_RESP_MALFORMED;
     }
@@ -769,6 +817,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
         sqlite3_finalize(s);
         if (tc) sqlite3_finalize(tc);
         archive_store(db, session_id, iteration_id, model, "tool_markup", blob, blen, 1, request_body, NULL);
+        ingest_end(db, own, 1);
         sqlite3_finalize(j);
         return LLM_RESP_TOOL_MARKUP;
     }
@@ -779,6 +828,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
         sqlite3_finalize(s);
         if (tc) sqlite3_finalize(tc);
         archive_store(db, session_id, iteration_id, model, "empty", blob, blen, 1, request_body, NULL);
+        ingest_end(db, own, 1);
         sqlite3_finalize(j);
         return LLM_RESP_EMPTY;
     }
@@ -791,6 +841,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
         stop = STOP_REASON_TOOL_USE;
 
     int part = 0;
+    int failed = 0;   /* a write that did not land: the whole ingest is undone */
 
     /* Reasoning entry (scalar pointers still valid — s untouched). Two things
      * live here: the display text — the provider's summary, or on an
@@ -819,6 +870,8 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
             reasoning_meta_set(db, r_id, ep, model, replay_blob, replay_text);
             attr_exec(db, "UPDATE entries SET token_estimate=?2 WHERE id=?1;",
                       r_id, TOKEN_ESTIMATE(0), 0);
+        } else {
+            failed = 1;   /* the replay blob is owed back on the next request */
         }
     }
 
@@ -843,17 +896,13 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
             sqlite3_finalize(cu);
         }
     }
-    if (asst_id < 0) {
-        if (tc) sqlite3_finalize(tc);
-        sqlite3_finalize(j);
-        return LLM_RESP_DBERR;
-    }
+    if (asst_id < 0) failed = 1;
 
     /* ── Tool call entries + tool_calls workflow rows ──
      * Arguments are validated with json() and stored in entries.content (single
      * source of truth). tool_calls holds only workflow state — no arguments.
      * Invalid JSON → immediate error tool_result so the model sees feedback. */
-    if (tc && tc_count > 0) {
+    if (!failed && tc && tc_count > 0) {
         const char *tc_ins_sql =
             "INSERT INTO tool_calls(session_id, entry_id, call_id, name)"
             " VALUES(?1,?2,?3,?4);";
@@ -865,7 +914,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
         sqlite3_prepare_v2(db, "SELECT json(?1)", -1, &jval, NULL);
 
         int idx = 0;
-        while (sqlite3_step(tc) == SQLITE_ROW) {
+        while (!failed && sqlite3_step(tc) == SQLITE_ROW) {
             const char *id   = (const char *)sqlite3_column_text(tc, 0);
             const char *name = (const char *)sqlite3_column_text(tc, 1);
             const char *args = (const char *)sqlite3_column_text(tc, 2);
@@ -893,12 +942,13 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
 
             if (!normalized) {
                 /* Invalid JSON from model — emit error tool_result directly */
-                entry_append_typed(db, session_id, iteration_id, "tool_call", part++,
-                                   "{}", id, name,
-                                   0, STOP_REASON_NONE, NULL, 0, 0, 0);
-                entry_append_typed(db, session_id, iteration_id, "tool_result", part++,
-                                   "error: invalid JSON in tool call arguments",
-                                   id, name, 1, STOP_REASON_NONE, NULL, 0, 0, 0);
+                if (entry_append_typed(db, session_id, iteration_id, "tool_call", part++,
+                                       "{}", id, name,
+                                       0, STOP_REASON_NONE, NULL, 0, 0, 0) < 0 ||
+                    entry_append_typed(db, session_id, iteration_id, "tool_result", part++,
+                                       "error: invalid JSON in tool call arguments",
+                                       id, name, 1, STOP_REASON_NONE, NULL, 0, 0, 0) < 0)
+                    failed = 1;
                 if (jval) sqlite3_reset(jval);
                 idx++;
                 continue;
@@ -909,13 +959,21 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
                                                   0, STOP_REASON_NONE, NULL, 0, 0, 0);
             if (jval) sqlite3_reset(jval);
 
+            /* A call with no tool_calls row is never dispatched and never
+             * answered: the turn would wait on it forever. */
             if (tc_entry > 0 && ins) {
                 sqlite3_bind_int64(ins, 1, session_id);
                 sqlite3_bind_int64(ins, 2, tc_entry);
                 sqlite3_bind_text(ins, 3, id, -1, SQLITE_STATIC);
                 sqlite3_bind_text(ins, 4, name ? name : "", -1, SQLITE_STATIC);
-                sqlite3_step(ins);
+                if (sqlite3_step(ins) != SQLITE_DONE) {
+                    LOG_WARN_("tool_calls: row not written: %s (sqlite %d)",
+                              sqlite3_errmsg(db), sqlite3_extended_errcode(db));
+                    failed = 1;
+                }
                 sqlite3_reset(ins);
+            } else {
+                failed = 1;
             }
             idx++;
         }
@@ -923,10 +981,20 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iterat
         if (ins) sqlite3_finalize(ins);
     }
     if (tc) sqlite3_finalize(tc);
-    sqlite3_finalize(j);   /* blob no longer needed */
 
-    usage_attribute(db, session_id, iteration_id, asst_id, model, prompt_tokens,
-                    completion_tokens, usage.reasoning_tokens);
+    if (!failed)
+        usage_attribute(db, session_id, iteration_id, asst_id, model, prompt_tokens,
+                        completion_tokens, usage.reasoning_tokens);
+    if (ingest_end(db, own, !failed) != 0) failed = 1;
+    if (failed) {
+        /* Undone as a whole (when the transaction was ours). The body was
+         * valid: keep it, outside the transaction, so the error entry has a
+         * row to cite and the reply can be recovered by hand. */
+        archive_store(db, session_id, iteration_id, model, "ingest_error", blob, blen, 1, request_body, NULL);
+        sqlite3_finalize(j);
+        return LLM_RESP_DBERR;
+    }
+    sqlite3_finalize(j);   /* blob no longer needed */
 
     if (out) {
         out->assistant_entry_id = asst_id;

@@ -5,6 +5,7 @@
 #include "test_util.h"
 #include "agent_config.h"
 #include "config.h"
+#include "config_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,6 +90,48 @@ int main(void) {
     char *q = build(db, "Tester");
     assert(strcmp(p, q) == 0);
     free(p); free(q);
+    printf("PASS\n");
+
+    /* Two layers: the built-in rules open every prompt, the agent's own
+     * text (its role) follows; an agent with no text gets the rules alone. */
+    printf("  layers... ");
+    p = build(db, "Tester");
+    char *rules = strstr(p, "## How You Work");
+    char *role = strstr(p, "You are Tester.");
+    assert(rules && role && rules < role && role < strstr(p, "## Requestable Tools"));
+    assert(strstr(p, "Working directory: /srv/agents/Tester/workspace"));
+    free(p);
+    db_agent_upsert(db, "Bare", NULL, NULL);
+    p = build(db, "Bare");
+    assert(strstr(p, "## How You Work") && !strstr(p, "You are Tester."));
+    free(p);
+    printf("PASS\n");
+
+    /* Installed, not tracked: a sync copies the build's text into value once
+     * and never again, so a later build's default leaves it alone. */
+    printf("  seeded_once... ");
+    assert(config_registry_sync(db) == 0);
+    assert(sqlite3_exec(db,
+        "UPDATE config SET default_value='NEWER BUILD' WHERE key='system_prompt';",
+        NULL, NULL, NULL) == SQLITE_OK);
+    p = build(db, "Bare");
+    assert(strstr(p, "## How You Work") && !strstr(p, "NEWER BUILD"));
+    free(p);
+    printf("PASS\n");
+
+    /* A changed base prompt reaches every agent. */
+    printf("  override... ");
+    assert(sqlite3_exec(db,
+        "INSERT INTO config(key, value) VALUES('system_prompt','RULES for {agent_name}')"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+        NULL, NULL, NULL) == SQLITE_OK);
+    p = build(db, "Tester");
+    assert(strncmp(p, "RULES for Tester\n\nYou are Tester.", 33) == 0);
+    assert(!strstr(p, "## How You Work"));
+    free(p);
+    p = build(db, "Bare");
+    assert(strncmp(p, "RULES for Bare", 14) == 0);
+    free(p);
     printf("PASS\n");
 
     db_close(db);

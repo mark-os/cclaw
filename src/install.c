@@ -163,12 +163,10 @@ static int install_user(void) {
     else
         printf("Unit written but `systemctl --user enable --now cclaw` failed (exit %d).\n"
                "Check manually: systemctl --user status cclaw\n", enable_rc);
-    if (!env_rc)
-        printf("Note: %s already existed — if the key probe fails, edit it and run:\n"
-               "  systemctl --user restart cclaw\n", env_path);
-    else
-        printf("Next: edit %s (set your API key), then: systemctl --user restart cclaw\n"
-               "Diagnose with: cclaw --doctor\n", env_path);
+    printf("API key: a key stored in the database (cclaw's first-run prompt, or\n"
+           "`cclaw secret set OPENROUTER_API_KEY`) is already in use. Otherwise set one\n"
+           "in %s and run: systemctl --user restart cclaw\n"
+           "Check with: cclaw --doctor      Dashboard link: cclaw dashboard\n", env_path);
     return 0;
 }
 

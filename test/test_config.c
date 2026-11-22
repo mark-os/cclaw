@@ -204,8 +204,8 @@ static void test_system_prompt(void) {
     char *rendered = config_render_system_prompt(cfg, 42);
     assert(rendered != NULL);
     assert(strstr(rendered, "CClaw") != NULL);
-    assert(strstr(rendered, "Tool Call Style") != NULL);
-    assert(strstr(rendered, "Execution Bias") != NULL);
+    assert(strstr(rendered, "## How You Work") != NULL);
+    assert(strstr(rendered, "## Workspace") != NULL);
     free(rendered);
     config_free(cfg);
     db_close(db);

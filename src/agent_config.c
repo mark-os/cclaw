@@ -61,14 +61,31 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
         return config_render_system_prompt(fallback_cfg, session_id);
     }
 
-    /* Render the prompt body: from the DB template when present, else the global
-     * fallback (every ephemeral agent has a NULL template). Either way fall
-     * through to the memory+skills assembly below so those blocks aren't dropped.
-     * A NULL render is a hard failure — don't continue with an empty body. */
+    /* Two layers, two owners. The built-in operating rules (config key
+     * system_prompt: the compiled template unless the operator overrode it)
+     * render for every agent, so a new build's text reaches existing agents.
+     * The agent's own system_prompt is its role, appended when present; who
+     * the agent is lives in its AGENT memory block. A NULL render is a hard
+     * failure — don't continue with an empty body. */
+    char *base_tmpl = config_get(db, "system_prompt");
+    char *rendered = render_template(
+        (base_tmpl && base_tmpl[0]) ? base_tmpl : config_default("system_prompt"),
+        session_id, agent_name, agents_dir);
+    free(base_tmpl);
     const char *tmpl = row->system_prompt;
-    char *rendered = (tmpl && tmpl[0])
-        ? render_template(tmpl, session_id, agent_name, agents_dir)
-        : config_render_system_prompt(fallback_cfg, session_id);
+    if (rendered && tmpl && tmpl[0]) {
+        char *role = render_template(tmpl, session_id, agent_name, agents_dir);
+        size_t bl = strlen(rendered), rl = role ? strlen(role) : 0;
+        char *both = role ? malloc(bl + rl + 3) : NULL;
+        if (both) {
+            memcpy(both, rendered, bl);
+            memcpy(both + bl, "\n\n", 2);
+            memcpy(both + bl + 2, role, rl + 1);
+        }
+        free(role);
+        free(rendered);
+        rendered = both;
+    }
     if (!rendered) {
         agent_row_free(row);
         return NULL;

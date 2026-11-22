@@ -8,12 +8,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "templates.h"
 
 /* The registry. Adding a config key means adding a row here — it then exists
  * on every install with a default and a description, no seed data required. */
 static const ConfigDef s_defs[] = {
     { "default_agent",      "Assistant",
       "Agent that owns new unrouted sessions" },
+    { "system_prompt",      TPL_DEFAULT_SYSTEM_PROMPT_MD,
+      "The base system prompt shared by every agent; an agent's own"
+      " system_prompt (its role) follows it. Seeded once at install from the"
+      " build's text and then left alone: a later build never rewrites it."
+      " 'overridden' here means installed. Clear the value to take the running"
+      " build's text" },
     { "max_iterations",     "25",
       "Max tool-loop iterations per turn" },
     { "shell_timeout",      "30",
@@ -125,7 +132,7 @@ static const ConfigDef s_defs[] = {
        * exists to prevent. request_config stays, so escalation remains
        * available the sanctioned way. */
       "[\"file_read\",\"file_write\",\"file_list\",\"file_find\",\"file_grep\","
-      "\"file_edit\",\"js_eval\",\"request_config\","
+      "\"file_edit\",\"js_eval\",\"web_fetch\",\"request_config\","
       "\"search_config\",\"memory_block_create\",\"memory_block_update\","
       "\"memory_note_add\",\"memory_note_edit\",\"memory_note_delete\","
       "\"cron_set\",\"cron_list\",\"cron_remove\","
@@ -270,6 +277,14 @@ int config_registry_sync(sqlite3 *db) {
         sqlite3_reset(stmt);
     }
     sqlite3_finalize(stmt);
+    /* The base prompt is installed, not tracked: the first sync copies the
+     * build's text into value, and from then on a new build changes only
+     * default_value — the two differing is how drift is seen (doctor,
+     * search_config), and it is the operator's call to take the new text. */
+    if (sqlite3_exec(db,
+            "UPDATE config SET value=default_value"
+            " WHERE key='system_prompt' AND value IS NULL",
+            NULL, NULL, NULL) != SQLITE_OK) rc = -1;
     return rc;
 }
 

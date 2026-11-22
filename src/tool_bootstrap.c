@@ -4,12 +4,15 @@
 #include "approval.h"
 #include "config_registry.h"  /* config_get (install_update) */
 #include "db.h"
+#include "proc.h"             /* proc_is_daemon (install_service) */
 #include "tool_args.h"        /* tool_args_str (install_update) */
 #include "update.h"
 #include "validate.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
+#include <unistd.h>
 
 /* ── create_agent ─────────────────────────────────────────────────── */
 
@@ -17,7 +20,7 @@ static const char *CREATE_AGENT_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
     "\"name\":{\"type\":\"string\",\"description\":\"Agent name (PascalCase: uppercase first letter, letters and digits only)\"},"
     "\"description\":{\"type\":\"string\",\"description\":\"One-line hint: when to delegate to this agent\"},"
-    "\"system_prompt\":{\"type\":\"string\",\"description\":\"Agent persona/system prompt\"},"
+    "\"system_prompt\":{\"type\":\"string\",\"description\":\"The agent's role and persona. The built-in operating rules (tools, secrets, escalation) are added above it for every agent — do not repeat them\"},"
     "\"models\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Routing order: registered model ids, first is primary (omit to inherit your own list)\"},"
     "\"sandbox_profile\":{\"type\":\"string\",\"enum\":[\"host\",\"standard\",\"restricted\"],\"description\":\"Containment profile; must not be looser than yours\"},"
     "\"grants\":{\"type\":\"object\",\"properties\":{"
@@ -70,7 +73,7 @@ static const char *UPDATE_AGENT_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
     "\"name\":{\"type\":\"string\",\"description\":\"Agent to update — yourself, or one you created\"},"
     "\"description\":{\"type\":\"string\"},"
-    "\"system_prompt\":{\"type\":\"string\",\"description\":\"Replacement system prompt (full text, not a diff)\"},"
+    "\"system_prompt\":{\"type\":\"string\",\"description\":\"Replacement role/persona text (full text, not a diff); the built-in operating rules are not part of it\"},"
     "\"models\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Replacement routing order: registered model ids within your own list, first is primary\"},"
     "\"sandbox_profile\":{\"type\":\"string\",\"enum\":[\"host\",\"standard\",\"restricted\"],\"description\":\"Must not be looser than yours\"},"
     "\"grants\":{\"type\":\"object\",\"properties\":{"
@@ -228,6 +231,87 @@ int tool_install_update_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
                           tool_install_update_handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "install_update",
+                         (ToolRecipe){.vehicle = EXEC_INLINE,
+                                      .null_kind = NULL_PARK});
+    return rc;
+}
+
+/* ── install_service ─────────────────────────────────────────────────
+ * "Keep me running after this terminal closes." The agent's own shell is a
+ * sandbox and cannot reach the service manager, so the install is offered
+ * the way an update is: this call parks, and approval makes the trusted
+ * parent run the binary's own `cclaw install` (resolve.c). User-mode only —
+ * `install --system` needs root and stays the operator's command. */
+
+static const char *INSTALL_SERVICE_PARAMS =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"reason\":{\"type\":\"string\",\"description\":\"Shown to the approver\"}"
+    "}}";
+
+static char *tool_install_service_handler(const char *arguments, void *user_data, int *is_error) {
+    ToolBootstrapCtx *ctx = (ToolBootstrapCtx *)user_data;
+    if (!ctx || !ctx->db)
+        return tool_fail(is_error, "error: install_service unavailable");
+    /* A daemon installing a service would start a second daemon on the same
+     * database, and two of them fight over every channel message. */
+    if (proc_is_daemon())
+        return tool_fail(is_error, "error: you are already running as a daemon — "
+            "there is nothing to install. If it was started by hand and should "
+            "survive a reboot, the person stops it and runs `cclaw install`");
+    if (access("/run/systemd/system", F_OK) != 0)
+        return tool_fail(is_error, "error: this machine does not run systemd, so "
+            "there is no per-user service to install. The person can run "
+            "`cclaw install --system` as root (it supports SysV init), or start "
+            "`cclaw --daemon` under the machine's own supervisor — see the "
+            "installing-cclaw skill");
+    char exe[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (n <= 0)
+        return tool_fail(is_error, "error: cannot resolve the running binary's path");
+    exe[n] = '\0';
+
+    char *reason = tool_args_str(ctx->db, arguments, "reason");
+    sqlite3_stmt *st;
+    char *doc = NULL;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT json_object('runs', ?1 || ' install',"
+            " 'effect', 'writes a systemd user unit that starts ' || ?1 ||"
+            "   ' --daemon at login and boot, and starts it now',"
+            " 'reason', ?2);", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, exe, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, reason ? reason : "", -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *j = (const char *)sqlite3_column_text(st, 0);
+            if (j) doc = strdup(j);
+        }
+        sqlite3_finalize(st);
+    }
+    free(reason);
+    if (!doc) return tool_fail(is_error, "error: OOM");
+
+    int64_t aid = approval_create(ctx->db, ctx->session_id,
+        ctx->current_tool_call_id, "install_service", APPROVAL_PARK_REQUIRED,
+        doc, "apply");
+    free(doc);
+    if (aid < 0)
+        return tool_fail(is_error, "error: failed to create approval");
+    session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
+    return NULL; /* park */
+}
+
+int tool_install_service_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
+    int rc = tools_register(reg, "install_service",
+                          "Propose installing cclaw as a service on this machine, so it "
+                          "keeps running after the terminal closes and starts at boot "
+                          "(requires human approval). Approval runs `cclaw install` for "
+                          "the current user: a systemd user unit that starts the binary "
+                          "from where it is now — if that is a downloads or temporary "
+                          "folder, have the person move it somewhere permanent first. "
+                          "Only from a terminal session; a daemon has nothing to install.",
+                          INSTALL_SERVICE_PARAMS,
+                          tool_install_service_handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "install_service",
                          (ToolRecipe){.vehicle = EXEC_INLINE,
                                       .null_kind = NULL_PARK});
     return rc;

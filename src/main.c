@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -269,16 +270,12 @@ static void ensure_default_agent(const char *base_dir) {
     if (!al || ac == 0) {
         char ws[PATH_MAX]; snprintf(ws, sizeof(ws), "%s/agents/Assistant/workspace/.keep", base_dir);
         util_ensure_parent_dir(ws);
-        /* Create default agent */
-        const char *agent_sql =
-            "INSERT OR IGNORE INTO agents(name, system_prompt, sandbox_profile)"
-            " VALUES('Assistant', ?, 'standard');"
-            ;
-        sqlite3_stmt *bs;
-        if (sqlite3_prepare_v2(proc_db(), agent_sql, -1, &bs, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(bs, 1, TPL_DEFAULT_SYSTEM_PROMPT_MD, -1, SQLITE_STATIC);
-            sqlite3_step(bs); sqlite3_finalize(bs);
-        }
+        /* The default agent has no prompt of its own: the built-in layer
+         * (config key system_prompt) renders for every agent, and identity
+         * lives in the memory blocks seeded below. */
+        sqlite3_exec(proc_db(),
+            "INSERT OR IGNORE INTO agents(name, sandbox_profile)"
+            " VALUES('Assistant', 'standard');", NULL, NULL, NULL);
         /* One-row routing list: the seeded bootstrap model. Explicit — an
          * agent with no list is unroutable by design (model-routing.md R2). */
         sqlite3_exec(proc_db(),
@@ -299,6 +296,8 @@ static void ensure_default_agent(const char *base_dir) {
                            GRANT_ORIGIN("seed", 0));
         agent_config_grant(proc_db(), "Assistant", "tool", "secret_create", 0,
                            GRANT_ORIGIN("seed", 0));
+        agent_config_grant(proc_db(), "Assistant", "tool", "install_service", 0,
+                           GRANT_ORIGIN("seed", 0));
         /* The default extensions every new agent gets — the bundled
          * compaction among them, installed just before this runs. */
         agent_attach_default_extensions(proc_db(), "Assistant");
@@ -313,15 +312,23 @@ static void ensure_default_agent(const char *base_dir) {
             "Your identity, capabilities, and operational notes: facts that change what you do next time, not a record of what happened. Correct a note when it goes out of date; delete it when it stops mattering.",
             5000, "system");
         memory_block_create(proc_db(), "Assistant", "USER",
-            "Information about the user: preferences, context, working style. Keep what changes how you work with them; correct notes that go out of date.",
+            "Who you work for: name, timezone, preferences, how they like to work. Learn it sideways, through the work — not a questionnaire. If they would be annoyed to repeat it later, keep it. A note changes your next turn, not this one: you are writing for your future self.",
             5000, "system");
-        /* AGENT gets one functional starter note (it drives the self-naming
-         * flow). USER starts empty — its description already states the block's
-         * purpose, so a placeholder note would just be noise the model has to
-         * carry until it edits it away. */
-        if (agent_block > 0)
-            memory_note_add(proc_db(), agent_block,
-                "You are CClaw. You do not have a name yet — ask the user what they would like to call you, then save it here with memory_note_edit.");
+        /* Onboarding is notes that ask to be deleted: when none is left it is
+         * over, and no C tracks it (plan/projects/onboarding.md). They sit in
+         * AGENT rather than a block of their own because an agent cannot
+         * delete a block — an emptied one would ride the prompt for good. The
+         * built-in prompt's "Requests First" section says how to treat them. */
+        if (agent_block > 0) {
+            static const char *const notes[] = {
+                "Setup: you have no name yet. Introduce yourself as CClaw and ask what they would like to call you — they choose; do not suggest a name. Then replace this note with your name and one line on the character you will have.",
+                "Setup: learn what to call the person and their timezone. Save to USER.",
+                "Setup: offer a channel (Telegram, Discord or WhatsApp) so they can reach you from a phone — read the cclaw-channels skill first, and call it done only when a message sent through the channel has arrived. Offer to keep running after the terminal closes: install_service does it on this machine once they approve; another machine is the installing-cclaw skill.",
+                "Setup: call search_config once and tell them plainly about anything that will get in the way (no sandbox on this host, a missing key).",
+            };
+            for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); i++)
+                memory_note_add(proc_db(), agent_block, notes[i]);
+        }
     }
     if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
 }
@@ -586,6 +593,73 @@ static int cli_single_turn_over(void) {
     return g_cli_done && !child_hook_holds(proc_cli_session());
 }
 
+/* Which provider a pasted key belongs to, by the prefix its issuer gives it.
+ * Longest prefixes first: "sk-" alone is OpenAI's, and a prefix of three
+ * others. NULL = not a shape we know. */
+static const char *key_env_for(const char *key) {
+    static const struct { const char *prefix, *env; } kinds[] = {
+        { "sk-or-",  "OPENROUTER_API_KEY" },
+        { "sk-ant-", "ANTHROPIC_API_KEY" },
+        { "AIza",    "GEMINI_API_KEY" },
+        { "gsk_",    "GROQ_API_KEY" },
+        { "csk-",    "CEREBRAS_API_KEY" },
+        { "sk-",     "OPENAI_API_KEY" },
+    };
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
+        if (strncmp(key, kinds[i].prefix, strlen(kinds[i].prefix)) == 0)
+            return kinds[i].env;
+    return NULL;
+}
+
+/* First run at a terminal with no key anywhere: ask for one, once, and keep
+ * it encrypted in the DB (scope system — the same row a provider's
+ * api_key_env resolves from), so neither this CLI nor a daemon installed
+ * later needs an env file. The key is read with echo off and never printed.
+ * On any failure nothing is stored and the caller's "no API key" error
+ * stands. */
+static void first_run_key_prompt(void) {
+    fprintf(stderr,
+            "cclaw needs a key for one LLM provider, and none was found.\n"
+            "  Easiest: OpenRouter — create a key at https://openrouter.ai/keys\n"
+            "  (an Anthropic, OpenAI, Gemini, Groq or Cerebras key works too).\n"
+            "Paste the key and press Enter (it will not be shown; empty = quit): ");
+    struct termios old, quiet;
+    int have_tty = tcgetattr(STDIN_FILENO, &old) == 0;
+    if (have_tty) {
+        quiet = old;
+        quiet.c_lflag &= ~(tcflag_t)ECHO;
+        tcsetattr(STDIN_FILENO, TCSANOW, &quiet);
+    }
+    char key[512];
+    char *got = fgets(key, sizeof(key), stdin);
+    if (have_tty) tcsetattr(STDIN_FILENO, TCSANOW, &old);
+    fputc('\n', stderr);
+    if (!got) return;
+    size_t n = strlen(key);
+    while (n && (key[n-1] == '\n' || key[n-1] == '\r' || key[n-1] == ' ')) key[--n] = '\0';
+    char *k = key;
+    while (*k == ' ') k++;
+    if (!*k) return;
+    const char *env = key_env_for(k);
+    if (!env) {
+        fprintf(stderr, "That does not look like a key from a provider cclaw knows.\n"
+                        "Store it by name instead: cclaw secret set <PROVIDER>_API_KEY\n");
+        return;
+    }
+    if (db_secret_set(proc_db(), env, k, "operator", "system") != 0) {
+        fprintf(stderr, "Could not store the key (is %s writable?).\n", "~/.cclaw");
+        return;
+    }
+    memset(key, 0, sizeof(key));
+    Config *fresh = config_load(proc_db());
+    if (!fresh) return;
+    fresh->log_level = proc_cfg()->log_level;
+    config_free(proc_cfg());
+    proc_set_cfg(fresh);
+    fprintf(stderr, "Stored encrypted as %s. Remove it with: cclaw secret rm %s\n\n",
+            env, env);
+}
+
 static int run_cli(char *db_path, const char *prompt,
                    int64_t session_id, int new_session, int host_mode, int auto_approve) {
     /* ── CLI mode ────────────────────────────────────────────────── */
@@ -593,6 +667,9 @@ static int run_cli(char *db_path, const char *prompt,
     proc_set_auto_approve(auto_approve);
     g_next_db_poll = time(NULL);
 
+    if ((!proc_cfg()->provider.api_key || !proc_cfg()->provider.api_key[0]) &&
+        isatty(STDIN_FILENO) && isatty(STDERR_FILENO))
+        first_run_key_prompt();
     if (!proc_cfg()->provider.api_key || !proc_cfg()->provider.api_key[0]) {
         fprintf(stderr,
                 "error: no API key\n"

@@ -130,6 +130,37 @@ static int test_create_agent_missing_name(void) {
     return 0;
 }
 
+/* install_service: parks an 'apply' approval naming the exact command, or —
+ * on a machine without systemd — refuses with the way that does work. */
+static int test_install_service(void) {
+    sqlite3 *db = setup_db();
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "Bootstrap",
+                            .current_tool_call_id = "call_svc"};
+    tool_install_service_register(&reg, &ctx);
+    ToolEntry *e = tools_lookup(&reg, "install_service");
+    assert(e && e->recipe.null_kind == NULL_PARK);
+    int err = 0;
+    char *r = e->handler("{\"reason\":\"stay up\"}", e->user_data, &err);
+    if (access("/run/systemd/system", F_OK) == 0) {
+        assert(r == NULL);   /* parked */
+        assert(db_scalar_i64(db,
+            "SELECT EXISTS(SELECT 1 FROM approvals WHERE tool_name='install_service'"
+            " AND state='pending' AND resolve='apply'"
+            " AND json_extract(args_json,'$.runs') LIKE '% install'"
+            " AND json_extract(args_json,'$.reason')='stay up');", 0, 0) == 1);
+    } else {
+        assert(r && err && strstr(r, "systemd"));
+        free(r);
+    }
+    tools_free(&reg);
+    db_close(db);
+    cleanup();
+    printf("  PASS: test_install_service\n");
+    return 0;
+}
+
 /* install_update: refuses without update.repo / a known release; parks an
  * 'apply' approval carrying the tag once both exist. */
 static int test_install_update(void) {
@@ -182,5 +213,6 @@ int main(void) {
     rc |= test_create_agent_invalid_name();
     rc |= test_create_agent_missing_name();
     rc |= test_install_update();
+    rc |= test_install_service();
     return rc;
 }

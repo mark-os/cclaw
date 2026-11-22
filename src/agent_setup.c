@@ -137,6 +137,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     tool_create_agent_register(&setup->reg, &setup->bootstrap_ctx);
     tool_update_agent_register(&setup->reg, &setup->bootstrap_ctx);
     tool_install_update_register(&setup->reg, &setup->bootstrap_ctx);
+    tool_install_service_register(&setup->reg, &setup->bootstrap_ctx);
 
     /* Extension lifecycle — inline tools (apply in-process via ctx->db), so
      * available in both CLI and daemon like the bootstrap tools. */

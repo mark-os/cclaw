@@ -1400,6 +1400,7 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
         { "skills/cclaw-channels/SKILL.md",       TPL_DOCS_CCLAW_CHANNELS_MD },
         { "skills/cclaw-secrets-memory/SKILL.md", TPL_DOCS_CCLAW_SECRETS_MEMORY_MD },
         { "skills/backup-restore/SKILL.md",       TPL_DOCS_BACKUP_RESTORE_MD },
+        { "skills/installing-cclaw/SKILL.md",     TPL_DOCS_INSTALLING_CCLAW_MD },
     };
 
     int rc = 0;

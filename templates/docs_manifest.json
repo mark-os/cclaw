@@ -9,6 +9,7 @@
     "skills/cclaw-agents",
     "skills/cclaw-channels",
     "skills/cclaw-secrets-memory",
-    "skills/backup-restore"
+    "skills/backup-restore",
+    "skills/installing-cclaw"
   ]
 }

@@ -22,5 +22,6 @@ int tool_update_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx);
 
 /* install_update: offer a noticed release; approval runs the update rails. */
 int tool_install_update_register(ToolRegistry *reg, ToolBootstrapCtx *ctx);
+int tool_install_service_register(ToolRegistry *reg, ToolBootstrapCtx *ctx);
 
 #endif

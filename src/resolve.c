@@ -9,6 +9,8 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include <limits.h>
 
 #include "resolve.h"
 
@@ -152,6 +154,45 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
             }
         }
         free(tag);
+    } else if (strcmp(a->tool_name, "install_service") == 0) {
+        /* Approval = run the operator's own verb, `cclaw install`, and hand
+         * its output back as the result. Waited on, unlike an update: it is
+         * a few systemctl calls and the agent needs to read what happened
+         * (install exits 0 even when the unit was written but not started). */
+        char exe[PATH_MAX];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        int pfd[2];
+        if (proc_is_daemon() || n <= 0 || pipe(pfd) != 0) {
+            LOG_WARN_("install_service apply failed: %s",
+                      proc_is_daemon() ? "already a daemon" : "no exe path or pipe");
+            *apply_failed = 1;
+        } else {
+            exe[n] = '\0';
+            pid_t pid = fork();
+            if (pid == 0) {
+                dup2(pfd[1], STDOUT_FILENO);
+                dup2(pfd[1], STDERR_FILENO);
+                close(pfd[0]); close(pfd[1]);
+                execl(exe, exe, "install", (char *)NULL);
+                _exit(127);
+            }
+            close(pfd[1]);
+            char out[4096];
+            size_t len = 0;
+            ssize_t r;
+            while (pid > 0 && len < sizeof(out) - 1 &&
+                   (r = read(pfd[0], out + len, sizeof(out) - 1 - len)) > 0)
+                len += (size_t)r;
+            out[len] = '\0';
+            close(pfd[0]);
+            int status = 0;
+            if (pid < 0 || waitpid(pid, &status, 0) < 0 ||
+                !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                LOG_WARN_("install_service: `cclaw install` failed");
+                *apply_failed = 1;
+            }
+            if (detail && len) *detail = strdup(out);
+        }
     } else if (strcmp(a->tool_name, "cron_set") == 0) {
         /* Standing job: approved once here, then it fires unattended. The
          * document is the same one cron_set validated before parking. */

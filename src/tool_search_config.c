@@ -171,7 +171,8 @@ static const char SQL_CONFIG_DOC[] =
     " 'config', json((SELECT COALESCE(json_group_object(key, json_object("
     /* web_admin_token is the dashboard's credential — the dashboard can
      * approve requests, so an agent must not be able to read it here. */
-    "     'value', CASE WHEN COALESCE(secret,0) OR key='web_admin_token' THEN NULL"
+    "     'value', CASE WHEN COALESCE(secret,0)"
+    "                        OR key IN ('web_admin_token','system_prompt') THEN NULL"
     "                   ELSE COALESCE(value, default_value) END,"
     "     'overridden', value IS NOT NULL,"
     "     'secret', COALESCE(secret,0))),'{}') FROM config"
@@ -503,6 +504,14 @@ static char *render_text(SearchConfigCtx *ctx, const char *query,
             if (sqlite3_column_int(st, 4)) {
                 buf_appendf(&out, "%s = (secret, env/secret-store only) — %s\n",
                             key, desc);
+                continue;
+            }
+            /* The built-in prompt is already at the top of the agent's own
+             * context; printing it here again would only cost tokens. */
+            if (key && strcmp(key, "system_prompt") == 0) {
+                (void)overridden;
+                buf_appendf(&out, "%s = (the text at the top of your system "
+                            "prompt) — %s\n", key, desc);
                 continue;
             }
             if (key && strcmp(key, "web_admin_token") == 0) {

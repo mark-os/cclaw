@@ -123,7 +123,7 @@ Every new agent is granted a baseline toolset; the rest it asks for with `reques
 | `cron_set` / `cron_list` / `cron_remove` | Schedule its own prompts and scripts | yes |
 | `launch_agent` / `check_session` | Delegate work and check on it | yes |
 | `shell_exec` | Run a shell command in the namespace sandbox | on request |
-| `web_fetch` | Fetch a URL (host-allowlisted) | on request |
+| `web_fetch` | Fetch a URL (host-allowlisted: each new host is still a `request_config` grant) | yes |
 | `db_query` | Query the SQLite database read-only | on request |
 
 The baseline list is the `agent_default_tools` config key. File tools are workspace-scoped; `file_find`/`file_grep` skip `.git` and `node_modules`. `js_eval` runs modern JavaScript (QuickJS — ES2023-class; no modules, no event loop, no top-level `await`, no `Atomics`) with the globals `fs.readFile/writeFile/readdir/stat/cwd`, `http_request`, `XML.parse`, and `LLM()` — see [specs/extensions.md](specs/extensions.md#js-dialect--globals).
@@ -144,7 +144,7 @@ On first run with just an API key, CClaw:
 
 1. Creates `~/.cclaw/`, the database, and the encryption key.
 2. Creates the default agent, `Assistant`, with the baseline grants (plus `create_agent`, `extension_publish` and `secret_create`, since it is your main point of contact), `AGENT` and `USER` memory blocks, and a disabled heartbeat cron job.
-3. Starts a chat. The agent has no name yet; it asks what you would like to call it and saves the answer to its memory.
+3. Starts a chat. Your request comes first; when there is room the agent works through a short setup list kept in its own memory — what to call it, who you are, a channel to reach it from your phone — deleting each step as it is done or skipped.
 
 From there you set things up by talking to it: ask for a Telegram channel, a different model, a new agent. Anything that widens its reach comes back to you as an approval. Secrets never pass through the model: put them in the environment, store them with `cclaw secret set NAME`, or have the agent capture a tool result directly into the encrypted store with `save_secret`. A secret you add is usable by no agent until you grant it (`cclaw secret grant NAME <agent>`); one an agent captures is its own.
 

@@ -329,6 +329,58 @@ static void test_error_provider(void) {
                        && strstr(err, "save_secret") != NULL);
     free(err);
 
+    /* A secret the asking agent captured is accepted, and approval makes it
+     * the provider's key: system scope, no agent grant left. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO secrets(name, value, source, scope) VALUES('NOKEY_API_KEY','x','captured','agent');"
+        "INSERT INTO grants(agent_name, kind, value, source) VALUES('test','secret','NOKEY_API_KEY','capture');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    /* Binding the same secret in the same document contradicts that. */
+    ctx.current_tool_call_id = "pv6a";
+    err = call_handler(&reg,
+        "{\"changes\":{\"provider\":"
+        "{\"provider\":\"nokey\",\"base_url\":\"https://n.example/v1\"},"
+        "\"secret_bindings\":{\"NOKEY_API_KEY\":[\"n.example\"]}}}");
+    assert(err != NULL && strstr(err, "takes no") != NULL);
+    free(err);
+    ctx.current_tool_call_id = "pv6b";
+    char *park = call_handler(&reg,
+        "{\"changes\":{\"provider\":"
+        "{\"provider\":\"nokey\",\"base_url\":\"https://n.example/v1\"}}}");
+    assert(park == NULL);
+    assert(row_exists(db, "SELECT 1 FROM secrets WHERE name='NOKEY_API_KEY' AND scope='agent'"));
+    apply_latest(db, ctx.session_id, NULL);
+    assert(row_exists(db, "SELECT 1 FROM secrets WHERE name='NOKEY_API_KEY' AND scope='system'"));
+    assert(!row_exists(db, "SELECT 1 FROM grants WHERE kind='secret' AND value='NOKEY_API_KEY'"));
+    assert(row_exists(db, "SELECT 1 FROM providers WHERE name='nokey' AND api_key_env='NOKEY_API_KEY'"));
+
+    /* A secret already bound to a host is a tool credential. A provider
+     * document may not carry it to a new address, nor one held by another. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO secrets(name, value, source, scope) VALUES('TOOL_TOKEN','x','captured','agent');"
+        "INSERT INTO grants(agent_name, kind, value, source) VALUES('test','secret','TOOL_TOKEN','capture');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    assert(db_secret_host_bind(db, "TOOL_TOKEN", "api.example.com") == 0);
+    ctx.current_tool_call_id = "pv6c";
+    err = call_handler(&reg,
+        "{\"changes\":{\"provider\":"
+        "{\"provider\":\"evil\",\"base_url\":\"https://e.example/v1\","
+        "\"api_key_env\":\"TOOL_TOKEN\"}}}");
+    assert(err != NULL && strstr(err, "cannot become a provider key") != NULL);
+    free(err);
+    db_agent_upsert(db, "someone_else", NULL, NULL);
+    assert(sqlite3_exec(db,
+        "INSERT INTO secrets(name, value, source, scope) VALUES('OTHERS_KEY','x','captured','agent');"
+        "INSERT INTO grants(agent_name, kind, value, source) VALUES('someone_else','secret','OTHERS_KEY','capture');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    ctx.current_tool_call_id = "pv6d";
+    err = call_handler(&reg,
+        "{\"changes\":{\"provider\":"
+        "{\"provider\":\"evil\",\"base_url\":\"https://e.example/v1\","
+        "\"api_key_env\":\"OTHERS_KEY\"}}}");
+    assert(err != NULL && strstr(err, "cannot become a provider key") != NULL);
+    free(err);
+
     /* Keyless is legal, but it has to be said out loud. */
     ctx.current_tool_call_id = "pv7";
     char *ok = call_handler(&reg,

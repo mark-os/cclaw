@@ -446,6 +446,18 @@ static char *validate_secret_bindings(sqlite3 *db, const char *changes) {
     return err;
 }
 
+static char *sql_text2(sqlite3 *db, const char *sql, const char *b[2]) {
+    sqlite3_stmt *st;
+    char *out = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(st, 1, b[0], -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, b[1], -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
+        out = strdup((const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    return out;
+}
+
 /* True when this credential name resolves to something: env var or a
  * system-scope secret. Mirrors llm_proc's provider_key_available (existence
  * only, no decrypt) — that is the runtime test this validation front-runs. */
@@ -455,6 +467,25 @@ static int key_name_resolves(sqlite3 *db, const char *name) {
     if (v && v[0]) return 1;
     return q1_true(db, "SELECT 1 FROM secrets WHERE name=?1 AND scope='system'",
                    name);
+}
+
+/* A secret the asking agent captured for this purpose: agent scope, granted
+ * to that agent, bound to no host. Approving the provider document turns it
+ * into the provider's key (request_config_changes_apply). A secret that is
+ * bound somewhere is in use as a tool credential, and a provider document may
+ * not carry it off to a new address. */
+static int key_name_promotable(sqlite3 *db, const char *name, const char *agent) {
+    if (!name || !name[0] || !agent) return 0;
+    const char *b[] = { name, agent };
+    char *r = sql_text2(db,
+        "SELECT 1 FROM secrets s WHERE s.name=?1 AND s.scope='agent'"
+        " AND EXISTS(SELECT 1 FROM grants g WHERE g.agent_name=?2"
+        "   AND g.kind='secret' AND g.value=s.name"
+        "   AND (g.expires_at IS NULL OR g.expires_at > unixepoch()))"
+        " AND NOT EXISTS(SELECT 1 FROM secret_hosts h WHERE h.secret_name=s.name)", b);
+    int ok = r != NULL;
+    free(r);
+    return ok;
 }
 
 /* Suggestion for a model reference that isn't a registered id: the canonical
@@ -880,12 +911,17 @@ static char *validate_models(sqlite3 *db, const char *changes,
             err = errf("error: provider '%s' is not registered — define it "
                        "first (changes.provider: {provider, base_url, "
                        "api_key_env}), then register models on it", np);
-        } else if (pk && !key_name_resolves(db, pk)) {
+        } else if (pk && !(doc_prov && strcmp(doc_prov, np) == 0) &&
+                   !key_name_resolves(db, pk)) {
+            /* (A provider this same document defines had its key checked by
+             * validate_provider, which also accepts a captured secret.) */
             /* Registering onto a provider whose key is missing produces a row
              * routing will skip in silence — say so now, not never. */
-            err = errf("error: provider's key '%s' does not exist — store it "
-                       "with save_secret first, or the model registers into a "
-                       "provider routing will skip", pk);
+            err = errf("error: provider's key '%s' does not exist. Capture "
+                       "it with save_secret, then send the provider section "
+                       "(api_key_env) in the same document as these models; "
+                       "otherwise the model registers into a provider routing "
+                       "will skip", pk);
         } else if (models_canon_append(db, &canon, entry, nm, np) != 0) {
             err = strdup("error: failed to build models JSON");
         }
@@ -990,7 +1026,8 @@ static char *validate_routes(sqlite3 *db, const char *changes,
  * secret that pays for it. Models are registered through $.models (2A); a
  * 'model' key here used to be the only way to register one, and the
  * masquerade is exactly what took prod's gateway down (A1). */
-static char *validate_provider(sqlite3 *db, const char *changes, char **canon_out) {
+static char *validate_provider(sqlite3 *db, const char *changes,
+                               const char *agent, char **canon_out) {
     *canon_out = NULL;
     if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.provider')='object'", changes))
         return strdup("error: changes.provider must be an object");
@@ -1078,16 +1115,22 @@ static char *validate_provider(sqlite3 *db, const char *changes, char **canon_ou
     /* Config-time key check (A8's prevention half): at request time the agent
      * can still fix this. At request time the alternative is a routing layer
      * that drops the model with a debug line nobody reads. */
-    if (!key_name_resolves(db, env_val)) {
-        char buf[512];
-        snprintf(buf, sizeof(buf),
-                 "error: no key named '%s' exists — neither an environment "
-                 "variable nor a saved system secret. Store it first "
-                 "(save_secret '%s'), then request the provider; a provider "
-                 "whose key cannot be resolved has all its models skipped at "
-                 "request time. (A provider that genuinely needs no key: pass "
-                 "api_key_env:\"\".)", env_val, env_val);
-        err = strdup(buf);
+    if (!key_name_resolves(db, env_val) && !key_name_promotable(db, env_val, agent)) {
+        if (q1_true(db, "SELECT 1 FROM secrets WHERE name=?1 AND scope='agent'", env_val))
+            err = errf("error: secret '%s' cannot become a provider key: it must "
+                       "be granted to you and bound to no host. A secret in use "
+                       "as a tool credential stays one; capture the provider's "
+                       "key under its own name with save_secret.", env_val);
+        else
+            err = errf("error: no key named '%s' exists. Capture it under that "
+                       "name with save_secret on the call that reads it (the "
+                       "value never enters your context), then request the "
+                       "provider: approval makes it the provider's key. The "
+                       "operator can also store it with `cclaw secret set` or "
+                       "in the environment. A provider whose key cannot be "
+                       "resolved has all its models skipped at request time. "
+                       "(A provider that genuinely needs no key: pass "
+                       "api_key_env:\"\".)", env_val);
         goto out;
     }
     {
@@ -1157,7 +1200,24 @@ static char *validate_changes(sqlite3 *db, const char *changes,
     /* Order is the dependency chain of one document: a provider carries the
      * models registered on it, and the agent may adopt a model this same
      * document registers. */
-    if (has_provider && (err = validate_provider(db, changes, &provider))) goto out;
+    if (has_provider && (err = validate_provider(db, changes, agent_name, &provider))) goto out;
+    /* A provider key is the daemon's and goes only to the provider's own
+     * address, so it takes no host binding. A document that binds the secret
+     * it also names as the key would leave it a tool credential. */
+    if (has_provider && has_bindings && provider) {
+        const char *b[] = { changes, provider };
+        char *dup = sql_text2(db,
+            "SELECT s.key FROM json_each(?1,'$.secret_bindings') s"
+            " WHERE s.key = json_extract(?2,'$.api_key_env') LIMIT 1", b);
+        if (dup) {
+            err = errf("error: '%s' is this provider's key, so it takes no "
+                       "secret_bindings entry: the daemon sends it only to the "
+                       "provider's own address. Remove it from secret_bindings "
+                       "and send the document again.", dup);
+            free(dup);
+            goto out;
+        }
+    }
     if (has_models && (err = validate_models(db, changes, provider, &models))) goto out;
     if (has_agent && (err = validate_agent(db, changes, models))) goto out;
     if (has_routes && (err = validate_routes(db, changes, agent_name))) goto out;
@@ -1668,6 +1728,31 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                 rc = -1;
             }
             if (rc != 0) apply_detail(detail_out, "failed defining provider");
+        }
+        /* The key the provider names, when it is a secret the asking agent
+         * captured: approval makes it the provider's key. It moves to system
+         * scope and its grants go, so from here on only the daemon reads it.
+         * The same test as at request time, repeated because the secret may
+         * have been bound or regranted while the approval waited; a secret
+         * that no longer qualifies is left alone. */
+        if (rc == 0) {
+            char *kn = q1_text(db,
+                "SELECT json_extract(?1,'$.changes.provider.api_key_env')", args_json);
+            if (kn && kn[0] && key_name_promotable(db, kn, agent)) {
+                static const char *PROMOTE[] = {
+                    "UPDATE secrets SET scope='system' WHERE name=?1",
+                    "DELETE FROM grants WHERE kind='secret' AND value=?1",
+                };
+                for (size_t i = 0; i < 2 && rc == 0; i++) {
+                    sqlite3_stmt *ps;
+                    if (sqlite3_prepare_v2(db, PROMOTE[i], -1, &ps, NULL) != SQLITE_OK) { rc = -1; break; }
+                    sqlite3_bind_text(ps, 1, kn, -1, SQLITE_STATIC);
+                    if (sqlite3_step(ps) != SQLITE_DONE) rc = -1;
+                    sqlite3_finalize(ps);
+                }
+                if (rc != 0) apply_detail(detail_out, "failed making '%s' the provider key", kn);
+            }
+            free(kn);
         }
         /* Models: register missing rows, then update the fields this document
          * actually carries. Two statements rather than one upsert because an

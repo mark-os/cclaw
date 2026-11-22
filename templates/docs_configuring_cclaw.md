@@ -81,9 +81,15 @@ one approval covers the whole document:
   (no approval is parked), so check `search_config` first. Values are strings.
 - `provider`: define an LLM provider's **transport** — `provider`, `base_url`
   for custom names, and `api_key_env` naming the secret that holds the API key.
-  Store the key first with `save_secret` (never pass key material): a provider
-  whose key does not exist is refused here, because at request time its models
-  are skipped in silence. A keyless endpoint says so explicitly with
+  Capture the key first with `save_secret` under that name, on the call that
+  reads it (a file the person saved, a command that prints it), so the value
+  never enters your context; never pass key material. Approving the document
+  then makes that secret the provider's key: the daemon alone reads it and you
+  can no longer use it yourself. Only a secret granted to you and bound to no
+  host qualifies, and a provider key takes no `secret_bindings` entry. The person may store the key instead (`cclaw secret set
+  NAME`, the admin page, or the environment). A provider whose key does not
+  exist is refused here, because at request time its models are skipped in
+  silence. A keyless endpoint says so explicitly with
   `"api_key_env": ""`. Editing an existing provider leaves its credential name
   alone unless you pass a new one.
 - `models`: register, update, or disable a model — `[{"id": "<model>@<provider>",

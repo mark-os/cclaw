@@ -869,6 +869,13 @@ static const char *SQL_CHANGES_SYSTEM_WIDE =
     "     WHERE p.name=json_extract(?1,'$.changes.provider.provider')"
     "       AND p.base_url=json_extract(?1,'$.changes.provider.base_url')"
     "       AND p.api_key_env=json_extract(?1,'$.changes.provider.api_key_env'))"
+    /* The named key is a secret an agent captured: approving turns it into
+     * the provider's key, which is worth a line of its own. */
+    " UNION ALL SELECT format('secret %s becomes this provider''s key "
+    "(daemon only; no agent can use it afterwards)',"
+    "     json_extract(?1,'$.changes.provider.api_key_env'))"
+    "   WHERE EXISTS(SELECT 1 FROM secrets s WHERE s.scope='agent'"
+    "     AND s.name=json_extract(?1,'$.changes.provider.api_key_env'))"
     /* Models are the substance of a model switch — what actually answers
      * after the approval, at what context size, healthy or retired. */
     " UNION ALL SELECT format('model %s%s%s%s',"

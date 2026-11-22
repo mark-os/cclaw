@@ -43,7 +43,8 @@ curl -H "Authorization: Bearer {{SECRET:GITHUB_TOKEN}}" https://api.github.com/u
 Two rules apply to every use, independently: the secret must be granted to
 you (who may use it), and bound to the target host (where it may go). System
 secrets (provider API keys) are the daemon's alone — no agent can be granted
-one. A secret may only be submitted to hosts it is bound to. A call using an unbound secret (or
+one. A key you captured becomes one when a provider document naming it is
+approved (see configuring-cclaw). A secret may only be submitted to hosts it is bound to. A call using an unbound secret (or
 aiming at an uncovered host) is denied with the missing pair named: request it
 with `request_config` (`secret_bindings: {"NAME": ["host"]}`), batching every
 host a denial named into one document, then re-issue the call. If a tool

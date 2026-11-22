@@ -17,7 +17,7 @@ static const char *SPAWN_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"task\":{\"type\":\"string\",\"description\":\"Task description for the sub-agent\"},"
     "\"name\":{\"type\":\"string\",\"description\":\"Agent to launch — a name from the roster; omit to spawn a copy of yourself (worker)\"},"
-    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Self-spawn only (error if 'name' is set): restrict the worker to these tools, intersected with your own grants — it can never widen them. Omitted, the worker gets the default worker toolset named at the end of this description.\"},"
+    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Self-spawn only (error if 'name' is set): restrict the worker to these tools, intersected with your own grants and your own tool filter — it can never widen them. Omitted, the worker gets the default worker toolset named at the end of this description.\"},"
     "\"background\":{\"type\":\"boolean\",\"description\":\"Default false: the call blocks and its result is the child's final answer. True returns session_id immediately and the child's result is delivered to you when it finishes — no need to check on it.\"},"
     "\"delivery\":{\"type\":\"string\",\"enum\":[\"iteration\",\"digest\",\"turn\",\"quiescent\",\"explicit\"],\"description\":\"When the child's output reaches you. Omitted: inherits your own policy (default quiescent — exactly one message, the real answer, once the child and everything it launched has settled). turn = final message at every turn end; digest = its prose since the last delivery, at turn end; iteration = every assistant message as it lands (costs you a turn per message); explicit = nothing auto-ships (check_session is your window). Blocking launches accept only quiescent/turn/digest.\"}"
     "},\"required\":[\"task\"]}";
@@ -25,6 +25,49 @@ static const char *SPAWN_PARAMS_JSON =
 int agent_max_depth(sqlite3 *db) {
     int d = config_get_int(db, "agent_max_depth");
     return (d > 0) ? d : config_default_int("agent_max_depth");
+}
+
+/* Narrow a child's spawn filter by the launcher's effective scope (its own
+ * session filter ∩ its pinning chat's filter, session_effective_tool_filter):
+ * a child can never see a tool its launcher could not. NULL = unrestricted on
+ * every side, so the result is NULL only when both inputs are. The child's
+ * filter is frozen on its session row, so a grandchild inherits the narrowed
+ * scope through this same call. Returns 0 with *out set (heap or NULL), 1 when
+ * the launcher's scope emptied a non-empty request (*out = launcher scope, for
+ * the message), -1 on a query failure. */
+static int spawn_filter_narrow(sqlite3 *db, int64_t launcher_sid,
+                               const char *filter, char **out) {
+    *out = NULL;
+    char *scope = session_effective_tool_filter(db, launcher_sid);
+    if (!scope) {
+        *out = filter ? strdup(filter) : NULL;
+        return (filter && !*out) ? -1 : 0;
+    }
+    if (!filter) { *out = scope; return 0; }
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT (SELECT json_group_array(a.value) FROM json_each(?1) a"
+            "         WHERE a.value IN (SELECT value FROM json_each(?2))),"
+            "       json_array_length(?1);", -1, &st, NULL) != SQLITE_OK) {
+        free(scope);
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, filter, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, scope, -1, SQLITE_STATIC);
+    int rc = -1;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *r = (const char *)sqlite3_column_text(st, 0);
+        int asked = sqlite3_column_int(st, 1);
+        if (r && strcmp(r, "[]") == 0 && asked > 0) {
+            *out = scope; scope = NULL; rc = 1;
+        } else if (r) {
+            *out = strdup(r);
+            rc = *out ? 0 : -1;
+        }
+    }
+    sqlite3_finalize(st);
+    free(scope);
+    return rc;
 }
 char *tool_launch_agent_handler(const char *arguments, void *user_data, int *is_error) {
     AgentLaunchCtx *ctx = (AgentLaunchCtx *)user_data;
@@ -63,8 +106,9 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data, int *is_
 
     /* Create child session. Omitted name = self-spawn: a worker running as
      * the calling agent, scoped down by a frozen session tool_filter
-     * (explicit `tools` arg → kv worker_tools → unrestricted). The filter is
-     * intersection-only against grants — it can never add authority. */
+     * (explicit `tools` arg → kv worker_tools → unrestricted), then narrowed
+     * by the launcher's own scope (below). The filter is intersection-only
+     * against grants — it can never add authority. */
     char *agent = tool_args_str(ctx->db, arguments, "name");
     int self_spawn = (!agent || !agent[0]);
     int background = tool_args_bool(ctx->db, arguments, "background", 0);
@@ -133,6 +177,31 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data, int *is_
         }
     }
     free(tools_json);
+
+    /* Both kinds of spawn are capped by the launcher's own scope — a named
+     * agent too: its grants are its own, but the session that asked was only
+     * trusted with these tools. An empty result is refused rather than
+     * launched as a toolless child: the model asked for tools it lacks, and
+     * telling it so (naming its scope) is more useful than a worker that
+     * silently can do nothing. */
+    char *narrowed = NULL;
+    int nrc = spawn_filter_narrow(ctx->db, ctx->session_id, filter, &narrowed);
+    free(filter);
+    filter = NULL;
+    if (nrc != 0) {
+        char msg[384];
+        if (nrc > 0)
+            snprintf(msg, sizeof(msg), "error: none of the worker's tools are"
+                     " within this session's own tool filter %.200s — not"
+                     " launched; a sub-agent can only get tools you can use",
+                     narrowed);
+        else
+            snprintf(msg, sizeof(msg), "error: could not resolve the"
+                     " sub-agent's tool filter — not launched");
+        free(narrowed); free(task); free(agent); free(delivery);
+        return tool_fail(is_error, "%s", msg);
+    }
+    filter = narrowed;
 
     int64_t child_sid = session_create_filtered(ctx->db, "agent", agent,
                                                 ctx->session_id, depth + 1,

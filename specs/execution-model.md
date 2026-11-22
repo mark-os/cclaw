@@ -132,5 +132,7 @@ launch gate) · `session_max_concurrent` 10 (sessions doing work at once; over
 it, autonomous turns defer) · `CHILD_MAX` 48 · `job_timeout_max` 3600s · `max_iterations` per turn ·
 `max_autonomous_turn_streak` cross-turn. The worker tool filter narrows
 visibility, never authority (grants ∩ filter, both enforced at dispatch);
-the default worker list is rendered into launch_agent's description so a
+every spawn, self or named, is further capped by the launcher's own scope
+(its session filter ∩ its pinning chat's filter), and a spawn left with no
+tools by that cap is refused; the default worker list is rendered into launch_agent's description so a
 spawner can read what a worker will get.

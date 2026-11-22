@@ -346,8 +346,30 @@ int secret_main(int argc, char *argv[]) {
                 fprintf(stderr, "error: master key unavailable\n");
                 rc = 1;
             } else {
-                rc = db_secret_set(db, name, value, "operator", "agent") == 0 ? 0 : 1;
-                if (rc == 0) {
+                /* A provider's key name makes a system secret: the daemon
+                 * reads provider keys only at that scope, so stored as an
+                 * agent secret the key would sit unused. A name already held
+                 * at system scope keeps it for the same reason. */
+                int system = 0;
+                sqlite3_stmt *sc;
+                /* Before the first run the providers table is empty; seed it
+                 * so the key a person stores first is recognised. */
+                if (db_scalar_i64(db, "SELECT count(*) FROM providers WHERE ?1", 1, 1) == 0)
+                    db_seed_defaults(db);
+                if (sqlite3_prepare_v2(db,
+                        "SELECT EXISTS(SELECT 1 FROM providers WHERE api_key_env=?1)"
+                        "    OR EXISTS(SELECT 1 FROM secrets WHERE name=?1 AND scope='system')",
+                        -1, &sc, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(sc, 1, name, -1, SQLITE_STATIC);
+                    if (sqlite3_step(sc) == SQLITE_ROW) system = sqlite3_column_int(sc, 0);
+                    sqlite3_finalize(sc);
+                }
+                rc = db_secret_set(db, name, value, "operator",
+                                   system ? "system" : "agent") == 0 ? 0 : 1;
+                if (rc == 0 && system) {
+                    printf("secret set: %s (a provider key: the daemon uses it, "
+                           "no agent can read it)\n", name);
+                } else if (rc == 0) {
                     char *who = NULL;
                     sqlite3_stmt *st;
                     if (sqlite3_prepare_v2(db,

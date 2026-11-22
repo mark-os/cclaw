@@ -6,6 +6,7 @@
 #include "tool_shell.h"   /* shell_secrets_free */
 #include "secret.h"
 #include "secret_store.h"
+#include "cli_verbs.h"
 #include "validate.h"
 #include "test_util.h"
 #include <assert.h>
@@ -200,6 +201,27 @@ static void test_secrets_granted_filter(void) {
     printf("  PASS: secrets_granted_filter\n");
 }
 
+/* `cclaw secret set` with a provider's key name stores a system secret, the
+ * only scope the daemon reads provider keys at, on a database that has never
+ * been run (no providers row yet). Any other name is an agent secret. */
+static void test_verb_set_provider_key_is_system(void) {
+    clean_db();
+    setenv("CCLAW_DB_PATH", DB_PATH, 1);
+    char *a1[] = { "cclaw", "secret", "set", "OPENROUTER_API_KEY", "sk-or-test", NULL };
+    char *a2[] = { "cclaw", "secret", "set", "MY_TOKEN", "abc", NULL };
+    assert(secret_main(5, a1) == 0);
+    assert(secret_main(5, a2) == 0);
+    unsetenv("CCLAW_DB_PATH");
+    sqlite3 *db = db_open(DB_PATH);
+    assert(db);
+    assert(db_scalar_i64(db, "SELECT count(*) FROM secrets WHERE name='OPENROUTER_API_KEY'"
+                             " AND scope='system' AND ?1", 1, 0) == 1);
+    assert(db_scalar_i64(db, "SELECT count(*) FROM secrets WHERE name='MY_TOKEN'"
+                             " AND scope='agent' AND ?1", 1, 0) == 1);
+    sqlite3_close(db);
+    printf("  PASS: verb_set_provider_key_is_system\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_secret_store:\n");
@@ -211,6 +233,7 @@ int main(void) {
     test_name_validation();
     test_rm_cleans_bindings_and_grants();
     test_secrets_granted_filter();
+    test_verb_set_provider_key_is_system();
     clean_db();
     printf("  all tests passed\n");
     return 0;

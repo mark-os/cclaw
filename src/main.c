@@ -527,6 +527,9 @@ static int run_daemon(char *db_path) {
             char drain[64];
             while (read(fifo_fd, drain, sizeof(drain)) > 0) {}
             channel_consume_events(proc_db());
+            /* `cclaw approvals` nudges the same FIFO after queueing a
+             * decision, so it is carried out now and not at the next poll. */
+            approval_apply_queued();
         }
         if (pfds[d_worker_idx].revents & POLLIN)
             event_step_worker(daemon_worker_fd);

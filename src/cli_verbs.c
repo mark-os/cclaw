@@ -21,6 +21,7 @@
 #include "models_cache.h"
 #include "secret.h"
 #include "validate.h"
+#include "wake.h"
 #include "secret_store.h"
 #include <time.h>
 #include "util.h"
@@ -131,10 +132,18 @@ int approvals_main(int argc, char *argv[]) {
         } else if (sqlite3_changes(db) == 0) {
             fprintf(stderr, "error: a decision for approval #%lld is already on its way\n", id); rc = 1;
         } else {
-            printf("%s #%lld. A running daemon carries it out within half a minute; "
-                   "otherwise the next cclaw run does, before its turn starts.\n",
+            /* The daemon's FIFO only opens for writing while a daemon holds
+             * the other end, so success means one was told. A missed nudge
+             * costs nothing: its DB poll applies the decision anyway. */
+            char *db_path = util_resolve_db_path();
+            int told = db_path && wake_external(db_path) == 0;
+            free(db_path);
+            printf("%s #%lld. %s\n",
                    d == APPROVAL_DENY ? "Denied" : d == APPROVAL_ONCE ? "Approved once"
-                                                                      : "Approved", id);
+                                                                      : "Approved", id,
+                   told ? "The running daemon has been told and carries it out now."
+                        : "No daemon is running; the next cclaw run carries it out "
+                          "before its turn starts.");
         }
     } else {
         fprintf(stderr, "usage: cclaw approvals [list]\n"

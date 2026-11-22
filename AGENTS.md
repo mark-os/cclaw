@@ -371,8 +371,8 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   applied and the agent is told at the start of the next turn, where it
   re-issues the call.
   An unanswered request expires after `approval_timeout_sec`. Two limits:
-  a running daemon picks a queued decision up at its next DB poll (up to
-  30 s), and a *sensitive-target* approval cannot be satisfied this way at
+  a running daemon is nudged and applies a queued decision at once (its DB
+  poll is the fallback, up to 30 s), and a *sensitive-target* approval cannot be satisfied this way at
   all — it covers one frozen call, which the run already answered, so the
   re-issued call asks again. Test those with `--auto-approve` or a pty. With no word,
   `approve` is the narrowest that works — `once` for a single call, the whole

@@ -954,18 +954,43 @@ static int run_cli(char *db_path, const char *prompt,
             {
                 Approval *pa = approval_get_parked_subtree(proc_db(), proc_cli_session());
                 if (pa) {
-                    ApprovalDecision d;
-                    if (strcasecmp(linebuf, "once") == 0 || strcasecmp(linebuf, "o") == 0)
-                        d = APPROVAL_ONCE;
-                    else if (strcasecmp(linebuf, "y") == 0 ||
-                             strcasecmp(linebuf, "yes") == 0 ||
-                             strcasecmp(linebuf, "ok") == 0 ||
-                             strcasecmp(linebuf, "okay") == 0 ||
-                             strcasecmp(linebuf, "approve") == 0)
-                        d = APPROVAL_ALWAYS;
-                    else
-                        d = APPROVAL_DENY;
-                    resolve_approval(pa->id, d, "cli:interactive", 0);
+                    /* Only an explicit answer decides, and `y` is the minimum
+                     * that works — text never mints standing authority unless
+                     * it says so (channel_intent.h). Anything else re-asks: a
+                     * stray line is most often the next message, typed without
+                     * noticing the prompt. The choices must match the prompt
+                     * handle_approval_park (resolve.c) printed for this row:
+                     * an applied request has no "once", a sensitive target no
+                     * "always" (resolve_approval's rules). */
+                    int apply = pa->resolve && strcmp(pa->resolve, "apply") == 0;
+                    int sensitive = !apply && approval_is_sensitive(pa);
+                    const char *l = linebuf;
+                    int yes = !strcasecmp(l, "y") || !strcasecmp(l, "yes") ||
+                              !strcasecmp(l, "ok") || !strcasecmp(l, "okay") ||
+                              !strcasecmp(l, "approve");
+                    int once = !strcasecmp(l, "o") || !strcasecmp(l, "once");
+                    int always = !strcasecmp(l, "a") || !strcasecmp(l, "always");
+                    int no = !strcasecmp(l, "n") || !strcasecmp(l, "no") ||
+                             !strcasecmp(l, "d") || !strcasecmp(l, "deny");
+                    int d = -1;
+                    if (no) d = APPROVAL_DENY;
+                    else if (apply) { if (yes || always) d = APPROVAL_ALWAYS; }
+                    else if (yes || once) d = APPROVAL_ONCE;
+                    else if (always && !sensitive) d = APPROVAL_ALWAYS;
+                    if (d < 0) {
+                        fprintf(stdout, "Not an answer, and not sent as a message. %s\n%s",
+                                apply ? "This request is approved or denied as a whole:"
+                                        " y or n."
+                                : sensitive ? "A sensitive target is allowed one call at"
+                                              " a time: y or n."
+                                : "y allows this call, a allows it from now on, n denies.",
+                                apply ? "Approve? [y]es / [n]o: "
+                                : sensitive ? "Allow once? [y]es / [n]o: "
+                                : "Allow? [y]es once / [a]lways / [n]o: ");
+                        fflush(stdout);
+                    } else {
+                        resolve_approval(pa->id, (ApprovalDecision)d, "cli:interactive", 0);
+                    }
                     approval_free(pa);
                     /* Shift and continue */
                     size_t consumed = (size_t)(nl - linebuf) + 1;

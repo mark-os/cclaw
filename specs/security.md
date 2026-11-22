@@ -170,7 +170,11 @@ every turn (no cached state to drift):
 **Self-spawn** (`launch_agent` with no `name`): child runs as the *calling*
 agent — same grants, fresh session, task in inbox. Filter resolution:
 explicit `tools` arg → config `worker_tools` → unrestricted (unreachable in
-practice: the registry default is never empty). The shipped `worker_tools`
+practice: the registry default is never empty), then intersected with the
+launcher's own scope (its `sessions.tool_filter` ∩ its pinning chat's
+`tool_filter`) — a child never sees a tool its launcher could not. If that
+leaves nothing, the launch is refused with the launcher's scope named. The
+frozen child filter carries the cap to grandchildren. The shipped `worker_tools`
 default is exactly:
 
 ```
@@ -193,7 +197,8 @@ into `search_config`'s grants block for the worker itself. Passing `tools`
 with a `name` is an error.
 
 **Named spawn** (launch existing agent): child runs under the target agent's
-own grants, unfiltered. The target must already exist (not created at spawn
+own grants, filtered only by the launcher's scope (as above; unfiltered when
+the launcher is). The target must already exist (not created at spawn
 time); the model picks from a live roster embedded in `launch_agent`'s
 description (`agents.name` + `agents.description`, recomputed each turn).
 
@@ -313,6 +318,18 @@ All actions use `resolve='apply'` approvals (ambient capability grants, not one-
 ### read_path / write_path grants → sandbox bind-mounts
 
 Path grants (`kind='read_path'` or `kind='write_path'`) become extra bind-mounts inside the sandboxed tool child. `agent_setup_init()` (`src/agent_setup.c`) loads them into the `SandboxProfile`, and `contain_enter()` (`src/contain_linux.c`) mounts them (canonicalized, deduped, rw-wins, sorted shallow→deep) alongside the workspace.
+
+### The terminal prompt (interactive CLI)
+
+When stdin is a tty, a park prints its summary and a prompt listing only the answers that row accepts (`handle_approval_park`, `src/resolve.c`; read back in `run_cli`, `src/main.c`). `y` (or `yes` / `ok` / `okay` / `approve`) is always the minimum that works, matching chat `/approve`:
+
+| Approval | Prompt | Allow | Standing | Deny |
+|---|---|---|---|---|
+| rerun | `Allow? [y]es once / [a]lways / [n]o: ` | `y`, `o`, `once` → ONCE | `a`, `always` → ALWAYS | `n`, `no`, `d`, `deny` |
+| rerun, sensitive target | `Allow once? [y]es / [n]o: ` | `y`, `o`, `once` → ONCE | — | same |
+| apply | `Approve? [y]es / [n]o: ` | `y`, `a`, `always` → ALWAYS (approves the document; there is no once) | — | same |
+
+Any other line decides nothing: the terminal says it was not understood and not sent as a message, and asks again; the approval stays pending. EOF (Ctrl-D) ends the CLI as at any other time; the open request is left to recovery. Decisions are recorded with `decided_via = 'cli:interactive'`.
 
 ### --auto-approve (CLI)
 

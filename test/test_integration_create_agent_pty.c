@@ -145,7 +145,7 @@ int main(void) {
     int rc = 1;
     if (expect(mfd, "> ", 10000) != 0) goto done;
     if (send_line(mfd, "please make a scout agent") != 0) goto done;
-    if (expect(mfd, "Grant? (y/n):", 15000) != 0) goto done;
+    if (expect(mfd, "Approve? [y]es / [n]o: ", 15000) != 0) goto done;
     if (send_line(mfd, "y") != 0) goto done;
     if (expect(mfd, "scout created", 15000) != 0) goto done;
     if (send_line(mfd, "exit") != 0) goto done;

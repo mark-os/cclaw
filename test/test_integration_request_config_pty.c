@@ -1,7 +1,7 @@
 /* Approve-path e2e for request_config under a PTY.
  *
  * -p mode auto-denies all approvals, so the interactive approve loop (park →
- * y/n prompt → resolve_approval → apply_grant) is unreachable by unit tests
+ * approve prompt → resolve_approval → apply_grant) is unreachable by unit tests
  * and by the other integration tests. Run build/cclaw under a PTY so
  * isatty(stdin) is true, script a request_changes tool call from the mock
  * LLM, answer 'y' at the prompt, and assert the grant landed as kind
@@ -187,13 +187,35 @@ int main(void) {
         _exit(113);
     }
 
-    /* Drive: banner prompt → user turn → approval prompt → y → final → exit */
+    /* Drive: banner prompt → user turn → approval prompt → stray line (re-asked)
+     * → y → second prompt → y → final → exit */
     int rc = 1;
     if (expect(mfd, "> ", 10000) != 0) goto done;
     if (send_line(mfd, "please get access") != 0) goto done;
-    if (expect(mfd, "Grant? (y/n):", 15000) != 0) goto done;
+    if (expect(mfd, "Approve? [y]es / [n]o: ", 15000) != 0) goto done;
+    /* A stray line (the next message, typed past the prompt) decides
+     * nothing: the hint and the prompt come back — one needle, since the
+     * hint's newline flushes them as two writes (the pty's onlcr makes it
+     * \r\n) — and the request stays pending. No turn starts either: the
+     * request count below stays 4. */
+    if (send_line(mfd, "thanks, and also check the logs") != 0) goto done;
+    if (expect(mfd, "y or n.\r\nApprove? [y]es / [n]o: ", 15000) != 0) goto done;
+    {
+        sqlite3 *db = db_open(DB_PATH);
+        sqlite3_stmt *s;
+        int pending = 0;
+        if (db && sqlite3_prepare_v2(db,
+                "SELECT 1 FROM approvals WHERE state='pending'"
+                " AND json_extract(args_json,'$.reason')='pty integration test'",
+                -1, &s, NULL) == SQLITE_OK) {
+            pending = (sqlite3_step(s) == SQLITE_ROW);
+            sqlite3_finalize(s);
+        }
+        if (db) sqlite3_close(db);
+        if (!pending) { fprintf(stderr, "FAIL: stray line decided the approval\n"); goto done; }
+    }
     if (send_line(mfd, "y") != 0) goto done;
-    if (expect(mfd, "Grant? (y/n):", 15000) != 0) goto done;
+    if (expect(mfd, "Approve? [y]es / [n]o: ", 15000) != 0) goto done;
     if (send_line(mfd, "y") != 0) goto done;
     if (expect(mfd, "grant received", 15000) != 0) goto done;
     if (send_line(mfd, "exit") != 0) goto done;
@@ -293,6 +315,7 @@ int main(void) {
         goto done;
     }
 
+    printf("  PASS stray_line_reasks_via_pty\n");
     printf("  PASS approve_grant_path_via_pty\n");
     printf("All request_config PTY tests passed.\n");
     rc = 0;

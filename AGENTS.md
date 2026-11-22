@@ -370,7 +370,11 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   The decision is delivered the way a late channel approval is: the grant is
   applied and the agent is told at the start of the next turn, where it
   re-issues the call.
-  An unanswered request expires after `approval_timeout_sec`. With no word,
+  An unanswered request expires after `approval_timeout_sec`. Two limits:
+  a running daemon picks a queued decision up at its next DB poll (up to
+  30 s), and a *sensitive-target* approval cannot be satisfied this way at
+  all — it covers one frozen call, which the run already answered, so the
+  re-issued call asks again. Test those with `--auto-approve` or a pty. With no word,
   `approve` is the narrowest that works — `once` for a single call, the whole
   document for a `request_config`/`create_agent`.
 - **`--auto-approve` approves every request the run makes, unseen.** Use it
@@ -380,6 +384,12 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   approvals"` before and after. (`cclaw sqlite3` is the operator DB verb:
   vendored SQLite 3.53, full CLI compat, read-only unless `--write`, drops
   root to the DB owner.)
+- **At an interactive terminal, `y` is the minimum and a stray line
+  re-asks.** The prompt lists only the answers the row accepts
+  (`Allow? [y]es once / [a]lways / [n]o: `, `Approve? [y]es / [n]o: ` for a
+  document, `Allow once? [y]es / [n]o: ` for a sensitive target); only
+  `n`/`no`/`d`/`deny` denies, and anything unrecognised is discarded, not
+  sent. A PTY test waits for those literal strings (specs/security.md).
 - **Verify config changes in the DB, never from the agent's claims.** The
   agent will assert success ("Gemini is now active") without checking; the
   truth is `agent_models` (the agent's routing list), `grants`,

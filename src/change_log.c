@@ -346,6 +346,16 @@ int change_log_sync(sqlite3 *db) {
     if (plan_sync(db, &plan) != 0) { free(buf_take(&plan)); return -1; }
     char *sql = buf_take(&plan);
     if (!sql || !sql[0]) { free(sql); return 0; }
+    /* No log trigger at all means a database created in this run: installing
+     * them is part of creating it, not news for the operator. */
+    sqlite3_stmt *st;
+    int had_any = 0;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='trigger'"
+                               " AND name LIKE 'log\\_%' ESCAPE '\\' LIMIT 1",
+                           -1, &st, NULL) == SQLITE_OK) {
+        had_any = sqlite3_step(st) == SQLITE_ROW;
+        sqlite3_finalize(st);
+    }
     int own_txn = sqlite3_get_autocommit(db);
     char *err = NULL;
     int rc = own_txn ? sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) : SQLITE_OK;
@@ -356,8 +366,10 @@ int change_log_sync(sqlite3 *db) {
     }
     if (rc != SQLITE_OK)
         LOG_ERROR_("change_log: trigger sync failed: %s", err ? err : "?");
-    else
+    else if (had_any)
         LOG_INFO_("change_log: triggers brought in line with the column list");
+    else
+        LOG_DEBUG_("change_log: triggers installed");
     sqlite3_free(err);
     free(sql);
     return rc == SQLITE_OK ? 0 : -1;

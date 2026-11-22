@@ -575,10 +575,15 @@ void handle_approval_park(int64_t session_id, const char *tool_call_id) {
             fprintf(stdout, ": %s", summary ? summary : "?");
             free(summary);
         }
+        /* Only the choices this row accepts (an applied request has no
+         * "once", a sensitive target no "always"); `y` is always the minimum.
+         * The reader in run_cli (main.c) re-asks with the same text. */
         if (a->resolve && strcmp(a->resolve, "apply") == 0)
-            fprintf(stdout, "\nGrant? (y/n): ");
+            fprintf(stdout, "\nApprove? [y]es / [n]o: ");
+        else if (approval_is_sensitive(a))
+            fprintf(stdout, "\nAllow once? [y]es / [n]o: ");
         else
-            fprintf(stdout, "\nApprove? (y=always / o=once / n=no): ");
+            fprintf(stdout, "\nAllow? [y]es once / [a]lways / [n]o: ");
         fflush(stdout);
         proc_set_cli_turn_active(0);  /* unblock input loop for the y/n read */
         /* The actual y/n is read back in the main CLI input loop. */

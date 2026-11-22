@@ -54,6 +54,14 @@ Main process
 
 The database runs in WAL mode, so threads and processes read and write it concurrently without blocking each other.
 
+**The operating system is a friend, not an obstacle.** CClaw leans on what the kernel and SQLite already do well, instead of rebuilding it in user space:
+
+- *Isolation is a process.* Every sandboxed tool call is a fresh `fork`+`exec` of the same binary inside its own namespaces. A crash, a runaway loop or a hostile script ends that child and nothing else; the agent gets an error result and carries on.
+- *A process is cheap.* The kernel maps one copy of the binary's code and shares it between every child, so a new sandbox pays only for the pages it writes — a few hundred kilobytes — and starts in a few milliseconds (numbers under [Benchmarks](#benchmarks)).
+- *Concurrency is the kernel's and SQLite's job.* Sandboxes run in parallel on as many cores as the machine has. Each thread holds its own handle on the memory-mapped, write-ahead-logged database, so readers and the writer do not wait on each other and there is no lock scheme of ours to get wrong.
+
+The same shape works on anything that behaves like Linux, from a 128 MB plug computer to a server.
+
 **CLI mode** (default): one process with the worker thread pool. No daemon needed.
 
 **Daemon mode** (`--daemon`): adds channels (Telegram, Discord, WhatsApp, webhooks), cron, the web dashboard, and many agents working at once.
@@ -233,6 +241,31 @@ Network and model, per request:
   DNS + TCP + TLS:    16 ms
   Time to first byte: 650 ms (model- and provider-dependent)
 ```
+
+### The cost of a sandbox
+
+Same machine, static arm64 release binary, the default `standard` profile (user, mount and network namespaces around every call). Times run from the fork to the result arriving back in the agent.
+
+```
+One sandboxed call, start to result (median of 20):
+  js_eval  "1+1"        5.3 ms   (new process, new namespaces, new QuickJS engine)
+  shell_exec "true"     4.1 ms   (new process, new namespaces, /bin/sh)
+
+Four sub-agents at once, each computing fib(36) in its own QuickJS sandbox:
+  one alone             2.6 s
+  four together         5.9 s each, all done in 6.2 s   (2 cores; 10.5 s back to back)
+
+Memory while those four run (each process's fair share of shared pages):
+  the agent process     10.9 MB  (five sessions, their model connections, SQLite)
+  each sandbox           0.9 MB  (0.4 MB of it private; the rest is shared code)
+  everything together   14.6 MB
+
+The same with four shell sandboxes each running `sleep`:
+  each sandbox           0.6 MB  (0.3 MB private)
+  everything together   12.7 MB
+```
+
+Sub-agents are sessions inside the one agent process, not processes of their own; only the tool calls fork. Adding up each process's resident size instead gives 27 MB for the same picture, because the shared code is counted once per process. A tool that starts a heavy program — a compiler, `node` — costs whatever that program uses on top.
 
 ## Documentation
 

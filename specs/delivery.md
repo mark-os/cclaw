@@ -5,9 +5,8 @@ reply-edge timeouts) is deferred; `target_kind='session'` is reserved for it.
 
 Every outbound edge of a session is a `delivery_edges` row with a policy
 from one shared vocabulary: the **standing parent edge** every child gets at
-creation, the **channel edge** a chat-bound session gets lazily at its first
-delivery boundary, and the **one-shot `tool_call` edge** a blocking launch
-adds on top. Parent and tool_call edges carry their policy, frozen. A channel
+creation, the **channel edge** a session gets when it is bound to a chat, and
+the **one-shot `tool_call` edge** a blocking launch adds on top. Parent and tool_call edges carry their policy, frozen. A channel
 edge carries none (`policy` is NULL — a CHECK enforces it): its policy is the
 `delivery_mode` of the chat the session belongs to, read at every boundary
 (`EDGE_POLICY` in db.h, the one definition every reader uses). The row keeps
@@ -72,6 +71,25 @@ answer of a turn that was never meant to post. Pushes are latency, the sweep is 
 (`db_recover_stale_sessions`) handles the dead. **No delivery-edge timeouts
 in milestone 1** — blocking launches have no clock, exactly the prior
 doctrine.
+
+## The channel edge is created at bind
+
+A session that belongs to a chat has its channel edge from that moment, made
+in the same transaction that stamps `sessions.channel_name`
+(`delivery_edge_bind_channel`): every pin (`channel_pin_session` /
+`channel_pin_new_session` — first contact, `/new`, `cclaw route add`, the
+explorer, `request_config` routes, and the fresh session a pin gives the chat
+it takes a session from) and a chat-bound cron `target:"new"` fire. The
+cursor is the session's `leaf_id` at that moment, 0 when it has no entries:
+nothing it already said is posted, and everything it says after is owed.
+That is what closes the first-turn window — the state flips to `idle` before
+`advance_deliver_boundary()` commits, and a crash between the two used to
+leave a bound session with no edge, which the sweep (it joins
+`delivery_edges`) could never see. A session pinned again keeps its edge and
+cursor; one moved to another chat keeps its cursor (what was delivered
+elsewhere is not re-sent). The boundary still ensures the edge, at cursor 0,
+as a backstop for a session stamped some other way — that boundary's answer
+ships.
 
 ## Blocking: one-shot + standing, same transaction
 
@@ -144,3 +162,12 @@ that delivery was owed under v60 too, and the sweep makes it. Where a session's 
 differed from its route — the route was edited after the session's first
 delivery — the route's value now applies; the patch logs each such chat. A
 channel edge's `target_ref` was set to its session's channel.
+
+## Migration (v69) — history
+
+Channel edges stopped materializing lazily (see "The channel edge is created
+at bind"). Every chat-bound session without a channel edge got one at its
+current `leaf_id` (0 for none), so the upgrade re-posts no old answer —
+teaching the sweep to look at edgeless sessions instead would have. The cost:
+a reply already cut off by a crash in the old window before the upgrade stays
+lost. Data only; the table's shape did not change.

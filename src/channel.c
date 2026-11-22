@@ -316,7 +316,11 @@ static int64_t fresh_chat_session(sqlite3 *db, const char *channel_name,
     if (name) sqlite3_bind_text(st, 4, name, -1, SQLITE_STATIC);
     int rc = sqlite3_step(st);
     sqlite3_finalize(st);
-    return rc == SQLITE_DONE ? sqlite3_last_insert_rowid(db) : -1;
+    if (rc != SQLITE_DONE) return -1;
+    /* Born bound, so born with its channel edge (cursor 0: the first reply is
+     * owed) — in the caller's pin transaction. */
+    int64_t sid = sqlite3_last_insert_rowid(db);
+    return delivery_edge_bind_channel(db, sid) == 0 ? sid : -1;
 }
 
 /* The chat's row, if nobody has seen it yet: an operator or agent naming a
@@ -380,7 +384,10 @@ static int pin_locked(sqlite3 *db, const char *channel_name, const char *chat_id
     free(agent); free(other_ch); free(other_chat);
 
     /* Pin, stamp, and point an existing channel edge at the new channel (its
-     * cursor stays: what was delivered elsewhere is not re-sent here). */
+     * cursor stays: what was delivered elsewhere is not re-sent here); a
+     * session with none gets it now, cursor at its leaf — what it already
+     * said is not posted, its next reply is owed even if a crash cuts the
+     * delivery off (specs/delivery.md). */
     return ok &&
         pin_exec(db, "UPDATE channel_chats SET session_id=?3"
                      " WHERE channel_name=?1 AND chat_id=?2;",
@@ -390,7 +397,8 @@ static int pin_locked(sqlite3 *db, const char *channel_name, const char *chat_id
         pin_exec(db, "UPDATE delivery_edges SET target_ref=?1"
                      " WHERE session_id=?3 AND target_kind='channel'"
                      "   AND target_ref<>?1;",
-                 channel_name, chat_id, sid) == 0 ? 0 : -1;
+                 channel_name, chat_id, sid) == 0 &&
+        delivery_edge_bind_channel(db, sid) == 0 ? 0 : -1;
 }
 
 int channel_pin_session(sqlite3 *db, const char *channel_name,

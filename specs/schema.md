@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v68 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v69 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v40 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into the floor.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -575,8 +575,8 @@ The chat columns that lived here until v61 (`chat_title`, `chat_is_admin`,
 The delivery contract lives in [delivery.md](delivery.md); this is the shape.
 One row per outbound edge of a session: the standing parent edge every child
 gets at creation (v42 replaced `sessions.parent_notified_at` with this
-table), the channel edge a chat-bound session gets at its first delivery
-boundary (no policy of its own — its chat's `delivery_mode` is read live), and the one-shot `tool_call` edge a blocking
+table), the channel edge a session gets in the same write that binds it to a
+chat, cursor at its leaf (v69; no policy of its own — its chat's `delivery_mode` is read live), and the one-shot `tool_call` edge a blocking
 launch adds (deleted when it fires). `target_kind='session'` + one-shot reply
 edges are reserved for milestone 2's `session_send`.
 
@@ -591,6 +591,10 @@ edges are reserved for milestone 2's `session_send`.
 | `one_shot` | INTEGER NOT NULL DEFAULT 0 | blocking reply edge: fires once, then the row is deleted |
 
 Unique: `(session_id, target_kind, target_ref)`.
+
+The v69 patch gave every chat-bound session that had no channel edge one at
+its current `leaf_id` (0 for none): the sweep can find a reply cut off before
+delivery from then on, and the upgrade owes nothing already said.
 
 ### sessions.state values
 

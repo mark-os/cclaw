@@ -2053,6 +2053,22 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       NULL },
     /* v68: session hooks and compaction — see patch_v68_hooks. */
     { 68, NULL, patch_v68_hooks },
+    /* v69: a chat-bound session's channel edge is created when the session is
+     * bound (delivery_edge_bind_channel), no longer lazily at its first
+     * delivery — a crash between a first turn ending and its delivery lost
+     * the reply, because the sweep only sees sessions with an edge. Every
+     * bound session still without one gets it now, cursor at its current
+     * leaf (0 for none), so the upgrade owes nothing already said. Data only:
+     * templates/schema.sql does not change shape. */
+    { 69,
+      "INSERT INTO delivery_edges(session_id, target_kind, target_ref, policy,"
+      "                           cursor, one_shot)"
+      " SELECT s.id, 'channel', s.channel_name, NULL,"
+      "        MAX(COALESCE(s.leaf_id, 0), 0), 0"
+      " FROM sessions s WHERE s.channel_name IS NOT NULL"
+      "   AND NOT EXISTS (SELECT 1 FROM delivery_edges e"
+      "                   WHERE e.session_id=s.id AND e.target_kind='channel');",
+      NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
@@ -3146,6 +3162,21 @@ int delivery_edge_create(sqlite3 *db, int64_t session_id, const char *kind,
     sqlite3_bind_text(st, 3, ref, -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 4, policy, -1, SQLITE_STATIC);
     sqlite3_bind_int(st, 5, one_shot ? 1 : 0);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int delivery_edge_bind_channel(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR IGNORE INTO delivery_edges"
+            " (session_id, target_kind, target_ref, policy, cursor, one_shot)"
+            " SELECT id, 'channel', channel_name, NULL, MAX(COALESCE(leaf_id, 0), 0), 0"
+            " FROM sessions WHERE id=?1 AND channel_name IS NOT NULL;",
+            -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(st, 1, session_id);
     int rc = sqlite3_step(st);
     sqlite3_finalize(st);
     return (rc == SQLITE_DONE) ? 0 : -1;

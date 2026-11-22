@@ -282,6 +282,14 @@ char *delivery_policy_resolve(sqlite3 *db, int64_t launcher_session_id);
 int delivery_edge_create(sqlite3 *db, int64_t session_id, const char *kind,
                          const char *ref, const char *policy, int one_shot);
 
+/* The channel edge of a session just bound to a chat (sessions.channel_name
+ * already stamped), cursor at the session's leaf — 0 when it has no entries:
+ * nothing already said is posted, everything said after is owed, and the
+ * sweep can find a reply whose delivery a crash cut off. Call it in the
+ * transaction that binds. An existing edge (and its cursor) wins. 0 on
+ * success, including a session with no channel; -1 on error. */
+int delivery_edge_bind_channel(sqlite3 *db, int64_t session_id);
+
 /* Overwrite the policy of a session's non-one-shot edge of the given kind
  * (launch_agent's explicit `delivery` override). Returns 0 on success. */
 int delivery_edge_set_policy(sqlite3 *db, int64_t session_id, const char *kind,

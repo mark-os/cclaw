@@ -525,10 +525,13 @@ static int edge_session_row(sqlite3 *db, int64_t sid, EdgeSessionRow *out) {
     return ok;
 }
 
-/* Lazily materialize the channel edge for a chat-bound session at its first
- * boundary. The row holds only the cursor: its policy is the chat's
- * delivery_mode, read at every boundary (EDGE_POLICY). INSERT OR IGNORE, so
- * a present row (and its cursor) always wins. */
+/* The channel edge of a chat-bound session. Binding creates it
+ * (delivery_edge_bind_channel, cursor at the leaf) so the sweep can see a
+ * reply whose delivery a crash cut off; this is the backstop for a session
+ * stamped some other way, at cursor 0 so this boundary's answer still ships.
+ * The row holds only the cursor: its policy is the chat's delivery_mode, read
+ * at every boundary (EDGE_POLICY). INSERT OR IGNORE, so a present row (and
+ * its cursor) always wins. */
 static void channel_edge_ensure(sqlite3 *db, int64_t sid, const EdgeSessionRow *sr) {
     if (!sr->channel[0]) return;
     delivery_edge_create(db, sid, "channel", sr->channel, NULL, 0);

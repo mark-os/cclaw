@@ -869,15 +869,39 @@ static int64_t fresh_session(sqlite3 *db, const DueJob *j, const char *agent) {
     int64_t sid = session_create_filtered(db, "cron", agent, parent, depth, NULL);
     if (sid <= 0) return -1;
     if (chat_bound) {
+        /* Stamp and channel edge in one write: a bound session without its
+         * edge is invisible to the sweep, and a crash between this fire's
+         * turn and its delivery would lose the report. */
+        int own = sqlite3_get_autocommit(db);
+        int ok = sqlite3_exec(db, own ? "BEGIN IMMEDIATE" : "SAVEPOINT cron_bind",
+                              NULL, NULL, NULL) == SQLITE_OK;
+        int began = ok;
         sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
+        ok = ok && sqlite3_prepare_v2(db,
                 "UPDATE sessions SET channel_name=?1, chat_id=?2 WHERE id=?3;",
-                -1, &st, NULL) == SQLITE_OK) {
+                -1, &st, NULL) == SQLITE_OK;
+        if (ok) {
             sqlite3_bind_text(st, 1, j->channel, -1, SQLITE_STATIC);
             sqlite3_bind_text(st, 2, j->chat, -1, SQLITE_STATIC);
             sqlite3_bind_int64(st, 3, sid);
-            sqlite3_step(st);
+            ok = sqlite3_step(st) == SQLITE_DONE;
             sqlite3_finalize(st);
+        }
+        ok = ok && delivery_edge_bind_channel(db, sid) == 0;
+        if (ok)
+            ok = sqlite3_exec(db, own ? "COMMIT" : "RELEASE cron_bind",
+                              NULL, NULL, NULL) == SQLITE_OK;
+        if (!ok && began)
+            sqlite3_exec(db, own ? "ROLLBACK"
+                                 : "ROLLBACK TO cron_bind; RELEASE cron_bind",
+                         NULL, NULL, NULL);
+        if (!ok) {
+            LOG_WARN_("cron job=%lld: could not bind session %lld to %s:%s: %s",
+                      (long long)j->id, (long long)sid, j->channel, j->chat,
+                      sqlite3_errmsg(db));
+            /* Unparented (chat-bound), so it has no edge to clear first. */
+            job_exec(db, "DELETE FROM sessions WHERE id=?;", sid);
+            return -1;
         }
     }
     return sid;

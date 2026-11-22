@@ -538,6 +538,65 @@ static void test_channel_edge_semantics(void) {
     printf("  PASS test_channel_edge_semantics\n");
 }
 
+/* ── Channel edge at bind: the first reply survives a crash before delivery ── */
+
+static void test_channel_edge_at_bind(void) {
+    sqlite3 *db = open_seeded();
+    const char *edge_at =
+        "SELECT e.cursor FROM delivery_edges e WHERE e.session_id=?"
+        " AND e.target_kind='channel' AND e.target_ref='discord' AND e.policy IS NULL;";
+
+    /* (a) An existing session pinned to a chat gets its edge in the pin,
+     * cursor at its leaf: what it already said is not posted. */
+    int64_t old = session_create(db, "old", "default", -1, 0);
+    inbox_insert(db, old, "cli", NULL, "before the chat");
+    assert(run_turn(db, old, "said before the pin") == ADVANCE_DONE);
+    int64_t leaf = scalar(db, "SELECT leaf_id FROM sessions WHERE id=?;", old);
+    assert(leaf > 0);
+    test_seed_chat(db, "discord", "60");
+    assert(channel_pin_session(db, "discord", "60", old) == 0);
+    assert(scalar(db, edge_at, old) == leaf);
+    assert(advance_sweep_undelivered(db) == 0);
+    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
+                  old) == 0);
+    /* Pinning it again leaves the edge (and its cursor) as it is. */
+    assert(channel_pin_session(db, "discord", "60", old) == 0);
+    assert(scalar(db, "SELECT COUNT(*) FROM delivery_edges WHERE session_id=?"
+                      " AND target_kind='channel';", old) == 1);
+
+    /* A brand-new chat session (first contact, /new) is born with its edge
+     * at 0: its first reply is owed before any boundary has run. */
+    int64_t sid = channel_pin_new_session(db, "discord", "61", "default", NULL);
+    assert(sid > 0);
+    assert(scalar(db, edge_at, sid) == 0);
+
+    /* (b) The window: the first turn ends (state idle, answer landed) and the
+     * process dies before advance_deliver_boundary commits. Nothing was
+     * posted; the sweep finds the reply and posts it exactly once. */
+    inbox_insert(db, sid, "discord", NULL, "hello");
+    AdvanceOutput out = advance_session(db, sid, 25);
+    assert(out.action == ADVANCE_DISPATCH_LLM);
+    Message m = { .role = ROLE_ASSISTANT, .content = "first reply",
+                  .stop_reason = STOP_REASON_STOP };
+    entry_append_with_iteration(db, sid, &m, db_next_iteration_id(db, sid));
+    assert(session_set_state(db, sid, "idle") == 0);   /* advance's step before delivery */
+    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
+                  sid) == 0);
+    assert(advance_sweep_undelivered(db) == 1);
+    assert(advance_sweep_undelivered(db) == 0);
+    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
+                  sid) == 1);
+    char *text = db_scalar_text(db, "SELECT json_extract(payload,'$.text')"
+                                    " FROM channel_outbox WHERE session_id=?;", sid);
+    assert(text && strcmp(text, "first reply") == 0);
+    free(text);
+    assert(scalar(db, edge_at, sid) ==
+           scalar(db, "SELECT leaf_id FROM sessions WHERE id=?;", sid));
+
+    db_close(db);
+    printf("  PASS test_channel_edge_at_bind\n");
+}
+
 /* One failed turn: drain, land an error answer, advance to the boundary. */
 static void run_failed_turn(sqlite3 *db, int64_t sid, const char *err) {
     AdvanceOutput out = advance_session(db, sid, 25);
@@ -738,6 +797,7 @@ int main(void) {
     test_sweep_delivers_silent_settle();
     test_streak_pause_fail_notify();
     test_channel_edge_semantics();
+    test_channel_edge_at_bind();
     test_error_goes_to_operator();
     printf("All delivery tests passed.\n");
     return 0;

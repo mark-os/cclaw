@@ -438,8 +438,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_cache_armed ON sessions(cache_armed_at)
 
 -- ═══ Delivery edges (specs/delivery.md) ═══
 -- Every outbound edge of a session is a row: the standing parent edge every
--- child gets at creation, the channel edge a chat-bound session gets lazily at
--- its first delivery boundary, and the one-shot tool_call edge a blocking
+-- child gets at creation, the channel edge a session gets when it is bound to
+-- a chat (cursor at its leaf), and the one-shot tool_call edge a blocking
 -- launch adds on top. A channel edge has no policy of its own (NULL): its
 -- policy is the chat's channel_chats.delivery_mode, read live at every
 -- boundary ('auto' = quiescent) — the row keeps only the cursor. policy is

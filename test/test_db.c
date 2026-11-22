@@ -1653,11 +1653,17 @@ static void test_schema_patch_v61(void) {
     assert(db_scalar_i64(db, "SELECT channel_name='tg' AND chat_id='-100'"
         " FROM sessions WHERE id=3;", 0, -1) == 1);
     /* Channel edges: cursor kept, policy gone; the dead channel's edge gone;
-     * the parent edge untouched. */
+     * the parent edge untouched. (Of the sessions that had edges going in:
+     * v69 then gives every other chat-bound session its channel edge.) */
     assert(db_scalar_i64(db, "SELECT group_concat(session_id||':'||target_kind||':'"
         "||COALESCE(policy,'-')||':'||cursor, ' ')"
         " = '1:channel:-:10 4:channel:-:20 6:parent:digest:3'"
-        " FROM (SELECT * FROM delivery_edges ORDER BY session_id);", 0, -1) == 1);
+        " FROM (SELECT * FROM delivery_edges WHERE session_id IN (1,4,6,12)"
+        "       ORDER BY session_id);", 0, -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sessions s"
+        " WHERE s.channel_name IS NOT NULL AND NOT EXISTS (SELECT 1 FROM"
+        "   delivery_edges e WHERE e.session_id=s.id AND e.target_kind='channel');",
+        0, -1) == 0);
 
     /* The links refuse: a session or job naming no chat row, a second pin of
      * one session, a channel edge with a policy. */
@@ -2182,6 +2188,79 @@ static void test_schema_patch_v68(void) {
     printf("  PASS test_schema_patch_v68\n");
 }
 
+/* v69: every chat-bound session without a channel edge gets one at its
+ * current leaf, so the sweep can find a cut-off reply from now on, and the
+ * upgrade itself posts nothing old. Cases:
+ *   1 bound, answered (assistant leaf), no edge  -> edge at the leaf, not owed
+ *   2 bound, no entries, no edge                 -> edge at 0
+ *   3 bound, edge behind its leaf (owed before)  -> untouched, still owed
+ *   4 not bound                                  -> no edge
+ * Then the first sweep posts 3's answer alone, and only once. */
+static void test_schema_patch_v69(void) {
+    const char *path = "/tmp/test_cclaw_schema_v69.sqlite";
+    test_db_clean(path);
+    sqlite3 *db = db_open(path);
+    assert(db != NULL && db_ensure_schema(db) == 0);
+    test_seed_agent(db, "Keep");
+    test_seed_chat(db, "discord", "c1");
+    test_seed_chat(db, "discord", "c2");
+    test_seed_chat(db, "discord", "c3");
+    int64_t s[5];
+    for (int i = 1; i <= 4; i++) s[i] = session_create(db, "s", "Keep", -1, 0);
+    const char *texts[5] = { NULL, "a1 old", NULL, "a3 owed", "a4 unbound" };
+    for (int i = 1; i <= 4; i++) {
+        if (!texts[i]) continue;
+        Message q = { .role = ROLE_USER, .content = "q" };
+        Message a = { .role = ROLE_ASSISTANT, .content = (char *)texts[i],
+                      .stop_reason = STOP_REASON_STOP };
+        assert(entry_append_with_iteration(db, s[i], &q, 0) > 0);
+        assert(entry_append_with_iteration(db, s[i], &a, 1) > 0);
+    }
+    /* Bound the v68 way: stamped, no edge until a boundary. */
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+        "UPDATE sessions SET channel_name='discord', chat_id='c1' WHERE id=%lld;"
+        "UPDATE sessions SET channel_name='discord', chat_id='c2' WHERE id=%lld;"
+        "UPDATE sessions SET channel_name='discord', chat_id='c3' WHERE id=%lld;"
+        "INSERT INTO delivery_edges(session_id, target_kind, target_ref, cursor)"
+        " VALUES (%lld,'channel','discord',0);",
+        (long long)s[1], (long long)s[2], (long long)s[3], (long long)s[3]);
+    char *err = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
+    if (rc != SQLITE_OK) fprintf(stderr, "v69 seed: %s\n", err ? err : "?");
+    assert(rc == SQLITE_OK);
+    set_user_version(db, 68);
+
+    assert(db_schema_compat(db) == 1);
+    int uv = 0;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
+    const char *edge =
+        "SELECT COUNT(*) FROM delivery_edges e JOIN sessions s ON s.id=e.session_id"
+        " WHERE e.session_id=?1 AND e.target_kind='channel' AND e.target_ref='discord'"
+        "   AND e.policy IS NULL AND e.one_shot=0 AND e.cursor=%s;";
+    char q[320];
+    snprintf(q, sizeof(q), edge, "s.leaf_id AND s.leaf_id > 0");
+    assert(db_scalar_i64(db, q, s[1], -1) == 1);
+    snprintf(q, sizeof(q), edge, "0");
+    assert(db_scalar_i64(db, q, s[2], -1) == 1);
+    assert(db_scalar_i64(db, q, s[3], -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM delivery_edges WHERE session_id=?",
+                         s[3], -1) == 1);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM delivery_edges WHERE session_id=?",
+                         s[4], -1) == 0);
+
+    /* The first sweep: only the delivery already owed before the upgrade. */
+    assert(advance_sweep_undelivered(db) == 1);
+    assert(db_scalar_i64(db, "SELECT group_concat(json_extract(payload,'$.text'))"
+        " = 'a3 owed' FROM channel_outbox;", 0, -1) == 1);
+    assert(advance_sweep_undelivered(db) == 0);
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM channel_outbox;", 0, -1) == 1);
+
+    db_close(db);
+    test_db_clean(path);
+    printf("  PASS test_schema_patch_v69\n");
+}
+
 /* cache_lifetime on an Anthropic entry: 300 or 3600 only, on insert and on
  * update (also when the model under it changes); a new Anthropic chat entry
  * that says nothing — omitted or NULL — gets 3600; a utility entry and other
@@ -2364,6 +2443,7 @@ int main(void) {
     test_schema_patch_v66();
     test_schema_patch_v67();
     test_schema_patch_v68();
+    test_schema_patch_v69();
     test_agent_models_capability_gate();
     test_agent_models_cache_lifetime();
     test_agent_models_reasoning_display();

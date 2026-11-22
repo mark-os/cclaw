@@ -113,7 +113,7 @@ debug: clean
 # on mixed objects; cleaning first makes that impossible). The standard
 # pre-commit sanitizer check.
 test-asan: clean
-	$(MAKE) test CC=clang \
+	$(MAKE) test CC=clang TEST_TIMEOUT=90 \
 	            EXTRA_CFLAGS="-O0 -U_FORTIFY_SOURCE -g3 -fno-omit-frame-pointer -fsanitize=address,undefined" \
 	            LDFLAGS="$(LDFLAGS) -fsanitize=address,undefined"
 
@@ -211,12 +211,15 @@ $(BUILDDIR)/:
 # Several unit tests (test_run_tool_escape, test_sandbox_mounts, ...) fork
 # build/cclaw via --run-tool, so the binary must be fresh — depend on it so a
 # stale build/cclaw can't slip in.
+# Seconds each unit suite may run. test-asan raises it: instrumented code is
+# several times slower, and a slow pass is not a hang.
+TEST_TIMEOUT ?= 20
 test: $(TEST_BIN) $(BUILDDIR)/cclaw
 	@fail=0; for t in $(TEST_BIN); do \
 		out="/tmp/cclaw_$$(basename $$t).txt"; \
-		timeout 20 ./$$t > $$out 2>&1; rc=$$?; \
+		timeout $(TEST_TIMEOUT) ./$$t > $$out 2>&1; rc=$$?; \
 		if [ $$rc -eq 0 ]; then echo "PASS $$t (→ $$out)"; \
-		elif [ $$rc -eq 124 ]; then echo "TIMEOUT $$t (killed after 20s → $$out)"; fail=1; \
+		elif [ $$rc -eq 124 ]; then echo "TIMEOUT $$t (killed after $(TEST_TIMEOUT)s → $$out)"; tail -20 $$out | sed 's/^/  | /'; fail=1; \
 		else echo "FAIL $$t (exit $$rc → $$out)"; tail -20 $$out | sed 's/^/  | /'; fail=1; fi; \
 	done; \
 	if [ $$fail -eq 0 ]; then echo "All unit tests passed ($(words $(TEST_BIN)) suites)"; fi; \
@@ -228,7 +231,7 @@ smoke: $(SMOKE_BIN)
 		out="/tmp/cclaw_$$(basename $$t).txt"; \
 		timeout 20 ./$$t > $$out 2>&1; rc=$$?; \
 		if [ $$rc -eq 0 ]; then echo "PASS $$t (→ $$out)"; \
-		elif [ $$rc -eq 124 ]; then echo "TIMEOUT $$t (killed after 20s → $$out)"; fail=1; \
+		elif [ $$rc -eq 124 ]; then echo "TIMEOUT $$t (killed after 20s → $$out)"; tail -20 $$out | sed 's/^/  | /'; fail=1; \
 		else echo "FAIL $$t (exit $$rc → $$out)"; tail -20 $$out | sed 's/^/  | /'; fail=1; fi; \
 	done; \
 	if [ $$fail -eq 0 ]; then echo "Smoke passed ($(words $(SMOKE_BIN)) suites)"; fi; \

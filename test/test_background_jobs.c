@@ -272,6 +272,7 @@ static void test_cancel(void) {
     r = tool_cancel_handler(args, &ctx, &err);
     assert(r && !err);
     assert(strstr(r, "already gone") != NULL);
+    free(r);
     char sql[128];
     snprintf(sql, sizeof(sql),
              "SELECT status='done' AND resolved_by='job:cancelled'"

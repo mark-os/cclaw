@@ -90,7 +90,7 @@ static void test_split_columns_written(void) {
     asst.role = ROLE_ASSISTANT;
     asst.content = "Hello";
     asst.stop_reason = STOP_REASON_STOP;
-    asst.model = "deepseek/deepseek-v4-flash";
+    asst.model = "deepseek/deepseek-v4.1-flash";
     asst.usage_in = 100;
     asst.usage_out = 50;
     int64_t eid = entry_append_with_iteration(db, sid, &asst, 1);
@@ -103,7 +103,7 @@ static void test_split_columns_written(void) {
     sqlite3_bind_int64(stmt, 1, eid);
     if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); FAIL("no row"); }
     const char *model = (const char *)sqlite3_column_text(stmt, 0);
-    if (!model || strcmp(model, "deepseek/deepseek-v4-flash") != 0) { sqlite3_finalize(stmt); FAIL("model mismatch"); }
+    if (!model || strcmp(model, "deepseek/deepseek-v4.1-flash") != 0) { sqlite3_finalize(stmt); FAIL("model mismatch"); }
     if (sqlite3_column_int(stmt, 1) != 100) { sqlite3_finalize(stmt); FAIL("usage_in"); }
     if (sqlite3_column_int(stmt, 2) != 50) { sqlite3_finalize(stmt); FAIL("usage_out"); }
     sqlite3_finalize(stmt);

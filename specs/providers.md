@@ -38,6 +38,27 @@ serving-model-change notice (specs/error-handling.md). This is the operator-visi
 half of the same defect the apply-time probe covers for the agent
 (see [self-configuration.md](self-configuration.md)).
 
+### The seeded OpenRouter provider
+
+A new install talks to OpenRouter with `deepseek/deepseek-v4.1-flash` and this
+`providers.request_extra`:
+
+```json
+{"provider": {"ignore": ["StreamLake"], "zdr": true}}
+```
+
+- `zdr: true` restricts routing to endpoints with a Zero Data Retention
+  policy (OpenRouter's request-level switch; it can only tighten the account's
+  own setting). OpenRouter does not count in-memory prompt caching as
+  retention, so cached-prefix pricing still applies. A model with no such
+  endpoint fails with OpenRouter's error and the routing list moves on; to
+  use one anyway, the operator edits `request_extra` for the provider.
+- `ignore: ["StreamLake"]` routes around an upstream that returned tool calls
+  as markup.
+
+The seed is `INSERT OR IGNORE`: an existing install keeps its provider row,
+model and routing list as they are.
+
 ## Provider Fallback Chain
 
 Routing does not walk the `providers` table. Each request walks the agent's

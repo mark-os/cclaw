@@ -10,13 +10,17 @@
 -- request_extra: StreamLake keeps returning DeepSeek tool calls as raw DSML
 -- markup inside `reasoning` (two prod incidents, 2026-08-10 / 2026-08-19), so
 -- the seed routes around it with OpenRouter's documented provider params.
+-- zdr: route only to endpoints with a Zero Data Retention policy, so a new
+-- install does not send a person's conversations to a provider that keeps
+-- them. A model with no such endpoint fails with OpenRouter's own error; the
+-- operator lifts it by editing this provider's request_extra.
 INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority, request_extra)
-  VALUES('openrouter', 'https://openrouter.ai/api/v1', 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4-flash', 0,
-         '{"provider":{"ignore":["StreamLake"]}}');
+  VALUES('openrouter', 'https://openrouter.ai/api/v1', 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4.1-flash', 0,
+         '{"provider":{"ignore":["StreamLake"],"zdr":true}}');
 
 -- ═══ Default model ═══
 INSERT OR IGNORE INTO models(id, provider_name, model)
-  VALUES('openrouter/deepseek/deepseek-v4-flash', 'openrouter', 'deepseek/deepseek-v4-flash');
+  VALUES('openrouter/deepseek/deepseek-v4.1-flash', 'openrouter', 'deepseek/deepseek-v4.1-flash');
 
 -- ═══ Media preprocessing model (capability-routed, e.g. voice transcription) ═══
 -- Native Gemini endpoint (llm_build_url appends /models/<model>:generateContent).

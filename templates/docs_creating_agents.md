@@ -54,7 +54,7 @@ One JSON schema everywhere an agent is defined (`create_agent` arguments,
   "name": "Watcher",
   "description": "Watches the NWS feed and alerts on warnings",
   "system_prompt": "You are…",
-  "models": ["openrouter/deepseek/deepseek-v4-flash"],
+  "models": ["openrouter/deepseek/deepseek-v4.1-flash"],
   "sandbox_profile": "standard",
   "grants": { "tools": ["web_fetch"], "hosts": ["api.weather.gov"],
               "read_paths": [], "write_paths": [], "secrets": ["NWS_TOKEN"] },
@@ -73,7 +73,7 @@ then overlays the fields you set — "like Assistant but with X" is one field.
 
 Models are canonical ids exactly as `search_config` lists them — a bare model
 name is refused, since the same name can exist on more than one provider.
-Seeded models look like `openrouter/deepseek/deepseek-v4-flash`; models
+Seeded models look like `openrouter/deepseek/deepseek-v4.1-flash`; models
 registered through `request_config` look like `model@provider`.
 
 ## Creation caps — and the two-step when you hit them

@@ -166,7 +166,7 @@ static void test_live_content_response(void) {
     Config cfg = {0};
     cfg.provider.base_url = "https://openrouter.ai/api/v1";
     cfg.provider.api_key = (char *)key;
-    cfg.provider.model = "deepseek/deepseek-v4-flash";
+    cfg.provider.model = "deepseek/deepseek-v4.1-flash";
     cfg.provider.max_tokens = 64;
     cfg.context_window = 128000;
 
@@ -192,7 +192,7 @@ static void test_live_tool_call_roundtrip(void) {
     Config cfg = {0};
     cfg.provider.base_url = "https://openrouter.ai/api/v1";
     cfg.provider.api_key = (char *)key;
-    cfg.provider.model = "deepseek/deepseek-v4-flash";
+    cfg.provider.model = "deepseek/deepseek-v4.1-flash";
     cfg.provider.max_tokens = 256;
     cfg.context_window = 128000;
 

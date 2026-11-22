@@ -39,7 +39,7 @@ static void test_env_defaults(void) {
     Config *cfg = config_load(db);
     assert(cfg != NULL);
     assert(strcmp(cfg->provider.base_url, "https://openrouter.ai/api/v1") == 0);
-    assert(strcmp(cfg->provider.model, "deepseek/deepseek-v4-flash") == 0);
+    assert(strcmp(cfg->provider.model, "deepseek/deepseek-v4.1-flash") == 0);
     assert(cfg->provider.max_tokens == 4096);
     assert(cfg->context_window == 128000);
     assert(cfg->max_iterations == 25);

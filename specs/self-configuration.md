@@ -42,7 +42,7 @@ Design invariants:
    "routes":["telegram:12345"],
    "config":{"registered.key":"value-string"},
    "provider":{"provider":"openrouter","base_url":"https://openrouter.ai/api/v1"},
-   "models":[{"id":"deepseek/deepseek-v4-flash@openrouter","context_window":128000}]
+   "models":[{"id":"deepseek/deepseek-v4.1-flash@openrouter","context_window":128000}]
  },"reason":"shown to approver"}
 ```
 

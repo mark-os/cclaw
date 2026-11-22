@@ -162,7 +162,7 @@ static int seed_mock_provider(const char *url) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(seed,
             "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, default_model)"
-            " VALUES('openrouter', ?1, 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4-flash')",
+            " VALUES('openrouter', ?1, 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4.1-flash')",
             -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_text(s, 1, url, -1, SQLITE_STATIC);
         sqlite3_step(s);
@@ -170,8 +170,8 @@ static int seed_mock_provider(const char *url) {
     }
     sqlite3_exec(seed,
         "INSERT INTO models(id, provider_name, model, status, context_window)"
-        " VALUES('openrouter/deepseek/deepseek-v4-flash', 'openrouter',"
-        "        'deepseek/deepseek-v4-flash', 'healthy', 1000000)",
+        " VALUES('openrouter/deepseek/deepseek-v4.1-flash', 'openrouter',"
+        "        'deepseek/deepseek-v4.1-flash', 'healthy', 1000000)",
         NULL, NULL, NULL);
     sqlite3_close(seed);
     return 0;

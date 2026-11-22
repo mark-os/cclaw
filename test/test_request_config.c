@@ -594,12 +594,12 @@ static void test_bare_model_name_teaching(void) {
     tools_init(&reg);
     tool_request_config_register(&reg, &ctx);
 
-    /* 'deepseek/deepseek-v4-flash' is seeded, under a canonical id. */
+    /* 'deepseek/deepseek-v4.1-flash' is seeded, under a canonical id. */
     char *r = call_handler(&reg,
         "{\"changes\":{\"agent\":"
-        "{\"models\":[\"deepseek/deepseek-v4-flash\"]}}}");
+        "{\"models\":[\"deepseek/deepseek-v4.1-flash\"]}}}");
     assert(r && strstr(r, "bare model name"));
-    assert(r && strstr(r, "openrouter/deepseek/deepseek-v4-flash"));
+    assert(r && strstr(r, "openrouter/deepseek/deepseek-v4.1-flash"));
     free(r);
 
     /* Nothing like it registered → no invented suggestion. */
@@ -978,12 +978,12 @@ static void test_agent_models_effort(void) {
      * object without an id, duplicate id across the two spellings. */
     char *r = call_handler(&reg,
         "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"effort\":\"max\"}]}}}");
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"effort\":\"max\"}]}}}");
     assert(r && strstr(r, "effort 'max' must be one of"));
     free(r);
     r = call_handler(&reg,
         "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"reasoning\":\"high\"}]}}}");
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"reasoning\":\"high\"}]}}}");
     assert(r && strstr(r, "unknown agent.models key 'reasoning'"));
     free(r);
     r = call_handler(&reg,
@@ -996,15 +996,15 @@ static void test_agent_models_effort(void) {
     free(r);
     r = call_handler(&reg,
         "{\"changes\":{\"agent\":{\"models\":"
-        "[\"openrouter/deepseek/deepseek-v4-flash\","
-        "{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"effort\":\"low\"}]}}}");
+        "[\"openrouter/deepseek/deepseek-v4.1-flash\","
+        "{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"effort\":\"low\"}]}}}");
     assert(r && strstr(r, "duplicate entry"));
     free(r);
 
     /* Object form parks and applies: effort lands on the routing row. */
     r = call_handler(&reg,
         "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"effort\":\"high\"}]}}}");
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"effort\":\"high\"}]}}}");
     assert(r == NULL); /* parked */
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(db,
@@ -1021,7 +1021,7 @@ static void test_agent_models_effort(void) {
         " WHERE agent_name='test' ORDER BY pos", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                  "openrouter/deepseek/deepseek-v4-flash") == 0);
+                  "openrouter/deepseek/deepseek-v4.1-flash") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "high") == 0);
     assert(sqlite3_step(s) == SQLITE_DONE);
     sqlite3_finalize(s);
@@ -1038,7 +1038,7 @@ static void test_agent_models_effort(void) {
     ctx.current_tool_call_id = "ef2";
     r = call_handler(&reg,
         "{\"changes\":{\"agent\":{\"models\":"
-        "[\"openrouter/deepseek/deepseek-v4-flash\"]}}}");
+        "[\"openrouter/deepseek/deepseek-v4.1-flash\"]}}}");
     assert(r == NULL);
     assert(sqlite3_prepare_v2(db,
         "SELECT args_json FROM approvals WHERE session_id=?1"
@@ -1087,7 +1087,7 @@ static void test_agent_models_trim(void) {
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
     assert(sqlite3_exec(db, "UPDATE models SET context_window=100000"
-                            " WHERE id='openrouter/deepseek/deepseek-v4-flash';",
+                            " WHERE id='openrouter/deepseek/deepseek-v4.1-flash';",
                         NULL, NULL, NULL) == SQLITE_OK);
     int64_t sid = session_create(db, "t", "test", -1, 0);
     RequestConfigCtx ctx = {
@@ -1100,30 +1100,30 @@ static void test_agent_models_trim(void) {
     assert(session_set_state(db, sid, "tool_running") == 0);
 
     char *r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"trim_threshold\":0}]}}}");
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"trim_threshold\":0}]}}}");
     assert(r && strstr(r, "trim_threshold must be a positive integer"));
     free(r);
     r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"prune_target\":\"9\"}]}}}");
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"prune_target\":\"9\"}]}}}");
     assert(r && strstr(r, "prune_target must be a positive integer"));
     free(r);
     r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"trim_threshold\":5000,"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"trim_threshold\":5000,"
         "\"prune_target\":5000}]}}}");
     assert(r && strstr(r, "prune_target must be below its trim_threshold"));
     free(r);
     /* No threshold is half the window (100000): a target at it is refused in
      * the explorer's words; one below it passes the check. */
     r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"prune_target\":50000}]}}}");
-    assert(r && strstr(r, "error: The prune target for openrouter/deepseek/deepseek-v4-flash"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"prune_target\":50000}]}}}");
+    assert(r && strstr(r, "error: The prune target for openrouter/deepseek/deepseek-v4.1-flash"
                           " (50000 tokens) must be below its trim threshold, which is empty"
                           " and so half the model's window (50000 tokens). Lower the target,"
                           " or set a threshold above it."));
     free(r);
 
     r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"trim_threshold\":60000,"
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"trim_threshold\":60000,"
         "\"prune_target\":20000}]}}}");
     assert(r == NULL); /* parked */
     char *args = last_args(db, sid);
@@ -1136,7 +1136,7 @@ static void test_agent_models_trim(void) {
     /* Over the model's window: refused by the schema, said by name. */
     ctx.current_tool_call_id = "tr2";
     r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"trim_threshold\":200000}]}}}");
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"trim_threshold\":200000}]}}}");
     assert(r == NULL);
     args = last_args(db, sid);
     char *detail = NULL;
@@ -1150,12 +1150,12 @@ static void test_agent_models_trim(void) {
     /* cache_lifetime: seconds, applied; on an Anthropic model 300 or 3600,
      * said at request time, and 3600 when the entry leaves it out. */
     r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"cache_lifetime\":-5}]}}}");
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"cache_lifetime\":-5}]}}}");
     assert(r && strstr(r, "cache_lifetime must be a positive integer (seconds)"));
     free(r);
     ctx.current_tool_call_id = "tr3";
     r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4-flash\",\"cache_lifetime\":600}]}}}");
+        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"cache_lifetime\":600}]}}}");
     assert(r == NULL);
     args = last_args(db, sid);
     assert(request_config_changes_apply(db, "test", args, 0, 0, 0, NULL) == 0);

@@ -306,7 +306,7 @@ make clean        # remove build/
 ## Running
 
 ```bash
-# Minimal — just needs an API key (defaults to OpenRouter + DeepSeek V4 Flash)
+# Minimal — just needs an API key (defaults to OpenRouter + DeepSeek V4.1 Flash)
 export OPENROUTER_API_KEY="sk-or-v1-..."
 ./build/cclaw              # interactive CLI (default)
 ./build/cclaw -p "..."     # single-turn: send prompt, print response, exit
@@ -435,6 +435,6 @@ Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
 
 ## LLM Provider
 
-Default: OpenRouter → DeepSeek V4 Flash (`deepseek/deepseek-v4-flash`).
+Default: OpenRouter → DeepSeek V4.1 Flash (`deepseek/deepseek-v4.1-flash`).
 
 Three wire formats are implemented (`src/llm_payload.c`): OpenAI-compatible chat completions (OpenRouter, OpenAI, DeepSeek, Cerebras, …), Gemini-native `generateContent` (the direct Gemini provider — its OpenAI-compat endpoint is not used), and the Anthropic Messages API (the direct `anthropic` provider — thinking replay and prompt-cache markers there are scoped around the moving user context block; read the spec before touching either). See [specs/providers.md](specs/providers.md). Switch provider via the `providers` table (or an approval-gated `request_config` changes document with a `provider` section — see [specs/config-doc.md](specs/config-doc.md)); API keys are stored encrypted in the `secrets` table (scope `system`) via `save_secret`, referenced by name (`api_key_env`). Env var `OPENROUTER_API_KEY` is all you need to start.

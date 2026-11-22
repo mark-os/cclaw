@@ -30,7 +30,7 @@ static void test_defaults(void) {
     assert(cfg != NULL);
     assert(strcmp(cfg->provider.api_key, "sk-test-123") == 0);
     assert(strcmp(cfg->provider.base_url, "https://openrouter.ai/api/v1") == 0);
-    assert(strcmp(cfg->provider.model, "deepseek/deepseek-v4-flash") == 0);
+    assert(strcmp(cfg->provider.model, "deepseek/deepseek-v4.1-flash") == 0);
     assert(cfg->web_port == 8080);
     assert(cfg->max_iterations == 25);
     config_free(cfg);

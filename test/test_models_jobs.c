@@ -18,10 +18,10 @@ static void test_models_table(void) {
     /* Verify models row seeded */
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(db, "SELECT provider_name, model, context_window, status"
-        " FROM models WHERE id='openrouter/deepseek/deepseek-v4-flash'", -1, &s, NULL) == SQLITE_OK);
+        " FROM models WHERE id='openrouter/deepseek/deepseek-v4.1-flash'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "openrouter") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1), "deepseek/deepseek-v4-flash") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "deepseek/deepseek-v4.1-flash") == 0);
     assert(sqlite3_column_type(s, 2) == SQLITE_NULL);  /* NULL = use global default */
     assert(strcmp((const char *)sqlite3_column_text(s, 3), "healthy") == 0);
     sqlite3_finalize(s);

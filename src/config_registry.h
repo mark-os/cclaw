@@ -24,7 +24,7 @@ typedef struct {
 /* Provider fallbacks shared by the DB and env config loaders (the providers
  * table is the real source; these cover a missing/empty table). */
 #define CCLAW_DEF_BASE_URL       "https://openrouter.ai/api/v1"
-#define CCLAW_DEF_MODEL          "deepseek/deepseek-v4-flash"
+#define CCLAW_DEF_MODEL          "deepseek/deepseek-v4.1-flash"
 #define CCLAW_DEF_MAX_TOKENS     4096
 #define CCLAW_DEF_CONTEXT_WINDOW 128000
 

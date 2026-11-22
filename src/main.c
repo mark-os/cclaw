@@ -280,9 +280,9 @@ static void ensure_default_agent(const char *base_dir) {
          * agent with no list is unroutable by design (model-routing.md R2). */
         sqlite3_exec(proc_db(),
             "INSERT OR IGNORE INTO agent_models(agent_name, model_id, pos)"
-            " SELECT 'Assistant', 'openrouter/deepseek/deepseek-v4-flash', 0"
+            " SELECT 'Assistant', 'openrouter/deepseek/deepseek-v4.1-flash', 0"
             " WHERE EXISTS (SELECT 1 FROM models"
-            "               WHERE id='openrouter/deepseek/deepseek-v4-flash');",
+            "               WHERE id='openrouter/deepseek/deepseek-v4.1-flash');",
             NULL, NULL, NULL);
         /* Seed default tools as grants — plus the operator-deputy extras the
          * baseline deliberately lacks (Livermore haircut: created agents get

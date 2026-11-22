@@ -969,7 +969,7 @@ static void test_chat_approve_commands(void) {
     assert(g_resolve_approval_id == aid);
     assert(g_resolve_decision == APPROVAL_ONCE);
     assert(strcmp(g_resolve_decided_via, "channel:apch:9") == 0);
-    assert_reply_has(db, "apch", "shell_exec approval_required");
+    assert_reply_has(db, "apch", "(`shell_exec`)");
 
     /* Already decided (the spy left the row pending, so settle it as main.c
      * would): a second decision is refused with a message, not silence. */

@@ -212,8 +212,10 @@ static int intent_exec_decide(sqlite3 *db, const char *ch_name, const char *cid,
               (long long)id, tool, why);
     resolve_approval(id, d, decided_via, 0);
 
-    snprintf(msg, sizeof(msg), "%s #%lld (%s %s)%s",
-             deny ? "denied" : "approved", (long long)id, tool, why,
+    /* The tool name goes in backticks: its underscores are markdown emphasis
+     * to a channel that renders it. The park reason is for the log, not here. */
+    snprintf(msg, sizeof(msg), "%s #%lld (`%s`)%s",
+             deny ? "denied" : "approved", (long long)id, tool,
              (!deny && d == APPROVAL_ONCE) ? " — once" : "");
     reply(db, ch_name, cid, msg);
     return 1;

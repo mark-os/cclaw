@@ -1046,7 +1046,7 @@ int main(int argc, char *argv[]) {
     { ssize_t n = readlink("/proc/self/exe", g_exe_path, sizeof(g_exe_path) - 1);
       if (n > 0) g_exe_path[n] = '\0'; else g_exe_path[0] = '\0'; }
 
-    /* --run-tool: early intercept for sandboxed file tool child. No DB, no key,
+    /* --run-tool: early intercept for every sandboxed tool child. No DB, no key,
      * no config. The child reads its request from fd 3. */
     if (argc >= 2 && strcmp(argv[1], "--run-tool") == 0) return run_tool_main();
 

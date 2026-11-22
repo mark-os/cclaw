@@ -20,7 +20,10 @@
 #include "run_tool.h"
 #include "util.h"
 
-#define TOOL_MAX_OUTPUT (60 * 1024)  /* 60KB — fits in pipe buffer */
+/* The most result body the parent keeps from one child. It is the wire limit
+ * itself: a child never sends more (run_tool.h), and a smaller cap here cut
+ * the "full output is in <file>" note off the end of a spilled result. */
+#define TOOL_MAX_OUTPUT RUNTOOL_RESULT_MAX
 
 /* ── Child tracking ─────────────────────────────────────────────── */
 

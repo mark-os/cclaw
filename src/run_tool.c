@@ -533,6 +533,15 @@ static char *spill_large_result(const char *spill_path, const char *result,
     }
     if (cut >= len) return NULL;   /* fits — nothing to do */
 
+    /* It does not fit, so it is spilled — and what goes back must leave room
+     * for the note (RUNTOOL_SPILL_CUT_*). Re-cut the head to the lower marks. */
+    cut = len;
+    lines = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (result[i] == '\n' && ++lines >= RUNTOOL_SPILL_CUT_LINES) { cut = i + 1; break; }
+        if (i + 1 >= RUNTOOL_SPILL_CUT_BYTES) { cut = RUNTOOL_SPILL_CUT_BYTES; break; }
+    }
+
     /* The drain may already have streamed the full output here, in which case
      * rewriting from `result` would replace it with the truncated copy.
      * O_NOFOLLOW: a symlink planted at the path must fail the open, not
@@ -551,17 +560,15 @@ static char *spill_large_result(const char *spill_path, const char *result,
         close(fd);
     }
 
-    char suffix[PATH_MAX + 128];
+    char suffix[RUNTOOL_SPILL_NOTE_MAX];
     if (wrote)
         snprintf(suffix, sizeof(suffix),
                  "\n[truncated — showing first %d lines of %d. Full output: %s]",
-                 lines < RUNTOOL_RESULT_MAX_LINES ? lines : RUNTOOL_RESULT_MAX_LINES,
-                 total_lines > 0 ? total_lines : 1, spill_path);
+                 lines > 0 ? lines : 1, total_lines > 0 ? total_lines : 1, spill_path);
     else
         snprintf(suffix, sizeof(suffix),
                  "\n[truncated — showing first %d lines of %d; full output could not be saved]",
-                 lines < RUNTOOL_RESULT_MAX_LINES ? lines : RUNTOOL_RESULT_MAX_LINES,
-                 total_lines > 0 ? total_lines : 1);
+                 lines > 0 ? lines : 1, total_lines > 0 ? total_lines : 1);
 
     size_t slen = strlen(suffix);
     char *out = malloc(cut + slen + 1);

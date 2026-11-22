@@ -6,6 +6,7 @@
  * binary, so the wire is a struct, not JSON (AGENTS.md).
  */
 
+#include <limits.h>
 #include "sandbox.h"
 #include "tool_args.h"
 
@@ -38,6 +39,16 @@
  * it a second time — overwriting the full output with the truncated copy. */
 #define RUNTOOL_RESULT_MAX       (64 * 1024)
 #define RUNTOOL_RESULT_MAX_LINES 2000
+
+/* Where the child cuts when it spills. Its result is the head PLUS a note
+ * naming the file, and that whole thing has to stay under both limits above:
+ * cutting at the limits themselves made the note push it over, so the parent
+ * truncated a second time and wrote the head over the full output (line
+ * limit), or dropped the note in its drain cap (byte limit). The note is a
+ * path and a sentence; it starts with a newline. */
+#define RUNTOOL_SPILL_NOTE_MAX   (PATH_MAX + 256)
+#define RUNTOOL_SPILL_CUT_BYTES  (RUNTOOL_RESULT_MAX - RUNTOOL_SPILL_NOTE_MAX)
+#define RUNTOOL_SPILL_CUT_LINES  (RUNTOOL_RESULT_MAX_LINES - 2)
 
 /* The socketpair fd the request blob arrives on (and the result departs on)
  * in the re-exec'd child. */

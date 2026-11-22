@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "update.h"
 #include "loop.h"
@@ -71,6 +72,48 @@ void turn_end_trim(int64_t session_id, const char *agent_name) {
 
 static void run_output(int64_t session_id, AdvanceOutput out);
 
+/* ── The terminal shows every assistant message, as it lands ───────────────
+ * A turn used to print only its last message, so anything the model said
+ * alongside tool calls — often the actual answer, before it went on to tidy
+ * up — never reached the person. The terminal is the one surface where
+ * showing each message costs nothing; channels keep their delivery mode.
+ * Cursor and last-printed text are per-process scratch for the turn in
+ * flight: nothing here is state the database needs. */
+static int64_t g_cli_printed_id;     /* newest assistant entry already printed */
+static char *g_cli_printed_text;     /* its text, to recognise it at turn end */
+
+static void cli_remember_printed(int64_t id, const char *text) {
+    if (id > g_cli_printed_id) g_cli_printed_id = id;
+    free(g_cli_printed_text);
+    g_cli_printed_text = text ? strdup(text) : NULL;
+}
+
+/* Print the root session's assistant text of the current turn that is not on
+ * the terminal yet. Called when a model reply arrives with tool calls. */
+static void cli_print_new_assistant_text(int64_t session_id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(proc_db(),
+            "SELECT id, content FROM entries"
+            " WHERE session_id=?1 AND id>?2 AND type='assistant_message'"
+            "   AND content IS NOT NULL AND trim(content, ' ' || char(9,10,13)) != ''"
+            "   AND turn_id = (SELECT turn_id FROM entries WHERE session_id=?1"
+            "                  ORDER BY id DESC LIMIT 1)"
+            "   AND CASE WHEN json_valid(data) THEN json_extract(data,'$.replaces') END IS NULL"
+            " ORDER BY id;", -1, &st, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_int64(st, 1, session_id);
+    sqlite3_bind_int64(st, 2, g_cli_printed_id);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *text = (const char *)sqlite3_column_text(st, 1);
+        if (!text) continue;
+        cli_indicator_clear();
+        printf("%s\n", text);
+        cli_remember_printed(sqlite3_column_int64(st, 0), text);
+    }
+    sqlite3_finalize(st);
+    fflush(stdout);
+}
+
 void run_advance(int64_t session_id) {
     int max_iter = session_max_iter(session_id);
     /* Tag every log line from here — including advance_session's own state
@@ -121,6 +164,11 @@ static void run_output(int64_t session_id, AdvanceOutput out) {
          * rename, update_agent, agent switch). */
         if (proc_tool_setup())
             agent_setup_refresh_caps(proc_tool_setup(), proc_db(), out.agent_name);
+        /* What the model said with these calls goes on the terminal before
+         * the calls' own progress lines (the cursor makes a re-entry for the
+         * same batch print nothing). */
+        if (!proc_is_daemon() && session_id == proc_cli_session())
+            cli_print_new_assistant_text(session_id);
         int async_in_flight = 0;
         int stop = 0;
         for (int i = 0; i < out.tc_count && !stop; i++) {
@@ -231,8 +279,14 @@ void deliver_response(int64_t session_id) {
          * routes its result to the parent's tool_call (advance.c), not stdout. */
         if (session_id != proc_cli_session()) return;
         cli_indicator_clear();
+        /* The turn's last word — unless it is a message already printed
+         * mid-turn (a final reply with no text falls back to the newest
+         * earlier one, which is on the terminal already). */
         char *text = get_response_text(proc_db(), session_id);
-        if (text) { printf("%s\n", text); free(text); }
+        if (text && !(g_cli_printed_text && strcmp(text, g_cli_printed_text) == 0))
+            printf("%s\n", text);
+        free(text);
+        cli_remember_printed(0, NULL);   /* the next turn starts clean */
         proc_set_cli_turn_active(0);
         return;
     }

@@ -357,8 +357,10 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
   is at the terminal, so nobody decides: the parked call is answered "waiting
   for the operator, do not ask again this turn", the turn finishes with a
   reply that names the approval, and the request stays open. stderr prints
-  the id, the summary and the three commands below; stdout is the reply
-  alone. The script decides, then continues the same session:
+  the id, the summary and the three commands below; stdout carries the
+  turn's assistant messages — every one, as it lands, with the dimmed tool
+  lines between them, not only the last. The script decides, then continues
+  the same session:
 
   ```bash
   cclaw -p "fetch example.com" ; echo $?       # 3 = finished, approval(s) waiting

@@ -24,6 +24,16 @@ edges also ship mid-turn via `advance_deliver_iteration()`.
 | `quiescent` | final assistant message | turn end **iff** the subtree is quiescent — the default |
 | `explicit` | nothing auto-ships | — |
 
+**The terminal is not an edge.** The CLI (`cclaw`, and `cclaw -p`) prints
+every content-bearing assistant message of the root session as it lands,
+before the tool lines of the calls it came with, and the final message at
+turn end — the behaviour of `iteration`, fixed, with no setting
+(`cli_print_new_assistant_text`, `deliver_response`, `src/loop.c`). A turn's
+last message alone often left out the answer: the model says it, then goes on
+working. Sub-agent sessions print nothing there; their result reaches the
+root as a tool result. Channel chats keep the policies above — new direct
+chats default to the final message, which is what most channels want.
+
 **No policy×edge legality matrix** — every policy is valid on every edge;
 costs are documented, not legislated (`iteration` on a parent edge costs the
 parent one LLM turn per message; `explicit` on a parent edge means the child

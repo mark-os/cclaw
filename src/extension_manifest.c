@@ -225,7 +225,10 @@ static int check_handlers(sqlite3 *db, const char *manifest, const char *bundle_
             rc = -1; break;
         }
         char fp[PATH_MAX];
-        snprintf(fp, sizeof(fp), "%s/%s", bundle_dir, h);
+        if (snprintf(fp, sizeof(fp), "%s/%s", bundle_dir, h) >= (int)sizeof(fp)) {
+            xerr(err_out, "handler path is too long");
+            rc = -1; break;
+        }
         struct stat sb;
         if (stat(fp, &sb) != 0 || !S_ISREG(sb.st_mode)) {
             if (err_out) {

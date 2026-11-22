@@ -318,9 +318,11 @@ static void ensure_default_agent(const char *base_dir) {
          * over, and no C tracks it (plan/projects/onboarding.md). They sit in
          * AGENT rather than a block of their own because an agent cannot
          * delete a block — an emptied one would ride the prompt for good. The
-         * built-in prompt's "Requests First" section says how to treat them. */
+         * first note is the rule for the rest, so the base prompt says
+         * nothing about a first run and the rule leaves with the checklist. */
         if (agent_block > 0) {
             static const char *const notes[] = {
+                "Setup: the notes here that begin \"Setup:\" are a first-run checklist, a ritual and never a gate. The person's request comes first; take one when the conversation has room. Delete a note when it is done, or when the person says skip or later — that is an answer, not a fact to record. Delete this note when no other is left.",
                 "Setup: you have no name yet. Introduce yourself as CClaw and ask what they would like to call you — they choose; do not suggest a name. Then replace this note with your name and one line on the character you will have.",
                 "Setup: learn what to call the person and their timezone. Save to USER.",
                 "Setup: offer a channel (Telegram, Discord or WhatsApp) so they can reach you from a phone — read the cclaw-channels skill first, and call it done only when a message sent through the channel has arrived. Offer to keep running after the terminal closes: install_service does it on this machine once they approve; another machine is the installing-cclaw skill.",

@@ -107,6 +107,48 @@ int main(void) {
     free(p);
     printf("PASS\n");
 
+    /* A session's tool filter narrows Your Tools the way it narrows the
+     * payload: a granted tool the filter drops is not listed at all. */
+    printf("  session_filter... ");
+    assert(sqlite3_exec(db,
+        "INSERT OR REPLACE INTO grants(agent_name, kind, value, source) VALUES"
+        " ('Tester','tool','alpha_tool','operator'),"
+        " ('Tester','tool','beta_tool','operator');", NULL, NULL, NULL) == SQLITE_OK);
+    int64_t fsid = session_create(db, NULL, "Tester", -1, 0);
+    assert(fsid > 0);
+    {
+        Config cfg = {0};
+        cfg.context_window = 128000;
+        p = agent_build_system_prompt(db, "Tester", fsid, "/srv/agents", &cfg);
+        assert(p && strstr(p, "- alpha_tool") && strstr(p, "- beta_tool"));
+        free(p);
+        char sql[160];
+        snprintf(sql, sizeof(sql),
+                 "UPDATE sessions SET tool_filter='[\"beta_tool\"]' WHERE id=%lld;",
+                 (long long)fsid);
+        assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+        p = agent_build_system_prompt(db, "Tester", fsid, "/srv/agents", &cfg);
+        assert(p && strstr(p, "- beta_tool") && !strstr(p, "alpha_tool"));
+        free(p);
+    }
+    printf("PASS\n");
+
+    /* The Memory Blocks header says who maintains them: an agent holding a
+     * memory tool is told it does; one holding none is told it cannot. */
+    printf("  memory_header... ");
+    assert(memory_block_create(db, "Tester", "NOTES", "test block", 5000, "system") > 0);
+    p = build(db, "Tester");
+    assert(strstr(p, "## Memory Blocks") && strstr(p, "maintained for you"));
+    assert(!strstr(p, "You keep these current yourself"));
+    free(p);
+    assert(sqlite3_exec(db,
+        "INSERT INTO grants(agent_name, kind, value, source) VALUES"
+        " ('Tester','tool','memory_note_add','operator');", NULL, NULL, NULL) == SQLITE_OK);
+    p = build(db, "Tester");
+    assert(strstr(p, "You keep these current yourself") && !strstr(p, "maintained for you"));
+    free(p);
+    printf("PASS\n");
+
     /* Installed, not tracked: a sync copies the build's text into value once
      * and never again, so a later build's default leaves it alone. */
     printf("  seeded_once... ");

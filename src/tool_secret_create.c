@@ -48,10 +48,10 @@ static int random_from_charset(char *out, size_t len, const char *charset, size_
         /* `want` never exceeds what is left, so `i < want` alone bounds the
          * fill. Do not add `&& filled < len`: it is redundant, and GCC 13.3 on
          * aarch64 at -O2 (Ubuntu 24.04) then deletes this loop. Its dom2 pass
-         * folds the entry test `(len != filled) & (filled < len)` to false —
-         * two plain integers, no memory involved; the same code is clean
-         * under UBSan and ASan. test_tool_secret_create hangs when it
-         * happens. */
+         * folds the entry test `(len != filled) & (filled < len)` to false:
+         * relation_fold_and_or negates a reversed-operand relation where it
+         * should swap it (fixed on GCC trunk as PR125774; GCC 12 and 14 are
+         * not affected). test_tool_secret_create hangs when it happens. */
         for (size_t i = 0; i < want; i++) {
             if (buf[i] >= limit) continue;   /* reject: would bias the distribution */
             out[filled++] = charset[buf[i] % clen];

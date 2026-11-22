@@ -96,10 +96,14 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
      * prompt is rebuilt every llm_req, byte-stable until a grant changes —
      * and a mid-session change busting the provider cache once is correct.
      * "Requestable" = registered-but-ungranted; shown ≡ granted holds for
-     * the payload, this section is how the agent learns what to ask for. */
+     * the payload, this section is how the agent learns what to ask for.
+     * A granted tool the session's filter narrows away (a worker's spawn
+     * filter, a chat's) is in neither list: the payload omits it, and no
+     * request could bring it back. */
     char *tool_section = NULL;
     size_t tool_len = 0;
     {
+        char *filter = session_effective_tool_filter(db, session_id);
         const char *tsql =
             "WITH visible AS ("
             "  SELECT t.name, COALESCE(t.description,'') AS description,"
@@ -112,7 +116,8 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
             ")"
             "SELECT COALESCE((SELECT char(10)||char(10)||'## Your Tools'||char(10)||"
             "    group_concat('- '||name||' — '||description, char(10) ORDER BY name)"
-            "  FROM visible WHERE granted), '')"
+            "  FROM visible WHERE granted"
+            "    AND (?2 IS NULL OR name IN (SELECT value FROM json_each(?2)))), '')"
             " || COALESCE((SELECT char(10)||char(10)||'## Requestable Tools'||char(10)||"
             "    'Registered but not granted to you. Ask with request_config'"
             "    ||' (changes.grants.tools) and a reason; an operator approves.'||char(10)||"
@@ -121,6 +126,7 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
         sqlite3_stmt *ts;
         if (sqlite3_prepare_v2(db, tsql, -1, &ts, NULL) == SQLITE_OK) {
             sqlite3_bind_text(ts, 1, agent_name, -1, SQLITE_STATIC);
+            if (filter) sqlite3_bind_text(ts, 2, filter, -1, SQLITE_STATIC);
             if (sqlite3_step(ts) == SQLITE_ROW) {
                 const char *txt = (const char *)sqlite3_column_text(ts, 0);
                 if (txt && txt[0]) {
@@ -130,13 +136,17 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
             }
             sqlite3_finalize(ts);
         }
+        free(filter);
     }
 
     /* Skill index (progressive disclosure): names+descriptions+locations
      * only — the model file_reads a skill body when a task matches. */
     char *skills = skills_index_build(db, agents_dir, agent_name);
 
-    /* Render memory blocks section — single query (S7/group 5c) */
+    /* Render memory blocks section — single query (S7/group 5c). The header
+     * carries the guidance for the memory tools as a family, and says the
+     * true thing for this agent: one holding no memory tool is told the
+     * blocks are maintained for it (plan: system-prompt-composition). */
     char *mb_section = NULL;
     size_t mb_len = 0;
     {
@@ -148,6 +158,13 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
             "  WHERE a.agent_name=?1 AND b.placement='system' ORDER BY b.id"
             ")"
             "SELECT char(10) || char(10) || '## Memory Blocks' || char(10) ||"
+            "       CASE WHEN EXISTS (SELECT 1 FROM grants g WHERE g.agent_name=?1"
+            "                 AND g.kind='tool' AND g.value LIKE 'memory\\_%' ESCAPE '\\'"
+            "                 AND (g.expires_at IS NULL OR g.expires_at > unixepoch()))"
+            "            THEN 'What you know and who you are. You keep these current yourself,'"
+            "                 || ' with the memory tools: a note is written for your future self.'"
+            "            ELSE 'What you know and who you are. They are maintained for you;'"
+            "                 || ' you cannot change them.' END || char(10) ||"
             "       group_concat(block_text, '' ORDER BY id)"
             "FROM per_block;";
         if (sqlite3_prepare_v2(db, mb_sql, -1, &mbs, NULL) == SQLITE_OK) {

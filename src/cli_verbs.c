@@ -51,7 +51,8 @@ static sqlite3 *verb_db_open(void) {
  * operator's way to answer a parked request without a terminal prompt, a
  * channel or the dashboard. It records the decision in approval_decisions,
  * the same queue the dashboard writes; the event loop that owns the work
- * carries it out — a running daemon at its next DB poll (30 s), otherwise the next
+ * carries it out — a running daemon at once (nudged over its wake FIFO, with
+ * its DB poll as the fallback), otherwise the next
  * `cclaw` run, which is what makes a scripted `-p` session approvable:
  *   cclaw -p "..."          → "approval #7 left pending (session 3)", exit 3
  *   cclaw approvals approve 7

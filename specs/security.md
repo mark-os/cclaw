@@ -342,7 +342,7 @@ This means `--auto-approve` never creates permanent grants — only time-bounded
 
 ### Non-interactive mode
 
-When stdin is not a tty (`-p` piped mode) nobody can be asked, and nothing runs unapproved: the parked call is answered "waiting for the operator" (the daemon's block-window answer, given at once), the request stays `pending`, and the run exits 3 after its reply. `cclaw approvals approve|deny <id>` records the decision in `approval_decisions` — the queue the dashboard writes — and the event loop that next runs (a daemon's tick, or the next `cclaw` run before its turn) carries it out as a late decision. A terminal prompt only ever asks about a call that is parked now; a request left open by an earlier run is `cclaw approvals`' to answer. `auto:no-approver` remains the denial for a daemon session with no channel to ask on.
+When stdin is not a tty (`-p` piped mode) nobody can be asked, and nothing runs unapproved: the parked call is answered "waiting for the operator" (the daemon's block-window answer, given at once), the request stays `pending`, and the run exits 3 after its reply. `cclaw approvals approve|deny <id>` records the decision in `approval_decisions` — the queue the dashboard writes — and the event loop that next runs carries it out as a late decision: a running daemon at once (the verb nudges its wake FIFO; the DB poll is the fallback), otherwise the next `cclaw` run before its turn. A terminal prompt only ever asks about a call that is parked now; a request left open by an earlier run is `cclaw approvals`' to answer. `auto:no-approver` remains the denial for a daemon session with no channel to ask on.
 
 ## Attack Scenarios
 

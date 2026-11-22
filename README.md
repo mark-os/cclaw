@@ -25,62 +25,51 @@ The first run creates `~/.cclaw/` and a default agent named `Assistant`, and put
 
 ## Architecture
 
-The core is an agent loop built on SQLite. All state lives in one database file (`cclaw.db`): sessions, messages, config, memory, secrets, queues. Each step of a turn reads that state and decides what to do next. Everything else is a layer on top of the core, with a clear boundary:
-
-| Layer | What it adds | What it needs from the host |
-|-------|--------------|-----------------------------|
-| Core | Agent loop, SQLite, config and self-reconfiguration, LLM requests | A kernel, a filesystem, a CA bundle for HTTPS |
-| Tools | File tools, `web_fetch`, JavaScript (`js_eval`, extension tools) | Nothing more |
-| Containment | A sandbox around code cclaw cannot inspect | Linux user namespaces today |
-| Shell | Arbitrary programs (`shell_exec`) | Containment, or the operator's explicit `host` opt-out |
-| Daemon | Channels, cron, webhooks, multi-agent | `fork`/`exec` of the cclaw binary, signals |
-
-A host that lacks what a layer needs loses that layer and nothing below it. (As built today, the tools layer still leans on containment too: every tool call, not just the shell, runs in the sandbox.) [specs/portability.md](specs/portability.md) describes the layers and where they are heading.
-
-The process uses threads for concurrency and fork+exec for isolation. The main thread runs a poll loop — no callbacks, no async. LLM calls are blocking HTTP requests on worker threads. Each sandboxed tool call runs in its own short-lived child process.
+All state lives in one SQLite file, `cclaw.db`: sessions, messages, config, memory, secrets and queues. One binary plays every role.
 
 ```
-Main process
-├─ main thread: poll loop (stdin, wake fd, signals, worker notifications,
-│                periodic DB tick for cron and recovery)
-├─ LLM worker threads (1–N elastic, each owns sqlite3* + CURL*)
-│    blocking HTTP calls, connection reuse, 30s idle timeout
-├─ tool threads (DB-only tools: one short-lived thread per call)
+cclaw
+├─ main thread: one poll() loop; reads a session from the database, takes the next step
+├─ LLM worker threads   up to 4 by default; each keeps its own database handle and curl
+│                       connection, and an idle one exits after 30 s
+├─ tool threads         one short-lived thread per database-only tool call
+├─ civetweb threads     daemon: dashboard, webhooks
 │
-├─ fork+exec → cclaw --run-tool   (one per sandboxed tool call: file, web, JS, shell)
-├─ fork+exec → cclaw --channel    (daemon: one long-lived runner per channel)
-└─ civetweb threads               (daemon: webhooks, dashboard)
+├─ fork+exec → cclaw --run-tool    one per sandboxed tool call, scheduled script or hook;
+│    └─ fork → sandboxed child     file tools need only the first process; web, JS and
+│         ├─ net_shim              shell fork once more, add a loopback proxy, and the
+│         └─ /bin/sh …             shell runs the program inside
+└─ fork+exec → cclaw --channel     daemon: one long-lived runner per channel
 ```
 
-The database runs in WAL mode, so threads and processes read and write it concurrently without blocking each other.
+**One plain loop.** The main thread runs a `poll()` loop, not a callback framework: it sleeps until the kernel says one of a handful of file descriptors has something to read, and uses no CPU while it waits. Anything slow happens elsewhere as an ordinary blocking call — a model request on a worker thread, an untrusted tool in a child process — which writes its result to the database and wakes the loop through a pipe. The loop keeps almost nothing in memory: each time it is woken for a session, it reads that session's state from the database and takes one next step. A restart picks up from what the database says. The price is that replies arrive whole rather than streamed word by word, and each slow thing needs a thread or a process of its own.
 
-**The operating system is a friend, not an obstacle.** CClaw leans on what the kernel and SQLite already do well, instead of rebuilding it in user space:
+**The operating system is a friend, not an obstacle.** CClaw uses what the kernel and SQLite already do well instead of rebuilding it:
 
 - *Isolation is a process.* Every sandboxed tool call is a fresh `fork`+`exec` of the same binary inside its own namespaces. A crash, a runaway loop or a hostile script ends that child and nothing else; the agent gets an error result and carries on.
-- *A process is cheap.* The kernel maps one copy of the binary's code and shares it between every child, so a new sandbox pays only for the pages it writes — a few hundred kilobytes — and starts in a few milliseconds (numbers under [Benchmarks](#benchmarks)).
-- *Concurrency is the kernel's and SQLite's job.* Sandboxes run in parallel on as many cores as the machine has. Each thread holds its own handle on the write-ahead-logged database, so readers and the writer do not wait on each other and there is no lock scheme of ours to get wrong. The worker threads that build model requests and store the replies memory-map the file, so they read the pages the kernel already has cached.
+- *A process is cheap.* Every child runs the same binary, so the kernel shares one copy of its code between them all. A new sandbox pays only for the pages it writes — a few hundred kilobytes — and starts in a few milliseconds (see [Benchmarks](#benchmarks)).
+- *Concurrency is the kernel's and SQLite's job.* Threads and processes run in parallel on every core. The database uses a write-ahead log and every handle memory-maps it, so readers do not wait for the writer and all of them read the same pages from the kernel's cache. There is no lock scheme of ours to get wrong.
+- *Connections are kept.* Each LLM worker reuses its open connection to the provider, so back-to-back requests skip the TLS handshake — which matters on a slow ARM board.
 
-The same shape works on anything that behaves like Linux, from a 128 MB plug computer to a server.
+This has limits you can hit — an 8 MB heap for each JavaScript run, per-call timeouts, 64 KB of tool output before the rest goes to a file. They are listed, with what the agent sees, in [docs/architecture.md](docs/architecture.md#limits-you-can-hit).
 
-**CLI mode** (default): one process with the worker thread pool. No daemon needed.
-
-**Daemon mode** (`--daemon`): adds channels (Telegram, Discord, WhatsApp, webhooks), cron, the web dashboard, and many agents working at once.
+**CLI mode** (default) is one process with the worker threads; no daemon needed. **Daemon mode** (`--daemon`) adds channels (Telegram, Discord, WhatsApp, webhooks), cron, the web dashboard, and many agents working at once.
 
 ## Secure
 
 What an agent can reach is decided in two places: its **sandbox profile** (containment — what the sandbox lets a program touch) and its **grants** (authority — which tools, hosts and paths it may use). A missing grant means no. Agents ask for more with `request_config`, and a human approves — at the terminal prompt, with a button or `/approve` in a chat channel, on the dashboard, or with `cclaw approvals`. A plain yes always grants the least that works; a standing grant has to be asked for by name ("always").
 
 - **Sandboxed tool calls** — every tool call runs in a forked child inside Linux namespaces (user, mount, network). The child sees its workspace read-write and system directories read-only; anything else needs a path grant. `cclaw.db` and `.cclaw_key` are hidden from the child under every sandboxed profile.
-- **Network** — the sandbox has only a loopback interface. Programs reach the network through `HTTP_PROXY`/`HTTPS_PROXY`, which point at a proxy on that loopback. The proxy checks the agent's host allowlist (default-deny); a denied host gets a `403`, and the tool result names the blocked host. Programs that ignore the proxy variables have no network at all. `git` over ssh is preconfigured; plain `ssh` needs `-o ProxyCommand="$CCLAW_CONNECT %h %p"`. See [specs/shell-networking.md](specs/shell-networking.md).
+- **Network** — the sandbox has only a loopback interface. Programs reach the network through `HTTP_PROXY`/`HTTPS_PROXY`, which point at a proxy on that loopback. The proxy checks the agent's host allowlist (default-deny); a denied host gets a `403`, and the tool result names the blocked host. Programs that ignore the proxy variables have no network at all. `git` over ssh is preconfigured; plain `ssh` needs `-o ProxyCommand="$CCLAW_CONNECT %h %p"`.
 - **Sandbox profiles** — `standard` (the default), `restricted` (no network, ever), and `host` (no sandbox at all, for machines that are already isolated or cannot run one). A sandboxed profile that cannot set up its sandbox refuses to run the tool rather than running it unsandboxed. See [specs/sandbox-profiles.md](specs/sandbox-profiles.md).
 - **Secrets** — encrypted at rest in `cclaw.db` (ChaCha20-Poly1305, via Monocypher). The model refers to a secret as `{{SECRET:NAME}}`; cclaw substitutes the real value just before the tool runs, so the value never enters the context window or the logs. An agent may use only the secrets granted to it. A scanner redacts credential-shaped text from tool results and user messages.
 - **Resource limits** — `setrlimit` caps the process count (and, under `restricted`, CPU time) to bound a runaway. Address space is deliberately *not* capped: `RLIMIT_AS` limits reservations rather than usage, which stops `go`/`node`/`rustc` from starting without bounding real memory.
 
-The full model is in [specs/security.md](specs/security.md) and [specs/trust.md](specs/trust.md).
+The full model, including how the proxy and the namespaces work, is in [specs/security.md](specs/security.md).
 
 ## Portable
 
-The goal is to run on the widest range of old, embedded and very cheap Linux devices, and later on platforms that bring their own sandbox, such as Android.
+The goal is to run on the widest range of old, embedded and very cheap Linux devices, and later on platforms that bring their own sandbox, such as Android. CClaw is built in layers — core, tools, containment, shell, daemon — and a host that lacks what one layer needs (user namespaces, say) loses that layer and nothing below it; [specs/portability.md](specs/portability.md) describes them.
 
 CClaw vendors everything except libcurl:
 
@@ -140,7 +129,7 @@ The baseline list is the `agent_default_tools` config key. File tools are worksp
 
 ## Extensible
 
-Agents extend themselves at runtime, and QuickJS is how: C provides the peanut butter, JavaScript the jelly on top. An **extension** is the unit of sharing: a directory with an `extension.json` manifest declaring any mix of tools, a channel, scripts, [skills](specs/skills.md), agents and config keys, plus the JavaScript handler files it points to. The code lives in files; the database stores only definitions and paths. The lifecycle:
+Agents extend themselves at runtime, and QuickJS is how: C provides the peanut butter, JavaScript the jelly on top. An **extension** is the unit of sharing: a directory with an `extension.json` manifest declaring any mix of tools, a channel, scripts, skills, agents and config keys, plus the JavaScript handler files it points to. The code lives in files; the database stores only definitions and paths. The lifecycle:
 
 1. **Draft** — the agent writes the bundle in its private workspace (`workspace/extensions/<name>/`) and tests handlers with `js_eval`. Personal skills need no bundle at all — drop a `SKILL.md` in `agents/<name>/skills/`.
 2. **Promote** (`extension_promote`) — validates the manifest, and after the operator approves, copies the bundle into the shared store (`~/.cclaw/extensions/<name>/`, which agents cannot modify) and registers its contents. Still visible only to the owning agent.
@@ -263,10 +252,11 @@ Sub-agents are sessions inside the one agent process; only tool calls fork. A to
 
 ## Documentation
 
-- [docs/](docs/) — architecture, configuration, debugging, templates
-- [specs/](specs/) — detailed reference (schema, security, sandbox profiles, portability, providers, extensions, operations, …)
-- [AGENTS.md](AGENTS.md) — project ethos, coding conventions, build instructions
-- Running agents find their own documentation as built-in skills (the `cclaw-docs` extension, from `templates/docs_*.md`)
+- [docs/architecture.md](docs/architecture.md) — the full architecture: processes, threads, the main loop, how they talk, who touches the database, and the limits you can hit.
+- [specs/](specs/) — the detailed reference. Start with `security.md`, `sandbox-profiles.md`, `extensions.md`, `memory.md`, `operations.md` and `schema.md`.
+- [docs/](docs/) — operator how-tos: configuration, debugging, templates.
+- [AGENTS.md](AGENTS.md) — project ethos, coding conventions, build instructions.
+- A running agent has its own copy of the user-facing material as built-in skills it can read (the `cclaw-docs` extension, built from `templates/docs_*.md`).
 
 ## LOC
 

@@ -191,7 +191,7 @@ field order. Fields by tier (additive over file):
 - web/shell/js: `host_rules[]` (exact/suffix), `deny_rules[]` (sensitivity labels), `agent_dir` (for the proxy socket; the broker partitions grants into host/CIDR rules at `proxy_bind`)
 - shell: `command` (with secrets already interpolated by the daemon parent), `secrets[]` (minimal name/value set for env injection)
 - shell/web/js: `timeout` — the call's budget in seconds. Each tool takes a
-  `timeout` argument (defaults 60 shell / 60 web / 120 js), clamped by the
+  `timeout` argument (defaults 30 shell — config `shell_timeout` — / 60 web / 120 js), clamped by the
   parent to `TOOL_TIMEOUT_MAX_SEC` (600); the daemon's own backstop deadline is
   set margin-seconds past it so the broker's teardown wins in the normal case
 - file/web/js: `params[]` — the tool's arguments, pre-extracted by the parent

@@ -27,7 +27,7 @@ tool with selectable delivery (`background: true`).
 |---|---|---|---|
 | `EXEC_INLINE` | event-loop thread | control-flow tools (launch_agent, check_session, cancel, request_config, cron/extension/agent tools, channel_send) | synchronous unless the recipe's `null_kind` says otherwise |
 | `EXEC_THREAD` | detached thread | DB/session-only tools (memory_*, cron_list/remove, db_query, search_config/models) | call already `running`; completion writes the result |
-| `EXEC_SANDBOX` | fork+exec `--run-tool` child (`CHILD_MAX` 48) | file / shell / web / js tiers | result pipe drained by the poll loop; reap completes the call |
+| `EXEC_SANDBOX` | fork+exec `--run-tool` child (`CHILD_MAX` 48) | file / shell / web / js tiers | result socket (a socketpair on fd 3) drained by the poll loop; reap completes the call |
 
 Two kinds of `--run-tool` child have no tool call in front of them and share
 the JS-tier vehicle (`script_child_spawn`, dispatch.c): a scheduled script

@@ -446,9 +446,16 @@ function onInteraction(d) {
     // "appr:<approval_id>:<yes|once|always|no>"
     var parts = customId.substring(5).split(":");
     var approvalId = parseInt(parts[0], 10);
-    var decision = parts[1] || "no";
+    var decision = parts[1] || "";
     var toast = (decision === "yes" || decision === "always") ? "Approved" :
-                decision === "once" ? "Approved once" : "Denied";
+                decision === "once" ? "Approved once" :
+                decision === "no" ? "Denied" : null;
+    // A word that is not an answer decides nothing (the daemon agrees): clear
+    // the spinner and leave the card and its buttons as they are.
+    if (!toast) {
+        interactionRespond(d, { type: CALLBACK_DEFERRED_UPDATE });
+        return;
+    }
 
     // Interaction ids are unique per click — free idempotency via the
     // channel_events UNIQUE(channel_name, external_id) constraint.

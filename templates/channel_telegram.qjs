@@ -370,7 +370,14 @@ function handleApprovalCallback(fromId, data, cbq) {
     var decision = parts[1];
 
     var toast = (decision === "yes" || decision === "always") ? "Approved" :
-                decision === "once" ? "Approved once" : "Denied";
+                decision === "once" ? "Approved once" :
+                decision === "no" ? "Denied" : null;
+    // A word that is not an answer decides nothing (the daemon agrees): clear
+    // the spinner and leave the card and its buttons as they are.
+    if (!toast) {
+        if (cbq.id) tgCast("answerCallbackQuery", {callback_query_id: cbq.id});
+        return;
+    }
     if (cbq.id) {
         tgCast("answerCallbackQuery", {callback_query_id: cbq.id, text: toast});
     }

@@ -58,7 +58,7 @@ The database runs in WAL mode, so threads and processes read and write it concur
 
 - *Isolation is a process.* Every sandboxed tool call is a fresh `fork`+`exec` of the same binary inside its own namespaces. A crash, a runaway loop or a hostile script ends that child and nothing else; the agent gets an error result and carries on.
 - *A process is cheap.* The kernel maps one copy of the binary's code and shares it between every child, so a new sandbox pays only for the pages it writes — a few hundred kilobytes — and starts in a few milliseconds (numbers under [Benchmarks](#benchmarks)).
-- *Concurrency is the kernel's and SQLite's job.* Sandboxes run in parallel on as many cores as the machine has. Each thread holds its own handle on the memory-mapped, write-ahead-logged database, so readers and the writer do not wait on each other and there is no lock scheme of ours to get wrong.
+- *Concurrency is the kernel's and SQLite's job.* Sandboxes run in parallel on as many cores as the machine has. Each thread holds its own handle on the write-ahead-logged database, so readers and the writer do not wait on each other and there is no lock scheme of ours to get wrong. The worker threads that build model requests and store the replies memory-map the file, so they read the pages the kernel already has cached.
 
 The same shape works on anything that behaves like Linux, from a 128 MB plug computer to a server.
 
@@ -244,28 +244,22 @@ Network and model, per request:
 
 ### The cost of a sandbox
 
-Same machine, static arm64 release binary, the default `standard` profile (user, mount and network namespaces around every call). Times run from the fork to the result arriving back in the agent.
+Same machine, static arm64 release binary, the default `standard` profile (user, mount and network namespaces around every call).
 
 ```
-One sandboxed call, start to result (median of 20):
-  js_eval  "1+1"        5.3 ms   (new process, new namespaces, new QuickJS engine)
-  shell_exec "true"     4.1 ms   (new process, new namespaces, /bin/sh)
+One sandboxed call, from fork to result (median of 20):
+  js_eval "1+1"        5.3 ms
+  shell_exec "true"    4.1 ms
 
-Four sub-agents at once, each computing fib(36) in its own QuickJS sandbox:
-  one alone             2.6 s
-  four together         5.9 s each, all done in 6.2 s   (2 cores; 10.5 s back to back)
+Memory one running sandbox adds:
+  QuickJS, computing   0.9 MB  (0.4 MB private; the rest is code shared with the agent)
+  shell, sleeping      0.6 MB  (0.3 MB private)
 
-Memory while those four run (each process's fair share of shared pages):
-  the agent process     10.9 MB  (five sessions, their model connections, SQLite)
-  each sandbox           0.9 MB  (0.4 MB of it private; the rest is shared code)
-  everything together   14.6 MB
-
-The same with four shell sandboxes each running `sleep`:
-  each sandbox           0.6 MB  (0.3 MB private)
-  everything together   12.7 MB
+Four sub-agents each computing fib(36) in its own QuickJS sandbox, on 2 cores:
+  one alone 2.6 s; four at once 5.9 s each, all finished in 6.2 s
 ```
 
-Sub-agents are sessions inside the one agent process, not processes of their own; only the tool calls fork. Adding up each process's resident size instead gives 27 MB for the same picture, because the shared code is counted once per process. A tool that starts a heavy program — a compiler, `node` — costs whatever that program uses on top.
+Sub-agents are sessions inside the one agent process; only tool calls fork. A tool that starts a heavy program — a compiler, `node` — costs whatever that program uses on top.
 
 ## Documentation
 

@@ -155,7 +155,7 @@ static void *worker_fn(void *arg) {
             llm_transcribe(db, curl, item.job_id);
             LOG_INFO_("llm_job done job=%lld type=transcribe", (long long)item.job_id);
             cclaw_log_clear_ctx();
-            (void)write(g_pool.notify_fd, &item.session_id, sizeof(item.session_id));
+            (void)!write(g_pool.notify_fd, &item.session_id, sizeof(item.session_id));
             continue;
         }
 
@@ -173,7 +173,7 @@ static void *worker_fn(void *arg) {
         job_delete(db, item.job_id);
 
         /* Notify parent poll loop */
-        (void)write(g_pool.notify_fd, &item.session_id, sizeof(item.session_id));
+        (void)!write(g_pool.notify_fd, &item.session_id, sizeof(item.session_id));
     }
 
     if (curl) curl_easy_cleanup(curl);

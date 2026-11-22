@@ -6,7 +6,11 @@ CONTAIN  ?= linux
 # through their hardening defaults, so CI enforces it whether we ask or not;
 # Amazon Linux does not, which let a genuine format-string bug sit on master
 # unbuilt by CI. Ask for it explicitly so a local build fails where CI fails.
-CFLAGS  := -std=c11 -O2 -Wall -Wextra -Werror -Wformat-security -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn -Ivendor/yxml
+# _FORTIFY_SOURCE is asked for by name: Debian and Ubuntu compilers turn it on
+# by themselves at -O2 (and with it glibc's warn_unused_result on write/read),
+# other distros do not, so without it CI rejects code the local build accepts.
+# -U first: a compiler that predefines it would otherwise warn on redefinition.
+CFLAGS  := -std=c11 -O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -Wall -Wextra -Werror -Wformat-security -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn -Ivendor/yxml
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
 VERSION_COMMIT := $(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) status --porcelain --untracked-files=no 2>/dev/null | grep -q . && echo -dirty)
@@ -101,7 +105,7 @@ all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw.a $(BUILDDIR)/net_shim compile_comma
 # Development build: debug symbols, no optimization, sanitizers (clang preferred for better traces)
 debug: clean
 	$(MAKE) all CC=clang \
-	            EXTRA_CFLAGS="-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined" \
+	            EXTRA_CFLAGS="-O0 -U_FORTIFY_SOURCE -g3 -fno-omit-frame-pointer -fsanitize=address,undefined" \
 	            LDFLAGS="$(LDFLAGS) -fsanitize=address,undefined"
 
 # Full unit suite under ASan/UBSan — library, main binary, and every test
@@ -110,7 +114,7 @@ debug: clean
 # pre-commit sanitizer check.
 test-asan: clean
 	$(MAKE) test CC=clang \
-	            EXTRA_CFLAGS="-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined" \
+	            EXTRA_CFLAGS="-O0 -U_FORTIFY_SOURCE -g3 -fno-omit-frame-pointer -fsanitize=address,undefined" \
 	            LDFLAGS="$(LDFLAGS) -fsanitize=address,undefined"
 
 $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
@@ -274,15 +278,19 @@ $(BUILDDIR)/libcclaw.a: $(LIB_OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 	rm -f $@
 	$(AR) rcs $@ $^
 
+# Test scaffolding ignores the result of its own setup and cleanup calls
+# (system("rm -rf ..."), chdir) on purpose; shipped code may not.
+TEST_CFLAGS := $(CFLAGS) -Wno-unused-result
+
 $(BUILDDIR)/mock_server.o: test/mock_server.c | $(BUILDDIR)/
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 
 $(BUILDDIR)/libtest.a: $(BUILDDIR)/mock_server.o
 	rm -f $@
 	$(AR) rcs $@ $^
 
 $(BUILDDIR)/test_%: test/test_%.c $(BUILDDIR)/libcclaw.a $(BUILDDIR)/libtest.a | $(BUILDDIR)/
-	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -o $@ $< $(BUILDDIR)/libtest.a $(BUILDDIR)/libcclaw.a $(LDFLAGS)
+	$(CC) $(TEST_CFLAGS) -I$(BUILDDIR) -MMD -MP -o $@ $< $(BUILDDIR)/libtest.a $(BUILDDIR)/libcclaw.a $(LDFLAGS)
 
 
 # Paid measurement tool, not a test — never picked up by any suite.

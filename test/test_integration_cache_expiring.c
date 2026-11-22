@@ -202,7 +202,7 @@ int main(void) {
     TEST_INIT();
     alarm(40);
     printf("test_integration_cache_expiring:\n");
-    (void)system("rm -rf " ROOT);
+    (void)!system("rm -rf " ROOT);
     mkdir(ROOT, 0755);
     mkdir(WS, 0755);
     mkdir(HOME, 0755);
@@ -334,6 +334,6 @@ done:
     stop_daemon(daemon);
     mock_server_stop();
     free(agent);
-    if (rc == 0) (void)system("rm -rf " ROOT);
+    if (rc == 0) (void)!system("rm -rf " ROOT);
     return rc;
 }

@@ -137,7 +137,7 @@ static void sigchld_handler(int sig) {
      * interrupted must not see that in its errno. */
     int saved = errno;
     char c = 1;
-    (void)write(g_chld_pipe[1], &c, 1);
+    (void)!write(g_chld_pipe[1], &c, 1);
     errno = saved;
 }
 
@@ -334,7 +334,7 @@ ChildProc *spawn_run_tool_blob_fd(ChildType type, int64_t session_id,
         char *const envp[] = {proc_log_level_env(), proc_js_heap_env(), NULL};
         execve("/proc/self/exe", argv, envp);
         /* execve failed — write a framed static error to fd 3 and die */
-        (void)write(FD_REQUEST, child_exec_fail_frame, child_exec_fail_frame_len);
+        (void)!write(FD_REQUEST, child_exec_fail_frame, child_exec_fail_frame_len);
         _exit(127);
     }
 

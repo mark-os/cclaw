@@ -123,7 +123,7 @@ static void *tool_thread_fn(void *arg) {
     free(job);
 
     /* Wake the poll loop to advance the session (run_advance runs there). */
-    (void)write(g_notify_pipe[1], &sid, sizeof(sid));
+    (void)!write(g_notify_pipe[1], &sid, sizeof(sid));
 
     /* Accounting: single exit point. Wake the drain barrier when the last
      * in-flight thread leaves. */

@@ -346,7 +346,7 @@ int main(int argc, char *argv[]) {
     test_db_clean(DB_PATH);
     char cmd[160];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", ws);
-    (void)system(cmd);
+    (void)!system(cmd);
     printf("All secret_gate tests passed.\n");
     return 0;
 }

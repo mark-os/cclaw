@@ -281,7 +281,7 @@ int main(void) {
     TEST_INIT();
     alarm(42);
     printf("test_integration_hold_crash:\n");
-    (void)system("rm -rf " ROOT);
+    (void)!system("rm -rf " ROOT);
     mkdir(ROOT, 0755);
     mkdir(WS, 0755);
     mkdir(HOME, 0755);
@@ -370,6 +370,6 @@ done:
     stop(daemon, SIGKILL);
     stop(cli, SIGKILL);
     mock_server_stop();
-    if (rc == 0) (void)system("rm -rf " ROOT);
+    if (rc == 0) (void)!system("rm -rf " ROOT);
     return rc;
 }

@@ -516,7 +516,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     /* Connect request: "host:port" or "ip:port" */
     char *colon = strrchr(preamble, ':');
     if (!colon) {
-        write(client_fd, "ERROR bad preamble\n", 19);
+        (void)!write(client_fd, "ERROR bad preamble\n", 19);
         close(client_fd);
         return;
     }
@@ -533,7 +533,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     char *pend = NULL;
     long pval = strtol(colon + 1, &pend, 10);
     if (pend == colon + 1 || *pend != '\0' || pval < 1 || pval > 65535) {
-        write(client_fd, "ERROR bad preamble\n", 19);
+        (void)!write(client_fd, "ERROR bad preamble\n", 19);
         close(client_fd);
         return;
     }
@@ -547,8 +547,8 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
         LOG_WARN_("proxy deny host=%s reason=%s", target,
                   unresolved ? "resolve_failed" : "policy");
         record_denied(ctx, target);
-        if (unresolved) write(client_fd, "ERROR resolve\n", 14);
-        else            write(client_fd, "DENIED\n", 7);
+        if (unresolved) (void)!write(client_fd, "ERROR resolve\n", 14);
+        else            (void)!write(client_fd, "DENIED\n", 7);
         close(client_fd);
         return;
     }
@@ -557,20 +557,20 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     /* Bound simultaneous relays per call — refuse cleanly when at the cap. */
     if (!relay_acquire(ctx)) {
         LOG_INFO_("proxy relay_full host=%s", target);
-        write(client_fd, "ERROR busy\n", 11);   /* not policy: do not say DENIED */
+        (void)!write(client_fd, "ERROR busy\n", 11);   /* not policy: do not say DENIED */
         close(client_fd);
         return;
     }
 
     int remote_fd = dial_ip(dial, port);
     if (remote_fd < 0) {
-        write(client_fd, "ERROR connect\n", 14);
+        (void)!write(client_fd, "ERROR connect\n", 14);
         close(client_fd);
         relay_release(ctx);
         return;
     }
 
-    write(client_fd, "OK\n", 3);
+    (void)!write(client_fd, "OK\n", 3);
 
     /* Shared-IP CDN check (Q6): a hostname-authorized connection is only as trustworthy
      * as the SNI it actually presents once the IP is shared across unrelated

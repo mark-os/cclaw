@@ -74,7 +74,7 @@ static int run_check(const char *name, char *out, size_t cap) {
 int main(void) {
     TEST_INIT();
     printf("test_integration_channel_transport_check:\n");
-    (void)system("rm -rf /tmp/test_transport_check*");
+    (void)!system("rm -rf /tmp/test_transport_check*");
 
     write_bundle(PERSIST_DIR,
         "{\"name\":\"discx\",\"version\":\"0.1.0\","
@@ -111,7 +111,7 @@ int main(void) {
     if (rc != 0) { fprintf(stderr, "  out: %s\n", out); FAIL("non-persistent channel wrongly gated on WS"); }
     printf("  PASS: no transport declared -> unconstrained (check passes)\n");
 
-    (void)system("rm -rf /tmp/test_transport_check*");
+    (void)!system("rm -rf /tmp/test_transport_check*");
     printf("all transport-check integration tests passed\n");
     return 0;
 }

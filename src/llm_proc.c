@@ -1099,7 +1099,8 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         fseek(f, 0, SEEK_END); long flen = ftell(f); fseek(f, 0, SEEK_SET);
         char *mock_data = malloc((size_t)flen + 1);
         if (!mock_data) { fclose(f); goto err; }
-        fread(mock_data, 1, (size_t)flen, f); mock_data[flen] = '\0';
+        size_t got = fread(mock_data, 1, (size_t)flen, f);
+        mock_data[got] = '\0';
         fclose(f);
 
         int64_t iteration_id = db_next_iteration_id(db, session_id);

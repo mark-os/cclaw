@@ -413,7 +413,7 @@ int channel_outbox_wake(const char *db_path, const char *channel_name) {
     free(path);
     if (fd < 0) return -1;
     char c = 1;
-    (void)write(fd, &c, 1);
+    (void)!write(fd, &c, 1);
     close(fd);
     return 0;
 }

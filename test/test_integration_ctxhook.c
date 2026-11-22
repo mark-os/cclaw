@@ -455,7 +455,7 @@ static int bundled_turn(const char *exe, const char *url, int64_t sid) {
 }
 
 static void cleanup_files(void) {
-    (void)system("rm -rf " ROOT);
+    (void)!system("rm -rf " ROOT);
 }
 
 int main(void) {

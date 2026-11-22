@@ -402,7 +402,7 @@ int main(void) {
         return 0;
     }
 
-    (void)system("rm -f /tmp/test_integ_discord.db* /tmp/test_integ_discord.discord.*");
+    (void)!system("rm -f /tmp/test_integ_discord.db* /tmp/test_integ_discord.discord.*");
 
     g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (g_listen_fd < 0) { fprintf(stderr, "FAIL: socket\n"); return 1; }

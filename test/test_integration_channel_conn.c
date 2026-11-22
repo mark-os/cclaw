@@ -394,7 +394,7 @@ int main(void) {
         return 0;
     }
 
-    (void)system("rm -f /tmp/test_integ_conn.db* /tmp/test_integ_conn.discx.*");
+    (void)!system("rm -f /tmp/test_integ_conn.db* /tmp/test_integ_conn.discx.*");
 
     /* Loopback listener on an OS-assigned port. */
     g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);

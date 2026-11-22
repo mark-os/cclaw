@@ -186,7 +186,7 @@ static AgentSetup g_setup;
 static Config *g_cfg;
 
 static inline void fixture_open(void) {
-    (void)system("rm -rf " ROOT);
+    (void)!system("rm -rf " ROOT);
     mkdir(ROOT, 0755);
     mkdir(ROOT "/ws", 0755);
     setenv("CCLAW_DB_PATH", DB_PATH, 1);
@@ -224,7 +224,7 @@ static inline void fixture_close(void) {
     agent_setup_destroy(&g_setup);
     config_free(g_cfg);
     db_close(g_db);
-    (void)system("rm -rf " ROOT);
+    (void)!system("rm -rf " ROOT);
 }
 
 #endif

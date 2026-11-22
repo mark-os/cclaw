@@ -133,7 +133,7 @@ static pid_t start_fake_runner(const char *sock_path) {
                  strstr(buf, "hello-hook") &&
                  strstr(buf, "X-Hook-Test");
         const char *reply = ok ? "207\nhook-reply" : "500\nbad-envelope";
-        (void)write(cfd, reply, strlen(reply));
+        (void)!write(cfd, reply, strlen(reply));
         close(cfd);
         close(fd);
         _exit(ok ? 0 : 2);
@@ -878,7 +878,7 @@ static void test_web_bind(void) {
     char response[4096] = {0};
     curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19880/");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
     assert(curl_easy_perform(curl) == CURLE_OK);
     assert(strstr(response, "version:") && strstr(response, "build:"));

@@ -199,7 +199,7 @@ int main(void) {
 
     /* Stale debris from a killed previous run (wal/shm/pipe/sock) makes
      * this test hang nondeterministically — clean the whole family */
-    (void)system("rm -f /tmp/test_integ_cr.db* /tmp/test_integ_cr.test.*");
+    (void)!system("rm -f /tmp/test_integ_cr.db* /tmp/test_integ_cr.test.*");
 
     int port = mock_server_start();
     if (port < 0) FAIL("mock_server_start");

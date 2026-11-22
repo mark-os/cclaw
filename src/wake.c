@@ -76,7 +76,7 @@ int wake_external(const char *db_path) {
     free(path);
     if (fd < 0) return -1;
     char c = 1;
-    (void)write(fd, &c, 1);
+    (void)!write(fd, &c, 1);
     close(fd);
     return 0;
 }

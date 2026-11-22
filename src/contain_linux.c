@@ -512,7 +512,7 @@ int contain_enter(const char *workspace, const char *cwd_path,
     if (syscall(SYS_pivot_root, newroot, put_old) != 0)
         return -1;
 
-    chdir("/");
+    if (chdir("/") != 0) return -1;   /* never run with a cwd outside the new root */
     /* The directory the root tmpfs was mounted on is, after the pivot, an
      * ordinary empty directory on the old root: remove it while that is still
      * reachable. Without this the mkdtemp fallback left one empty directory
@@ -551,7 +551,7 @@ int contain_enter(const char *workspace, const char *cwd_path,
 
     /* CWD into workspace so commands start there */
     if (ws_resolved && chdir(ws_resolved) != 0)
-        chdir("/tmp");
+        (void)!chdir("/tmp");   /* best effort: any cwd inside the sandbox will do */
 
     return 0;
 }

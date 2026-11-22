@@ -610,14 +610,20 @@ static int llm_attempt(sqlite3 *db, ModelCandidate *m, const char *body,
 /* Request body per wire format. ?1=model ?2=messages(json array, openai
  * shape) ?3=opts(json) ?4=candidate extra (request_extra+effort merged).
  * json_patch's RFC-7386 null-removes-key rule is what makes the optional
- * fields disappear when opts omits them. Caller extra merges LAST. */
+ * fields disappear when opts omits them. Caller extra merges after the
+ * candidate's, so a script may add fields (grounding) and change the effort
+ * the route asked for. It may not choose the model or undo what the operator
+ * put on the provider: ?5=providers.request_extra and the model are applied
+ * once more on top, so the routing list stays the whole of a script's
+ * authority (specs/js-llm.md, Trust boundaries). */
 static const char *SQL_JSBODY_OPENAI =
-    "SELECT json_patch(json_patch(json_patch("
+    "SELECT json_patch(json_patch(json_patch(json_patch("
     "  json_object('model', ?1, 'messages', json(?2)),"
     "  json_object('max_tokens',  json_extract(?3,'$.max_tokens'),"
     "              'temperature', json_extract(?3,'$.temperature'))),"
     "  json(?4)),"
-    "  COALESCE(json_extract(?3,'$.extra'), '{}'))";
+    "  COALESCE(json_extract(?3,'$.extra'), '{}')),"
+    "  json_patch(json_object('model', ?1), json(?5)))";
 
 /* One message's content as Gemini parts. A string is one text part. An array
  * is OpenAI content parts (the form images take, see SQL_JSLLM_ATTACH): text
@@ -681,7 +687,7 @@ static const char *SQL_JSLLM_IMAGES_BAD =
     "    OR json_extract(value,'$.data') GLOB '*[^A-Za-z0-9+/=]*' LIMIT 1";
 
 static const char *SQL_JSBODY_GEMINI =
-    "SELECT json_patch(json_patch(json_patch("
+    "SELECT json_patch(json_patch(json_patch(json_patch("
     /* base: contents only — the always-present part */
     "  json_object("
     "    'contents',"
@@ -709,7 +715,8 @@ static const char *SQL_JSBODY_GEMINI =
     "             'temperature',    json_extract(?3,'$.temperature')))"
     "    END)),"
     "  json(?4)),"
-    "  COALESCE(json_extract(?3,'$.extra'), '{}'))";
+    "  COALESCE(json_extract(?3,'$.extra'), '{}')),"
+    "  json(?5))";
 
 /* Anthropic: system is a top-level string, max_tokens is mandatory (and pays
  * for thinking too, hence the generous default), and sampling parameters are
@@ -736,7 +743,7 @@ static const char *SQL_JSBODY_GEMINI =
     " ELSE json_extract(m.value,'$.content') END"
 
 static const char *SQL_JSBODY_ANTHROPIC =
-    "SELECT json_patch(json_patch(json_patch("
+    "SELECT json_patch(json_patch(json_patch(json_patch("
     "  json_object('model', ?1,"
     "    'max_tokens', COALESCE(json_extract(?3,'$.max_tokens'), 16000),"
     "    'messages',"
@@ -751,7 +758,8 @@ static const char *SQL_JSBODY_ANTHROPIC =
     "     FROM json_each(?2)"
     "     WHERE json_extract(value,'$.role') = 'system'))),"
     "  json(?4)),"
-    "  COALESCE(json_extract(?3,'$.extra'), '{}'))";
+    "  COALESCE(json_extract(?3,'$.extra'), '{}')),"
+    "  json_patch(json_object('model', ?1), json(?5)))";
 
 /* The assistant text of a 2xx body, whichever wire format produced it: openai
  * choices[0].message.content, gemini parts joined with newlines (grounded
@@ -942,20 +950,26 @@ char *llm_request(sqlite3 *db, const char *agent_name,
                 "  WHERE name=?1 AND json_valid(request_extra)),'{}'),"
                 "  CASE WHEN json_valid(?2) THEN ?2 ELSE '{}' END)", xb, 2);
         }
+        const char *pb[] = { m->provider_name };
+        char *op_extra = sql_text(db,
+            "SELECT COALESCE((SELECT request_extra FROM providers"
+            "  WHERE name=?1 AND json_valid(request_extra)),'{}')", pb, 1);
         const char *bb[] = { m->model, messages, opts,
-                             cand_extra ? cand_extra : "{}" };
+                             cand_extra ? cand_extra : "{}",
+                             op_extra ? op_extra : "{}" };
         const char *body_sql =
               m->endpoint_type == ENDPOINT_GEMINI    ? SQL_JSBODY_GEMINI
             : m->endpoint_type == ENDPOINT_ANTHROPIC ? SQL_JSBODY_ANTHROPIC
             : SQL_JSBODY_OPENAI;
-        char *body = sql_text(db, body_sql, bb, 4);
+        char *body = sql_text(db, body_sql, bb, 5);
         char *kept = NULL;
         if (archived) {
             const char *kb[] = { m->model, archived, opts,
-                                 cand_extra ? cand_extra : "{}" };
-            kept = sql_text(db, body_sql, kb, 4);
+                                 cand_extra ? cand_extra : "{}",
+                                 op_extra ? op_extra : "{}" };
+            kept = sql_text(db, body_sql, kb, 5);
         }
-        free(effort); free(cand_extra);
+        free(effort); free(cand_extra); free(op_extra);
 
         {
             HttpResponse resp = {0};

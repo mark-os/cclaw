@@ -102,8 +102,11 @@ everything:
   native Gemini `generateContent` / Anthropic Messages, which takes no
   `temperature` and defaults `max_tokens` to 16000), llm_payload.c style. Merge order:
   cclaw-built fields ← provider `request_extra` + effort fragment ← caller
-  `opts.extra` (caller wins). RFC-7386 `json_patch` null-removal is what
-  makes optional fields disappear.
+  `opts.extra` ← the model and provider `request_extra` once more. So
+  `opts.extra` adds fields and may change the route's effort, but cannot
+  name another model or undo an operator's provider setting (such as
+  OpenRouter's zero-retention flag). RFC-7386 `json_patch` null-removal is
+  what makes optional fields disappear.
 - **Accounting**: gated by `token_rate_limit`; every attempt archived to
   `llm_responses` stamped with the calling session/iteration and a source
   label (`jsllm_ok js:web_search`, `jsllm_http_429 cron:digest`) — `cclaw
@@ -128,7 +131,8 @@ sandboxed child asserting anything.
 
 - **Authority is the routing lists.** No separate grant: a script can spend
   what is on the agent's chat list and its utility list, both written by the
-  operator. `opts.model` narrows within a list and can never widen it.
+  operator. `opts.model` narrows within a list and can never widen it, and
+  `opts.extra` cannot either: a `model` in it is overwritten.
 - **Children never see keys.** Not "held C-side" — absent from the process.
 - **No egress widening.** The child's allowlist is untouched; completions
   never leave the parent. The `restricted` profile (`net_mode=1`, no network) gets no

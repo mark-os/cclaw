@@ -178,6 +178,37 @@ static void test_gemini_body_and_extra(void) {
     PASS();
 }
 
+/* A script's extra may add fields. It may not pick a model the routing list
+ * does not hold, nor undo what the operator put on the provider. */
+static void test_extra_cannot_widen(void) {
+    TEST("extra_cannot_widen");
+    MockHttp m = { .nconn = 1, .resp = { RESP_OPENAI } };
+    pthread_t tid;
+    if (mock_http_start(&m, &tid) != 0) { FAIL("mock"); return; }
+    route_two(m.port, 1);
+    seed("UPDATE providers SET request_extra="
+         "'{\"provider\":{\"zdr\":true}}' WHERE name='pa';");
+    char *r = req("t",
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"q\"}],"
+        "\"opts\":{\"model\":\"open\",\"extra\":{\"model\":\"other/expensive\","
+        "\"provider\":{\"zdr\":false,\"sort\":\"price\"},\"seed\":7}}}");
+    mock_http_stop(&m, tid);
+    seed("UPDATE providers SET request_extra=NULL WHERE name='pa';");
+    const char *c = m.captured[0];
+    if (!r || !strstr(r, "\"ok\":true")) { FAIL(r ? r : "NULL"); free(r); return; }
+    free(r);
+    if (strstr(c, "other/expensive") || !strstr(c, "\"model\":\"open-model\"")) {
+        FAIL("extra replaced the model"); printf("    got: %.400s\n", c); return;
+    }
+    if (!strstr(c, "\"zdr\":true") || strstr(c, "\"zdr\":false")) {
+        FAIL("extra undid the provider's request_extra"); printf("    got: %.400s\n", c); return;
+    }
+    if (!strstr(c, "\"seed\":7") || !strstr(c, "\"sort\":\"price\"")) {
+        FAIL("extra's own fields were dropped"); printf("    got: %.400s\n", c); return;
+    }
+    PASS();
+}
+
 static void test_fallback_walks_ladder(void) {
     TEST("fallback_walks_ladder");
     MockHttp m = { .nconn = 2, .resp = { RESP_500, RESP_GEMINI } };
@@ -723,6 +754,7 @@ int main(void) {
 
     test_openai_success();
     test_gemini_body_and_extra();
+    test_extra_cannot_widen();
     test_fallback_walks_ladder();
     test_model_filter_miss();
     test_no_routing();

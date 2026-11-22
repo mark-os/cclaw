@@ -5,6 +5,7 @@
 #include "config_registry.h"  /* config_get (install_update) */
 #include "db.h"
 #include "tool_args.h"        /* tool_args_str (install_update) */
+#include "update.h"
 #include "validate.h"
 #include <stdlib.h>
 #include <string.h>
@@ -178,14 +179,12 @@ static char *tool_install_update_handler(const char *arguments, void *user_data,
                                    "daemon's release check has not seen one; "
                                    "pass a tag explicitly if you know it");
     }
-    char *installed = config_get(ctx->db, "update.installed_tag");
-    if (installed && strcmp(installed, tag) == 0) {
+    if (update_is_installed(ctx->db, tag)) {
         char *msg = tool_fail(is_error,
             "error: %s is already the installed release", tag);
-        free(repo); free(tag); free(installed);
+        free(repo); free(tag);
         return msg;
     }
-    free(installed);
 
     char *reason = tool_args_str(ctx->db, arguments, "reason");
     /* Rendered via json_object so a hostile tag/reason can't break the doc. */
@@ -197,7 +196,7 @@ static char *tool_install_update_handler(const char *arguments, void *user_data,
         sqlite3_bind_text(st, 1, tag, -1, SQLITE_STATIC);
         sqlite3_bind_text(st, 2, repo, -1, SQLITE_STATIC);
         sqlite3_bind_text(st, 3, reason ? reason : "", -1, SQLITE_STATIC);
-        sqlite3_bind_text(st, 4, VERSION_COMMIT, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 4, VERSION, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
             const char *j = (const char *)sqlite3_column_text(st, 0);
             if (j) doc = strdup(j);

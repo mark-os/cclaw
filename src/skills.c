@@ -273,7 +273,8 @@ static void index_extension_skills(SkillIndex *ix, sqlite3 *db, const char *agen
                 if (stat(full, &sb) != 0) continue;
                 char fallback[256];
                 if (S_ISDIR(sb.st_mode)) {
-                    snprintf(fallback, sizeof(fallback), "%s", path_basename(full));
+                    pn = snprintf(fallback, sizeof(fallback), "%s", path_basename(full));
+                    if (pn < 0 || (size_t)pn >= sizeof(fallback)) continue;
                     size_t l = strlen(full);
                     if (l + 10 >= sizeof(full)) continue;
                     snprintf(full + l, sizeof(full) - l, "/SKILL.md");

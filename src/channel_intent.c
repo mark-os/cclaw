@@ -61,8 +61,8 @@ ChannelIntent channel_intent_from_text(const char *text) {
         it.kind = CHANNEL_INTENT_STATUS;
         return it;
     }
-    if (cmd_arg(text, "/dashboard")) {
-        it.kind = CHANNEL_INTENT_DASHBOARD;
+    if (cmd_arg(text, "/admin")) {
+        it.kind = CHANNEL_INTENT_ADMIN;
         return it;
     }
     return it;
@@ -267,12 +267,12 @@ static int intent_exec_status(sqlite3 *db, const char *ch_name, const char *cid)
     return 1;
 }
 
-/* /dashboard — the operator's sign-in link. The link IS the admin credential,
+/* /admin — the operator's sign-in link to the dashboard. The link IS the admin credential,
  * so it goes only into a direct message: anyone else in a group would hold it
  * too. A chat whose kind the channel never reported counts as a group. The
  * reply is a channel reply like every command's: it reaches the outbox, never
  * the session's conversation. */
-static int intent_exec_dashboard(sqlite3 *db, const char *ch_name, const char *cid) {
+static int intent_exec_admin(sqlite3 *db, const char *ch_name, const char *cid) {
     int dm = 0;
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
@@ -285,26 +285,34 @@ static int intent_exec_dashboard(sqlite3 *db, const char *ch_name, const char *c
     }
     if (!dm) {
         reply(db, ch_name, cid, "The dashboard link signs you in as the operator, so I"
-              " only send it in a direct message: ask me there with /dashboard.");
+              " only send it in a direct message: ask me there with /admin.");
         return 1;
     }
     if (!proc_web_up()) {
         reply(db, ch_name, cid, "The dashboard is not available: this daemon's web server"
-              " is not running (check web_port, then restart the daemon).");
+              " is not running (check web_port and web_bind, then restart the daemon).");
         return 1;
     }
-    char *url = config_admin_url(db, "/dashboard");
+    char *url = config_admin_url(db, "/admin");
     if (!url) {
         reply(db, ch_name, cid, "The dashboard is not available yet: there is no admin"
               " token (the daemon makes one when its web server starts).");
         return 1;
     }
-    size_t n = strlen(url) + 96;
+    /* A loopback link opens only on the machine itself: say how to get to it
+     * from where the operator is reading this. */
+    const char *far = strncmp(url, "http://127.", 11) == 0
+        ? "\n\nThe web server listens on this machine only, so the link opens"
+          " there. From another device, tunnel to it first (ssh -L 8080:127.0.0.1:"
+          "8080 <this machine>), or set web_bind and web_public_url and restart."
+        : "";
+    size_t n = strlen(url) + strlen(far) + 96;
     char *msg = malloc(n);
     if (msg) {
-        snprintf(msg, n, "Your dashboard (this link signs you in; do not share it):\n%s", url);
+        snprintf(msg, n, "Your dashboard (this link signs you in; do not share it):\n%s%s",
+                 url, far);
         reply(db, ch_name, cid, msg);
-        LOG_INFO_("channel /dashboard ch=%s chat=%s — link sent", ch_name, cid);
+        LOG_INFO_("channel /admin ch=%s chat=%s — link sent", ch_name, cid);
     }
     free(msg);
     free(url);
@@ -410,8 +418,8 @@ int channel_intent_execute(sqlite3 *db, const char *ch_name, const char *cid,
         return intent_exec_list(db, ch_name, cid);
     case CHANNEL_INTENT_STATUS:
         return intent_exec_status(db, ch_name, cid);
-    case CHANNEL_INTENT_DASHBOARD:
-        return intent_exec_dashboard(db, ch_name, cid);
+    case CHANNEL_INTENT_ADMIN:
+        return intent_exec_admin(db, ch_name, cid);
     case CHANNEL_INTENT_NONE:
         break;
     }

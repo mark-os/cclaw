@@ -54,7 +54,7 @@ static int publish(const char *dir, const char *key, const char *notes, const ch
 }
 
 static int exists(const char *dir, const char *name) {
-    char p[512];
+    char p[1024];
     snprintf(p, sizeof(p), "%s/%s", dir, name);
     return access(p, F_OK) == 0;
 }
@@ -116,6 +116,8 @@ static void test_publish_and_verify(void) {
     check("latest_seq_1", ok && r.seq == 1);
     check("latest_notes", ok && r.notes && strcmp(r.notes, "first build") == 0);
     check("latest_version_from_binary", ok && r.version && strncmp(r.version, "cclaw ", 6) == 0);
+    /* The commit is read out of the binary's own --version line. */
+    check("latest_commit_from_binary", ok && r.commit && strcmp(r.commit, VERSION_COMMIT) == 0);
     char *data = NULL; size_t len = 0;
     check("asset_verifies", ok && uchan_fetch_asset(url, &r, &data, &len, why, sizeof(why)) == 0);
     free(data);

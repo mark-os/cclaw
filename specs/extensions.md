@@ -440,9 +440,8 @@ loop; the await suspends the JS continuation, never the thread) or
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `channel.admin.isAdmin` | `(chat_id)` → `bool` | Check whether `chat_id` appears in the channel's `<ext>.admin_ids` config value (comma- or whitespace-separated — `split_and_trim` in `util.c`). Used by handlers to gate `/admin`-style chat commands. |
+| `channel.admin.isAdmin` | `(chat_id)` → `bool` | Check whether `chat_id` appears in the channel's `<ext>.admin_ids` config value (comma- or whitespace-separated — `split_and_trim` in `util.c`). Used by handlers to gate admin chat commands such as `/approvals`. |
 | `channel.admin.listPendingApprovals` | `()` → `[{id, session_id, agent, tool_name, action, args_json}]` | Return pending approval requests scoped to this channel. Enables admin notification flows in chat. |
-| `channel.admin.dashboardUrl` | `()` → `string \| null` | Generate a tokenized `/admin` URL for the web dashboard (same trust model as passing credentials through admin chat commands). |
 
 ### Event flow
 

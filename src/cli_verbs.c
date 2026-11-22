@@ -710,8 +710,8 @@ static int resp_print(sqlite3 *db, const char *where, int64_t id, const char *wh
 int dashboard_main(void) {
     sqlite3 *db = verb_db_open();
     if (!db) return 1;
-    char *dash = config_admin_url(db, "/dashboard");
-    char *data = config_admin_url(db, "/admin");
+    char *dash = config_admin_url(db, "/admin");
+    char *data = config_admin_url(db, "/admin/data");
     sqlite3_close(db);
     int rc = 0;
     if (!dash || !data) {

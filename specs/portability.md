@@ -73,7 +73,7 @@ and nothing between them:
 What is already in good shape:
 
 - **The containment mechanism is one file.** `src/contain.h` is the backend
-  interface (name, probe, enter, egress); `contain_linux.c` implements it with
+  interface (name, probe, hint, enter, egress); `contain_linux.c` implements it with
   namespaces and `contain_none.c` with nothing. `sandbox.c` holds only policy
   and child setup. `make CONTAIN=none` builds without the Linux backend. What
   remains Linux-specific outside it is `prctl(PR_SET_PDEATHSIG)` in
@@ -107,11 +107,16 @@ it.
 ## Work, in order
 
 Done: one probe for "can this host contain a child" (`contain_probe`),
-`--doctor` `[layers]`, and containment as a backend (`CONTAIN=linux|none`).
+`--doctor` `[layers]`, containment as a backend (`CONTAIN=linux|none`), and
+the answer at startup: when the probe fails and an agent has a sandboxed
+profile, the CLI and the daemon say so before the first tool call does, with
+the backend's hint (`contain_hint` — on Linux, whichever of the AppArmor
+restriction, `unprivileged_userns_clone` or `max_user_namespaces` is set
+against it) and the way to run uncontained. Nothing is switched
+automatically: `host` stays the operator's choice.
 
-1. **Make "no containment here" a first-class answer at first run.** A fresh
-   install on such a host still gets the `standard` profile and every tool
-   call exits 126; `--doctor` now explains it, first run does not.
+1. **A mediated tier.** See the placeholders below: on a host with no
+   containment the choice today is all or nothing.
 2. **Platform backends.** A build for a platform with its own sandbox
    (Android) starts from `contain_none.c`.
 

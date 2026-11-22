@@ -485,8 +485,15 @@ int publish_main(int argc, char *argv[]) {
         fprintf(stderr, "error: %s does not run here (--version failed)\n", binary);
         return 1;
     }
+    /* "cclaw <version> (<commit>, <date>)" */
     char commit[64] = "";
-    sscanf(version, "%*s %63s", commit);
+    sscanf(version, "%*s %*s (%63[^,)]", commit);
+    if (!commit[0]) {
+        crypto_wipe(sk, sizeof(sk));
+        fprintf(stderr, "error: cannot read a commit out of '%s'\n", version);
+        free(version);
+        return 1;
+    }
     int dirty = strstr(commit, "-dirty") != NULL;
 
     size_t blen = 0;

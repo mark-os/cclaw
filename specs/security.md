@@ -403,6 +403,20 @@ Regression coverage is `test/test_sandbox_key_mask.c`. The load-bearing case is 
 
 The one remaining exposure is **`host`** (per agent, or `--trust-host`; the answer on a host without a containment backend, see [portability.md](portability.md)): it runs with *no* sandbox, so a shell child reads the host filesystem directly, key included. That is the documented price of `host` — never run untrusted-derived work at `host` on a box whose `.cclaw_key` matters. See [Sandbox Profile Policy Bundles](#sandbox-profile-policy-bundles).
 
+### What `db_query` does not return
+
+`db_query` is the agent's sanctioned way to read the database, and the admin
+pages are where an agent's own approvals are answered — so the admin token
+must not be readable through it. Two columns read as NULL there, whatever
+shape the query takes: `config.value` (which holds `web_admin_token`) and
+`channel_outbox.payload` (which holds the chat reply that carried the sign-in
+link). It is an SQLite authorizer installed for the one statement
+(`src/tool_db_query.c`), so `SELECT *`, a subquery, `substr()` or `hex()` see
+NULL as well; the result says so, and points at `search_config` for config.
+Rows that carry an encrypted value (`enc:…`) are dropped whole, as before.
+The token is still plain text in `config.value` for the operator's tools
+(`cclaw sqlite3`); it is not encrypted at rest.
+
 ### Secrets are referenced by name
 
 A secret is referenced by the model via `{{SECRET:name}}`: if the model needs to use a secret — typing a password into a browser field, passing a token in a curl header, authenticating an API call — it needs to know the name to write the placeholder. The security property is that the **value** never enters the context window, not that the name is hidden. *Which* agent may use a name is a grant (below).

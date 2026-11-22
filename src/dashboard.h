@@ -6,7 +6,7 @@
 struct mg_context;
 struct mg_connection;
 
-/* Register the operator's pages (/dashboard and /admin — explore.h) on a
+/* Register the operator's pages (/admin and /admin/data — explore.h) on a
  * running civetweb context and ensure the
  * web_admin_token config value exists (generated from util_random() on first
  * start; `cclaw dashboard` prints the tokenized links). Returns 0 on success. */

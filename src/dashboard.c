@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The operator's pages: /dashboard (the admin panel) and /admin (the data
+/* The operator's pages: /admin (the dashboard) and /admin/data (the data
  * explorer), and their credential. Both pages and their API live in explore.c
  * (specs/explorer.md). Auth is a single generated token — a cookie for the
  * session, ?token= for the first visit (LAN threat model; TLS/tunnelling
@@ -66,16 +66,10 @@ static int handle_admin(struct mg_connection *conn, void *cbdata) {
     return explore_handle(conn, s_db);
 }
 
-static int handle_dashboard(struct mg_connection *conn, void *cbdata) {
-    (void)cbdata;
-    return explore_dashboard(conn, s_db);
-}
-
 int dashboard_register(struct mg_context *ctx, sqlite3 *db) {
     if (!ctx || !db) return -1;
     s_db = db;
     if (ensure_token(db) != 0) return -1;
     mg_set_request_handler(ctx, "/admin", handle_admin, NULL);
-    mg_set_request_handler(ctx, "/dashboard", handle_dashboard, NULL);
     return 0;
 }

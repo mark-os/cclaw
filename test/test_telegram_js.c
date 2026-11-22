@@ -46,7 +46,6 @@ static char *eval_expr(const char *expr) {
         "http:function(r){__sent.push(r);return new Promise(function(res){__res.push(res);});},"
         "emit:function(t,p,e){__emits.push({type:t,payload:p,ext:e});return 0;},"
         "admin:{isAdmin:function(id){__adminArg=id;return false;},"
-        "dashboardUrl:function(){return 'http://192.0.2.1:8080/admin?token=t0k';},"
         "listPendingApprovals:function(){return [];}}};\n";
     size_t n = strlen(stub) + strlen(TPL_CHANNEL_TELEGRAM_QJS) + strlen(expr) + 8;
     char *code = malloc(n);
@@ -420,13 +419,17 @@ int main(void) {
         "__emits[0].payload",
         "\"mentioned\":false");
 
-    /* ── slash-command surface: approvals + admin only ──────────────── */
-    expect("commands_are_approvals_admin",
-        "Object.keys(COMMANDS).sort().join(',')", "admin,approvals");
-    /* /admin replies with the tokenized dashboard URL from the bridge. */
-    expect_has("admin_command_sends_dashboard_url",
-        "COMMANDS.admin.handler('7'); __sent[0].body",
-        "http://192.0.2.1:8080/admin?token=t0k");
+    /* ── slash-command surface: /approvals is handled here; /admin is the
+     * daemon's (it hands out the sign-in link in a direct message only), so
+     * it is in the menu and falls through to the daemon as ordinary text. */
+    expect("commands_are_approvals_only",
+        "Object.keys(COMMANDS).sort().join(',')", "approvals");
+    expect("menu_lists_admin",
+        "MENU_ONLY.map(function(c){return c.command;}).join(',')", "admin");
+    expect("admin_is_forwarded_not_answered",
+        "__sent=[];__emits=[];channel.admin.isAdmin=function(){return true;};"
+        "processMessage({chat:{id:7,type:'private'}, from:{id:7}, text:'/admin'}, 1);"
+        "__sent.length + ':' + __emits.length", "0:1");
     /* /approvals with nothing pending says so. */
     expect_has("approvals_empty",
         "COMMANDS.approvals.handler('7'); __sent[0].body",

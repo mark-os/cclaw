@@ -47,7 +47,6 @@ static char *eval_expr(const char *expr) {
         "emit:function(t,p,e){__emits.push({type:t,payload:p,ext:e});return 0;},"
         "conn:{open:function(){return 1;},send:function(){},close:function(){}},"
         "admin:{isAdmin:function(id){return false;},"
-        "dashboardUrl:function(){return 'http://192.0.2.1:8080/admin?token=t0k';},"
         "listPendingApprovals:function(){return [];}}};\n";
     size_t n = strlen(stub) + strlen(TPL_CHANNEL_DISCORD_QJS) + strlen(expr) + 8;
     char *code = malloc(n);

@@ -145,6 +145,22 @@ its place. A daemon that is alive but hung never trips a crash counter; that
 is the supervisor's watchdog to catch, not this guard's — though it also never
 reaches `verified`, which `--doctor` shows.
 
+### What version is this
+
+`cclaw version` (or `--version`) prints `cclaw <version> (<commit>, <date>)`.
+The version is the git tag the binary was built from, read at build time by
+`git describe` and kept nowhere else: `v0.8.0` on a tag, `v0.7.3-41-g1a2b3c4`
+between tags, with `-dirty` when the tree had uncommitted changes. So a
+binary downloaded by hand knows its release with no database, and a build
+that is not a release never names one. The release workflow passes the tag in
+(`VERSION`), because its clone has no tags to describe, and fails the build
+if the binary then reports anything else.
+
+`update.installed_tag` is a different fact: what `cclaw update` last
+installed. It is the only name a pre-release (`pre-<seq>`, numbered at
+publish time) or a sideloaded file has. A release counts as already installed
+when either one names it (`update_is_installed`).
+
 ## Pre-release channels — `cclaw publish`
 
 Releases are for milestones; most changes ship incrementally. A **channel** is
@@ -272,22 +288,33 @@ tokens=…->… threshold=… target=…`).
   on every entry); set `none` on an entry to stop storing it.
 - A session caught in the removed `compacting` state goes `idle`.
 
-## The dashboard — `/dashboard` and `/admin`
+## The dashboard — `/admin` and `/admin/data`
 
-`cclaw dashboard` prints two links with the token: `<base>/dashboard?token=…`
+`cclaw dashboard` prints two links with the token: `<base>/admin?token=…`
 (the admin panel: what needs you, what each agent can do, what it did) and
-`<base>/admin?token=…` (the Telegram and Discord `/admin` commands send this
-one). An admin can also send `/dashboard` to an agent in a direct message.
-Opening either link once puts the token in a cookie; after that both pages
-work in that browser. `/admin` is the data explorer:
+`<base>/admin/data?token=…`. An admin can also send `/admin` to an agent in a
+direct message and gets the first link; in a group the agent declines, because
+the link is the operator's credential. Opening either link once puts the token
+in a cookie; after that both pages work in that browser.
+
+**The web server listens on `web_bind`, `127.0.0.1` by default** — this
+machine only. The pages are plain HTTP and the link carries the token, so the
+safe ways to reach them from elsewhere are a tunnel (`ssh -L
+8080:127.0.0.1:8080 <box>`) or a reverse proxy that adds TLS, with
+`web_public_url` set to the address people then use. `web_bind = 0.0.0.0`
+listens on every interface, for a network you trust (a home LAN, a VPN);
+webhooks from a channel provider need that or a proxy too. Both keys take
+effect when the daemon restarts; a `web_bind` that is not one IPv4 address
+stops the web server from starting, with a line in the log.
+
+`/admin/data` is the data explorer:
 every table, what each column means and how rows link, and the operator's
 actions where the thing is shown — grants, copying an agent, model lists,
 sessions on chats, providers and models, memory, chat and channel settings,
 approvals, secrets. Each action is a named request the server checks as the
 CLI would; each write is in the change log with actor `dashboard` and context
 `act:<action>`. The page and its JSON API (`/admin/api/`) are described in
-[explorer.md](explorer.md). `/admin/explore`, the page's address while the old
-server-rendered dashboard still held `/admin`, redirects to `/admin`.
+[explorer.md](explorer.md).
 
 ## Shared files — `/share`
 
@@ -298,8 +325,8 @@ attachment cannot carry — `channel_send`'s `file` is the direct way to show
 someone a picture. State is one row in `shares`
 ([schema.md](schema.md#shares)); nothing is copied.
 
-- **`<base>` is `web_public_url`** when set, else
-  `http://<first non-loopback address>:<web_port>`. A daemon reached through
+- **`<base>` is `web_public_url`** when set, else `http://<web_bind>:<web_port>`
+  (the first non-loopback address when `web_bind` is `0.0.0.0`). A daemon reached through
   a tunnel or a reverse proxy has no way to know that address, so the
   operator states it: `web_public_url` is the base of every link the daemon
   hands out, `/admin` included.

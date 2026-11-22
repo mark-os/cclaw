@@ -96,7 +96,9 @@ static int start_mock_broker(void) {
     struct sockaddr_un a;
     memset(&a, 0, sizeof(a));
     a.sun_family = AF_UNIX;
-    strncpy(a.sun_path, uds_path, sizeof(a.sun_path) - 1);
+    size_t plen = strlen(uds_path);
+    if (plen >= sizeof(a.sun_path)) return -1;
+    memcpy(a.sun_path, uds_path, plen + 1);
     if (bind(mock_listen_fd, (struct sockaddr *)&a, sizeof(a)) != 0) return -1;
     if (listen(mock_listen_fd, 8) != 0) return -1;
     struct timeval tv = {5, 0};

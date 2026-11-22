@@ -9,7 +9,7 @@
 /* The admin panel (specs/explorer.md, "The dashboard"): what needs you, what
    each agent can do, what it did. A client of /admin/api/ — no external
    requests, everything drawn with textContent. Detail and editing live in the
-   data explorer at /admin. */
+   data explorer at /admin/data. */
 :root {
   --bg: #f6f7f9; --surface: #ffffff; --fg: #171b24; --muted: #5a6272; --line: #d9dde4;
   --link: #0a3fc9; --ok: #1f7a45; --ok-bg: #e3f3e9; --warn: #8a5200; --warn-bg: #fbefd6;
@@ -109,7 +109,7 @@ pre.card-text { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var
 <header class="top"><div class="top-in">
 <a class="brand" href="#/">cclaw</a>
 <a class="nav" href="#/">Home</a>
-<a class="nav" href="/admin">All data</a>
+<a class="nav" href="/admin/data">All data</a>
 </div></header>
 <div class="page"><main id="main" tabindex="-1" aria-live="polite"></main></div>
 <script>
@@ -153,7 +153,7 @@ function code(s) { return h("span", { class: "mono", text: s }); }
 function agentLink(n) { return h("a", { href: "#/agent/" + encodeURIComponent(n), text: n }); }
 function sessionLink(id, text) { return h("a", { href: "#/session/" + id, text: text || "session " + id }); }
 function explorer(table, key) {
-  return "/admin#/r/" + encodeURIComponent(table) + "/" + key.map(function (k) { return encodeURIComponent(String(k)); }).join("/");
+  return "/admin/data#/r/" + encodeURIComponent(table) + "/" + key.map(function (k) { return encodeURIComponent(String(k)); }).join("/");
 }
 
 /* ── API ── */
@@ -915,7 +915,7 @@ function render() {
     if (my !== seq) return;
     clear(MAIN);
     var m = e && e.status === 404 ? "That does not exist (any more)." : e && e.status === 403
-      ? "You are signed out. Send /dashboard to your agent in a direct message for a new link."
+      ? "You are signed out. Send /admin to your agent in a direct message for a new link."
       : "Something went wrong: " + (e && e.message ? e.message : String(e));
     MAIN.appendChild(h("div", { class: "msg bad", role: "alert", text: m }));
     MAIN.appendChild(h("p", null, h("a", { href: "#/", text: "Home" })));

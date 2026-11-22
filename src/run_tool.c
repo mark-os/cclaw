@@ -960,7 +960,9 @@ int run_tool_main(void) {
     if (!q.workspace) die("error: missing workspace");
 
     /* net_mode forced to "no network"; host mode (sandbox=0) runs the handler
-     * on the bare host — the app-level workspace clamp still applies. */
+     * on the bare host. Nothing in the file tools confines a path — the mount
+     * namespace is the only workspace boundary — so under host they open
+     * whatever the user can (specs/portability.md). */
     q.net_mode = 1;
     if (q.sandbox) {
         SandboxConfig cfg;

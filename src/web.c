@@ -8,8 +8,11 @@
 #include "dashboard.h"
 #include "explore_act.h"
 #include "db.h"
+#include "config_registry.h"
 #include "json_escape.h"
+#include "log.h"
 #include "util.h"
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -194,9 +197,10 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
 
     Buf b = {0};
 
-    buf_appendf(&b, "version: %s\nuptime: %lds\n", CCLAW_VERSION, uptime);
-
     web_db_lock();
+
+    buf_appendf(&b, "version: %s\nbuild: %s (%s)\nuptime: %lds\n",
+                VERSION, VERSION_COMMIT, BUILD_DATE, uptime);
 
     /* Unauthenticated `/` is liveness only — the session table (names,
      * states, inbox depths) is operator data, gated behind the same
@@ -369,8 +373,20 @@ int web_start(Config *cfg, const char *db_path) {
 
     mg_init_library(0);
 
-    char port_str[16];
-    snprintf(port_str, sizeof(port_str), "%d", cfg->web_port);
+    /* web_bind goes into civetweb's port list verbatim, so it must be exactly
+     * one IPv4 address: anything else is refused rather than guessed at. */
+    char port_str[INET_ADDRSTRLEN + 16];
+    char *bind = config_get(s_db, "web_bind");
+    struct in_addr addr;
+    if (!bind || inet_pton(AF_INET, bind, &addr) != 1) {
+        LOG_ERROR_("web: web_bind '%s' is not an IPv4 address (use 127.0.0.1 for"
+                   " this machine only, 0.0.0.0 for every interface)", bind ? bind : "");
+        free(bind);
+        web_stop();
+        return -1;
+    }
+    snprintf(port_str, sizeof(port_str), "%s:%d", bind, cfg->web_port);
+    free(bind);
 
     /* Four workers: a provider check from the page (explore_act.c) holds one
      * for as long as llm_probe_timeout allows — without the database lock —

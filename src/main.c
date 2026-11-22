@@ -45,6 +45,7 @@
 #include "crash.h"
 #include "channel_harness.h"
 #include "extension_manifest.h"
+#include "contain.h"
 #include "doctor.h"
 #include "install.h"
 #include "wake.h"
@@ -325,6 +326,49 @@ static void ensure_default_agent(const char *base_dir) {
     if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
 }
 
+/* A host that cannot contain a tool child refuses every tool call of a
+ * sandboxed agent (exit 126). That is the right refusal and a bad first
+ * impression: say so at startup, with the way out, instead of leaving the
+ * operator to meet it one failed tool call at a time. `agent` NULL = every
+ * agent (the daemon). Nothing is changed here — running uncontained stays the
+ * operator's explicit choice. */
+static void warn_if_uncontained(sqlite3 *db, const char *agent, int daemon) {
+    const char *env = getenv("CCLAW_SANDBOX_PROFILE");
+    if (!daemon && env && strcmp(env, "host") == 0) return;
+    char who[256] = "";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT group_concat(name, ', ') FROM agents"
+            " WHERE COALESCE(sandbox_profile,'standard') <> 'host'"
+            "   AND (?1 IS NULL OR name = ?1)", -1, &st, NULL) != SQLITE_OK)
+        return;
+    if (agent) sqlite3_bind_text(st, 1, agent, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
+        snprintf(who, sizeof(who), "%s", (const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    if (!who[0]) return;
+    char why[160], hint[320];
+    if (contain_probe(why, sizeof(why))) return;
+    contain_hint(hint, sizeof(hint));
+    if (daemon) {
+        /* The daemon's log is syslog: one line. */
+        LOG_ERROR_("daemon: this host cannot sandbox tool calls (%s: %s) — every"
+                   " tool call by %s will be refused. %s%sTo run without the sandbox"
+                   " instead, put CCLAW_SANDBOX_PROFILE=host in the daemon's"
+                   " environment; `cclaw --doctor` has more",
+                   contain_backend(), why, who, hint, hint[0] ? ". " : "");
+        return;
+    }
+    fprintf(stderr,
+            "warning: this host cannot sandbox tool calls (%s: %s).\n"
+            "  Every tool call by a sandboxed agent (%s) will be refused.\n"
+            "%s%s%s"
+            "  To run without the sandbox instead, start cclaw with --trust-host —\n"
+            "  the machine itself is then the only boundary. `cclaw --doctor` has more.\n",
+            contain_backend(), why, who,
+            hint[0] ? "  " : "", hint, hint[0] ? "\n" : "");
+}
+
 static int run_daemon(char *db_path) {
     proc_set_daemon(1);
     g_next_db_poll = time(NULL);  /* run DB checks immediately on first iter */
@@ -353,7 +397,7 @@ static int run_daemon(char *db_path) {
     /* Scheduled scripts need the child table, which only the daemon has. */
     cron_set_script_runner(cron_script_run);
 
-    printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
+    printf("cclaw %s (%s, %s) — daemon mode\n", VERSION, VERSION_COMMIT, BUILD_DATE);
     /* Resolved config, once, at default verbosity: a daemon that talks to the
      * wrong provider or writes to the wrong workspace should say so in the log
      * rather than in a support thread. The key is named by *source* only —
@@ -368,10 +412,20 @@ static int run_daemon(char *db_path) {
               proc_cfg()->db_path ? proc_cfg()->db_path : "(unset)",
               proc_cfg()->provider.api_key_source ? proc_cfg()->provider.api_key_source
                                              : "(none)");
+    warn_if_uncontained(proc_db(), NULL, 1);
+    /* A daemon with no key still starts (channels and the admin page are how
+     * the operator fixes it), but it must not look healthy while every turn
+     * fails. */
+    if (!proc_cfg()->provider.api_key || !proc_cfg()->provider.api_key[0])
+        LOG_ERROR_("daemon: no API key for any provider — every turn will fail."
+                   " Put OPENROUTER_API_KEY (or another provider's key) in the"
+                   " daemon's environment and restart; `cclaw --doctor` shows"
+                   " which keys were found");
     proc_set_web_up(web_start(proc_cfg(), db_path) == 0);
     if (!proc_web_up())
-        LOG_ERROR_("daemon: web server did not start on port %d — /dashboard,"
-                   " /admin and webhooks are unavailable", proc_cfg()->web_port);
+        LOG_ERROR_("daemon: web server did not start on port %d (already in use,"
+                   " or a bad web_bind) — /admin, shared files and webhooks are"
+                   " unavailable", proc_cfg()->web_port);
     /* No heartbeat thread: the pulse is a seeded bare-wake cron row fired by
      * cron_run_due off the db_periodic tick — one scheduler. */
 
@@ -540,7 +594,13 @@ static int run_cli(char *db_path, const char *prompt,
     g_next_db_poll = time(NULL);
 
     if (!proc_cfg()->provider.api_key || !proc_cfg()->provider.api_key[0]) {
-        fprintf(stderr, "error: no API key (set OPENROUTER_API_KEY)\n");
+        fprintf(stderr,
+                "error: no API key\n"
+                "  cclaw needs a key for one LLM provider. The default is OpenRouter\n"
+                "  (https://openrouter.ai/keys):\n"
+                "    export OPENROUTER_API_KEY=sk-or-v1-...\n"
+                "  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY and others work\n"
+                "  the same way. `cclaw --doctor` shows which keys were found.\n");
         config_free(proc_cfg()); db_close(proc_db()); free(db_path); return 1;
     }
 
@@ -574,6 +634,7 @@ static int run_cli(char *db_path, const char *prompt,
     free(agent_sel);
 
     if (host_mode) setenv("CCLAW_SANDBOX_PROFILE", "host", 1);
+    warn_if_uncontained(proc_db(), proc_agent_name(), 0);
     workspace_init(proc_cfg());
     /* Make the workspace the process cwd so relative paths, shell children, and
      * fs.* all operate in the agent's workspace by default. (CLI only — the
@@ -961,8 +1022,10 @@ int main(int argc, char *argv[]) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0) { print_usage(); return 0; }
-        else if (strcmp(argv[i], "--version") == 0) {
-            printf("cclaw %s (%s)\n", VERSION_COMMIT, BUILD_DATE);
+        /* `cclaw publish` reads the commit out of this line (update_channel.c). */
+        else if (strcmp(argv[i], "--version") == 0 ||
+                 (i == 1 && strcmp(argv[i], "version") == 0)) {
+            printf("cclaw %s (%s, %s)\n", VERSION, VERSION_COMMIT, BUILD_DATE);
             return 0;
         }
         /* Machine-readable compatibility handshake. `cclaw update` runs this

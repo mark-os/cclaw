@@ -1,4 +1,4 @@
-# The dashboard — admin panel at `/dashboard`, data explorer at `/admin`, API at `/admin/api/`
+# The dashboard — admin panel at `/admin`, data explorer at `/admin/data`, API at `/admin/api/`
 
 Everything in `cclaw.db` for the operator: the tables, what each column means,
 how rows link to each other in both directions — and, where a thing is shown,
@@ -9,9 +9,10 @@ draws it; the API is also the first cut of what a mobile app will use. Code:
 `templates/dashboard.html` (below, "The admin panel"); tests in
 `test/test_explore.c`, `test/test_explore_act.c`, `test/test_web.c`.
 
-The server-rendered page that used to live at `/admin` (`dashboard.c`'s HTML
-and its form endpoint `POST /admin/act`) is gone; `/admin/explore`, the
-explorer's address while both existed, redirects to `/admin`.
+Everything the operator opens is under `/admin`, so one path prefix is all a
+reverse proxy or a tunnel has to carry. The earlier addresses (`/dashboard`
+for the panel, `/admin` and before it `/admin/explore` for the explorer) are
+gone, not redirected.
 
 ## Rules
 
@@ -51,7 +52,7 @@ explorer's address while both existed, redirects to `/admin`.
 ## Access
 
 The admin token (`web_admin_token`). `cclaw dashboard` prints two links with
-it, `/dashboard` first and `/admin` second; an admin who sends `/dashboard`
+it, `/admin` first and `/admin/data` second; an admin who sends `/admin`
 in a direct message to an agent gets the first one (see
 [channels.md](channels.md)). Either page accepts `?token=` once and answers
 with a 303 to its own clean address that moves the token into the
@@ -304,7 +305,7 @@ among them.) Network actions release the lock around the provider call.
 
 Letting an agent use a secret is `grant_add` with kind `secret`.
 
-## The page — `/admin`
+## The page — `/admin/data`
 
 `templates/explorer.html`, embedded at build time. Hash routes:
 
@@ -483,14 +484,14 @@ extension again would, and logs the operator's act (`hooks` is not
 change-logged). Refusals: 400 when a field is missing, 404 for no such
 extension or no such hook of it, 409 for a hook that is not turned off.
 
-## The admin panel — `/dashboard`
+## The admin panel — `/admin`
 
 `templates/dashboard.html`: the task-shaped screens for the person running
 the agents, in plain words, with no table or column names. It is a client of
 the same API (`rows`, `row`, `approval`, and `act` for approval decisions
 only); it adds no endpoint and edits nothing else — every section links to
 the agent's row in the explorer ("change", "all data"). Same serving rules as
-`/admin`: GET only, exact path, same token and cookie, same headers; no
+`/admin/data`: GET only, exact path, same token and cookie, same headers; no
 `innerHTML` (the source test covers both pages). Hash routes:
 
 | Route | Screen |

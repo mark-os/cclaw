@@ -72,7 +72,7 @@ holds moves it, and leaves that chat on a fresh session for the same agent.
 They can also decide approvals from chat: `/approvals` lists what is parked
 (id, agent, tool, arguments), `/approve <id>` and `/deny <id>` settle one, and
 `/status` shows the chat's session, agent, model, reply setting and pending
-count. `/dashboard` sends the admin a link to the web dashboard, in a direct
+count. `/admin` sends the admin a link to the web dashboard, in a direct
 message only — the link signs its holder in as the operator, so in a group it
 answers with a one-line pointer instead. An approval can only be decided from
 the channel it was raised on, and
@@ -235,8 +235,7 @@ Host API: `channel.emit`, `channel.send`, `channel.http`,
 `channel.getConfig(key)` (registry, read-only),
 `channel.getState/setState(key, value)` (runtime scratch),
 `channel.log`, `channel.ackOutbox/failOutbox`,
-and `channel.admin.isAdmin(id)` / `channel.admin.listPendingApprovals()` /
-`channel.admin.dashboardUrl()`.
+and `channel.admin.isAdmin(id)` / `channel.admin.listPendingApprovals()`.
 
 ## Discord
 

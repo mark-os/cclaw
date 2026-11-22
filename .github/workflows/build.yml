@@ -109,6 +109,10 @@ jobs:
           - { target: armv5te, packages: gcc-arm-linux-gnueabi,  strip: arm-linux-gnueabi-strip, qemu_cpu: arm926 }
     env:
       TARGET: ${{ matrix.target }}
+      # The Makefile takes the version from `git describe`, which has no tags
+      # to read in a shallow clone. A tag build knows its tag; anything else
+      # leaves this empty and reports the commit.
+      VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -152,6 +156,14 @@ jobs:
       - name: Build
         # Asserts on its own that the result has no dynamic dependencies.
         run: scripts/build_static.sh "$TARGET"
+
+      - name: The release binary names its own release
+        # What someone who downloads the asset sees from `cclaw --version`.
+        if: github.ref_type == 'tag'
+        run: |
+          got="$(build/cclaw --version)"
+          echo "$got"
+          case "$got" in "cclaw ${GITHUB_REF_NAME} ("*) ;; *) echo "error: expected ${GITHUB_REF_NAME}" >&2; exit 1 ;; esac
 
       - name: Unit and integration tests against the artifact
         # x64 only: the full suites, built static like the binary they drive.

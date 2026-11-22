@@ -146,6 +146,7 @@ static int handle_completions(struct mg_connection *conn, void *cbdata) {
     /* SSE response: if body starts with "data:" serve as event-stream */
     int is_sse = (body && strncmp(body, "data:", 5) == 0);
 
+    if (!body) body = "";
     int len = (int)strlen(body);
     mg_printf(conn,
         "HTTP/1.1 %d %s\r\n"

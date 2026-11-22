@@ -63,6 +63,36 @@ int contain_probe(char *why, size_t cap) {
     return 0;
 }
 
+/* A sysctl's integer value, or -1 when this kernel does not have it. */
+static long sysctl_long(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    long v = -1;
+    if (fscanf(f, "%ld", &v) != 1) v = -1;
+    fclose(f);
+    return v;
+}
+
+/* The switches distributions use to turn unprivileged user namespaces off,
+ * most specific first. Each is named only when it is set against us. */
+void contain_hint(char *out, size_t cap) {
+    if (!out || !cap) return;
+    out[0] = '\0';
+    if (sysctl_long("/proc/sys/kernel/apparmor_restrict_unprivileged_userns") == 1)
+        snprintf(out, cap, "AppArmor restricts unprivileged user namespaces here"
+                 " (Ubuntu 23.10 and later). To allow them:"
+                 " sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0");
+    else if (sysctl_long("/proc/sys/kernel/unprivileged_userns_clone") == 0)
+        snprintf(out, cap, "unprivileged user namespaces are switched off here."
+                 " To allow them: sudo sysctl -w kernel.unprivileged_userns_clone=1");
+    else if (sysctl_long("/proc/sys/user/max_user_namespaces") == 0)
+        snprintf(out, cap, "user namespaces are limited to zero here."
+                 " To allow them: sudo sysctl -w user.max_user_namespaces=15000");
+    else if (access("/.dockerenv", F_OK) == 0 || access("/run/.containerenv", F_OK) == 0)
+        snprintf(out, cap, "this is inside a container, and its runtime does not"
+                 " let a process make namespaces of its own");
+}
+
 /* Fixed in-sandbox path the broker's per-call proxy UDS is bind-mounted to. The
  * socket itself lives in the agent folder on the host (outside the workspace);
  * inside the netns net_shim reaches it here. */

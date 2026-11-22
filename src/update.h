@@ -26,6 +26,12 @@
 
 int update_main(int argc, char *argv[]);
 
+/* Is release `tag` what is running here? Either this build was made from that
+ * tag (a binary downloaded by hand knows its own version) or the updater
+ * recorded installing it (update.installed_tag — the only name a pre-release
+ * or a sideloaded file has). */
+int update_is_installed(sqlite3 *db, const char *tag);
+
 /* Release asset name for this build's architecture, or NULL. */
 const char *update_default_asset(void);
 

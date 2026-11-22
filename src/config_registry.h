@@ -58,7 +58,7 @@ int config_get_int(sqlite3 *db, const char *key);
 char *config_web_base_url(sqlite3 *db);
 
 /* "<config_web_base_url><path>?token=<web_admin_token>" — a link that signs
- * the holder in as the operator (path "/dashboard" or "/admin"). Malloc'd;
+ * the holder in as the operator (path "/admin" or "/admin/data"). Malloc'd;
  * NULL before the daemon has minted a token. */
 char *config_admin_url(sqlite3 *db, const char *path);
 double config_get_double(sqlite3 *db, const char *key);

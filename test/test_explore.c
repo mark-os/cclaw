@@ -779,18 +779,14 @@ static void test_http(void) {
     char path[256];
     snprintf(path, sizeof(path), "/admin/api/meta?token=%s", tok);
     assert(http(c, path, NULL, &b, &h) == 403);   /* API: cookie only */
-    assert(http(c, "/admin", NULL, &b, &h) == 403);
+    assert(http(c, "/admin/data", NULL, &b, &h) == 403);
     assert(strstr(b.d, "cclaw dashboard") && strstr(h.d, "text/html"));
-    assert(http(c, "/admin?token=00000000000000000000000000000000", NULL, &b, &h) == 403);
-    /* The page's old address keeps working: it redirects, query and all. */
-    snprintf(path, sizeof(path), "/admin/explore?token=%s", tok);
-    assert(http(c, path, NULL, &b, &h) == 303);
-    assert(strstr(h.d, "Location: /admin?token="));
+    assert(http(c, "/admin/data?token=00000000000000000000000000000000", NULL, &b, &h) == 403);
     /* Signing in moves the token into the cookie and out of the URL. */
-    snprintf(path, sizeof(path), "/admin?token=%s", tok);
+    snprintf(path, sizeof(path), "/admin/data?token=%s", tok);
     assert(http(c, path, NULL, &b, &h) == 303);
-    assert(strstr(h.d, "Location: /admin\r\n") && strstr(h.d, "Set-Cookie: cclaw_admin="));
-    assert(http(c, "/admin", NULL, &b, &h) == 200);
+    assert(strstr(h.d, "Location: /admin/data\r\n") && strstr(h.d, "Set-Cookie: cclaw_admin="));
+    assert(http(c, "/admin/data", NULL, &b, &h) == 200);
     assert(strstr(h.d, "Content-Security-Policy: default-src 'none'"));
     assert(strstr(h.d, "Cache-Control: no-store"));
     assert(strcmp(b.d, TPL_EXPLORER_HTML) == 0);
@@ -823,7 +819,7 @@ static void test_http(void) {
     /* Reading is GET only; actions are POST /admin/api/act, and a GET there
      * changes nothing. */
     assert(http(c, "/admin/api/meta", "x=1", &b, &h) == 405);
-    assert(http(c, "/admin", "x=1", &b, &h) == 405);
+    assert(http(c, "/admin/data", "x=1", &b, &h) == 405);
     assert(http(c, "/admin/api/act", NULL, &b, &h) == 405);
     /* Search: a substring of a text key column, here a cached model id. */
     assert(http(c, "/admin/api/rows?table=models_cache&q=A%2F2", NULL, &b, &h) == 200);

@@ -22,6 +22,25 @@ static int is_select_only(const char *sql) {
             (sql[6] == '\0' || isspace((unsigned char)sql[6])));
 }
 
+/* Columns no agent reads through here, whatever the query's shape: SQLite
+ * hands back NULL in their place (an authorizer sees every column a statement
+ * touches, through `*`, views and subqueries alike, so there is no spelling
+ * that gets round it). config.value holds the admin page's sign-in token and
+ * channel_outbox.payload the chat reply that carried the link — and the admin
+ * page is where this agent's own approvals are answered. Config is read with
+ * search_config, which withholds per key. */
+static int withheld_column(void *seen, int action, const char *table,
+                           const char *column, const char *dbname, const char *trigger) {
+    (void)dbname; (void)trigger;
+    if (action != SQLITE_READ || !table || !column) return SQLITE_OK;
+    if ((strcmp(table, "config") == 0 && strcmp(column, "value") == 0) ||
+        (strcmp(table, "channel_outbox") == 0 && strcmp(column, "payload") == 0)) {
+        *(int *)seen = 1;
+        return SQLITE_IGNORE;
+    }
+    return SQLITE_OK;
+}
+
 char *tool_db_query_handler(const char *arguments, void *user_data, int *is_error) {
     sqlite3 *db = (sqlite3 *)user_data;
     if (!db) return tool_fail(is_error, "error: no database connection");
@@ -37,9 +56,15 @@ char *tool_db_query_handler(const char *arguments, void *user_data, int *is_erro
         return tool_fail(is_error, "error: only SELECT queries allowed");
     }
 
+    /* The authorizer stays until the statement is finalized: changing it
+     * expires prepared statements, and a re-prepare without it would read the
+     * columns after all. */
+    int blanked = 0;
+    sqlite3_set_authorizer(db, withheld_column, &blanked);
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
+        sqlite3_set_authorizer(db, NULL, NULL);
         char *err = malloc(256);
         *is_error = 1;
         if (err) snprintf(err, 256, "error: %s", sqlite3_errmsg(db));
@@ -98,6 +123,7 @@ char *tool_db_query_handler(const char *arguments, void *user_data, int *is_erro
     }
 
     sqlite3_finalize(stmt);
+    sqlite3_set_authorizer(db, NULL, NULL);
 
     /* Invisible truncation is a lie of omission — always say what was cut. */
     if (truncated) {
@@ -110,6 +136,12 @@ char *tool_db_query_handler(const char *arguments, void *user_data, int *is_erro
         snprintf(note, sizeof(note),
                  "(%d row%s withheld: encrypted secret values)\n",
                  withheld, withheld == 1 ? "" : "s");
+        buf_append(&b, note, strlen(note));
+    }
+
+    if (blanked) {
+        const char *note = "(config.value and channel_outbox.payload read as empty"
+                           " here; read config with search_config)\n";
         buf_append(&b, note, strlen(note));
     }
 

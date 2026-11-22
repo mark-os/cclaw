@@ -4,9 +4,11 @@
 // downloads (await never blocks the loop — the transfer runs on the runner's
 // curl loop and resumes this continuation on completion); channel.send() only
 // for outbox-tracked deliveries, where C owns retry/ack.
-// Admin config (keys, models, grants) lives on the web dashboard (/admin
-// prints the URL); chat keeps only conversation, /approvals and the push
-// approval prompts.
+// Admin config (keys, models, grants) lives on the web dashboard; chat keeps
+// only conversation, /approvals and the push approval prompts. /admin (the
+// dashboard link) is the daemon's command, like /new and /status: it arrives
+// here as ordinary text and is forwarded, and the daemon answers it in a
+// direct message only.
 
 var TG_MAX_MSG_LEN = 4096;
 var VOICE_MAX_SECONDS = 120;     // reject longer voice notes up front
@@ -15,22 +17,20 @@ var PHOTO_MAX_BYTES = 3 * 1024 * 1024;  // matches the runner's download cap
 var config = {};
 var offset = 0;
 
-// Single source of truth for admin slash commands — drives both the
-// Telegram "/" menu (setMyCommands) and dispatch, so the two can't drift.
+// Single source of truth for the admin slash commands handled here — drives
+// both the Telegram "/" menu (setMyCommands) and dispatch, so the two can't
+// drift.
 var COMMANDS = {
     approvals: {
         description: "Review pending approvals",
         handler: function(chatId) { sendApprovalsMenu(chatId); }
-    },
-    admin: {
-        description: "Get the admin dashboard link",
-        handler: function(chatId) {
-            var url = channel.admin.dashboardUrl();
-            sendMessage(chatId, url ? "Admin dashboard:\n" + url :
-                "Dashboard unavailable — no token minted yet (is the daemon's web server running?).");
-        }
     }
 };
+// Daemon commands worth a menu entry. Not dispatched here: the text is
+// forwarded and the daemon answers.
+var MENU_ONLY = [
+    {command: "admin", description: "Get the dashboard link (direct message only)"}
+];
 
 // "/cmd arg text" -> {name: "cmd", args: "arg text"} (lowercased name), or
 // null if text isn't a slash command at all.
@@ -64,6 +64,7 @@ function onInit() {
     // Fix the stale command menu (leftover from a previous bot on this token).
     var cmdList = [];
     for (var name in COMMANDS) cmdList.push({command: name, description: COMMANDS[name].description});
+    cmdList = cmdList.concat(MENU_ONLY);
     tgCast("setMyCommands", {commands: cmdList});
 
     // Bot identity feeds the envelope's mentioned/reply_to_me facts.

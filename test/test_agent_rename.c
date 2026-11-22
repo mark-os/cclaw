@@ -230,7 +230,7 @@ static void seed_generic_row(sqlite3 *db, const char *table, const char *agent) 
     /* Build INSERT(cols) VALUES(vals) from pragma_table_info: agent_name gets
      * `agent`, other NOT-NULL-without-default non-autoincrement columns get a
      * type-appropriate dummy, everything else is left to its default. */
-    char q[256];
+    char q[2304];
     snprintf(q, sizeof(q), "PRAGMA table_info('%s')", table);
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(db, q, -1, &s, NULL) == SQLITE_OK);
@@ -323,7 +323,7 @@ static void test_rename_no_orphans_self_audit(void) {
 
     /* No agent_name table may retain a row under the old name. */
     for (int i = 0; i < nt; i++) {
-        char q[128];
+        char q[2304];
         snprintf(q, sizeof(q),
                  "SELECT COUNT(*) FROM %s WHERE agent_name='OldAgent'", tables[i]);
         int orphans = count_rows(db, q);

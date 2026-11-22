@@ -1032,9 +1032,9 @@ static void test_chat_status_command(void) {
     printf("PASS\n");
 }
 
-/* /dashboard: the tokenized link, to an admin, in a direct message only. The
+/* /admin: the tokenized link, to an admin, in a direct message only. The
  * link is the operator's credential: a group (or a chat whose kind was never
- * reported) gets a one-line refusal, a non-admin's /dashboard is ordinary
+ * reported) gets a one-line refusal, a non-admin's /admin is ordinary
  * chat like any other admin command, and the reply never enters the session's
  * conversation (entries) — only the outbox, like /status. */
 static void dash_say(sqlite3 *db, const char *chat, const char *sender,
@@ -1073,12 +1073,12 @@ static void test_chat_dashboard_command(void) {
     proc_set_web_up(1);
 
     /* Admin, direct message: the link, built on web_public_url. */
-    dash_say(db, "dm9", "9", "dm", "/dashboard");
+    dash_say(db, "dm9", "9", "dm", "/admin");
     assert_reply_has(db, "dash",
-        "https://box.example/dashboard?token=d00dfeedd00dfeedd00dfeedd00dfeed");
+        "https://box.example/admin?token=d00dfeedd00dfeedd00dfeedd00dfeed");
 
     /* Admin in a group: one line, no token. */
-    dash_say(db, "grp", "9", "group", "/dashboard");
+    dash_say(db, "grp", "9", "group", "/admin");
     assert_reply_has(db, "dash", "direct message");
     {
         char *t = last_outbox_text(db, "dash");
@@ -1088,24 +1088,24 @@ static void test_chat_dashboard_command(void) {
     /* A chat whose kind was never reported counts as a group (fail closed). */
     assert(sqlite3_exec(db, "INSERT INTO channel_chats(channel_name, chat_id)"
                             " VALUES('dash','unk');", NULL, NULL, NULL) == SQLITE_OK);
-    dash_say(db, "unk", "9", NULL, "/dashboard");
+    dash_say(db, "unk", "9", NULL, "/admin");
     assert_reply_has(db, "dash", "direct message");
 
-    /* A non-admin's /dashboard is not a command: it reaches the agent as
+    /* A non-admin's /admin is not a command: it reaches the agent as
      * text, and no link is sent anywhere. */
     int before = test_scalar_count(db, "SELECT COUNT(*) FROM channel_outbox");
-    dash_say(db, "dm9", "55", "dm", "/dashboard");
+    dash_say(db, "dm9", "55", "dm", "/admin");
     assert(test_inbox_count(db, dm) == 1);
     assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_outbox") == before);
 
     /* No web server, no token: said plainly, no dead link. */
     proc_set_web_up(0);
-    dash_say(db, "dm9", "9", "dm", "/dashboard");
+    dash_say(db, "dm9", "9", "dm", "/admin");
     assert_reply_has(db, "dash", "web server is not running");
     proc_set_web_up(1);
     assert(sqlite3_exec(db, "UPDATE config SET value='' WHERE key='web_admin_token';",
                         NULL, NULL, NULL) == SQLITE_OK);
-    dash_say(db, "dm9", "9", "dm", "/dashboard");
+    dash_say(db, "dm9", "9", "dm", "/admin");
     assert_reply_has(db, "dash", "no admin token");
 
     /* The token never reached a conversation: not in entries, not in the

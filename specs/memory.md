@@ -111,7 +111,7 @@ attach or detach it — those are the operator's, on the dashboard.
 
 ### Dashboard
 
-On `/admin` ([explorer.md](explorer.md)) every block has one page, reached from
+On `/admin/data` ([explorer.md](explorer.md)) every block has one page, reached from
 Home › Memory blocks or from an agent's Memory section: its fields (edit
 description, placement, limit and the block-wide read-only flag; delete it,
 after a confirm that says which agents it is detached from); the agents it is

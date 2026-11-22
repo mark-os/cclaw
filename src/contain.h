@@ -16,6 +16,11 @@ const char *contain_backend(void);
  * throwaway child to try it, so the caller's own process is never changed. */
 int contain_probe(char *why, size_t cap);
 
+/* After a failed probe: one line saying how this host can be made to allow
+ * containment, or "" when the backend knows of nothing to try. Advice only —
+ * the probe is the detector. */
+void contain_hint(char *out, size_t cap);
+
 /* Enter the boundary, in the forked tool child: after a 0 return the process
  * sees only the workspace, the CWD mount, the granted paths and the read-only
  * system directories, and has no network route but the proxy socket. -1 with

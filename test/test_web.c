@@ -298,7 +298,7 @@ static long raw_post(CURL *curl, const char *url, const char *ctype, const char 
     return code;
 }
 
-/* The operator's page at /admin (the data explorer) over HTTP: sign-in, the
+/* The operator's page at /admin/data (the data explorer) over HTTP: sign-in, the
  * actions' guards, and the behaviours the old server-rendered dashboard's
  * tests protected, ported to the actions that replace its forms. */
 static void test_admin_dashboard(void) {
@@ -337,18 +337,17 @@ static void test_admin_dashboard(void) {
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");  /* enable cookie engine */
 
     /* No token → 403; bad token → 403 */
-    assert(dash_get(curl, "http://127.0.0.1:19878/admin", page, sizeof(page)) == 403);
-    assert(dash_get(curl, "http://127.0.0.1:19878/admin?token=00000000000000000000000000000000",
+    assert(dash_get(curl, "http://127.0.0.1:19878/admin/data", page, sizeof(page)) == 403);
+    assert(dash_get(curl, "http://127.0.0.1:19878/admin/data?token=00000000000000000000000000000000",
                     page, sizeof(page)) == 403);
 
     /* Good token → 303 sets the cookie, following lands on the page */
     char url[160];
-    snprintf(url, sizeof(url), "http://127.0.0.1:19878/admin?token=%s", token);
+    snprintf(url, sizeof(url), "http://127.0.0.1:19878/admin/data?token=%s", token);
     assert(dash_get(curl, url, page, sizeof(page)) == 200);
     assert(strstr(page, "<title>cclaw</title>"));
-    /* Cookie now carries auth on its own; the old address redirects here. */
-    assert(dash_get(curl, "http://127.0.0.1:19878/admin", page, sizeof(page)) == 200);
-    assert(dash_get(curl, "http://127.0.0.1:19878/admin/explore", page, sizeof(page)) == 200);
+    /* Cookie now carries auth on its own. */
+    assert(dash_get(curl, "http://127.0.0.1:19878/admin/data", page, sizeof(page)) == 200);
     assert(strstr(page, "<title>cclaw</title>"));
 
     /* A hostile agent name reaches the page as JSON data, never as markup
@@ -520,7 +519,7 @@ static void test_admin_dashboard(void) {
     assert(act_post(curl, GRANT, "Origin: http://evil.example", page, sizeof(page)) == 403);
     assert(act_post(curl, GRANT, "Sec-Fetch-Site: cross-site", page, sizeof(page)) == 403);
     /* The old form endpoint is gone. */
-    assert(raw_post(curl, "http://127.0.0.1:19878/admin/act", "application/x-www-form-urlencoded",
+    assert(raw_post(curl, "http://127.0.0.1:19878/admin/data/act", "application/x-www-form-urlencoded",
                     "action=grant&agent=Assistant&kind=host&value=evil.example",
                     NULL, page, sizeof(page)) == 405);
     /* GET cannot act. */
@@ -553,7 +552,7 @@ static void test_admin_dashboard(void) {
     printf("PASS: test_admin_dashboard\n");
 }
 
-/* The admin panel at /dashboard: the same token and cookie as /admin. A
+/* The admin panel at /admin: the same token and cookie as /admin/data. A
  * cookie set through either page signs in the other page and the API (it is
  * Path=/), and the token leaves the URL with a 303 to the clean address. */
 static size_t hdr_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
@@ -581,9 +580,9 @@ static void test_dashboard_page(void) {
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");
 
     /* Not signed in: the page is 403 (and says how to get in), the API too. */
-    assert(dash_get(curl, "http://127.0.0.1:19879/dashboard", page, sizeof(page)) == 403);
-    assert(strstr(page, "/dashboard"));
-    assert(dash_get(curl, "http://127.0.0.1:19879/dashboard?token=00000000000000000000000000000000",
+    assert(dash_get(curl, "http://127.0.0.1:19879/admin", page, sizeof(page)) == 403);
+    assert(strstr(page, "/admin"));
+    assert(dash_get(curl, "http://127.0.0.1:19879/admin?token=00000000000000000000000000000000",
                     page, sizeof(page)) == 403);
     assert(dash_get(curl, "http://127.0.0.1:19879/admin/api/rows?table=agents",
                     page, sizeof(page)) == 403);
@@ -593,7 +592,7 @@ static void test_dashboard_page(void) {
         static char hdr[4096];
         struct page_buf hb = {hdr, sizeof(hdr)};
         hdr[0] = '\0';
-        snprintf(url, sizeof(url), "http://127.0.0.1:19879/dashboard?token=%s", token);
+        snprintf(url, sizeof(url), "http://127.0.0.1:19879/admin?token=%s", token);
         curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, hdr_cb);
         curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hb);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
@@ -607,18 +606,18 @@ static void test_dashboard_page(void) {
         long code = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
         assert(code == 303);
-        assert(strstr(hdr, "Location: /dashboard\r\n"));
+        assert(strstr(hdr, "Location: /admin\r\n"));
         assert(strstr(hdr, "Path=/; HttpOnly; SameSite=Strict"));
         curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, NULL);
         curl_easy_setopt(curl, CURLOPT_HEADERDATA, NULL);
     }
     /* That cookie: the page, the API, the explorer, and an action. */
-    assert(dash_get(curl, "http://127.0.0.1:19879/dashboard", page, sizeof(page)) == 200);
+    assert(dash_get(curl, "http://127.0.0.1:19879/admin", page, sizeof(page)) == 200);
     assert(strstr(page, "<title>") && strstr(page, "/admin/api/"));
     assert(dash_get(curl, "http://127.0.0.1:19879/admin/api/rows?table=agents",
                     page, sizeof(page)) == 200);
     assert(strstr(page, "\"Assistant\""));
-    assert(dash_get(curl, "http://127.0.0.1:19879/admin", page, sizeof(page)) == 200);
+    assert(dash_get(curl, "http://127.0.0.1:19879/admin/data", page, sizeof(page)) == 200);
     {
         struct curl_slist *h = curl_slist_append(NULL, "Content-Type: application/json");
         h = curl_slist_append(h, "X-Cclaw-Action: 1");
@@ -641,18 +640,18 @@ static void test_dashboard_page(void) {
         free(g);
     }
     /* Only GET, only the exact path. */
-    assert(raw_post(curl, "http://127.0.0.1:19879/dashboard", "application/json", "{}",
+    assert(raw_post(curl, "http://127.0.0.1:19879/admin", "application/json", "{}",
                     NULL, page, sizeof(page)) == 405);
-    assert(dash_get(curl, "http://127.0.0.1:19879/dashboard/x", page, sizeof(page)) == 404);
+    assert(dash_get(curl, "http://127.0.0.1:19879/admin/x", page, sizeof(page)) == 404);
     curl_easy_cleanup(curl);
 
-    /* The other way round: signed in through /admin, /dashboard opens. */
+    /* The other way round: signed in through /admin/data, /admin opens. */
     curl = curl_easy_init();
     assert(curl);
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");
-    snprintf(url, sizeof(url), "http://127.0.0.1:19879/admin?token=%s", token);
+    snprintf(url, sizeof(url), "http://127.0.0.1:19879/admin/data?token=%s", token);
     assert(dash_get(curl, url, page, sizeof(page)) == 200);
-    assert(dash_get(curl, "http://127.0.0.1:19879/dashboard", page, sizeof(page)) == 200);
+    assert(dash_get(curl, "http://127.0.0.1:19879/admin", page, sizeof(page)) == 200);
     assert(strstr(page, "/admin/api/"));
     curl_easy_cleanup(curl);
 
@@ -789,7 +788,7 @@ static void test_share(void) {
     snprintf(bare, sizeof(bare), "%.61s", url);
     assert(share_get(bare, h, b) == 200 && b->n == sizeof(png));
 
-    /* The server also hosts /admin, so an agent's file must never run as a
+    /* The server also hosts /admin/data, so an agent's file must never run as a
      * page: HTML is served as text, unknown binary as a download. */
     char *hurl = share(&reg, "{\"file\":\"page.html\"}", &failed);
     assert(!failed && share_get(hurl, h, b) == 200);
@@ -847,6 +846,51 @@ static void test_share(void) {
     printf("PASS: test_share\n");
 }
 
+/* web_bind: the listener is loopback unless the operator says otherwise, the
+ * links follow it, and a value that is not one IPv4 address stops the server
+ * instead of being passed to the listener. */
+static void test_web_bind(void) {
+    Config cfg = {0};
+    cfg.web_port = 19880;
+    cfg.db_path = "test_web.db";
+    sqlite3 *db = test_db_open(cfg.db_path);
+    assert(db);
+
+    char *v = config_get(db, "web_bind");
+    assert(v && strcmp(v, "127.0.0.1") == 0);
+    free(v);
+    setenv("CCLAW_WEB_PORT", "19880", 1);
+    char *base = config_web_base_url(db);
+    assert(base && strcmp(base, "http://127.0.0.1:19880") == 0);
+    free(base);
+
+    assert(config_set(db, "web_bind", "0.0.0.0:80,9000") == 0);
+    assert(web_start(&cfg, cfg.db_path) != 0);
+    assert(config_set(db, "web_bind", "localhost") == 0);
+    assert(web_start(&cfg, cfg.db_path) != 0);
+
+    /* Every interface: still answers on loopback. */
+    assert(config_set(db, "web_bind", "0.0.0.0") == 0);
+    assert(web_start(&cfg, cfg.db_path) == 0);
+    usleep(50000);
+    CURL *curl = curl_easy_init();
+    assert(curl);
+    char response[4096] = {0};
+    curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19880/");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    assert(curl_easy_perform(curl) == CURLE_OK);
+    assert(strstr(response, "version:") && strstr(response, "build:"));
+    curl_easy_cleanup(curl);
+    web_stop();
+
+    unsetenv("CCLAW_WEB_PORT");
+    db_close(db);
+    test_db_clean(cfg.db_path);
+    printf("  PASS: test_web_bind\n");
+}
+
 int main(void) {
     TEST_INIT();
     test_db_handle_owner();
@@ -855,6 +899,7 @@ int main(void) {
     test_admin_dashboard();
     test_dashboard_page();
     test_share();
+    test_web_bind();
     printf("All web tests passed.\n");
     return 0;
 }

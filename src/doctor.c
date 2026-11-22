@@ -62,6 +62,7 @@ static void mask_secret(const char *secret, char *buf, size_t cap) {
 
 static void check_version(void) {
     printf("\n[version]\n");
+    printf("  version: %s\n", VERSION);
     printf("  commit: %s\n", VERSION_COMMIT);
     printf("  built:  %s\n", BUILD_DATE);
 
@@ -410,6 +411,9 @@ static void check_layers(sqlite3 *db, const Config *cfg) {
     } else {
         snprintf(d, sizeof(d), "%s — %s", contain_backend(), why);
         print_fail("containment", d);
+        char hint[320];
+        contain_hint(hint, sizeof(hint));
+        if (hint[0]) printf("       %s\n", hint);
     }
     layer_tools(db, contained);
 

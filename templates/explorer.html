@@ -39,6 +39,7 @@ main:focus { outline: none; }
 .top-in, .page { max-width: 980px; margin: 0 auto; padding: 0 16px; }
 .top-in { display: flex; align-items: baseline; gap: 12px; padding-top: 10px; padding-bottom: 10px; }
 .brand { font-weight: 600; color: var(--fg); text-decoration: none; }
+.top a.nav { font-size: .9rem; margin-left: auto; }
 .top .sub { color: var(--muted); font-size: .85rem; }
 .page { padding-top: 16px; padding-bottom: 64px; }
 nav.crumbs { font-size: .85rem; color: var(--muted); margin-bottom: 14px; overflow-wrap: anywhere; }
@@ -173,7 +174,8 @@ form.f { display: flex; flex-direction: column; gap: 10px; }
 </head>
 <body>
 <header class="top"><div class="top-in"><a class="brand" href="#/" data-nav>cclaw</a>
-<span class="sub">your agents and their data</span></div></header>
+<span class="sub">your agents and their data</span>
+<a class="nav" href="/admin">Dashboard</a></div></header>
 <div class="page">
 <nav class="crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
 <main id="main" tabindex="-1" aria-live="polite"></main>

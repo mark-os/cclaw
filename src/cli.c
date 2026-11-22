@@ -146,6 +146,7 @@ void print_usage(void) {
            "  -v, --debug        debug logging (timing, context stats)\n"
            "  -vv, --trace       trace logging (full req/resp JSON)\n"
            "  --doctor           print redacted diagnostic report and exit\n"
+           "  --version          print the version (also: cclaw version)\n"
            "  --help             show this help\n"
            "\n"
            "note: running as root weakens mount-based read-only enforcement\n"

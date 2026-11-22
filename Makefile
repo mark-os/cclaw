@@ -6,12 +6,20 @@ CONTAIN  ?= linux
 # through their hardening defaults, so CI enforces it whether we ask or not;
 # Amazon Linux does not, which let a genuine format-string bug sit on master
 # unbuilt by CI. Ask for it explicitly so a local build fails where CI fails.
-CFLAGS  := -std=c11 -Wall -Wextra -Werror -Wformat-security -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn -Ivendor/yxml
+CFLAGS  := -std=c11 -O2 -Wall -Wextra -Werror -Wformat-security -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn -Ivendor/yxml
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
 VERSION_COMMIT := $(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) status --porcelain --untracked-files=no 2>/dev/null | grep -q . && echo -dirty)
 BUILD_DATE     := $(shell date -u +%Y-%m-%d)
-CFLAGS += -DVERSION_COMMIT='"$(VERSION_COMMIT)"' -DBUILD_DATE='"$(BUILD_DATE)"'
+# The version is the git tag, read here and nowhere else: `v0.8.0` on a tag,
+# `v0.7.3-41-ge1804a0` between tags, `-dirty` with uncommitted changes — so a
+# build that is not a release never names one. A checkout with no tags (CI
+# clones shallow) falls back to the commit; the release job passes VERSION,
+# since it knows the tag it was started for.
+ifeq ($(strip $(VERSION)),)
+VERSION := $(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) describe --tags --always --dirty 2>/dev/null || echo unknown)
+endif
+CFLAGS += -DVERSION='"$(VERSION)"' -DVERSION_COMMIT='"$(VERSION_COMMIT)"' -DBUILD_DATE='"$(BUILD_DATE)"'
 # debug passes its extra flags here — re-passing CFLAGS="$(CFLAGS)" through the
 # recursive $(MAKE) would strip the nested quotes off the -D defines above.
 CFLAGS += $(EXTRA_CFLAGS)
@@ -114,12 +122,12 @@ $(BUILDDIR)/templates.h $(BUILDDIR)/templates.c: $(TEMPLATES) scripts/gen_templa
 $(BUILDDIR)/templates.o: $(BUILDDIR)/templates.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -I$(BUILDDIR) -c -o $@ $<
 
-# Objects that bake VERSION_COMMIT rebuild when it changes (a new commit, or
-# the tree going dirty/clean); otherwise --version reports a stale commit,
+# Objects that bake the version rebuild when it changes (a new commit or tag,
+# or the tree going dirty/clean); otherwise --version reports a stale one,
 # which `cclaw publish` would then sign into the channel manifest.
 VERSION_STAMP := $(BUILDDIR)/version.stamp
-$(shell mkdir -p $(BUILDDIR); echo "$(VERSION_COMMIT) $(BUILD_DATE)" | cmp -s - $(VERSION_STAMP) 2>/dev/null || echo "$(VERSION_COMMIT) $(BUILD_DATE)" > $(VERSION_STAMP))
-$(addprefix $(BUILDDIR)/,main.o doctor.o tool_bootstrap.o update.o update_channel.o): $(VERSION_STAMP)
+$(shell mkdir -p $(BUILDDIR); echo "$(VERSION) $(VERSION_COMMIT) $(BUILD_DATE)" | cmp -s - $(VERSION_STAMP) 2>/dev/null || echo "$(VERSION) $(VERSION_COMMIT) $(BUILD_DATE)" > $(VERSION_STAMP))
+$(addprefix $(BUILDDIR)/,main.o doctor.o tool_bootstrap.o update.o update_channel.o web.o): $(VERSION_STAMP)
 
 $(BUILDDIR)/%.o: src/%.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -c -o $@ $<

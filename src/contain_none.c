@@ -13,6 +13,8 @@ int contain_probe(char *why, size_t cap) {
     return 0;
 }
 
+void contain_hint(char *out, size_t cap) { if (out && cap) out[0] = '\0'; }
+
 int contain_enter(const char *workspace, const char *cwd_path,
                   const char *db_path, const SandboxConfig *cfg) {
     (void)workspace; (void)cwd_path; (void)db_path; (void)cfg;

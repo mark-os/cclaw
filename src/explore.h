@@ -50,14 +50,11 @@ int explore_session(sqlite3 *db, int64_t session_id, char **out);
  * hidden in some rows). Shared with the tests' secret walk. */
 int explore_hidden(const char *table, const char *column);
 
-/* Everything under /admin: the page (GET /admin), the read API (GET
- * /admin/api/{meta,rows,row,approval,cache,session}) and the actions (POST /admin/api/act,
- * explore_act.h). db is the web server's handle; this takes web_db_lock()
- * itself, for the database work only. */
+/* Everything under /admin: the dashboard (GET /admin, templates/dashboard.html),
+ * the data explorer (GET /admin/data, templates/explorer.html), the read API
+ * both pages are clients of (GET /admin/api/{meta,rows,row,approval,cache,session})
+ * and the actions (POST /admin/api/act, explore_act.h). db is the web server's
+ * handle; this takes web_db_lock() itself, for the database work only. */
 int explore_handle(struct mg_connection *conn, sqlite3 *db);
-
-/* GET /dashboard: the admin panel page (templates/dashboard.html), a client
- * of the same /admin/api/ — same token, same cookie, same headers. */
-int explore_dashboard(struct mg_connection *conn, sqlite3 *db);
 
 #endif

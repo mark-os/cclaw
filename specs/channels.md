@@ -175,7 +175,7 @@ Admin chats can issue `/new` (re-point the pin at a fresh session for the
 same agent) and `/sessions [id]` (list this chat's sessions / attach to
 one), plus `/approve <id>` / `/deny <id>` (decide a parked approval) and
 `/status` (what this chat is pinned to, and its reply setting) and
-`/dashboard` (the tokenized link to the admin panel — the admin credential, so
+`/admin` (the tokenized link to the admin panel — the admin credential, so
 it is sent only in a chat whose `channel_chats.kind` is `dm`; a group, or a
 chat whose kind was never reported, gets a one-line refusal; if the web server
 is not running or no token exists it says so). Handled in C
@@ -247,7 +247,7 @@ this chat (Guidance, below).
 
 ## Where routes come from
 
-Operator verbs (`cclaw route add`; on `/admin`, a chat's "Route to an agent",
+Operator verbs (`cclaw route add`; on `/admin/data`, a chat's "Route to an agent",
 an agent's "New session on a channel" / "Move a session to a chat", and a
 channel's default agent) — or the agent itself: a `request_config` changes document
 with a `routes` section (`["telegram:12345"]`,

@@ -29,6 +29,11 @@ static const ConfigDef s_defs[] = {
       " calls default to 600s within it" },
     { "web_port",           "8080",
       "Embedded web server port" },
+    { "web_bind",           "127.0.0.1",
+      "Address the web server listens on. 127.0.0.1 = this machine only: reach"
+      " it through an SSH tunnel or a reverse proxy. 0.0.0.0 = every interface;"
+      " the admin link then crosses the network as plain HTTP, so use that only"
+      " on a network you trust. Takes effect at daemon restart" },
     { "web_admin_token",    "",
       "Admin dashboard auth token (auto-generated at daemon start; cclaw dashboard prints the URL)" },
     { "max_history_tokens", "0",
@@ -395,9 +400,16 @@ char *config_web_base_url(sqlite3 *db) {
     const char *env_port = getenv("CCLAW_WEB_PORT");
     int port = (env_port && env_port[0]) ? atoi(env_port)
                                          : config_get_int(db, "web_port");
+    /* Bound to one address: that is the only place it answers. Bound to all:
+     * the first non-loopback one is the best guess at how people reach it. */
     char host[INET_ADDRSTRLEN] = "127.0.0.1";
+    char *bind = config_get(db, "web_bind");
+    struct in_addr one;
+    int any = !bind || inet_pton(AF_INET, bind, &one) != 1 || one.s_addr == htonl(INADDR_ANY);
+    if (!any) snprintf(host, sizeof(host), "%s", bind);
+    free(bind);
     struct ifaddrs *ifa = NULL;
-    if (getifaddrs(&ifa) == 0) {
+    if (any && getifaddrs(&ifa) == 0) {
         for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
             if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
             struct sockaddr_in *sin = (struct sockaddr_in *)(void *)p->ifa_addr;

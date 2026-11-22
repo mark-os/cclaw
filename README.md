@@ -153,11 +153,13 @@ No manual config files. No YAML. The agent configures itself through the same to
 ## Usage
 
 ```bash
-cclaw                    # interactive CLI (default agent, streaming)
+cclaw                    # interactive CLI (default agent)
 cclaw -p "hello"         # single-turn: print response and exit
 cclaw -s 3               # resume session 3
 cclaw --new              # force new session
 cclaw --daemon           # daemon mode (channels, cron, multi-agent)
+cclaw dashboard          # links to the daemon's web pages: /admin and /admin/data
+cclaw --trust-host       # run tools without the sandbox, on a host that cannot provide one
 cclaw install [--system] # set up the daemon as a systemd (or SysV init) service
 cclaw --doctor           # redacted diagnostic report: TLS, layers, updates, …
 cclaw update             # install the latest release (refuses one that can't open this DB)
@@ -167,10 +169,15 @@ cclaw resp               # the last failed LLM request and response
 cclaw sqlite3 <db> "…"   # bundled SQLite shell, read-only unless --write
 cclaw -v                 # debug logging (timing, context stats)
 cclaw -vv                # trace logging (full LLM req/resp JSON)
+cclaw version            # e.g. "cclaw v0.8.0 (1a2b3c4, 2026-11-20)"; --version is the same
 cclaw --help             # all options
 ```
 
 Updating, rollback and pre-release channels (`cclaw publish`) are described in [specs/operations.md](specs/operations.md).
+
+The daemon's web pages (the dashboard at `/admin`, the data explorer at `/admin/data`) listen on `127.0.0.1:8080` by default. They are plain HTTP, so reach them from another machine through an SSH tunnel or a reverse proxy, or set `web_bind` to `0.0.0.0` on a network you trust. An admin can ask an agent for the sign-in link by sending `/admin` in a direct message.
+
+The sandbox needs unprivileged user namespaces. Some hosts switch them off — Ubuntu 23.10 and later restrict them through AppArmor, and most containers do not allow them. cclaw says so when it starts, with the setting to change; `--trust-host` runs without the sandbox where the machine or container is already the boundary.
 
 ## Configuration
 

@@ -358,18 +358,6 @@ static JSValue js_admin_list_pending_approvals(JSContext *ctx, JSValueConst this
     return arr;
 }
 
-/* admin.dashboardUrl() — tokenized /admin URL for the /admin chat command
- * (same trust as the old /key flow, which passed API keys through chat). */
-static JSValue js_admin_dashboard_url(JSContext *ctx, JSValueConst this_val,
-                                      int argc, JSValueConst *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    char *url = config_admin_url(g_ctx->db, "/admin");
-    if (!url) return JS_NULL;
-    JSValue r = JS_NewString(ctx, url);
-    free(url);
-    return r;
-}
-
 static JSValue js_admin_is_admin(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
     (void)this_val;
@@ -411,7 +399,6 @@ void qjs_register_channel_host_functions(JSContext *ctx) {
     JSValue admin = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, admin, "isAdmin", JS_NewCFunction(ctx, js_admin_is_admin, "isAdmin", 1));
     JS_SetPropertyStr(ctx, admin, "listPendingApprovals", JS_NewCFunction(ctx, js_admin_list_pending_approvals, "listPendingApprovals", 0));
-    JS_SetPropertyStr(ctx, admin, "dashboardUrl", JS_NewCFunction(ctx, js_admin_dashboard_url, "dashboardUrl", 0));
     JS_SetPropertyStr(ctx, ch, "admin", admin);
 
     /* Date.now() — already available via JS_AddIntrinsicDate in full context */

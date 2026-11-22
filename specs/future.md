@@ -32,7 +32,7 @@ simplicity — parked.
 - phone_number → session_id mapping
 
 ## Web Dashboard (Full)
-Shipped: the data explorer at `/admin` (specs/explorer.md) — every table,
+Shipped: the dashboard at `/admin` and the data explorer at `/admin/data` (specs/explorer.md) — every table,
 generic reading, named write actions for agents, models, providers, memory,
 chats, approvals and secrets. Still future:
 - Message/conversation viewer

@@ -5,8 +5,10 @@
 //
 // Inbound: gateway MESSAGE_CREATE -> channel.emit. Outbound replies go over
 // REST (channel.send -> POST /channels/<id>/messages) — no new C send path.
-// Admin config (keys, models, grants) lives on the web dashboard (/admin);
-// chat keeps only conversation, /approvals and /admin.
+// Admin config (keys, models, grants) lives on the web dashboard; chat keeps
+// only conversation and /approvals. /admin (the dashboard link) is the
+// daemon's command, like /new and /status: it is forwarded as ordinary text
+// and the daemon answers it in a direct message only.
 
 // ── Gateway opcodes (Discord v10) ────────────────────────────────
 var OP_DISPATCH = 0, OP_HEARTBEAT = 1, OP_IDENTIFY = 2, OP_RESUME = 6,
@@ -64,8 +66,7 @@ var RESUME_GIVEUP = 3;             // failed attempts before abandoning resume_g
 // slash commands need REST registration + interaction handling; text commands
 // are the minimal v1 (mirrors telegram).
 var COMMANDS = {
-    approvals: { run: function(chatId) { sendApprovals(chatId); } },
-    admin:     { run: function(chatId) { sendDashboard(chatId); } }
+    approvals: { run: function(chatId) { sendApprovals(chatId); } }
 };
 
 function onInit() {
@@ -747,12 +748,6 @@ function postMessage(chatId, content, outboxId, isFinal, comps) {
 }
 
 // ── Admin command replies (fire-and-forget REST, no outbox tracking) ──
-
-function sendDashboard(chatId) {
-    var url = channel.admin.dashboardUrl();
-    postSimple(chatId, url ? "Admin dashboard:\n" + url :
-        "Dashboard unavailable — no token minted yet (is the daemon's web server running?).");
-}
 
 function sendApprovals(chatId) {
     var list = channel.admin.listPendingApprovals();

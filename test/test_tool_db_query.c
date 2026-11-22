@@ -111,15 +111,16 @@ static void test_secret_filtering(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
-    sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES('test.plain','visible')", NULL, NULL, NULL);
-    sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES('test.secret','enc:abcdef1234567890')", NULL, NULL, NULL);
+    /* Encrypted values live in `secrets`; a row carrying one is dropped whole. */
+    sqlite3_exec(db, "INSERT INTO secrets(name,value) VALUES('A_SECRET','enc:abcdef1234567890')", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO sessions(name) VALUES('visible')", NULL, NULL, NULL);
 
-    char *r = tool_db_query_handler("{\"sql\":\"SELECT key, value FROM config WHERE key LIKE 'test.%'\"}", db, &(int){0});
+    char *r = tool_db_query_handler("{\"sql\":\"SELECT name, value FROM secrets UNION ALL SELECT name, 'x' FROM sessions\"}", db, &(int){0});
     assert(r);
-    assert(strstr(r, "test.plain"));
     assert(strstr(r, "visible"));
-    assert(!strstr(r, "test.secret"));
+    assert(!strstr(r, "A_SECRET"));
     assert(!strstr(r, "enc:"));
+    assert(strstr(r, "1 row withheld"));
     free(r);
     db_close(db);
     printf("  PASS: secret filtering\n");
@@ -143,6 +144,54 @@ static void test_register(void) {
     printf("  PASS: register\n");
 }
 
+/* The admin token and the chat replies that carried its link never come out,
+ * however the query is spelled — and the handle is left without the block. */
+static void test_admin_token_withheld(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db);
+    assert(sqlite3_exec(db,
+        "INSERT OR REPLACE INTO config(key, value) VALUES('web_admin_token','t0ken5ecret');"
+        "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+        " VALUES('tg',1,'http://h/admin?token=t0ken5ecret');", NULL, NULL, NULL) == SQLITE_OK);
+    const char *spellings[] = {
+        "{\"sql\":\"SELECT * FROM config\"}",
+        "{\"sql\":\"SELECT hex(value) FROM config WHERE key='web_admin_token'\"}",
+        "{\"sql\":\"SELECT substr(v,2) FROM (SELECT value AS v FROM main.config)\"}",
+        "{\"sql\":\"SELECT (SELECT group_concat(value) FROM config) AS x\"}",
+        "{\"sql\":\"SELECT payload FROM channel_outbox\"}",
+        "{\"sql\":\"SELECT * FROM (SELECT * FROM channel_outbox) AS c\"}",
+    };
+    for (size_t i = 0; i < sizeof(spellings) / sizeof(*spellings); i++) {
+        char *r = tool_db_query_handler(spellings[i], db, &(int){0});
+        assert(r);
+        assert(!strstr(r, "t0ken5ecret"));
+        assert(!strstr(r, "306B656E"));   /* hex of "0ken" */
+        assert(strstr(r, "search_config"));
+        free(r);
+    }
+    /* Keys and other columns still read; other tables say nothing of it. */
+    char *r = tool_db_query_handler(
+        "{\"sql\":\"SELECT key FROM config WHERE key='web_admin_token'\"}", db, &(int){0});
+    assert(r && strstr(r, "web_admin_token") && !strstr(r, "search_config"));
+    free(r);
+    /* The block is this call's only: the same handle reads the value after. */
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db, "SELECT value FROM config WHERE key='web_admin_token'",
+                              -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(st, 0), "t0ken5ecret") == 0);
+    sqlite3_finalize(st);
+    /* A failed prepare must not leave it installed either. */
+    r = tool_db_query_handler("{\"sql\":\"SELECT nope FROM config\"}", db, &(int){0});
+    free(r);
+    assert(sqlite3_prepare_v2(db, "SELECT value FROM config WHERE key='web_admin_token'",
+                              -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0) != NULL);
+    sqlite3_finalize(st);
+    db_close(db);
+    printf("  PASS: admin token withheld\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_tool_db_query:\n");
@@ -155,6 +204,7 @@ int main(void) {
     test_missing_sql_field();
     test_query_sessions_table();
     test_secret_filtering();
+    test_admin_token_withheld();
     test_register();
     printf("all tests passed\n");
     return 0;

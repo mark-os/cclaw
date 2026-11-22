@@ -62,8 +62,8 @@ static int store_dir_for(sqlite3 *db, const char *name, char *out, size_t cap) {
     char *slash = strrchr(base, '/');
     if (slash) *slash = '\0';
     else snprintf(base, sizeof(base), ".");
-    snprintf(out, cap, "%s/extensions/%s", base, name);
-    return 0;
+    int n = snprintf(out, cap, "%s/extensions/%s", base, name);
+    return (n < 0 || (size_t)n >= cap) ? -1 : 0;
 }
 
 int extension_path_in_store(sqlite3 *db, const char *path) {

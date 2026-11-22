@@ -965,10 +965,19 @@ static time_t g_next_check;   /* 0 = not scheduled yet */
 /* Tell the default agent a newer build exists, once per tag. Shared by the
  * release check and the channel check. Returns 0 when the agent has been told
  * (now or before), -1 when there was nobody to tell yet — the caller retries. */
+int update_is_installed(sqlite3 *db, const char *tag) {
+    if (!tag) return 0;
+    if (strcmp(VERSION, tag) == 0) return 1;
+    char *installed = config_get(db, "update.installed_tag");
+    int same = installed && strcmp(installed, tag) == 0;
+    free(installed);
+    return same;
+}
+
 static int notify_available(sqlite3 *db, const char *tag, const char *what) {
     char *installed = config_get(db, "update.installed_tag");
     char *notified = config_get(db, "update.notified_tag");
-    int already = (installed && strcmp(installed, tag) == 0) ||
+    int already = update_is_installed(db, tag) ||
                   (notified && strcmp(notified, tag) == 0);
     free(installed);
     free(notified);
@@ -990,7 +999,7 @@ static int notify_available(sqlite3 *db, const char *tag, const char *what) {
              "out. If you have the install_update tool, offer to install it "
              "with tag \"%s\" (that parks an approval — the operator decides); "
              "otherwise `cclaw update` installs it. Never install without approval.",
-             what, VERSION_COMMIT, tag);
+             what, VERSION, tag);
     int rc = -1;
     if (inbox_insert(db, sid, "update", tag, note) > 0) {
         config_set(db, "update.notified_tag", tag);
@@ -1250,9 +1259,9 @@ int update_main(int argc, char *argv[]) {
     }
 
     printf("installed: %s\nlatest:    %s\n",
-           installed && installed[0] ? installed : "(unknown)", tag);
+           installed && installed[0] ? installed : VERSION, tag);
 
-    if (!want_tag && installed && strcmp(installed, tag) == 0) {
+    if (!want_tag && update_is_installed(db, tag)) {
         printf("already up to date\n");
         free(self); free(repo); free(asset); free(installed); free(tag);
         sqlite3_close(db);

@@ -35,6 +35,17 @@ Whoever runs a step:
 - Finish with proof, not a claim: `cclaw --doctor` reads clean, and a message
   sent through a channel arrives.
 
+**Know where it is being installed.** Before any install, be clear which
+machine the daemon will live on and where the person will sit when they open
+its admin page. On the machine they are using, nothing more is needed. On
+another machine on their home or work network — a Pi, a router, a server in a
+closet — the admin page is unreachable by default, because it answers only on
+the machine itself. So an install on another machine is not finished until
+admin access is settled: either the page is opened to that network, or it
+stays closed and one particular machine reaches it through an ssh forward.
+Raise this yourself as part of the install; do not wait to be asked. The
+choices and what each exposes are under "Reaching the dashboard".
+
 First find out which of four things they want:
 
 | They say | Section |
@@ -136,7 +147,10 @@ fight over every message. So the old one stops before the new one starts.
 3. Old machine: `cclaw backup /tmp/cclaw-move.db` — a clean single-file copy.
 4. Copy to the new machine, into `~/.cclaw/`: the snapshot **as `cclaw.db`**,
    `.cclaw_key` (keep it mode 600), `agents/`, `extensions/`, `env`.
-5. New machine: `cclaw --doctor`, then `cclaw install`.
+5. New machine: `cclaw --doctor`, then `cclaw install`. If the old home was
+   the machine they sit at and the new one is not, settle admin access now
+   (Reaching the dashboard) — the setting travelled with the database and
+   still says "this machine only".
 6. Proof: send a message through the channel and see the reply come from the
    new machine (`cclaw --doctor` there shows a running daemon).
 7. Old machine: `cclaw uninstall`. Keep its `~/.cclaw/` until the new home has
@@ -149,7 +163,8 @@ on your first turn in the new home.
 ## A second, separate instance
 
 A fresh install on the other machine: its own database, its own key, its own
-first conversation. Copy nothing. It needs its own channel bot (a second
+first conversation. Copy nothing. It starts with its admin page closed to the
+network; settle that as part of the install (Reaching the dashboard). It needs its own channel bot (a second
 Telegram or Discord bot) — sharing one token is the fight described above. An
 agent definition cannot be exported from here to there yet; describe the agent
 to the new instance and let it build its own.
@@ -160,13 +175,22 @@ The daemon's web pages listen on `127.0.0.1:8080` by default: this machine
 only. `cclaw dashboard` prints the sign-in link.
 
 - A machine with a screen: open the link in its own browser. Nothing to change.
-- A headless machine, from another device at home: either forward the port
-  for one session, `ssh -L 8080:127.0.0.1:8080 user@box`, or make the pages
-  listen on the home network by setting `web_bind` to the box's LAN address
-  (`request_config`, config key `web_bind`; the operator approves) and
-  restarting the service. Say plainly what that means before asking: the
-  pages are plain HTTP, the sign-in link is the whole credential, and anyone
-  on that network who sees the link has the dashboard. Prefer the box's own
-  address over `0.0.0.0`.
+- Another machine on the home or work network. Two ways, and the person
+  chooses:
+  - **Allow admin from within the network.** Set `web_bind` to the box's own
+    address on that network (`request_config`, config key `web_bind`; the
+    operator approves) and restart the service. Any device on the network can
+    then reach the page; the sign-in link is still required. Say plainly what
+    that means before asking: the pages are plain HTTP, the link is the whole
+    credential, and anyone on that network who sees it has the dashboard.
+    Prefer the box's own address over `0.0.0.0`. Right for a home network the
+    person trusts; think twice on a shared or work network.
+  - **Allow admin from one machine only.** Leave `web_bind` alone and forward
+    the port from the machine they administer from:
+    `ssh -L 8080:127.0.0.1:8080 user@box`, then open the link on
+    `localhost:8080` there. Nothing new listens on the network. There is no
+    setting that admits one address and refuses the rest — the forward is how
+    "only this machine" is done. Right for a work network, or when they
+    already ssh into the box.
 - From outside the home there is no built-in path yet. A channel is the way
   to reach you from anywhere; it needs no open port.

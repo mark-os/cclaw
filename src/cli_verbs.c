@@ -15,6 +15,7 @@
 #include "config.h"
 #include "config_registry.h"
 #include "agent_config.h"
+#include "approval.h"
 #include "db.h"
 #include "log.h"
 #include "models_cache.h"
@@ -43,6 +44,106 @@ static sqlite3 *verb_db_open(void) {
         sqlite3_close(db); return NULL;
     }
     return db;
+}
+
+/* `cclaw approvals [list] | approve <id> [once|always] | deny <id>` — the
+ * operator's way to answer a parked request without a terminal prompt, a
+ * channel or the dashboard. It records the decision in approval_decisions,
+ * the same queue the dashboard writes; the event loop that owns the work
+ * carries it out — a running daemon within a tick, otherwise the next
+ * `cclaw` run, which is what makes a scripted `-p` session approvable:
+ *   cclaw -p "..."          → "approval #7 left pending (session 3)", exit 3
+ *   cclaw approvals approve 7
+ *   cclaw -p "go on" -s 3   → the decision is applied, then the turn runs */
+int approvals_main(int argc, char *argv[]) {
+    const char *sub = (argc >= 3) ? argv[2] : "list";
+    sqlite3 *db = verb_db_open();
+    if (!db) return 1;
+    int rc = 0;
+    if (strcmp(sub, "list") == 0) {
+        sqlite3_stmt *st;
+        int any = 0;
+        if (sqlite3_prepare_v2(db,
+                "SELECT a.id, a.session_id, COALESCE(s.agent_name,'?'),"
+                "       COALESCE(a.tool_name,'?'), a.resolve,"
+                "       a.park_reason = 'sensitive_target',"
+                "       COALESCE(a.args_json,''),"
+                "       (SELECT decision FROM approval_decisions d WHERE d.approval_id = a.id)"
+                " FROM approvals a LEFT JOIN sessions s ON s.id = a.session_id"
+                " WHERE a.state = 'pending' ORDER BY a.id", -1, &st, NULL) == SQLITE_OK) {
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                const char *queued = (const char *)sqlite3_column_text(st, 7);
+                int apply = strcmp((const char *)sqlite3_column_text(st, 4), "apply") == 0;
+                printf("#%lld  session %lld (%s)  %s  [%s]%s%s\n  %s\n",
+                       (long long)sqlite3_column_int64(st, 0),
+                       (long long)sqlite3_column_int64(st, 1),
+                       sqlite3_column_text(st, 2), sqlite3_column_text(st, 3),
+                       sqlite3_column_int(st, 5) ? "once or deny"
+                           : apply ? "approve or deny" : "once, always or deny",
+                       queued ? "  decision on its way: " : "", queued ? queued : "",
+                       sqlite3_column_text(st, 6));
+                any = 1;
+            }
+            sqlite3_finalize(st);
+        }
+        if (!any) printf("no pending approvals\n");
+    } else if ((strcmp(sub, "approve") == 0 || strcmp(sub, "deny") == 0) && argc >= 4) {
+        int deny = strcmp(sub, "deny") == 0;
+        char *end = NULL;
+        long long id = strtoll(argv[3], &end, 10);
+        const char *how = (argc >= 5) ? argv[4] : NULL;
+        int apply = 0, sensitive = 0, found = 0;
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT resolve = 'apply', park_reason = 'sensitive_target'"
+                " FROM approvals WHERE id=?1 AND state='pending'", -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(st, 1, id);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                found = 1;
+                apply = sqlite3_column_int(st, 0);
+                sensitive = sqlite3_column_int(st, 1);
+            }
+            sqlite3_finalize(st);
+        }
+        /* The same rules the dashboard enforces (explore_act.c): a request
+         * applied as a whole has no "once"; a sensitive target is never
+         * allowed for good. With no word given, the narrowest that works. */
+        ApprovalDecision d = APPROVAL_DENY;
+        const char *bad = NULL;
+        if (!deny) {
+            if (!how) d = apply ? APPROVAL_ALWAYS : APPROVAL_ONCE;
+            else if (strcmp(how, "once") == 0) d = APPROVAL_ONCE;
+            else if (strcmp(how, "always") == 0) d = APPROVAL_ALWAYS;
+            else bad = "say 'once' or 'always'";
+            if (!bad && d == APPROVAL_ONCE && apply)
+                bad = "it is a request applied as a whole, which has no 'once' — approve it or deny it";
+            if (!bad && d == APPROVAL_ALWAYS && sensitive)
+                bad = "it reaches a sensitive target, allowed one call at a time — approve it once or deny it";
+        }
+        if (id <= 0 || (end && *end)) {
+            fprintf(stderr, "error: '%s' is not an approval id\n", argv[3]); rc = 1;
+        } else if (!found) {
+            fprintf(stderr, "error: no pending approval #%lld (see: cclaw approvals)\n", id); rc = 1;
+        } else if (bad) {
+            fprintf(stderr, "error: approval #%lld: %s\n", id, bad); rc = 1;
+        } else if (approval_decision_queue(db, id, d, "cli:approvals") != 0) {
+            fprintf(stderr, "error: the decision could not be recorded\n"); rc = 1;
+        } else if (sqlite3_changes(db) == 0) {
+            fprintf(stderr, "error: a decision for approval #%lld is already on its way\n", id); rc = 1;
+        } else {
+            printf("%s #%lld. A running daemon carries it out within moments; "
+                   "otherwise the next cclaw run does, before its turn starts.\n",
+                   d == APPROVAL_DENY ? "Denied" : d == APPROVAL_ONCE ? "Approved once"
+                                                                      : "Approved", id);
+        }
+    } else {
+        fprintf(stderr, "usage: cclaw approvals [list]\n"
+                        "       cclaw approvals approve <id> [once|always]\n"
+                        "       cclaw approvals deny <id>\n");
+        rc = 1;
+    }
+    sqlite3_close(db);
+    return rc;
 }
 
 /* `cclaw sensitive add|rm|list [host]` — operator verb for the sensitivity

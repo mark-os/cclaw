@@ -43,7 +43,7 @@ void approval_apply_queued(void) {
  * approval pending so a later decision is delivered async (post-window). Under
  * BEGIN IMMEDIATE because db_tool_call_set_status is not itself a CAS — re-check
  * the parked invariant before mutating so a concurrent resolve can't double-act. */
-static void approval_unpark_block_window(int64_t approval_id) {
+void approval_unpark_block_window(int64_t approval_id) {
     if (sqlite3_exec(proc_db(), "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK)
         return;
 
@@ -72,7 +72,21 @@ static void approval_unpark_block_window(int64_t approval_id) {
     if (!ok) { sqlite3_exec(proc_db(), "ROLLBACK;", NULL, NULL, NULL); return; }
 
     char buf[512];
-    approval_background_notice(approval_id, buf, sizeof(buf));
+    if (proc_is_daemon())
+        approval_background_notice(approval_id, buf, sizeof(buf));
+    else
+        /* A run with nobody at the terminal (`cclaw -p`). Not a denial — the
+         * request stays open for `cclaw approvals` — but the model must not
+         * ask again: the same request would park and land here again, and
+         * the turn would spend itself on it (the loop b213580 closed by
+         * denying outright). */
+        snprintf(buf, sizeof(buf),
+                 "approval %lld is waiting for the operator: nobody is present "
+                 "to decide in this run, so it was neither approved nor denied. "
+                 "Do NOT request it again in this turn. Finish whatever does "
+                 "not need it, and say in your reply that approval %lld is "
+                 "waiting. You will be told the decision in a later turn.",
+                 (long long)approval_id, (long long)approval_id);
     ToolResult tr = { .tool_call_id = call_id, .content = buf };
     Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                     .tool_name = tool_name, .is_error = 0 };

@@ -184,6 +184,37 @@ Approval *approval_get_pending(sqlite3 *db, int64_t session_id) {
     return a;
 }
 
+/* The oldest approval in the subtree whose call is still waiting on it
+ * (claimed or parked, not yet answered). A request a no-approver run left
+ * open stays 'pending' after its call was answered — that one belongs to
+ * `cclaw approvals`, not to a terminal prompt, and must not take the answer
+ * typed for the call that is parked now. */
+Approval *approval_get_parked_subtree(sqlite3 *db, int64_t root_session_id) {
+    const char *sql =
+        "WITH RECURSIVE subtree(id) AS ("
+        "  SELECT ?1"
+        "  UNION ALL"
+        "  SELECT s.id FROM sessions s JOIN subtree t ON s.parent_session_id = t.id"
+        ")"
+        " SELECT a.id, a.session_id, a.tool_call_id, a.tool_name, a.park_reason,"
+        " a.args_json, a.resolve, a.state, a.decided_via, a.requested_at, a.expires_at"
+        " FROM approvals a WHERE a.session_id IN (SELECT id FROM subtree)"
+        " AND a.state='pending'"
+        " AND (a.tool_call_id IS NULL OR EXISTS (SELECT 1 FROM tool_calls t"
+        "       WHERE t.session_id = a.session_id AND t.call_id = a.tool_call_id"
+        "         AND t.status IN ('pending','running')))"
+        " ORDER BY a.requested_at ASC, a.id ASC LIMIT 1";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(stmt, 1, root_session_id);
+    Approval *a = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        a = row_to_approval(stmt);
+    sqlite3_finalize(stmt);
+    return a;
+}
+
 Approval *approval_get_pending_subtree(sqlite3 *db, int64_t root_session_id) {
     const char *sql =
         "WITH RECURSIVE subtree(id) AS ("

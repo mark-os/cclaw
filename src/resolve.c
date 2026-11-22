@@ -28,6 +28,7 @@
 #include "loop.h"
 #include "proc.h"
 #include "secret_interp.h"
+#include "sweep.h"
 #include "tool_args.h"
 #include "tool_request_config.h"
 #include "util.h"
@@ -457,6 +458,7 @@ static struct {
     ApprovalDecision decision;
     int64_t grant_expires_at;
     char via[24];
+    int leave_pending;          /* answer the call, keep the approval open */
 } g_deferred;
 
 static void approval_defer_decision(int64_t approval_id, ApprovalDecision decision,
@@ -464,12 +466,24 @@ static void approval_defer_decision(int64_t approval_id, ApprovalDecision decisi
     g_deferred.id = approval_id;
     g_deferred.decision = decision;
     g_deferred.grant_expires_at = grant_expires_at;
+    g_deferred.leave_pending = 0;
     snprintf(g_deferred.via, sizeof(g_deferred.via), "%s", decided_via);
 }
+
+/* Approvals a no-approver run left open, for the exit status and the closing
+ * notice (cli_pending_left). */
+static int g_left_pending;
+int approval_left_pending(void) { return g_left_pending; }
 
 void approval_flush_deferred(void) {
     if (!g_deferred.id) return;
     int64_t id = g_deferred.id;
+    if (g_deferred.leave_pending) {
+        g_deferred.id = 0;
+        g_deferred.leave_pending = 0;
+        approval_unpark_block_window(id);
+        return;
+    }
     ApprovalDecision decision = g_deferred.decision;
     int64_t expires = g_deferred.grant_expires_at;
     char via[sizeof(g_deferred.via)];
@@ -487,14 +501,20 @@ void handle_approval_park(int64_t session_id, const char *tool_call_id) {
      * CLI keeps oldest-first — its printed prompt must name the same row the
      * y/n reader answers (approval_get_pending_subtree ordering). */
     Approval *a = NULL;
-    if (proc_is_daemon() && tool_call_id) {
+    /* Unattended CLI runs answer by call too: an earlier run may have left a
+     * request open, and the oldest pending row would then be that one — the
+     * decision would go to it and the call parked now would never resume. */
+    int unattended = !proc_is_daemon() &&
+                     (proc_auto_approve() || !isatty(STDIN_FILENO));
+    if ((proc_is_daemon() || unattended) && tool_call_id) {
         a = approval_get_for_tool_call(proc_db(), session_id, tool_call_id);
         if (a && (!a->state || strcmp(a->state, "pending") != 0)) {
             approval_free(a);
             a = NULL;
         }
     }
-    if (!a) a = approval_get_pending(proc_db(), session_id);
+    if (!a) a = proc_is_daemon() ? approval_get_pending(proc_db(), session_id)
+                                 : approval_get_parked_subtree(proc_db(), session_id);
     if (!a) return;
 
     if (!proc_is_daemon()) {
@@ -523,8 +543,20 @@ void handle_approval_park(int64_t session_id, const char *tool_call_id) {
             return;
         }
         if (!isatty(STDIN_FILENO)) {
-            /* Non-interactive (-p mode): auto-deny */
-            approval_defer_decision(a->id, APPROVAL_DENY, "auto:no-approver", 0);
+            /* Nobody at the terminal (`cclaw -p` from a script): nobody said
+             * no either. The call is answered "waiting for the operator" once
+             * its claim is released and the request stays open, exactly as a
+             * daemon does when its block window lapses; `cclaw approvals`
+             * decides it and the next run on this session delivers the
+             * decision. stderr, so stdout stays the reply alone. */
+            char *summary = approval_format_summary(proc_db(), a);
+            fprintf(stderr, "approval #%lld left pending (session %lld): %s\n",
+                    (long long)a->id, (long long)a->session_id,
+                    summary ? summary : "?");
+            free(summary);
+            g_deferred.id = a->id;
+            g_deferred.leave_pending = 1;
+            g_left_pending++;
             approval_free(a);
             return;
         }

@@ -834,6 +834,12 @@ static int run_cli(char *db_path, const char *prompt,
         fflush(stdout);
     }
 
+    /* Decisions recorded while no event loop was running (`cclaw approvals`
+     * between two -p runs) are carried out now, so the turn about to start
+     * already sees them: the grant is in place and the agent has been told.
+     * Otherwise they would wait for db_periodic's first tick, after it. */
+    approval_apply_queued();
+
     /* Single-turn mode: -p <prompt> */
     if (prompt) {
         g_cli_done = 1;
@@ -946,7 +952,7 @@ static int run_cli(char *db_path, const char *prompt,
              * the CLI's session subtree, not just the root (a sub-agent's
              * request_config parks the same way and needs the same y/n). */
             {
-                Approval *pa = approval_get_pending_subtree(proc_db(), proc_cli_session());
+                Approval *pa = approval_get_parked_subtree(proc_db(), proc_cli_session());
                 if (pa) {
                     ApprovalDecision d;
                     if (strcasecmp(linebuf, "once") == 0 || strcasecmp(linebuf, "o") == 0)
@@ -989,6 +995,16 @@ static int run_cli(char *db_path, const char *prompt,
     }
 
 done:
+    /* A run with nobody to ask left requests open: say how to answer them,
+     * and exit 3 so a script can tell "finished" from "finished, waiting on
+     * you". stderr — stdout is the reply alone. */
+    if (approval_left_pending() > 0) {
+        fprintf(stderr, "\n%d approval(s) pending. See them: cclaw approvals\n"
+                        "Answer:   cclaw approvals approve <id> [once|always] | deny <id>\n"
+                        "Continue: cclaw -p \"...\" -s %lld\n",
+                approval_left_pending(), (long long)proc_cli_session());
+        rc = 3;
+    }
     /* Print session cost */
     { int64_t cost = session_cost(proc_db(), proc_cli_session());
       if (cost > 0) fprintf(stderr, "\n[session cost: $%.6f]\n", (double)cost / 1e9); }
@@ -1053,6 +1069,7 @@ int main(int argc, char *argv[]) {
     /* route: operator verb binding a channel+chat to an agent (channel_chats).
      * CLI-only, same rationale as sensitive/secret-bind — an authority change. */
     if (argc >= 2 && strcmp(argv[1], "route") == 0) return route_main(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "approvals") == 0) return approvals_main(argc, argv);
 
     /* rename-agent: operator identity surgery. CLI-only by design — no agent
      * tool renames anything (config-doc M2 deleted that arm). Takes a quiesce

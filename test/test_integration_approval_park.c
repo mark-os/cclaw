@@ -11,7 +11,9 @@
  * while the live call never ran.
  *
  * Two `-p` runs against a mock LLM reproduce the whole chain:
- *   run 1: model calls request_config (call_A, "doc A") → parks → auto-deny
+ *   run 1: model calls request_config (call_A, "doc A") → parks → left pending
+ *          (2026-11-22: a no-approver run no longer denies; the call is
+ *          answered "waiting for the operator" and the request stays open)
  *   run 2: model calls request_config (call_B, "doc B")
  * Post-fix, call_A is answered in run 1 and call_B parks its own document.
  */
@@ -41,6 +43,7 @@
  * covering cclaw.db is refused before it can ever park. */
 #define DIR_A   "/tmp/cclaw_park_a"
 #define DIR_B   "/tmp/cclaw_park_b"
+static int g_exit = -1;   /* exit status of the last run_cli_p child */
 #define FAIL(m) do { fprintf(stderr, "FAIL: %s\n", m); return 1; } while (0)
 
 /* Turn 1: ask for a read grant on document A. */
@@ -111,7 +114,7 @@ static int run_cli_p(const char *exe, const char *url, const char *prompt,
     for (int i = 0; i < 200; i++) {   /* 20s deadline */
         int st = 0;
         pid_t w = waitpid(pid, &st, WNOHANG);
-        if (w == pid) return 0;
+        if (w == pid) { g_exit = WIFEXITED(st) ? WEXITSTATUS(st) : -1; return 0; }
         struct timespec ts = {0, 100 * 1000 * 1000};
         nanosleep(&ts, NULL);
     }
@@ -119,6 +122,9 @@ static int run_cli_p(const char *exe, const char *url, const char *prompt,
     waitpid(pid, NULL, 0);
     return -1;
 }
+
+/* Exit status of the last run_cli_p child. */
+#define EXIT_LEFT_PENDING 3
 
 /* Single-integer query against the test DB. Returns -1 on any failure. */
 static int64_t db_count(const char *sql) {
@@ -157,20 +163,33 @@ static int check_run1(void) {
         return 1;
     }
 
-    /* The model must be told it was DENIED, not that the request evaporated:
-     * "expired without a decision. Not a denial" is what drives the re-request
-     * loop. */
+    /* Nobody was there to decide, so nobody denied: the call is answered
+     * "waiting for the operator", told not to ask again (what stops the
+     * re-request loop without a false denial), and the request stays open
+     * for `cclaw approvals`. */
     n = db_count("SELECT COUNT(*) FROM entries WHERE role=3"
-                 " AND tool_call_id='call_A' AND content LIKE '%denied%';");
+                 " AND tool_call_id='call_A'"
+                 " AND content LIKE '%waiting for the operator%'"
+                 " AND content LIKE '%Do NOT request it again%';");
     if (n != 1) {
-        fprintf(stderr, "FAIL run1: call_A result does not read as a denial\n");
+        fprintf(stderr, "FAIL run1: call_A result does not read as left pending\n");
         return 1;
     }
-    n = db_count("SELECT COUNT(*) FROM inbox"
-                 " WHERE payload LIKE '%expired without a decision%';");
-    if (n != 0) {
-        fprintf(stderr, "FAIL run1: auto-deny mislabelled as an expiry (rows=%lld)\n",
+    n = db_count("SELECT COUNT(*) FROM approvals WHERE tool_call_id='call_A'"
+                 " AND state='pending';");
+    if (n != 1) {
+        fprintf(stderr, "FAIL run1: call_A's approval was decided by nobody (pending rows=%lld)\n",
                 (long long)n);
+        return 1;
+    }
+    n = db_count("SELECT COUNT(*) FROM sessions WHERE state!='idle';");
+    if (n != 0) {
+        fprintf(stderr, "FAIL run1: session not idle after the run\n");
+        return 1;
+    }
+    if (g_exit != EXIT_LEFT_PENDING) {
+        fprintf(stderr, "FAIL run1: exit status %d, want %d (approval left pending)\n",
+                g_exit, EXIT_LEFT_PENDING);
         return 1;
     }
     return 0;
@@ -193,6 +212,20 @@ static int check_run2(void) {
     if (n != 1) {
         fprintf(stderr, "FAIL run2: stale call_A re-dispatched — %lld approvals"
                         " carry its tool_call_id\n", (long long)n);
+        return 1;
+    }
+
+    /* Run 1's request is still open and untouched: run 2 answered its own
+     * call, not the oldest pending row. */
+    n = db_count("SELECT COUNT(*) FROM approvals WHERE state='pending'"
+                 " AND tool_call_id IN ('call_A','call_B');");
+    if (n != 2) {
+        fprintf(stderr, "FAIL run2: want both requests open, got %lld\n", (long long)n);
+        return 1;
+    }
+    n = db_count("SELECT COUNT(*) FROM tool_calls WHERE call_id='call_B' AND status='done';");
+    if (n != 1) {
+        fprintf(stderr, "FAIL run2: call_B was not answered\n");
         return 1;
     }
 
@@ -262,7 +295,7 @@ int main(void) {
     int rc = 1;
     if (seed_mock_provider(url) != 0) { fprintf(stderr, "FAIL: seed\n"); goto done; }
 
-    /* ── run 1: park + auto-deny ──────────────────────────────────── */
+    /* ── run 1: park + left pending ───────────────────────────────── */
     mock_server_reset();
     mock_server_enqueue(200, RESP_CALL_A);
     mock_server_enqueue(200, RESP_FINAL);

@@ -72,6 +72,11 @@ Approval *approval_get_pending(sqlite3 *db, int64_t session_id);
  * heap-allocated Approval or NULL. */
 Approval *approval_get_pending_subtree(sqlite3 *db, int64_t root_session_id);
 
+/* As above, but only an approval whose call is still waiting on it — what a
+ * terminal prompt asks about. One left open by an earlier no-approver run is
+ * excluded: its call was answered, and `cclaw approvals` decides it. */
+Approval *approval_get_parked_subtree(sqlite3 *db, int64_t root_session_id);
+
 /* Get the most recent approval for a (session_id, tool_call_id) pair (any
  * state). Used by the dispatch gate's re-entrancy check (§7a). Scoped to the
  * session because tool_call_ids are model-supplied and not globally unique.

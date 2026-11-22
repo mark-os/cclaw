@@ -10,6 +10,7 @@ int secret_bind_main(int argc, char *argv[]);
 int secret_main(int argc, char *argv[]);
 int channel_cli_main(int argc, char *argv[]);
 int route_main(int argc, char *argv[]);
+int approvals_main(int argc, char *argv[]);
 int dashboard_main(void);
 int backup_main(int argc, char *argv[]);
 int resp_main(int argc, char *argv[]);

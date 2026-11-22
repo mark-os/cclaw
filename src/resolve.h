@@ -32,4 +32,7 @@ void handle_approval_park(int64_t session_id, const char *tool_call_id);
  * Called by run_advance after the dispatch loop returns. */
 void approval_flush_deferred(void);
 
+/* How many approvals this (no-approver CLI) run left open for `cclaw approvals`. */
+int approval_left_pending(void);
+
 #endif

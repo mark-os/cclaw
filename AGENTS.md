@@ -353,14 +353,29 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 
 ### Scripted agent testing with `-p` (what to expect)
 
-- **With piped stdin, `-p` denies an approval in the same run.** Single-turn
-  mode has no interactive approver: a `request_config` call parks and, when
-  stdin is not a tty, is answered DENY on the spot (`decided_via`
-  `auto:no-approver`), so the agent sees the refusal within that turn — and
-  then tends to loop re-requesting. Plan multi-turn scripts around this, or
-  pass `--auto-approve`.
-- **`--auto-approve` approves whatever is parked, not what you meant.** It is
-  single-use and blind to which approval it answers — inspect
+- **With piped stdin, `-p` leaves an approval pending and exits 3.** Nobody
+  is at the terminal, so nobody decides: the parked call is answered "waiting
+  for the operator, do not ask again this turn", the turn finishes with a
+  reply that names the approval, and the request stays open. stderr prints
+  the id, the summary and the three commands below; stdout is the reply
+  alone. The script decides, then continues the same session:
+
+  ```bash
+  cclaw -p "fetch example.com" ; echo $?       # 3 = finished, approval(s) waiting
+  cclaw approvals                              # list: id, session, tool, document
+  cclaw approvals approve 1                    # or: approve 1 once|always, deny 1
+  cclaw -p "it is decided, carry on" -s 1      # decision applied, then the turn
+  ```
+
+  The decision is delivered the way a late channel approval is: the grant is
+  applied and the agent is told at the start of the next turn, where it
+  re-issues the call.
+  An unanswered request expires after `approval_timeout_sec`. With no word,
+  `approve` is the narrowest that works — `once` for a single call, the whole
+  document for a `request_config`/`create_agent`.
+- **`--auto-approve` approves every request the run makes, unseen.** Use it
+  when the test is not about the approval; otherwise leave requests pending
+  and decide each. To see what it answered, inspect
   `cclaw sqlite3 <db> "select id, tool_call_id, args_json, state from
   approvals"` before and after. (`cclaw sqlite3` is the operator DB verb:
   vendored SQLite 3.53, full CLI compat, read-only unless `--write`, drops

@@ -202,7 +202,15 @@ static void run_output(int64_t session_id, AdvanceOutput out) {
         if (!proc_is_daemon() && session_id == proc_cli_session()
             && !child_has_session(session_id)
             && !child_hook_holds(session_id)
-            && !db_tool_call_any_running(proc_db(), session_id))
+            && !db_tool_call_any_running(proc_db(), session_id)
+            /* A model request in flight is the turn's own work too. A second
+             * advance can arrive while one is out — a wake queued by an
+             * approval decision applied just before the turn began, or by
+             * the unpark that resumed it — and must not read as "nothing in
+             * flight": a -p run would exit before the reply it is waiting on. */
+            && db_scalar_i64(proc_db(),
+                   "SELECT state = 'llm_running' FROM sessions WHERE id=?1",
+                   session_id, 0) != 1)
             proc_set_cli_turn_active(0);
         break;
     case ADVANCE_ERROR:

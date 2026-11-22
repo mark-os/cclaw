@@ -1,6 +1,8 @@
 #ifndef CCLAW_SWEEP_H
 #define CCLAW_SWEEP_H
 
+#include <stdint.h>
+
 /*
  * The periodic tick: everything the process does on a timer rather than on an
  * event. Edge wakes (wake pipe, worker completion, SIGCHLD) drive the normal
@@ -28,6 +30,11 @@ void db_periodic(void);
  * directly at CLI shutdown, where a short -p run can exit before the first
  * tick. */
 void approval_sweep_expired(void);
+
+/* Answer one parked call with a "still pending" result and resume its turn,
+ * leaving the approval open for a late decision. The block-window sweep's
+ * unit of work; also what a CLI run with no approver does at once. */
+void approval_unpark_block_window(int64_t approval_id);
 
 /* Resolve every decision in approval_decisions. Event loop only. */
 void approval_apply_queued(void);

@@ -8,9 +8,10 @@ From a release binary — download the one for your machine (`cclaw-linux-x64`, 
 
 ```bash
 chmod +x cclaw-linux-arm64 && mv cclaw-linux-arm64 cclaw
-export OPENROUTER_API_KEY="sk-or-v1-..."
 ./cclaw
 ```
+
+With no API key in the environment, the first run asks for one (OpenRouter, Anthropic, Gemini, Groq, Cerebras or OpenAI — it tells them apart by the key) and stores it encrypted.
 
 From source:
 
@@ -20,7 +21,7 @@ make
 ./build/cclaw
 ```
 
-The first run creates `~/.cclaw/` and a default agent named `Assistant`, and puts you straight into a chat. `cclaw --doctor` tells you what this host supports and what is missing.
+The first run creates `~/.cclaw/` and a default agent named `Assistant`, and puts you straight into a chat. With an OpenRouter key the default model is DeepSeek V4.1 Flash, and requests are routed only to endpoints with a zero-data-retention policy. `cclaw --doctor` tells you what this host supports and what is missing.
 
 ## Architecture
 
@@ -59,7 +60,7 @@ The database runs in WAL mode, so threads and processes read and write it concur
 
 ## Secure
 
-What an agent can reach is decided in two places: its **sandbox profile** (containment — what the sandbox lets a program touch) and its **grants** (authority — which tools, hosts and paths it may use). A missing grant means no. Agents ask for more with `request_config`, and a human approves.
+What an agent can reach is decided in two places: its **sandbox profile** (containment — what the sandbox lets a program touch) and its **grants** (authority — which tools, hosts and paths it may use). A missing grant means no. Agents ask for more with `request_config`, and a human approves — at the terminal prompt, with a button or `/approve` in a chat channel, on the dashboard, or with `cclaw approvals`. A plain yes always grants the least that works; a standing grant has to be asked for by name ("always").
 
 - **Sandboxed tool calls** — every tool call runs in a forked child inside Linux namespaces (user, mount, network). The child sees its workspace read-write and system directories read-only; anything else needs a path grant. `cclaw.db` and `.cclaw_key` are hidden from the child under every sandboxed profile.
 - **Network** — the sandbox has only a loopback interface. Programs reach the network through `HTTP_PROXY`/`HTTPS_PROXY`, which point at a proxy on that loopback. The proxy checks the agent's host allowlist (default-deny); a denied host gets a `403`, and the tool result names the blocked host. Programs that ignore the proxy variables have no network at all. `git` over ssh is preconfigured; plain `ssh` needs `-o ProxyCommand="$CCLAW_CONNECT %h %p"`. See [specs/shell-networking.md](specs/shell-networking.md).
@@ -90,9 +91,10 @@ CClaw vendors everything except libcurl:
 Tested on EC2 t4g.small (arm64), Chromebooks, and a Pogoplug V4 (ARMv5TE, 128 MB RAM).
 
 ```
-Binary size: about 4 MB stripped (x86_64 source build; SQLite and QuickJS are over half of it)
-Peak RSS:    9.7 MB (single turn)
-Startup:     10 ms
+Release binary:  5.1–6.5 MB, static (armv5te 5.1, arm64 5.6, x64 5.8, i586 6.5)
+Peak memory:     7.5 MB for a single turn with the static arm64 binary
+                 (17 MB for a source build: the system libcurl and its TLS library)
+Idle daemon:     12 MB resident (source build, no channels running)
 ```
 
 ## Self-Configuring
@@ -143,7 +145,7 @@ The manifest is the only door from an agent's drafts to system-wide registration
 On first run with just an API key, CClaw:
 
 1. Creates `~/.cclaw/`, the database, and the encryption key.
-2. Creates the default agent, `Assistant`, with the baseline grants (plus `create_agent`, `extension_publish` and `secret_create`, since it is your main point of contact), `AGENT` and `USER` memory blocks, and a disabled heartbeat cron job.
+2. Creates the default agent, `Assistant`, with the baseline grants (plus `create_agent`, `extension_publish`, `secret_create` and `install_service`, since it is your main point of contact), `AGENT` and `USER` memory blocks, and a disabled heartbeat cron job.
 3. Starts a chat. Your request comes first; when there is room the agent works through a short setup list kept in its own memory — what to call it, who you are, a channel to reach it from your phone — deleting each step as it is done or skipped.
 
 From there you set things up by talking to it: ask for a Telegram channel, a different model, a new agent. Anything that widens its reach comes back to you as an approval. Secrets never pass through the model: put them in the environment, store them with `cclaw secret set NAME`, or have the agent capture a tool result directly into the encrypted store with `save_secret`. A secret you add is usable by no agent until you grant it (`cclaw secret grant NAME <agent>`); one an agent captures is its own.
@@ -154,7 +156,8 @@ No manual config files. No YAML. The agent configures itself through the same to
 
 ```bash
 cclaw                    # interactive CLI (default agent)
-cclaw -p "hello"         # single-turn: print response and exit
+cclaw -p "hello"         # single-turn: print response and exit (exit 3: an approval is waiting)
+cclaw approvals          # list waiting approvals; `approve <id> [once|always]`, `deny <id>`
 cclaw -s 3               # resume session 3
 cclaw --new              # force new session
 cclaw --daemon           # daemon mode (channels, cron, multi-agent)
@@ -219,14 +222,16 @@ scripts/build_static.sh arm64   # static release binary (x64|arm64|i586|armv5te)
 
 ## Benchmarks
 
-Measured on Acer Chromebook Plus 514 (Intel i3-N305, 8GB RAM, Linux container).
+Measured 2026-11-22 on an EC2 t4g.small (2 vCPU arm64, 2 GB RAM), source build, one short turn through OpenRouter to DeepSeek V4.1 Flash. Medians of 5–7 runs.
 
 ```
-Agent overhead:  ~13 ms (DB + context build, before network)
-TTFB breakdown (OpenRouter, DeepSeek V4.1 Flash):
-  CClaw:         13 ms
-  DNS+TCP+TLS:  113 ms
-  LLM:         1073 ms (model-dependent)
+cclaw version:        7 ms   (process start to exit)
+One turn, everything but the model:
+  existing database:  43 ms  (start, context build, store the reply, exit)
+  first run ever:     50 ms  (also creates the database, key and default agent)
+Network and model, per request:
+  DNS + TCP + TLS:    16 ms
+  Time to first byte: 650 ms (model- and provider-dependent)
 ```
 
 ## Documentation

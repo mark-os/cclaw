@@ -223,7 +223,7 @@ Measured on Acer Chromebook Plus 514 (Intel i3-N305, 8GB RAM, Linux container).
 
 ```
 Agent overhead:  ~13 ms (DB + context build, before network)
-TTFB breakdown (OpenRouter, DeepSeek V4 Flash):
+TTFB breakdown (OpenRouter, DeepSeek V4.1 Flash):
   CClaw:         13 ms
   DNS+TCP+TLS:  113 ms
   LLM:         1073 ms (model-dependent)

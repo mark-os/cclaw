@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 static char *dup_or_null(const unsigned char *s) {
@@ -38,6 +39,85 @@ static Approval *row_to_approval(sqlite3_stmt *stmt) {
 int approval_is_sensitive(const Approval *a) {
     return a && a->park_reason &&
            strcmp(a->park_reason, APPROVAL_PARK_SENSITIVE) == 0;
+}
+
+/* ── Answers: one vocabulary, one fitting rule (approval.h) ─────────────── */
+
+ApprovalAnswer approval_answer_from_word(const char *w) {
+    if (!w) return APPROVAL_ANSWER_NONE;
+    if (!strcasecmp(w, "y") || !strcasecmp(w, "yes") || !strcasecmp(w, "ok") ||
+        !strcasecmp(w, "okay") || !strcasecmp(w, "approve"))
+        return APPROVAL_ANSWER_YES;
+    if (!strcasecmp(w, "o") || !strcasecmp(w, "once")) return APPROVAL_ANSWER_ONCE;
+    if (!strcasecmp(w, "a") || !strcasecmp(w, "always")) return APPROVAL_ANSWER_ALWAYS;
+    if (!strcasecmp(w, "n") || !strcasecmp(w, "no") || !strcasecmp(w, "d") ||
+        !strcasecmp(w, "deny"))
+        return APPROVAL_ANSWER_NO;
+    return APPROVAL_ANSWER_NONE;
+}
+
+ApprovalShape approval_shape_of(const char *resolve, const char *park_reason) {
+    if (resolve && strcmp(resolve, "apply") == 0) return APPROVAL_SHAPE_APPLY;
+    if (park_reason && strcmp(park_reason, APPROVAL_PARK_SENSITIVE) == 0)
+        return APPROVAL_SHAPE_SENSITIVE;
+    return APPROVAL_SHAPE_CALL;
+}
+
+ApprovalShape approval_shape(const Approval *a) {
+    return a ? approval_shape_of(a->resolve, a->park_reason) : APPROVAL_SHAPE_CALL;
+}
+
+int approval_answer_fit(ApprovalShape shape, ApprovalAnswer answer,
+                        ApprovalDecision *out, const char **why) {
+    if (why) *why = NULL;
+    switch (answer) {
+    case APPROVAL_ANSWER_NO:
+        *out = APPROVAL_DENY;
+        return 0;
+    case APPROVAL_ANSWER_YES:
+        *out = shape == APPROVAL_SHAPE_APPLY ? APPROVAL_ALWAYS : APPROVAL_ONCE;
+        return 0;
+    case APPROVAL_ANSWER_ONCE:
+        if (shape == APPROVAL_SHAPE_APPLY) {
+            if (why) *why = "it is a request applied as a whole, which has no"
+                            " \"once\": approve it or deny it";
+            return -1;
+        }
+        *out = APPROVAL_ONCE;
+        return 0;
+    case APPROVAL_ANSWER_ALWAYS:
+        if (shape == APPROVAL_SHAPE_SENSITIVE) {
+            if (why) *why = "it reaches a sensitive target, which is allowed one"
+                            " call at a time: approve it once or deny it";
+            return -1;
+        }
+        *out = APPROVAL_ALWAYS;
+        return 0;
+    case APPROVAL_ANSWER_NONE:
+        break;
+    }
+    return -1;
+}
+
+const char *approval_shape_prompt(ApprovalShape shape) {
+    switch (shape) {
+    case APPROVAL_SHAPE_APPLY:     return "Approve? [y]es / [n]o: ";
+    case APPROVAL_SHAPE_SENSITIVE: return "Allow once? [y]es / [n]o: ";
+    case APPROVAL_SHAPE_CALL:      break;
+    }
+    return "Allow? [y]es once / [a]lways / [n]o: ";
+}
+
+const char *approval_shape_choices(ApprovalShape shape) {
+    switch (shape) {
+    case APPROVAL_SHAPE_APPLY:
+        return "This request is approved or denied as a whole: y or n.";
+    case APPROVAL_SHAPE_SENSITIVE:
+        return "A sensitive target is allowed one call at a time: y or n.";
+    case APPROVAL_SHAPE_CALL:
+        break;
+    }
+    return "y allows this call, a allows it from now on, n denies.";
 }
 
 void approval_free(Approval *a) {

@@ -1372,22 +1372,18 @@ static int act_approval_decide(Act *a) {
     if (!state) return refuse(a, 404, "There is no approval #%lld.", id);
     if (strcmp(state, "pending") != 0)
         return refuse(a, 409, "Approval #%lld is %s already: there is nothing to decide.", id, state);
+    /* The rule every surface shares (approval_answer_fit): an applied
+     * request has no single-use form, and a sensitive target is never
+     * allowed for good. The page's buttons say once, always or deny. */
+    ApprovalAnswer ans = approval_answer_from_word(decision);
+    if (ans == APPROVAL_ANSWER_NONE)
+        return refuse(a, 400, "The decision must be once, always or deny.");
+    char *res = qs(a, "SELECT resolve FROM approvals WHERE id=?1", ids, NULL, NULL);
+    char *why = qs(a, "SELECT park_reason FROM approvals WHERE id=?1", ids, NULL, NULL);
     ApprovalDecision d;
-    if (decision && strcmp(decision, "once") == 0) d = APPROVAL_ONCE;
-    else if (decision && strcmp(decision, "always") == 0) d = APPROVAL_ALWAYS;
-    else if (decision && strcmp(decision, "deny") == 0) d = APPROVAL_DENY;
-    else return refuse(a, 400, "The decision must be once, always or deny.");
-    /* What the event loop accepts (resolve.c): an applied request (a
-     * configuration document, a new agent) has no single-use form, and a
-     * sensitive target is never allowed for good. */
-    if (d == APPROVAL_ONCE &&
-        qi(a, "SELECT resolve = 'apply' FROM approvals WHERE id=?1", ids, NULL, NULL) == 1)
-        return refuse(a, 400, "Approval #%lld is a request applied as a whole, which has no"
-                              " \"once\": approve it or deny it.", id);
-    if (d == APPROVAL_ALWAYS &&
-        qi(a, "SELECT park_reason = 'sensitive_target' FROM approvals WHERE id=?1", ids, NULL, NULL) == 1)
-        return refuse(a, 400, "Approval #%lld reaches a sensitive target, which is allowed one call"
-                              " at a time: approve it once or deny it.", id);
+    const char *bad = NULL;
+    if (approval_answer_fit(approval_shape_of(res, why), ans, &d, &bad) != 0)
+        return refuse(a, 400, "Approval #%lld: %s.", id, bad);
     char *queued = qs(a, "SELECT decision FROM approval_decisions WHERE approval_id=?1", ids, NULL, NULL);
     if (queued) return refuse(a, 409, "A decision (%s) for approval #%lld is already on its way.", queued, id);
     /* Recorded here, carried out by the event loop: resolving runs tools and

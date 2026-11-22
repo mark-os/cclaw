@@ -50,7 +50,7 @@ ChannelIntent channel_intent_from_text(const char *text) {
     if (approve_arg || deny_arg) {
         const char *arg = approve_arg ? approve_arg : deny_arg;
         it.kind = CHANNEL_INTENT_DECIDE;
-        it.decide = approve_arg ? CHANNEL_DECIDE_APPROVE : CHANNEL_DECIDE_DENY;
+        it.answer = approve_arg ? APPROVAL_ANSWER_YES : APPROVAL_ANSWER_NO;
         char *end = NULL;
         long long id = arg[0] ? strtoll(arg, &end, 10) : 0;
         if (id <= 0 || (end && *end != '\0' && *end != ' ')) id = 0;
@@ -90,17 +90,13 @@ int channel_intent_from_decision_event(sqlite3 *db, const char *payload,
         }
         sqlite3_finalize(js);
     }
-    if (approval_id <= 0 || !decision_str[0])
+    ApprovalAnswer answer = approval_answer_from_word(decision_str);
+    if (approval_id <= 0 || answer == APPROVAL_ANSWER_NONE)
         return -1;
 
     out->kind = CHANNEL_INTENT_DECIDE;
     out->approval_id = approval_id;
-    if (strcmp(decision_str, "yes") == 0)
-        out->decide = CHANNEL_DECIDE_APPROVE_ALWAYS;
-    else if (strcmp(decision_str, "once") == 0)
-        out->decide = CHANNEL_DECIDE_APPROVE_ONCE;
-    else
-        out->decide = CHANNEL_DECIDE_DENY;  /* "no" and anything unrecognized */
+    out->answer = answer;
     return 0;
 }
 
@@ -145,7 +141,7 @@ static void reply(sqlite3 *db, const char *ch_name, const char *cid,
  * events) — the same audit column the dashboard and CLI write. */
 static int intent_exec_decide(sqlite3 *db, const char *ch_name, const char *cid,
                               const char *sender, const ChannelIntent *it) {
-    int deny = it->decide == CHANNEL_DECIDE_DENY;
+    int deny = it->answer == APPROVAL_ANSWER_NO;
     const char *verb = deny ? "deny" : "approve";
     char msg[320];
     if (it->approval_id <= 0) {
@@ -198,13 +194,12 @@ static int intent_exec_decide(sqlite3 *db, const char *ch_name, const char *cid,
     }
 
     ApprovalDecision d = APPROVAL_DENY;
-    switch (it->decide) {
-    case CHANNEL_DECIDE_APPROVE:
-        d = strcmp(resolve, "apply") == 0 ? APPROVAL_ALWAYS : APPROVAL_ONCE;
-        break;
-    case CHANNEL_DECIDE_APPROVE_ALWAYS: d = APPROVAL_ALWAYS; break;
-    case CHANNEL_DECIDE_APPROVE_ONCE:   d = APPROVAL_ONCE;   break;
-    case CHANNEL_DECIDE_DENY:           d = APPROVAL_DENY;   break;
+    const char *bad = NULL;
+    if (approval_answer_fit(approval_shape_of(resolve, why), it->answer, &d, &bad) != 0) {
+        snprintf(msg, sizeof(msg), "approval #%lld: %s", (long long)id,
+                 bad ? bad : "that is not an answer");
+        reply(db, ch_name, cid, msg);
+        return 1;
     }
     char decided_via[128];
     if (sender)

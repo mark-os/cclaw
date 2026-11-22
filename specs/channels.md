@@ -199,10 +199,14 @@ falls through as conversation.
 the inline-button `approval_decision` event use. An approval is decidable only
 from the channel its session is bound to (a mismatch reads as "no such
 approval"), only while `state='pending'`, and the decision is attributed in
-`approvals.decided_via` as `channel:<channel>:<sender_id>`. Strength is
-deliberately minimal: a `rerun` approval resolves ONCE, an `apply` grant
-ALWAYS (once is incoherent for it) — "allow and stop asking" stays a
-dashboard/button decision.
+`approvals.decided_via` as `channel:<channel>:<sender_id>`. What an answer
+means is not decided here: text and buttons both carry an answer word
+(`/approve` is a plain "yes"; a button's event names `yes`, `once`, `always`
+or `no`) and `approval_answer_fit()` fits it to the request, the same rule
+the terminal, the dashboard and `cclaw approvals` use
+([security.md](security.md#one-answer-vocabulary-one-rule)). "Yes" is the
+least that works, so typed chat never mints a standing grant — that takes a
+button or page that says "always".
 
 ## Session resolution
 

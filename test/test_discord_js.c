@@ -103,7 +103,7 @@ int main(void) {
         "JSON.stringify(kbToComponents([[{text:'Deny',callback_data:'appr:7:no'}]]))",
         "\"style\":4");
     expect_has("kb_yes_primary_style",
-        "JSON.stringify(kbToComponents([[{text:'Always allow',callback_data:'appr:7:yes'}]]))",
+        "JSON.stringify(kbToComponents([[{text:'Always allow',callback_data:'appr:7:always'}]]))",
         "\"style\":1");
     expect("kb_empty_is_null", "'' + kbToComponents([])", "null");
 

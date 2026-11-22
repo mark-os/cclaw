@@ -12,6 +12,49 @@
 
 typedef enum { APPROVAL_DENY, APPROVAL_ONCE, APPROVAL_ALWAYS } ApprovalDecision;
 
+/* What an approver said, before it is fitted to a request: the one vocabulary
+ * every surface speaks (terminal line, chat command, button event, dashboard
+ * form, `cclaw approvals`). YES carries no strength — it means "the least
+ * that works for this request". ALWAYS is the deliberate standing grant. */
+typedef enum {
+    APPROVAL_ANSWER_NONE = 0,   /* not an answer: decides nothing */
+    APPROVAL_ANSWER_YES,
+    APPROVAL_ANSWER_ONCE,
+    APPROVAL_ANSWER_ALWAYS,
+    APPROVAL_ANSWER_NO,
+} ApprovalAnswer;
+
+/* The three kinds of request, which differ in the answers they accept. */
+typedef enum {
+    APPROVAL_SHAPE_CALL = 0,    /* one tool call: once, always or deny */
+    APPROVAL_SHAPE_SENSITIVE,   /* a sensitive target: once or deny */
+    APPROVAL_SHAPE_APPLY,       /* applied as a whole: approve or deny */
+} ApprovalShape;
+
+/* A word → an answer, case-insensitive: y/yes/ok/okay/approve, o/once,
+ * a/always, n/no/d/deny. Anything else (and NULL) is NONE. A surface that
+ * accepts fewer words narrows before or after calling this. */
+ApprovalAnswer approval_answer_from_word(const char *word);
+
+/* approvals.resolve + approvals.park_reason → the request's shape. */
+ApprovalShape approval_shape_of(const char *resolve, const char *park_reason);
+
+/* Fit an answer to a request — THE rule for what each answer means, shared
+ * by every surface so none of them can drift:
+ *   NO → deny;  YES → once (a call, a sensitive target) or the whole request
+ *   (apply);  ONCE → once, refused for apply;  ALWAYS → standing, refused
+ *   for a sensitive target.
+ * Returns 0 with *out set. Returns -1 when this request has no such answer,
+ * with *why a clause that completes "approval #N: ..." (NULL for NONE).
+ * resolve_approval keeps its own refusal/coercion as the backstop. */
+int approval_answer_fit(ApprovalShape shape, ApprovalAnswer answer,
+                        ApprovalDecision *out, const char **why);
+
+/* The terminal's question for a shape, listing only the answers it accepts,
+ * and the one-line reminder of what those answers do. */
+const char *approval_shape_prompt(ApprovalShape shape);
+const char *approval_shape_choices(ApprovalShape shape);
+
 /* approvals.park_reason — WHY a row parked. tool_name says WHAT parked; these
  * two values are the whole vocabulary. 'sensitive_target' is the trust.md
  * rule-1 overlay: per-call, never satisfiable by a standing grant, ALWAYS
@@ -42,6 +85,7 @@ typedef struct {
  * (park_reason = APPROVAL_PARK_SENSITIVE) — per-call authority that no
  * standing grant satisfies and no ticket transfers. */
 int approval_is_sensitive(const Approval *a);
+ApprovalShape approval_shape(const Approval *a);
 
 int approval_timeout_seconds(sqlite3 *db);
 int approval_block_seconds(sqlite3 *db);

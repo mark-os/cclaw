@@ -19,6 +19,7 @@
  * conversation for the session's agent.
  */
 
+#include "approval.h"
 #include <sqlite3.h>
 #include <stdint.h>
 
@@ -32,17 +33,11 @@ typedef enum {
     CHANNEL_INTENT_ADMIN,         /* /admin — the operator's sign-in link */
 } ChannelIntentKind;
 
-/* What a DECIDE means, as the surface expressed it. Chat's bare /approve
- * carries no strength — the executor picks it from approvals.resolve (chat
- * is the low-ceremony surface: "rerun" gets ONCE so text never mints
- * standing authority, "apply" gets ALWAYS because ONCE is incoherent for
- * it). Button taps say exactly what they mean. */
-typedef enum {
-    CHANNEL_DECIDE_APPROVE = 1,   /* strength chosen by the executor */
-    CHANNEL_DECIDE_APPROVE_ALWAYS,
-    CHANNEL_DECIDE_APPROVE_ONCE,
-    CHANNEL_DECIDE_DENY,
-} ChannelDecide;
+/* What a DECIDE says is an ApprovalAnswer (approval.h) — the vocabulary the
+ * terminal, the dashboard and `cclaw approvals` also speak — and what it
+ * means for a given request is approval_answer_fit(), not a rule kept here.
+ * Chat's /approve is a plain YES (the least that works), so typed text never
+ * mints standing authority; a button says exactly which answer it is. */
 
 typedef enum {
     CHANNEL_ORIGIN_CHAT = 0,  /* parsed from message text by the daemon */
@@ -52,7 +47,7 @@ typedef enum {
 typedef struct {
     ChannelIntentKind kind;
     ChannelIntentOrigin origin;
-    ChannelDecide decide;     /* DECIDE only */
+    ApprovalAnswer answer;    /* DECIDE only */
     int64_t approval_id;      /* DECIDE; <= 0 = unusable arg (usage reply) */
     int64_t session_id;       /* PIN_SESSION */
     /* DECIDE from a structural event: the clicker, as the extension reported
@@ -66,9 +61,10 @@ typedef struct {
  * "/new". Pure — no DB, no allocation. */
 ChannelIntent channel_intent_from_text(const char *text);
 
-/* approval_decision payload {approval_id, decision:"yes"|"once"|other,
- * sender?} →
- * DECIDE intent. `db` is used as the JSON parser only (jsmn stays banned
+/* approval_decision payload {approval_id, decision, sender?} → DECIDE
+ * intent. `decision` is an answer word (approval_answer_from_word): the
+ * built-in cards send "yes", "once", "always" or "no". A word that is not an
+ * answer is malformed and decides nothing — never a denial by default. `db` is used as the JSON parser only (jsmn stays banned
  * where a handle exists). Returns 0, or -1 for a malformed payload. */
 int channel_intent_from_decision_event(sqlite3 *db, const char *payload,
                                        ChannelIntent *out);

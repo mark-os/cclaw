@@ -94,34 +94,30 @@ int approvals_main(int argc, char *argv[]) {
         char *end = NULL;
         long long id = strtoll(argv[3], &end, 10);
         const char *how = (argc >= 5) ? argv[4] : NULL;
-        int apply = 0, sensitive = 0, found = 0;
+        int found = 0;
+        ApprovalShape shape = APPROVAL_SHAPE_CALL;
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
-                "SELECT resolve = 'apply', park_reason = 'sensitive_target'"
-                " FROM approvals WHERE id=?1 AND state='pending'", -1, &st, NULL) == SQLITE_OK) {
+                "SELECT resolve, park_reason FROM approvals WHERE id=?1 AND state='pending'",
+                -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_int64(st, 1, id);
             if (sqlite3_step(st) == SQLITE_ROW) {
                 found = 1;
-                apply = sqlite3_column_int(st, 0);
-                sensitive = sqlite3_column_int(st, 1);
+                shape = approval_shape_of((const char *)sqlite3_column_text(st, 0),
+                                          (const char *)sqlite3_column_text(st, 1));
             }
             sqlite3_finalize(st);
         }
-        /* The same rules the dashboard enforces (explore_act.c): a request
-         * applied as a whole has no "once"; a sensitive target is never
-         * allowed for good. With no word given, the narrowest that works. */
+        /* The rule every surface shares (approval_answer_fit). With no word
+         * given, `approve` is a plain yes: the narrowest that works. */
+        ApprovalAnswer ans = deny ? APPROVAL_ANSWER_NO
+                           : how ? approval_answer_from_word(how) : APPROVAL_ANSWER_YES;
         ApprovalDecision d = APPROVAL_DENY;
         const char *bad = NULL;
-        if (!deny) {
-            if (!how) d = apply ? APPROVAL_ALWAYS : APPROVAL_ONCE;
-            else if (strcmp(how, "once") == 0) d = APPROVAL_ONCE;
-            else if (strcmp(how, "always") == 0) d = APPROVAL_ALWAYS;
-            else bad = "say 'once' or 'always'";
-            if (!bad && d == APPROVAL_ONCE && apply)
-                bad = "it is a request applied as a whole, which has no 'once' — approve it or deny it";
-            if (!bad && d == APPROVAL_ALWAYS && sensitive)
-                bad = "it reaches a sensitive target, allowed one call at a time — approve it once or deny it";
-        }
+        if (!deny && (ans == APPROVAL_ANSWER_NONE || ans == APPROVAL_ANSWER_NO))
+            bad = "say 'once' or 'always'";
+        else
+            approval_answer_fit(shape, ans, &d, &bad);
         if (id <= 0 || (end && *end)) {
             fprintf(stderr, "error: '%s' is not an approval id\n", argv[3]); rc = 1;
         } else if (!found) {

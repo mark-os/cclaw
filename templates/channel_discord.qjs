@@ -443,11 +443,11 @@ function onInteraction(d) {
         return;
     }
 
-    // "appr:<approval_id>:<yes|once|no>"
+    // "appr:<approval_id>:<yes|once|always|no>"
     var parts = customId.substring(5).split(":");
     var approvalId = parseInt(parts[0], 10);
     var decision = parts[1] || "no";
-    var toast = decision === "yes" ? "Approved" :
+    var toast = (decision === "yes" || decision === "always") ? "Approved" :
                 decision === "once" ? "Approved once" : "Denied";
 
     // Interaction ids are unique per click — free idempotency via the
@@ -663,7 +663,7 @@ function sendFile(chatId, file, caption, outboxId) {
 }
 
 // Telegram-shaped [[{text, callback_data}]] -> Discord action rows. The
-// callback_data rides custom_id verbatim ("appr:<id>:<yes|once|no>", well
+// callback_data rides custom_id verbatim ("appr:<id>:<yes|once|always|no>", well
 // under Discord's 100-char limit); styles are keyed on the decision suffix
 // so the deny button reads as destructive. Discord caps: 5 buttons per row,
 // 5 rows per message — the C prompts use one short row, but clamp anyway.

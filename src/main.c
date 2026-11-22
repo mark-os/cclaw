@@ -957,42 +957,20 @@ static int run_cli(char *db_path, const char *prompt,
             {
                 Approval *pa = approval_get_parked_subtree(proc_db(), proc_cli_session());
                 if (pa) {
-                    /* Only an explicit answer decides, and `y` is the minimum
-                     * that works — text never mints standing authority unless
-                     * it says so (channel_intent.h). Anything else re-asks: a
-                     * stray line is most often the next message, typed without
-                     * noticing the prompt. The choices must match the prompt
-                     * handle_approval_park (resolve.c) printed for this row:
-                     * an applied request has no "once", a sensitive target no
-                     * "always" (resolve_approval's rules). */
-                    int apply = pa->resolve && strcmp(pa->resolve, "apply") == 0;
-                    int sensitive = !apply && approval_is_sensitive(pa);
-                    const char *l = linebuf;
-                    int yes = !strcasecmp(l, "y") || !strcasecmp(l, "yes") ||
-                              !strcasecmp(l, "ok") || !strcasecmp(l, "okay") ||
-                              !strcasecmp(l, "approve");
-                    int once = !strcasecmp(l, "o") || !strcasecmp(l, "once");
-                    int always = !strcasecmp(l, "a") || !strcasecmp(l, "always");
-                    int no = !strcasecmp(l, "n") || !strcasecmp(l, "no") ||
-                             !strcasecmp(l, "d") || !strcasecmp(l, "deny");
-                    int d = -1;
-                    if (no) d = APPROVAL_DENY;
-                    else if (apply) { if (yes || always) d = APPROVAL_ALWAYS; }
-                    else if (yes || once) d = APPROVAL_ONCE;
-                    else if (always && !sensitive) d = APPROVAL_ALWAYS;
-                    if (d < 0) {
+                    /* Only an explicit answer decides, and `y` is the least
+                     * that works (approval_answer_fit — the rule every
+                     * surface shares). Anything else re-asks: a stray line is
+                     * most often the next message, typed without noticing
+                     * the prompt. */
+                    ApprovalShape shape = approval_shape(pa);
+                    ApprovalDecision d;
+                    if (approval_answer_fit(shape, approval_answer_from_word(linebuf),
+                                            &d, NULL) != 0) {
                         fprintf(stdout, "Not an answer, and not sent as a message. %s\n%s",
-                                apply ? "This request is approved or denied as a whole:"
-                                        " y or n."
-                                : sensitive ? "A sensitive target is allowed one call at"
-                                              " a time: y or n."
-                                : "y allows this call, a allows it from now on, n denies.",
-                                apply ? "Approve? [y]es / [n]o: "
-                                : sensitive ? "Allow once? [y]es / [n]o: "
-                                : "Allow? [y]es once / [a]lways / [n]o: ");
+                                approval_shape_choices(shape), approval_shape_prompt(shape));
                         fflush(stdout);
                     } else {
-                        resolve_approval(pa->id, (ApprovalDecision)d, "cli:interactive", 0);
+                        resolve_approval(pa->id, d, "cli:interactive", 0);
                     }
                     approval_free(pa);
                     /* Shift and continue */

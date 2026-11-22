@@ -319,6 +319,29 @@ All actions use `resolve='apply'` approvals (ambient capability grants, not one-
 
 Path grants (`kind='read_path'` or `kind='write_path'`) become extra bind-mounts inside the sandboxed tool child. `agent_setup_init()` (`src/agent_setup.c`) loads them into the `SandboxProfile`, and `contain_enter()` (`src/contain_linux.c`) mounts them (canonicalized, deduped, rw-wins, sorted shallow→deep) alongside the workspace.
 
+### One answer vocabulary, one rule
+
+Every surface that decides an approval speaks the same four answers and asks the same function what they mean (`approval_answer_from_word`, `approval_answer_fit`, `src/approval.c`). No surface keeps its own copy of the rule; `resolve_approval` still refuses or coerces as the backstop.
+
+| Answer | Single call | Sensitive target | Applied as a whole (`apply`) |
+|---|---|---|---|
+| yes | ONCE | ONCE | ALWAYS (the whole request) |
+| once | ONCE | ONCE | refused — it has no once |
+| always | ALWAYS (standing) | refused — one call at a time | ALWAYS |
+| no | DENY | DENY | DENY |
+
+"yes" carries no strength: it is the least that works. A standing grant is only ever the word "always".
+
+| Surface | How the answer arrives | Which answers it can say |
+|---|---|---|
+| Terminal prompt | a typed line | all four; anything else re-asks |
+| Chat text | `/approve <id>`, `/deny <id>` from an admin | yes, no — typed chat never says "always" |
+| Button | `approval_decision` event `{approval_id, decision, sender}` | the word on the button: the card sends `yes`/`once`/`always`/`no` per shape; the `/approvals` digest sends `yes`/`no` |
+| Dashboard | form field `decision` | once, always, deny |
+| `cclaw approvals` | `approve <id> [once\|always]`, `deny <id>` | all four (bare `approve` is yes) |
+
+A word that is not an answer decides nothing on any surface — it is never a denial by default.
+
 ### The terminal prompt (interactive CLI)
 
 When stdin is a tty, a park prints its summary and a prompt listing only the answers that row accepts (`handle_approval_park`, `src/resolve.c`; read back in `run_cli`, `src/main.c`). `y` (or `yes` / `ok` / `okay` / `approve`) is always the minimum that works, matching chat `/approve`:

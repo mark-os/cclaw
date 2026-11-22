@@ -364,12 +364,12 @@ function processCallback(cbq) {
 // ── Approval callback ────────────────────────────────────────────
 
 function handleApprovalCallback(fromId, data, cbq) {
-    // "appr:<approval_id>:<yes|once|no>"
+    // "appr:<approval_id>:<yes|once|always|no>"
     var parts = data.substring(5).split(":");
     var approvalId = parts[0];
     var decision = parts[1];
 
-    var toast = decision === "yes" ? "Approved" :
+    var toast = (decision === "yes" || decision === "always") ? "Approved" :
                 decision === "once" ? "Approved once" : "Denied";
     if (cbq.id) {
         tgCast("answerCallbackQuery", {callback_query_id: cbq.id, text: toast});

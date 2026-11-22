@@ -584,13 +584,32 @@ static void test_channel_events_approval_decision(void) {
     /* re-point the chat's pin at this session — the pin is the binding */
     assert(channel_pin_session(db, "mychannel", "user1", sid) == 0);
 
-    /* decision "yes" -> APPROVAL_ALWAYS */
+    /* decision "yes" on a single call -> the least that works: APPROVAL_ONCE */
+    {
+        int64_t aid = approval_create(db, sid, "tc0", "shell_exec", APPROVAL_PARK_REQUIRED, "{}", "rerun");
+        assert(aid > 0);
+        char payload[128];
+        snprintf(payload, sizeof(payload),
+                 "{\"approval_id\":%lld,\"decision\":\"yes\"}", (long long)aid);
+        test_event_insert(db, "mychannel", "approval_decision", payload);
+        channel_consume_events(db);
+        assert(g_resolve_calls == 1);
+        assert(g_resolve_decision == APPROVAL_ONCE);
+        sqlite3_stmt *s;
+        assert(sqlite3_prepare_v2(db, "UPDATE approvals SET state='approved' WHERE id=?;", -1, &s, NULL) == SQLITE_OK);
+        sqlite3_bind_int64(s, 1, aid);
+        assert(sqlite3_step(s) == SQLITE_DONE);
+        sqlite3_finalize(s);
+    }
+
+    /* decision "always" -> APPROVAL_ALWAYS */
+    resolve_spy_reset();
     {
         int64_t aid = approval_create(db, sid, "tc1", "shell_exec", APPROVAL_PARK_REQUIRED, "{}", "rerun");
         assert(aid > 0);
         char payload[128];
         snprintf(payload, sizeof(payload),
-                 "{\"approval_id\":%lld,\"decision\":\"yes\"}", (long long)aid);
+                 "{\"approval_id\":%lld,\"decision\":\"always\"}", (long long)aid);
         test_event_insert(db, "mychannel", "approval_decision", payload);
         channel_consume_events(db);
 
@@ -636,7 +655,7 @@ static void test_channel_events_approval_decision(void) {
         sqlite3_finalize(s);
     }
 
-    /* decision "no" (and anything not "yes"/"once") -> APPROVAL_DENY */
+    /* decision "no" -> APPROVAL_DENY */
     resolve_spy_reset();
     {
         int64_t aid = approval_create(db, sid, "tc3", "shell_exec", APPROVAL_PARK_REQUIRED, "{}", "rerun");

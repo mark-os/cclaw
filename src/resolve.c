@@ -575,15 +575,9 @@ void handle_approval_park(int64_t session_id, const char *tool_call_id) {
             fprintf(stdout, ": %s", summary ? summary : "?");
             free(summary);
         }
-        /* Only the choices this row accepts (an applied request has no
-         * "once", a sensitive target no "always"); `y` is always the minimum.
-         * The reader in run_cli (main.c) re-asks with the same text. */
-        if (a->resolve && strcmp(a->resolve, "apply") == 0)
-            fprintf(stdout, "\nApprove? [y]es / [n]o: ");
-        else if (approval_is_sensitive(a))
-            fprintf(stdout, "\nAllow once? [y]es / [n]o: ");
-        else
-            fprintf(stdout, "\nAllow? [y]es once / [a]lways / [n]o: ");
+        /* Only the choices this row accepts; the reader in run_cli (main.c)
+         * re-asks with the same text. */
+        fprintf(stdout, "\n%s", approval_shape_prompt(approval_shape(a)));
         fflush(stdout);
         proc_set_cli_turn_active(0);  /* unblock input loop for the y/n read */
         /* The actual y/n is read back in the main CLI input loop. */
@@ -641,30 +635,31 @@ void handle_approval_park(int64_t session_id, const char *tool_call_id) {
         char *prompt = buf_take(&pb);
         if (!prompt) prompt = strdup("approval requested");
 
-        /* Buttons are labeled with their EFFECT, and a decision that cannot
-         * happen is not offered: "apply" approvals have no once semantics
-         * (resolve_approval rejects APPROVAL_ONCE outright), and ALWAYS is
-         * coerced to ONCE for sensitivity parks — mirror resolve_approval's
-         * coercion conditions exactly, or the button lies. */
+        /* Buttons are labeled with their EFFECT, a decision that cannot
+         * happen is not offered, and each carries the answer word it means
+         * (approval_answer_from_word): "yes" is the least that works, so the
+         * standing grant is spelled "always". */
         char keyboard[320];
-        int is_apply = a->resolve && strcmp(a->resolve, "apply") == 0;
-        int coerced = approval_is_sensitive(a);
-        if (is_apply) {
+        switch (approval_shape(a)) {
+        case APPROVAL_SHAPE_APPLY:
             snprintf(keyboard, sizeof(keyboard),
                      "[[{\"text\":\"Grant\",\"callback_data\":\"appr:%lld:yes\"},"
                      "{\"text\":\"Deny\",\"callback_data\":\"appr:%lld:no\"}]]",
                      (long long)a->id, (long long)a->id);
-        } else if (coerced) {
+            break;
+        case APPROVAL_SHAPE_SENSITIVE:
             snprintf(keyboard, sizeof(keyboard),
                      "[[{\"text\":\"Allow once\",\"callback_data\":\"appr:%lld:once\"},"
                      "{\"text\":\"Deny\",\"callback_data\":\"appr:%lld:no\"}]]",
                      (long long)a->id, (long long)a->id);
-        } else {
+            break;
+        case APPROVAL_SHAPE_CALL:
             snprintf(keyboard, sizeof(keyboard),
-                     "[[{\"text\":\"Always allow\",\"callback_data\":\"appr:%lld:yes\"},"
+                     "[[{\"text\":\"Always allow\",\"callback_data\":\"appr:%lld:always\"},"
                      "{\"text\":\"Once\",\"callback_data\":\"appr:%lld:once\"},"
                      "{\"text\":\"Deny\",\"callback_data\":\"appr:%lld:no\"}]]",
                      (long long)a->id, (long long)a->id, (long long)a->id);
+            break;
         }
 
         /* Two shapes: the admin fan-out addresses *user* ids (to_user=1, the

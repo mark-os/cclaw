@@ -23,12 +23,12 @@ static void test_parse_decide(void) {
     ChannelIntent it = channel_intent_from_text("/approve 12");
     assert(it.kind == CHANNEL_INTENT_DECIDE);
     assert(it.origin == CHANNEL_ORIGIN_CHAT);
-    assert(it.decide == CHANNEL_DECIDE_APPROVE);
+    assert(it.answer == APPROVAL_ANSWER_YES);
     assert(it.approval_id == 12);
 
     it = channel_intent_from_text("/deny 7");
     assert(it.kind == CHANNEL_INTENT_DECIDE);
-    assert(it.decide == CHANNEL_DECIDE_DENY);
+    assert(it.answer == APPROVAL_ANSWER_NO);
     assert(it.approval_id == 7);
 
     /* Extra spaces are stripped; trailing junk after a space is tolerated. */
@@ -102,7 +102,7 @@ static void test_parse_decision_event(void) {
     assert(it.kind == CHANNEL_INTENT_DECIDE);
     assert(it.origin == CHANNEL_ORIGIN_EVENT);
     assert(it.approval_id == 5);
-    assert(it.decide == CHANNEL_DECIDE_APPROVE_ALWAYS);
+    assert(it.answer == APPROVAL_ANSWER_YES);
     assert(it.sender[0] == '\0');   /* absent sender is not an error */
 
     /* The clicker rides the payload so decided_via can name them. */
@@ -112,16 +112,44 @@ static void test_parse_decision_event(void) {
 
     assert(channel_intent_from_decision_event(db,
         "{\"approval_id\":5,\"decision\":\"once\"}", &it) == 0);
-    assert(it.decide == CHANNEL_DECIDE_APPROVE_ONCE);
+    assert(it.answer == APPROVAL_ANSWER_ONCE);
 
     assert(channel_intent_from_decision_event(db,
         "{\"approval_id\":5,\"decision\":\"no\"}", &it) == 0);
-    assert(it.decide == CHANNEL_DECIDE_DENY);
+    assert(it.answer == APPROVAL_ANSWER_NO);
 
-    /* Anything unrecognized is a deny, never an approve. */
     assert(channel_intent_from_decision_event(db,
-        "{\"approval_id\":5,\"decision\":\"banana\"}", &it) == 0);
-    assert(it.decide == CHANNEL_DECIDE_DENY);
+        "{\"approval_id\":5,\"decision\":\"always\"}", &it) == 0);
+    assert(it.answer == APPROVAL_ANSWER_ALWAYS);
+
+    /* A word that is not an answer decides nothing — neither an approval
+     * nor a denial. */
+    assert(channel_intent_from_decision_event(db,
+        "{\"approval_id\":5,\"decision\":\"banana\"}", &it) == -1);
+
+    /* What each answer means for each kind of request: the one rule. */
+    ApprovalDecision d;
+    const char *why;
+    assert(approval_answer_fit(APPROVAL_SHAPE_CALL, APPROVAL_ANSWER_YES, &d, &why) == 0
+           && d == APPROVAL_ONCE);
+    assert(approval_answer_fit(APPROVAL_SHAPE_CALL, APPROVAL_ANSWER_ALWAYS, &d, &why) == 0
+           && d == APPROVAL_ALWAYS);
+    assert(approval_answer_fit(APPROVAL_SHAPE_SENSITIVE, APPROVAL_ANSWER_YES, &d, &why) == 0
+           && d == APPROVAL_ONCE);
+    assert(approval_answer_fit(APPROVAL_SHAPE_SENSITIVE, APPROVAL_ANSWER_ALWAYS, &d, &why) == -1
+           && why);
+    assert(approval_answer_fit(APPROVAL_SHAPE_APPLY, APPROVAL_ANSWER_YES, &d, &why) == 0
+           && d == APPROVAL_ALWAYS);
+    assert(approval_answer_fit(APPROVAL_SHAPE_APPLY, APPROVAL_ANSWER_ONCE, &d, &why) == -1
+           && why);
+    assert(approval_answer_fit(APPROVAL_SHAPE_APPLY, APPROVAL_ANSWER_NO, &d, &why) == 0
+           && d == APPROVAL_DENY);
+    assert(approval_answer_fit(APPROVAL_SHAPE_CALL, APPROVAL_ANSWER_NONE, &d, &why) == -1
+           && !why);
+    assert(approval_answer_from_word("Y") == APPROVAL_ANSWER_YES);
+    assert(approval_answer_from_word("deny") == APPROVAL_ANSWER_NO);
+    assert(approval_answer_from_word("yes please") == APPROVAL_ANSWER_NONE);
+    assert(approval_answer_from_word(NULL) == APPROVAL_ANSWER_NONE);
 
     /* Malformed: missing/zero id, missing decision, not JSON at all. */
     assert(channel_intent_from_decision_event(db,

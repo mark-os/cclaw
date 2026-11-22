@@ -351,6 +351,11 @@ sqlite3 *db_open(const char *path) {
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA wal_autocheckpoint=1000;", NULL, NULL, NULL);
+    /* Every handle maps the database file (up to 64 MB of it), so a read is
+     * the kernel's cached page itself, shared by every thread and process
+     * that has the file open — not a private copy per handle. A cap, not an
+     * allocation: only as much as the file holds is mapped. */
+    sqlite3_exec(db, "PRAGMA mmap_size=67108864;", NULL, NULL, NULL);
     sqlite3_busy_handler(db, db_busy_handler, NULL);
     /* Enforced since v31: agent_name columns are real FKs (ON UPDATE CASCADE),
      * so agent_rename is one UPDATE and rename orphans are structurally
@@ -2229,10 +2234,10 @@ int db_schema_compat(sqlite3 *db) {
     return db_schema_upgrade(db);
 }
 
-/* mmap + reduced cache + relaxed sync for child processes (short-lived). */
+/* A small private cache for the worker and tool threads' handles: they read
+ * through the mapping db_open sets up, so a large cache of their own would
+ * only be a second copy. */
 void db_set_child_pragmas(sqlite3 *db) {
-    sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA mmap_size=67108864;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA cache_size=-512;", NULL, NULL, NULL);
 }
 

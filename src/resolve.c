@@ -178,11 +178,11 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
                 _exit(127);
             }
             close(pfd[1]);
-            char out[4096];
+            char out[4096 + 512];   /* install output + room for the key note */
             size_t len = 0;
             ssize_t r;
-            while (pid > 0 && len < sizeof(out) - 1 &&
-                   (r = read(pfd[0], out + len, sizeof(out) - 1 - len)) > 0)
+            while (pid > 0 && len < 4095 &&
+                   (r = read(pfd[0], out + len, 4095 - len)) > 0)
                 len += (size_t)r;
             out[len] = '\0';
             close(pfd[0]);
@@ -191,6 +191,25 @@ static void apply_grant(const Approval *a, const char *agent, int *apply_failed,
                 !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
                 LOG_WARN_("install_service: `cclaw install` failed");
                 *apply_failed = 1;
+            }
+            /* The key this run uses may exist only in the terminal's
+             * environment, which a service does not inherit: the unit is up
+             * and every turn it runs would fail. Seen on a real systemd box —
+             * the agent reported "done". Say it in the result. */
+            const char *src = proc_cfg() ? proc_cfg()->provider.api_key_source : NULL;
+            if (!*apply_failed && src && strncmp(src, "env:", 4) == 0) {
+                char *stored = db_secret_get_system(proc_db(), src + 4);
+                if (!stored)
+                    snprintf(out + len, sizeof(out) - len,
+                        "\nWARNING: the service has NO API key. The key in use"
+                        " now comes from this terminal's environment (%s), which"
+                        " the service does not inherit — every turn it runs will"
+                        " fail until the key is saved. The person runs `cclaw"
+                        " secret set %s` (or puts it in ~/.cclaw/env), then"
+                        " `systemctl --user restart cclaw`. Tell them now.\n",
+                        src + 4, src + 4);
+                else { memset(stored, 0, strlen(stored)); free(stored); }
+                len = strlen(out);
             }
             if (detail && len) *detail = strdup(out);
         }
@@ -401,7 +420,7 @@ static void resolve_approval_inner(int64_t approval_id, ApprovalDecision decisio
     /* Build tool result message. Receipts over intent: on apply the detail is
      * what is now in effect (re-read from the DB); on failure it names the
      * failing step — approved-then-failed must never read as a denial. */
-    char result_buf[1024];
+    char result_buf[6144];   /* room for a whole apply receipt (install output) */
     if (apply_failed)
         snprintf(result_buf, sizeof(result_buf),
                  "error: %s was approved but applying it failed (%s) — "

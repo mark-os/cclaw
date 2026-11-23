@@ -644,7 +644,10 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a,
     /* Denied/expired messages carry the next-step norm — the moment the model
      * reads the outcome is the moment the norm matters, and the skill that
      * documents it may never be loaded. */
-    char buf[512];
+    /* Sized for an apply receipt: install_service hands back the whole of
+     * `cclaw install`'s output (up to ~4.6K), and a 512-byte buffer cut it
+     * off before the part the agent most needed to relay. */
+    char buf[6144];
     switch (outcome) {
     case APPROVAL_PW_RERUN_APPROVED:
         /* Sensitivity approvals are per-call (trust.md rule 1): the frozen

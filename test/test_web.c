@@ -607,7 +607,7 @@ static void test_dashboard_page(void) {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
         assert(code == 303);
         assert(strstr(hdr, "Location: /admin\r\n"));
-        assert(strstr(hdr, "Path=/; HttpOnly; SameSite=Strict"));
+        assert(strstr(hdr, "Path=/; HttpOnly; SameSite=Lax"));
         curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, NULL);
         curl_easy_setopt(curl, CURLOPT_HEADERDATA, NULL);
     }

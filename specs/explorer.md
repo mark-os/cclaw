@@ -56,7 +56,7 @@ it, `/admin` first and `/admin/data` second; an admin who sends `/admin`
 in a direct message to an agent gets the first one (see
 [channels.md](channels.md)). Either page accepts `?token=` once and answers
 with a 303 to its own clean address that moves the token into the
-`cclaw_admin` cookie (`Path=/`, HttpOnly, SameSite=Strict) — so signing in on
+`cclaw_admin` cookie (`Path=/`, HttpOnly, SameSite=Lax — Strict is withheld on the redirect that follows a link clicked in a chat or an access proxy's login, which left the person "Not signed in") — so signing in on
 one page signs in the other and the API. The API accepts the cookie only. Without it every path is 403: the page explains how to get in,
 the API answers `{"error": "not signed in: …"}`.
 
@@ -256,7 +256,7 @@ does not allow it: already there, still in use, needs a confirmation), 502
 (the provider did not answer) or 503 (database busy, secret key not loaded).
 
 **Forgery.** The cookie alone is not enough for another site's page to act.
-SameSite=Strict keeps it off cross-site requests in current browsers, and on
+SameSite=Lax keeps it off cross-site POSTs and subrequests in current browsers, and on
 top of that an action must carry `Content-Type: application/json` and
 `X-Cclaw-Action: 1` — a cross-site HTML form can send neither, and a
 cross-site `fetch()` that sets them is preflighted, which this server never

@@ -1309,10 +1309,17 @@ static int serve_page(struct mg_connection *conn, sqlite3 *db, const char *path,
         return send_body(conn, 403, "text/html; charset=utf-8", NOT_SIGNED_IN_HTML);
     if (auth == 2) {
         /* The token moves into the cookie and leaves the URL (address bar,
-         * history, referrers). */
+         * history, referrers). The cookie is SameSite=Lax, not Strict: the
+         * link is clicked in a chat app or arrives through an access proxy's
+         * login, the redirect below stays part of that cross-site navigation,
+         * and a Strict cookie is withheld from it — the person landed on
+         * "Not signed in" with the token gone. Lax is sent on a top-level
+         * GET like this one and still kept off cross-site POSTs and
+         * subrequests; every page and API read here is a GET that changes
+         * nothing, and an action has its own checks (act_refusal). */
         mg_printf(conn, "HTTP/1.1 303 See Other\r\nLocation: %s\r\n"
                         "Cache-Control: no-store\r\n"
-                        "Set-Cookie: cclaw_admin=%s; Path=/; HttpOnly; SameSite=Strict\r\n"
+                        "Set-Cookie: cclaw_admin=%s; Path=/; HttpOnly; SameSite=Lax\r\n"
                         "Content-Length: 0\r\n\r\n", path, tok ? tok : "");
         free(tok);
         return 303;
@@ -1375,8 +1382,8 @@ static int api_dispatch(sqlite3 *db, const char *what, const char *qs, char **ou
 
 /* ── POST /admin/api/act: the actions (explore_act.c) ──────────────────────
  * The admin cookie alone must not be enough for another site's page to
- * trigger an action: SameSite=Strict already keeps the cookie off a
- * cross-site request in current browsers, and on top of that a request must
+ * trigger an action: SameSite=Lax already keeps the cookie off a
+ * cross-site POST in current browsers, and on top of that a request must
  *  - say Content-Type: application/json and carry X-Cclaw-Action: 1 — a
  *    cross-site HTML form can send neither, and a cross-site fetch() that
  *    sets them is preflighted, which this server never approves (no CORS

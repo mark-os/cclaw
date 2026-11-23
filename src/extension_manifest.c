@@ -26,6 +26,19 @@ static char *xerr(char **out, const char *msg) {
     return NULL;
 }
 
+/* Copy one file into place by rename, so a process reading the store (a
+ * channel runner loading its handler) sees the old file or the new one and
+ * never a truncated one, and two installers cannot interleave their writes. */
+static int copy_file_atomic(const char *src, const char *dst) {
+    char tmp[PATH_MAX + 32];
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", dst, (long)getpid());
+    if (util_copy_file(src, tmp, 0644) != 0 || rename(tmp, dst) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
 /* Recursively copy a directory tree (regular files + subdirs only). */
 static int copy_tree(const char *src, const char *dst) {
     if (util_mkdir_p(dst) != 0) return -1;
@@ -44,7 +57,7 @@ static int copy_tree(const char *src, const char *dst) {
         if (S_ISDIR(st.st_mode)) {
             if (copy_tree(sp, dp) != 0) { rc = -1; break; }
         } else if (S_ISREG(st.st_mode)) {
-            if (util_copy_file(sp, dp, 0644) != 0) { rc = -1; break; }
+            if (copy_file_atomic(sp, dp) != 0) { rc = -1; break; }
         }
         /* symlinks and other types are skipped */
     }
@@ -1219,12 +1232,15 @@ static int builtin_row_foreign(sqlite3 *db, const char *name) {
  * The store dir is the bundle's final home, so installing from a sibling
  * staging dir avoids copy_tree src==dst. Bundle code ships in the binary;
  * the files on disk are a cache, rewritten on every start so a binary
- * upgrade can't leave a stale template running against a newer C loop. */
+ * upgrade can't leave a stale template running against a newer C loop.
+ * The staging dir carries the pid: two processes starting together (a CLI
+ * run beside a daemon) each stage and clean up their own, where a shared
+ * path let one unlink the files the other was about to validate. */
 static int builtin_stage_install(sqlite3 *db, const char *base,
                                  const BuiltinBundle *b) {
     char staging[2*PATH_MAX];
-    snprintf(staging, sizeof(staging), "%s/extensions/.%s.staging",
-             base, b->name);
+    snprintf(staging, sizeof(staging), "%s/extensions/.%s.staging.%ld",
+             base, b->name, (long)getpid());
     if (util_mkdir_p(staging) != 0) return -1;
 
     int rc = 0;

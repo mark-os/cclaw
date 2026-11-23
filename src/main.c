@@ -1247,8 +1247,10 @@ int main(int argc, char *argv[]) {
     { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
 
     /* Reinstalls the shipped bundles on every start (files are a cache of
-     * the binary's templates); idempotent against a current DB. */
-    extension_install_builtin(proc_db(), db_path);
+     * the binary's templates); idempotent against a current DB. A channel
+     * runner skips it: the daemon that forked it has just done this, and N
+     * runners repeating it only contend for the same files and write lock. */
+    if (!channel_mode) extension_install_builtin(proc_db(), db_path);
 
     proc_set_cfg(config_load(proc_db()));
     if (!proc_cfg()) { fprintf(stderr, "config load failed\n"); db_close(proc_db()); return 1; }

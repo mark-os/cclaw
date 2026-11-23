@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* channel.o (channel_should_launch) references resolve_approval — the stub
@@ -849,6 +850,44 @@ static void test_install_builtin_compaction(void) {
 /* extension_install_builtin on a fresh scratch DB: telegram lands with no owner
  * published=1 with a manifest on disk; the channel row exists ('draft'); a
  * second run preserves an 'active' status. */
+/* Several processes installing the builtins at once (a daemon and CLI runs
+ * starting together) must all succeed: each stages in its own directory and
+ * files reach the store by rename. With a shared staging path one process's
+ * cleanup unlinked what another was about to validate — seen on a slow box
+ * as "channel handler missing" on a healthy start. Verified to fail without
+ * the per-process staging dir. */
+static void test_install_builtin_concurrent(void) {
+    test_db_clean(TEST_DB);
+    rm_rf("/tmp/extensions");
+    sqlite3 *db = open_seeded();
+    assert(config_registry_sync(db) == 0);
+    sqlite3_close(db);
+
+    enum { NPROC = 6, ROUNDS = 3 };
+    for (int r = 0; r < ROUNDS; r++) {
+        pid_t pids[NPROC];
+        for (int i = 0; i < NPROC; i++) {
+            pids[i] = fork();
+            assert(pids[i] >= 0);
+            if (pids[i] == 0) {
+                sqlite3 *c = db_open(TEST_DB);
+                _exit(c && extension_install_builtin(c, TEST_DB) == 0 ? 0 : 1);
+            }
+        }
+        for (int i = 0; i < NPROC; i++) {
+            int st = 0;
+            assert(waitpid(pids[i], &st, 0) == pids[i]);
+            assert(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+        }
+    }
+    struct stat st;
+    assert(stat("/tmp/extensions/telegram/channel.qjs", &st) == 0 && st.st_size > 0);
+    assert(stat("/tmp/extensions/cclaw-docs/skills/configuring-cclaw/SKILL.md", &st) == 0);
+    /* No staging dirs or half-written files left behind. */
+    assert(system("test -z \"$(find /tmp/extensions -name '.*.staging*' -o -name '*.tmp.*')\"") == 0);
+    printf("  PASS test_install_builtin_concurrent\n");
+}
+
 static void test_install_builtin(void) {
     test_db_clean(TEST_DB);
     rm_rf("/tmp/extensions/telegram");
@@ -1106,6 +1145,7 @@ int main(void) {
     test_install_refuses_owner_takeover();
     test_install_builtin();
     test_install_builtin_compaction();
+    test_install_builtin_concurrent();
     test_manifest_agents();
     /* cleanup */
     test_db_clean(TEST_DB);

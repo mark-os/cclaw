@@ -43,7 +43,13 @@ char *tool_js_eval_handler(const char *arguments, void *user_data, int *is_error
 
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
     int rc = tools_register(reg, "js_eval",
-                          "Run JavaScript in QuickJS (modern JS; no modules, no top-level await). "
+                          "Run a script that can fetch URLs (http_request), read and "
+                          "write workspace files (fs), and call a model (LLM). Use it "
+                          "for any HTTP request, not only for computing: for a JSON API "
+                          "it beats web_fetch, because the script parses the response "
+                          "and returns only the fields you need instead of putting the "
+                          "whole body in the conversation. The language is JavaScript "
+                          "in QuickJS (modern JS; no modules, no top-level await). "
                           "Examples:\n"
                           "  var data = JSON.parse(fs.readFile('file.json'));\n"
                           "  var r = http_request('https://api.example.com/data'); var obj = JSON.parse(r.body);\n"

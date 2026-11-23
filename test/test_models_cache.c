@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /* models_cache: ingest, the size rules, and the TTL — all offline. The network
  * half (models_cache_refresh) is deliberately untested here: unit tests never
  * touch a real host, and the interesting logic all lives on the SQL side of
@@ -110,6 +111,32 @@ static void test_query(sqlite3 *db) {
 
 /* Above MODELS_CACHE_LIST_MAX rows a search term is mandatory — the rule that
  * keeps an aggregator's catalog out of a context window. */
+/* Anthropic's real catalog (2026-11-23) names the window max_input_tokens
+ * and states no price; a model with no window at all lists as "?", not 0.
+ * A named key that is nowhere is reported as missing, before any request. */
+static void test_anthropic_shape_and_unknowns(sqlite3 *db) {
+    char err[256] = "", *out = NULL;
+    assert(models_cache_ingest(db, "anthropic",
+        "{\"data\":[{\"type\":\"model\",\"id\":\"claude-x\","
+        "\"max_input_tokens\":1000000,\"max_tokens\":128000},"
+        "{\"type\":\"model\",\"id\":\"claude-bare\"}],\"has_more\":false}",
+        err, sizeof(err)) == 0);
+    touch_fresh(db);
+    assert(models_cache_query(db, "anthropic", NULL, 10, 1, 0, &out, err, sizeof(err)) == 0);
+    assert(strstr(out, "claude-x  ctx=1000000  prompt=$?"));
+    assert(strstr(out, "claude-bare  ctx=?  "));
+    free(out); out = NULL;
+
+    assert(sqlite3_exec(db,
+        "INSERT OR REPLACE INTO providers(name, base_url, endpoint_type, api_key_env)"
+        " VALUES('keyless','http://127.0.0.1:9/v1','openai','CCLAW_TEST_ABSENT_KEY')",
+        NULL, NULL, NULL) == SQLITE_OK);
+    unsetenv("CCLAW_TEST_ABSENT_KEY");
+    assert(models_cache_refresh(db, "keyless", err, sizeof(err)) == -1);
+    assert(strstr(err, "no API key") && strstr(err, "CCLAW_TEST_ABSENT_KEY"));
+    printf("  PASS anthropic shape, unknown window, missing key\n");
+}
+
 static void test_query_required(sqlite3 *db) {
     Buf b = {0};
     buf_append_str(&b, "{\"data\":[");
@@ -215,6 +242,7 @@ int main(void) {
     printf("models_cache tests\n");
     test_ingest(db);
     test_query(db);
+    test_anthropic_shape_and_unknowns(db);
     test_query_required(db);
     test_paging(db);
     test_ttl(db);

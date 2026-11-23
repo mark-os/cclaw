@@ -56,9 +56,13 @@ static void write_end(sqlite3 *db, int own, int ok) {
 
 /* The two catalog shapes providers send: {"data":[{"id",...}]} (OpenAI,
  * OpenRouter, Anthropic) and Gemini's {"models":[{"name":"models/x",
- * "inputTokenLimit":N}]}. Gemini states no modality, so none is recorded. */
+ * "inputTokenLimit":N}]}. Gemini states no modality, so none is recorded.
+ * The context window is context_length on OpenRouter and max_input_tokens on
+ * Anthropic (seen on the real endpoint, 2026-11-23). */
 #define CATALOG_ROWS_SQL \
-    " SELECT json_extract(value,'$.id') AS id, json_extract(value,'$.context_length') AS ctx," \
+    " SELECT json_extract(value,'$.id') AS id," \
+    "        COALESCE(json_extract(value,'$.context_length')," \
+    "                 json_extract(value,'$.max_input_tokens')) AS ctx," \
     "        json_extract(value,'$.pricing.prompt') AS pp," \
     "        json_extract(value,'$.pricing.completion') AS cp," \
     "        json_extract(value,'$.architecture.modality') AS modality" \
@@ -216,6 +220,14 @@ int models_cache_refresh(sqlite3 *db, const char *provider_name,
     char *key_env = q_text(db, "SELECT api_key_env FROM providers WHERE name=?1",
                            provider_name);
     char *key = models_cache_key(db, key_env);
+    /* A named key that is not there: say so, where asking the provider would
+     * come back as "refused the key" for a key nobody supplied. */
+    if (key_env && key_env[0] && !key) {
+        set_err(err, errlen, "no API key for provider '%s': %s is not set in the"
+                " environment and not saved as a secret", provider_name, key_env);
+        free(base_url); free(type); free(key_env);
+        return -1;
+    }
     char *body = NULL;
     int rc = models_cache_fetch(base_url, type, key, models_cache_timeout(db),
                                 &body, err, errlen);
@@ -312,7 +324,7 @@ int models_cache_query(sqlite3 *db, const char *provider, const char *query,
 
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
-            "SELECT provider_name, id, COALESCE(context_length,0),"
+            "SELECT provider_name, id, context_length,"
             "       COALESCE(prompt_price,'?'), COALESCE(completion_price,'?'),"
             "       COALESCE(modality,''),"
             "       COUNT(*) OVER () AS total"
@@ -340,9 +352,13 @@ int models_cache_query(sqlite3 *db, const char *provider, const char *query,
             snprintf(last_provider, sizeof(last_provider), "%s", pname);
             buf_appendf(&b, "\n[%s]\n", pname);
         }
-        buf_appendf(&b, "%s  ctx=%lld  prompt=$%s completion=$%s  %s\n",
-                    sqlite3_column_text(s, 1),
-                    (long long)sqlite3_column_int64(s, 2),
+        /* A provider that does not state a window has none recorded: "?",
+         * not 0. */
+        char ctx[24] = "?";
+        if (sqlite3_column_type(s, 2) != SQLITE_NULL)
+            snprintf(ctx, sizeof(ctx), "%lld", (long long)sqlite3_column_int64(s, 2));
+        buf_appendf(&b, "%s  ctx=%s  prompt=$%s completion=$%s  %s\n",
+                    sqlite3_column_text(s, 1), ctx,
                     sqlite3_column_text(s, 3), sqlite3_column_text(s, 4),
                     sqlite3_column_text(s, 5));
         shown++;

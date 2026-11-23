@@ -92,14 +92,16 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data, int *is_
      * count), so a burst admits exactly up to the cap and refuses the rest —
      * partial admission is the contract, and the message tells the model how
      * to proceed with the children it already has. */
-    char err[192];
+    char err[256];
     int max_active = config_get_int(ctx->db, "session_max_active");
     int total = session_count_active_agents(ctx->db);
     if (max_active > 0 && total >= max_active) {
         free(task);
-        snprintf(err, sizeof(err), "error: %d sub-agent sessions already in"
-                 " flight or queued system-wide (session_max_active=%d) — not"
-                 " launched; wait for capacity to free before launching more",
+        snprintf(err, sizeof(err), "error: %d sub-agent sessions already"
+                 " running or queued system-wide, the runaway limit"
+                 " (session_max_active=%d) — not launched; carry on with"
+                 " the sub-agents already running and launch more as they"
+                 " finish",
                  total, max_active);
         return tool_fail(is_error, "%s", err);
     }

@@ -232,7 +232,7 @@ need a rebuild.
 | Iterations per turn | 25 | `max_iterations`, per agent | the turn ends with `error: iteration limit reached (25 per turn)` |
 | `LLM()` calls per JS run | 25 | `llm_max_calls_per_tool` | `LLM()` throws, naming the cap |
 | Sessions working at once | 10 | `session_max_concurrent` | autonomous turns wait; human messages always go through |
-| Sub-agent sessions in flight | 20, nesting depth 2 | `session_max_active`, `agent_max_depth` | `launch_agent` refuses with the count |
+| Sub-agent sessions in flight | 100, nesting depth 2 | `session_max_active`, `agent_max_depth` | `launch_agent` refuses with the count |
 | Tokens per hour / spend per day | 1,000,000 / $5 | `token_rate_limit`, `daily_cost_limit` | the session waits; the user is told it is queued |
 
 There is no 64 MB limit on a sandbox. The 64 MB figure in the code is the

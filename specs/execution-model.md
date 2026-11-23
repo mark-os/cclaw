@@ -127,7 +127,7 @@ there is no second, weaker writer of results.
 
 ## Caps (the real rails)
 
-`agent_max_depth` 2 · `session_max_active` 20 (in-flight sub-agent sessions,
+`agent_max_depth` 2 · `session_max_active` 100 (in-flight sub-agent sessions,
 launch gate) · `session_max_concurrent` 10 (sessions doing work at once; over
 it, autonomous turns defer) · `CHILD_MAX` 48 · `job_timeout_max` 3600s · `max_iterations` per turn ·
 `max_autonomous_turn_streak` cross-turn. The worker tool filter narrows

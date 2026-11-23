@@ -64,7 +64,7 @@ static void test_system_wide_limit_batch_aware(void) {
         if (i < max_active)
             assert(strncmp(r, "error:", 6) != 0);   /* admitted */
         else {
-            assert(strstr(r, "in flight or queued system-wide") != NULL);
+            assert(strstr(r, "running or queued system-wide") != NULL);
             assert(strstr(r, "session_max_active") != NULL);
         }
         free(r);
@@ -93,7 +93,7 @@ static void test_system_wide_limit(void) {
     AgentLaunchCtx ctx = {.db = db, .session_id = my_sid};
     char *r = tool_launch_agent_handler("{\"task\":\"overflow\"}", &ctx, &(int){0});
     assert(r != NULL);
-    assert(strstr(r, "in flight or queued system-wide") != NULL);
+    assert(strstr(r, "running or queued system-wide") != NULL);
     assert(strstr(r, "session_max_active") != NULL);   /* names its knob */
     free(r);
     db_close(db);

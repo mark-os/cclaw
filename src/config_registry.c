@@ -84,10 +84,12 @@ static const ConfigDef s_defs[] = {
       " inline (naming the outstanding ids) until one is decided" },
     { "agent_max_depth",    "2",
       "Max sub-agent nesting depth for launch_agent" },
-    { "session_max_active", "20",
-      "System-wide in-flight sub-agent sessions — the existence half of the old"
-      " AGENT_MAX_TOTAL. launch_agent refuses and session-creating cron fires"
-      " skip past it (0 = unlimited)" },
+    { "session_max_active", "100",
+      "The runaway limit: sub-agent sessions that exist system-wide, running or"
+      " queued. Set well above an ordinary fan-out — it stops a batch that"
+      " would queue work for hours, it is not a throughput control."
+      " launch_agent refuses and session-creating cron fires skip past it"
+      " (0 = unlimited)" },
     { "session_max_concurrent", "10",
       "Sessions doing work at once — holding an in-flight LLM request or a"
       " running tool child; parents blocked on sub-agents hold nothing. Past it,"

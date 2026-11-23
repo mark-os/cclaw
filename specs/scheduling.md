@@ -36,14 +36,18 @@ rule: forgetting it must *degrade*, never corrupt.
 
 | Key | Default | Gate | Over the cap |
 |-----|---------|------|--------------|
-| `session_max_active` | 20 | launch | `launch_agent` refuses; cron `target:"new"` fires skip + log. Counts in-flight sub-agent sessions (`session_count_active_agents`) — the existence half |
+| `session_max_active` | 100 | launch | `launch_agent` refuses; cron `target:"new"` fires skip + log. Counts in-flight sub-agent sessions (`session_count_active_agents`) — the existence half |
 | `session_max_concurrent` | 10 | drain | autonomous turn opens defer — **all** sessions, not just sub-agents (a cron storm and a fan-out storm load the box identically) |
 
 Two knobs, one per back-pressure flavor: existence over `session_max_active`
 is **refused** while a synchronous caller can hear it; execution over
 `session_max_concurrent` **queues** (the inbox holds the work, the sweep
-retries). Read together: 10 may execute, the other 10 are the allowed queue
-depth. There is deliberately no per-parent fairness cap — one parent
+retries). `session_max_active` is the runaway limit, not a throughput
+control: a queued session is a row, so the default sits well clear of an
+ordinary fan-out (a 5×5 delegation is 30 sessions and hit the old default of
+20 — the refusals cost retries and tokens and told the model nothing a queue
+would not have). It exists to stop a batch that would queue work for hours.
+There is deliberately no per-parent fairness cap — one parent
 monopolizing the fleet is not a current concern, and a third knob on the same
 gate was the main source of confusion (removed 2026-08-04; it was
 `agent_max_per_parent`). If domination becomes real, the right arm for a

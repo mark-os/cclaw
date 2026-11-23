@@ -208,6 +208,7 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
   recall INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+CREATE INDEX IF NOT EXISTS idx_llm_jobs_session ON llm_jobs(session_id);
 
 -- ═══ Extensions ═══
 CREATE TABLE IF NOT EXISTS extensions (
@@ -347,7 +348,7 @@ CREATE TABLE IF NOT EXISTS channel_chats (
                                                -- or the operator removed the route)
   delivery_mode TEXT NOT NULL DEFAULT 'auto'   -- how a turn's output reaches this chat
     CHECK (delivery_mode IN ('auto','iteration','digest','turn','quiescent','explicit')),
-                                               -- (specs/delivery.md): 'auto' (= quiescent) —
+                                               -- (specs/delivery.md): 'auto' (= turn) —
                                                -- the final message posts; 'explicit' — nothing
                                                -- posts unless the agent calls channel_send. A new
                                                -- chat starts from its envelope's chat_type (group
@@ -435,6 +436,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_cache_armed ON sessions(cache_armed_at)
   WHERE cache_armed_at IS NOT NULL;
+-- "children of this session" is asked on every launch, request build and
+-- quiescence check; without this SQLite builds a throwaway index per query.
+CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)
+  WHERE parent_session_id IS NOT NULL;
 
 -- ═══ Delivery edges (specs/delivery.md) ═══
 -- Every outbound edge of a session is a row: the standing parent edge every
@@ -442,7 +447,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_cache_armed ON sessions(cache_armed_at)
 -- a chat (cursor at its leaf), and the one-shot tool_call edge a blocking
 -- launch adds on top. A channel edge has no policy of its own (NULL): its
 -- policy is the chat's channel_chats.delivery_mode, read live at every
--- boundary ('auto' = quiescent) — the row keeps only the cursor. policy is
+-- boundary ('auto' = turn) — the row keeps only the cursor. policy is
 -- one shared vocabulary on every edge:
 --   'iteration' — every content-bearing assistant message, as it lands
 --   'digest'    — assistant prose since cursor, concatenated, at turn end

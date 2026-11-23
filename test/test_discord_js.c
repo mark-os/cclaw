@@ -138,10 +138,44 @@ int main(void) {
         "__sent[0].body",
         "\"type\":6");
     expect("interaction_wrong_type_ignored",
-        "onInteraction({type:2, id:'i1', token:'tk',"
+        "onInteraction({type:5, id:'i1', token:'tk',"
         " data:{custom_id:'appr:5:yes'}, user:{id:'42'}});"
         "'' + (__sent.length + __emits.length)",
         "0");
+    /* ── slash commands (type 2): always answered privately; both are
+     *    operator-only. /admin in a DM is handed to the daemon as text; in a
+     *    server the bot opens the caller's DM and asks from there, so nothing
+     *    is posted to the room (the full path is in the integration test). ── */
+#define ADM "channel.admin.isAdmin=function(){return true;};"
+    expect_has("command_admin_dm_forwards_text",
+        ADM "onInteraction({type:2, id:'c1', token:'tk', channel_id:'dm7',"
+        " data:{name:'admin'}, user:{id:'42', username:'mark'}});"
+        "__emits.length + ':' + __emits[0].payload",
+        "1:{\"chat_id\":\"dm7\",\"text\":\"/admin\"");
+    expect_has("command_admin_dm_private_ack",
+        ADM "onInteraction({type:2, id:'c1', token:'tk', channel_id:'dm7',"
+        " data:{name:'admin'}, user:{id:'42', username:'mark'}});"
+        "__sent[0].body",
+        "\"flags\":64");
+    expect("command_admin_server_opens_dm_not_room",
+        ADM "onInteraction({type:2, id:'c2', token:'tk', channel_id:'ch1', guild_id:'g1',"
+        " data:{name:'admin'}, member:{user:{id:'42', username:'mark'}}});"
+        "__emits.length + ':' + (__sent[0].body.indexOf('direct messages') !== -1) + ':' +"
+        " (__sent[1].url.indexOf('/users/@me/channels') !== -1) + ':' +"
+        " (__sent[1].body.indexOf('\"recipient_id\":\"42\"') !== -1)",
+        "0:true:true:true");
+    expect("command_admin_non_admin_refused",
+        "onInteraction({type:2, id:'c4', token:'tk', channel_id:'dm7',"
+        " data:{name:'admin'}, user:{id:'99', username:'alice'}});"
+        "__emits.length + ':' + __sent.length + ':' +"
+        " (__sent[0].body.indexOf('Only the operator') !== -1)",
+        "0:1:true");
+    expect("command_approvals_non_admin_refused",
+        "onInteraction({type:2, id:'c3', token:'tk', channel_id:'dm7',"
+        " data:{name:'approvals'}, user:{id:'99', username:'alice'}});"
+        "__emits.length + ':' + __sent.length + ':' +"
+        " (__sent[0].body.indexOf('Only the operator') !== -1)",
+        "0:1:true");
     expect_has("interaction_admin_emits_decision",
         "channel.admin.isAdmin=function(){return true;};"
         "config.base='https://d.test';"

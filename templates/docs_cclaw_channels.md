@@ -242,7 +242,11 @@ and `channel.admin.isAdmin(id)` / `channel.admin.listPendingApprovals()`.
 Discord is a builtin channel (like telegram) reached over the real-time
 **Gateway** (a persistent WebSocket): full DMs + guild messages, not just slash
 commands. The handler owns the gateway protocol (IDENTIFY / RESUME / heartbeats
-/ reconnect); C owns only the socket.
+/ reconnect); C owns only the socket. `/admin` and `/approvals` are also
+registered with Discord when the channel connects, so they appear in its
+command menu under the bot; picked there, each is answered with a note only
+the caller sees. Both are for the operator only. `/admin` picked in a server
+sends the link to the operator's direct messages, never to the room.
 
 Turn it on:
 

@@ -221,7 +221,27 @@ static void *mock_gateway(void *arg) {
             ws_send_text(cfd,
                 "{\"op\":0,\"s\":1,\"t\":\"READY\",\"d\":{\"session_id\":\"sess1\","
                 "\"resume_gateway_url\":\"ws://127.0.0.1\",\"user\":{\"id\":\"" BOT_ID
-                "\",\"username\":\"cclawbot\"}}}");
+                "\",\"username\":\"cclawbot\"},\"application\":{\"id\":\"app1\"}}}");
+            /* Registered slash commands arrive as interactions (type 2).
+             * /admin from the operator in a DM is handed on as the text
+             * "/admin"; picked in a server it is asked from the operator's
+             * own DM channel (opened here), never the room; /approvals from
+             * a non-admin is refused privately. */
+            ws_send_text(cfd,
+                "{\"op\":0,\"s\":20,\"t\":\"INTERACTION_CREATE\",\"d\":{\"id\":\"int1\","
+                "\"token\":\"tok1\",\"type\":2,\"channel_id\":\"dmcmd\","
+                "\"data\":{\"name\":\"admin\"},"
+                "\"user\":{\"id\":\"adminuser\",\"username\":\"mark\"}}}");
+            ws_send_text(cfd,
+                "{\"op\":0,\"s\":21,\"t\":\"INTERACTION_CREATE\",\"d\":{\"id\":\"int2\","
+                "\"token\":\"tok2\",\"type\":2,\"channel_id\":\"chan1\",\"guild_id\":\"g1\","
+                "\"data\":{\"name\":\"admin\"},"
+                "\"member\":{\"user\":{\"id\":\"admin2\",\"username\":\"ops\"}}}}");
+            ws_send_text(cfd,
+                "{\"op\":0,\"s\":22,\"t\":\"INTERACTION_CREATE\",\"d\":{\"id\":\"int3\","
+                "\"token\":\"tok3\",\"type\":2,\"channel_id\":\"dmcmd\","
+                "\"data\":{\"name\":\"approvals\"},"
+                "\"user\":{\"id\":\"u1\",\"username\":\"alice\"}}}");
             /* GUILD_CREATE teaches the handler the room's display names,
              * so emitted envelopes can say where the bot is chatting. */
             ws_send_text(cfd,
@@ -276,6 +296,8 @@ static void *mock_gateway(void *arg) {
 static int g_rest_fd = -1;
 static volatile int g_rest_stop = 0;
 static volatile int g_dm_open_seen = 0;
+static volatile int g_cmds_registered = 0;   /* PUT applications/app1/commands */
+static volatile int g_int_acks = 0;          /* bitmask: int1, int2, int3 answered privately */
 static volatile int g_dm_msg_seen = 0;
 static volatile int g_bad_channel_post = 0;   /* POST to the raw user id */
 static volatile int g_file_upload_ok = 0;     /* multipart file post, bytes intact */
@@ -304,9 +326,21 @@ static void *mock_rest(void *arg) {
             if (rn >= (size_t)(hdr_end + 4 - req) + want) break;
         }
         const char *body = "{}";
-        if (strstr(req, "POST /api/v10/users/@me/channels")) {
+        if (strstr(req, "PUT /api/v10/applications/app1/commands")) {
+            if (strstr(req, "\"name\":\"admin\"") && strstr(req, "\"name\":\"approvals\"") &&
+                strcasestr(req, "Authorization: Bot "))
+                g_cmds_registered++;
+            body = "[]";
+        } else if (strstr(req, "POST /api/v10/interactions/int1/tok1/callback")) {
+            if (strstr(req, "\"type\":4") && strstr(req, "\"flags\":64")) g_int_acks |= 1;
+        } else if (strstr(req, "POST /api/v10/interactions/int2/tok2/callback")) {
+            if (strstr(req, "\"flags\":64") && strstr(req, "direct messages")) g_int_acks |= 2;
+        } else if (strstr(req, "POST /api/v10/interactions/int3/tok3/callback")) {
+            if (strstr(req, "\"flags\":64") && strstr(req, "Only the operator")) g_int_acks |= 4;
+        } else if (strstr(req, "POST /api/v10/users/@me/channels")) {
             if (strstr(req, "\"recipient_id\":\"adminuser\"")) g_dm_open_seen = 1;
-            body = "{\"id\":\"dmchan9\"}";
+            body = strstr(req, "\"recipient_id\":\"admin2\"") ? "{\"id\":\"dmchan7\"}"
+                                                             : "{\"id\":\"dmchan9\"}";
         } else if (strstr(req, "POST /api/v10/channels/dmchan9/messages")) {
             if (strstr(req, "ping the admin")) g_dm_msg_seen = 1;
         } else if (strstr(req, "POST /api/v10/channels/adminuser/messages")) {
@@ -356,7 +390,7 @@ static void seed_db(int port, int rest_port) {
         { "discord.base_url",       base_url },
         { "discord.gateway_url",    gw_url },
         { "discord.require_mention","1" },
-        { "discord.admin_ids",      "adminuser" },
+        { "discord.admin_ids",      "adminuser,admin2" },
         { "discord.ambient_channels","chan2" },
         { "discord.debounce_ms",     "1500" },
     };
@@ -499,6 +533,38 @@ int main(void) {
     for (int i = 0; i < 50 && !g_heartbeat_seen; i++) usleep(100000);
     if (!g_heartbeat_seen) FAIL("server never received a heartbeat");
     printf("  PASS: heartbeat liveness\n");
+
+    /* Slash commands: registered once with Discord; each interaction is
+     * answered privately; only the DM /admin becomes a message for the
+     * daemon, as the text a person would have typed. */
+    for (int i = 0; i < 50 && (!g_cmds_registered || g_int_acks != 7); i++) usleep(100000);
+    if (g_cmds_registered != 1) FAIL("slash commands were not registered exactly once");
+    if (g_int_acks != 7) FAIL("a slash-command interaction was not answered privately");
+    for (int i = 0; i < 50 && event_count(db, "dmchan7") < 1; i++) usleep(100000);
+    if (test_scalar_count_db(db,
+            "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
+            " AND json_extract(payload,'$.text')='/admin'"
+            " AND json_extract(payload,'$.chat_id')='dmcmd'"
+            " AND json_extract(payload,'$.chat_type')='dm'"
+            " AND json_extract(payload,'$.sender_id')='adminuser';") != 1)
+        FAIL("/admin picked in a DM did not reach the daemon as the text /admin");
+    if (test_scalar_count_db(db,
+            "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
+            " AND json_extract(payload,'$.text')='/admin'"
+            " AND json_extract(payload,'$.chat_id')='dmchan7'"
+            " AND json_extract(payload,'$.chat_type')='dm'"
+            " AND json_extract(payload,'$.sender_id')='admin2';") != 1)
+        FAIL("/admin picked in a server was not asked from the operator's DM channel");
+    if (test_scalar_count_db(db,
+            "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
+            " AND json_extract(payload,'$.text')='/admin'"
+            " AND json_extract(payload,'$.chat_id')='chan1';") != 0)
+        FAIL("/admin picked in a server was forwarded for the room");
+    if (test_scalar_count_db(db,
+            "SELECT COUNT(*) FROM channel_state WHERE channel_name='discord'"
+            " AND key='disc_cmds' AND value LIKE 'app1:%';") != 1)
+        FAIL("the registered command set was not remembered");
+    printf("  PASS: slash commands register once, answer privately; /admin asks from the DM\n");
 
     /* Admin notice (to_user=1): the destination is a *user* id, so the handler
      * must open a DM channel first and send there. */

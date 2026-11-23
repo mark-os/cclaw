@@ -62,12 +62,49 @@ var emojis = {};                   // name (lowercase) -> { n: name, id, a: anim
 var HELLO_TIMEOUT_MS = 20000;      // handshake done but gateway silent -> drop + retry
 var RESUME_GIVEUP = 3;             // failed attempts before abandoning resume_gateway_url
 
-// Admin slash-style commands (leading "/", admin-gated). Discord's native
-// slash commands need REST registration + interaction handling; text commands
-// are the minimal v1 (mirrors telegram).
+// Admin slash-style commands (leading "/", admin-gated), handled here.
 var COMMANDS = {
     approvals: { run: function(chatId) { sendApprovals(chatId); } }
 };
+
+// The same commands registered with Discord (the mirror of telegram's
+// setMyCommands), plus the daemon's /admin. Without registration Discord's
+// client treats a typed "/admin" as a search of *other* apps' commands and
+// Enter runs whichever it highlighted — the person cannot send the text.
+// Registered, they show in the picker under this bot and arrive as
+// INTERACTION_CREATE (onCommandInteraction). The typed form keeps working.
+var NATIVE_COMMANDS = [
+    { name: "admin", description: "Get the dashboard link (direct message only)" },
+    { name: "approvals", description: "Review pending approvals" }
+];
+
+// One bulk overwrite of the bot's global commands, skipped while Discord
+// already holds this exact set (state survives restarts; registration is
+// rate-limited per day and a restart loop must not spend it).
+function registerCommands(appId) {
+    if (!appId) return;
+    var body = NATIVE_COMMANDS.map(function (c) {
+        // type 1 = slash command; contexts 0 = server, 1 = DM with the bot
+        return { name: c.name, description: c.description, type: 1,
+                 integration_types: [0], contexts: [0, 1] };
+    });
+    var want = appId + ":" + JSON.stringify(body);
+    if (channel.getState("disc_cmds") === want) return;
+    channel.http({
+        method: "PUT",
+        url: config.base + "/api/v10/applications/" + appId + "/commands",
+        headers: ["Authorization: Bot " + config.token, "Content-Type: application/json"],
+        body: JSON.stringify(body)
+    }).then(function (r) {
+        if (r.error || r.status < 200 || r.status >= 300) {
+            channel.log("command registration failed status=" + r.status +
+                        " error=" + r.error + " (typed /commands still work)");
+            return;
+        }
+        channel.setState("disc_cmds", want);
+        channel.log("registered " + body.length + " slash commands");
+    });
+}
 
 function onInit() {
     config.token = channel.getConfig("bot_token");
@@ -210,6 +247,7 @@ function onDispatch(m) {
         }
         backoff = 1000; connFails = 0;   // healthy connection resets backoff
         channel.log("READY as " + (d.user ? d.user.username : "?") + " session=" + sessionId);
+        registerCommands((d.application && d.application.id) ? "" + d.application.id : botId);
     } else if (t === "RESUMED") {
         backoff = 1000; connFails = 0;
         channel.log("RESUMED session=" + sessionId);
@@ -426,11 +464,79 @@ function onMessageCreate(d) {
 // unconditionally (channel_intent_allowed, CHANNEL_ORIGIN_EVENT), so this
 // check IS the authority boundary for button decisions.
 
+var INTERACTION_APPLICATION_COMMAND = 2;
 var INTERACTION_MESSAGE_COMPONENT = 3;
+var CALLBACK_MESSAGE = 4;                 // answer with a message
 var CALLBACK_UPDATE_MESSAGE = 7;          // edit the message the button lives on
 var CALLBACK_DEFERRED_UPDATE = 6;         // ack silently, change nothing
+var FLAG_EPHEMERAL = 64;                  // only the person who ran it sees it
+
+// A registered slash command, picked from Discord's menu. Discord wants an
+// answer within three seconds or shows "the application did not respond", so
+// every path answers at once with a note only the caller sees; the real reply
+// follows as an ordinary message. Authority is unchanged from the typed form:
+// both commands are admin-gated here (as in onMessageCreate), and /admin is
+// handed to the daemon as the text "/admin" from a direct message — it checks
+// the sender again and answers into that chat. Picked in a server, the
+// request is made from the caller's own DM channel with the bot, so the link
+// lands there and nothing is posted to the room.
+function onCommandInteraction(d) {
+    var name = (d.data && d.data.name) || "";
+    var user = (d.member && d.member.user) || d.user || {};
+    var fromId = "" + (user.id || "");
+    var chatId = "" + (d.channel_id || "");
+    var isDm = !d.guild_id;
+    function note(text) {
+        interactionRespond(d, { type: CALLBACK_MESSAGE,
+                                data: { content: text, flags: FLAG_EPHEMERAL } });
+    }
+    if (!chatId || !fromId) { note("That did not reach me. Try again."); return; }
+    noteUser(user);
+
+    if (COMMANDS[name]) {
+        if (!channel.admin.isAdmin(fromId)) { note("Only the operator can use this."); return; }
+        note("Listing here.");
+        COMMANDS[name].run(chatId, "");
+        return;
+    }
+    if (name === "admin") {
+        if (!channel.admin.isAdmin(fromId)) { note("Only the operator can use this."); return; }
+        var ask = function (dmChat) {
+            emitEnv({
+                chat_id: dmChat,
+                text: "/admin",
+                sender_id: fromId,
+                sender_name: displayName(user),
+                chat_type: "dm",
+                chat_title: chatTitle(dmChat, null, user, true),
+                mentioned: false,
+                reply_to_me: false
+            }, "disc_int_" + d.id);
+        };
+        if (isDm) {
+            note("Asking for your dashboard link.");
+            ask(chatId);
+            return;
+        }
+        note("I'm sending your dashboard link to our direct messages.");
+        openDm(fromId, function (id, r) {
+            if (!id) {
+                channel.log("/admin: DM open failed for user " + fromId +
+                            " status=" + r.status + " error=" + r.error);
+                return;
+            }
+            ask(id);
+        });
+        return;
+    }
+    note("I do not know that command.");
+}
 
 function onInteraction(d) {
+    if (d && d.type === INTERACTION_APPLICATION_COMMAND && d.id && d.token) {
+        onCommandInteraction(d);
+        return;
+    }
     if (!d || d.type !== INTERACTION_MESSAGE_COMPONENT || !d.id || !d.token) return;
     var customId = (d.data && d.data.custom_id) || "";
     var user = (d.member && d.member.user) || d.user || {};
@@ -698,9 +804,12 @@ function kbToComponents(keyboard) {
 // just re-opens (the endpoint is idempotent, it returns the existing DM).
 var dmChannels = {};
 
-function sendToUser(userId, text, outboxId, comps) {
+// The DM channel with a user, opened on first use and remembered. done(id)
+// gets the channel id, or null with the response when Discord refused (DMs
+// closed, or the id is not a user).
+function openDm(userId, done) {
     var dm = dmChannels[userId];
-    if (dm) { sendChunked(dm, text, outboxId, comps); return; }
+    if (dm) { done(dm, null); return; }
     channel.http({
         method: "POST",
         url: config.base + "/api/v10/users/@me/channels",
@@ -711,6 +820,13 @@ function sendToUser(userId, text, outboxId, comps) {
         if (!r.error && r.status >= 200 && r.status < 300) {
             try { id = JSON.parse(r.body || "{}").id; } catch (e) { id = null; }
         }
+        if (id) dmChannels[userId] = "" + id;
+        done(id ? "" + id : null, r);
+    });
+}
+
+function sendToUser(userId, text, outboxId, comps) {
+    openDm(userId, function (id, r) {
         if (!id) {
             // Fail the row rather than retrying: an admin who has DMs closed
             // (or an id that is not a user) would otherwise wedge the outbox
@@ -720,8 +836,7 @@ function sendToUser(userId, text, outboxId, comps) {
             channel.failOutbox(outboxId, "DM open failed for user " + userId);
             return;
         }
-        dmChannels[userId] = "" + id;
-        sendChunked("" + id, text, outboxId, comps);
+        sendChunked(id, text, outboxId, comps);
     });
 }
 

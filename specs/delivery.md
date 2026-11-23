@@ -20,8 +20,8 @@ edges also ship mid-turn via `advance_deliver_iteration()`.
 |--------|-------|------|
 | `iteration` | every content-bearing assistant message, incl. tool_use-stop commentary | as each lands |
 | `digest` | assistant prose since the edge cursor, `---`-joined (no tool summaries — `check_session` is the pull surface) | turn end |
-| `turn` | final assistant message (`get_response_text`) | turn end — the old standard |
-| `quiescent` | final assistant message | turn end **iff** the subtree is quiescent — the default |
+| `turn` | final assistant message (`get_response_text`) | turn end — the default for a chat (`auto`) |
+| `quiescent` | final assistant message | turn end **iff** the subtree is quiescent — the default between agents |
 | `explicit` | nothing auto-ships | — |
 
 **The terminal is not an edge.** The CLI (`cclaw`, and `cclaw -p`) prints
@@ -58,11 +58,32 @@ Rule 2 is load-bearing: after a grandchild finishes, everyone is momentarily
 idle while its result sits unconsumed in the middle session's inbox — that
 state is *not* quiescent. Consequences accepted by design: a `quiescent`
 delegation tree is silent until the whole thing settles (the parent sees
-exactly one notice — the real answer), and channel auto-delivery coalesces (a
-follow-up message already queued at turn end holds delivery until the
-follow-up turn's answer covers both). **Errors bypass the hold**: a parked
+exactly one notice — the real answer). **Errors bypass the hold**: a parked
 parent must get an error result rather than hang on a subtree that never
 settles.
+
+### A chat is not held by default, and what a chat holds is never dropped
+
+`quiescent` was designed for the parent edge, whose reader is a model that
+wants one notice and can pull the rest (`check_session`). A chat's reader is
+a person, so `auto` means `turn`: each turn's final message posts when the
+turn ends. (Until 2026-11-23 `auto` meant `quiescent`. In a 25-sub-agent run
+three of the agent's four messages never reached the chat — the person waited
+two minutes with no acknowledgement and then got a last message written as
+if the first three had been read. The model does not know a message was
+held, and its prompt tells it "your final message of the turn is posted".)
+
+`auto` is not inherited as `turn`: a sub-agent launched from a session in an
+`auto` chat still gets `quiescent` on its parent edge
+(`EDGE_INHERIT_POLICY`, db.c), because how often a person hears from the
+agent says nothing about how often a child should wake its parent. A chat
+set to a named policy passes that policy down, as before.
+
+A chat can still be set to `quiescent`. Then a turn that ends with work
+pending is held, and when the hold releases the final message of **every**
+held turn ships, in order, followed by the current one
+(`channel_push_held_turns`, advance.c). A parent edge keeps the one-notice
+rule.
 
 ## The cursor is the only delivery state
 
@@ -125,7 +146,7 @@ failed:`. `source='agent_result'`, `source_ref=<child sid>` as before.
 | Edge | Config surface | Default |
 |------|----------------|---------|
 | parent | `launch_agent` arg `delivery` overrides; otherwise the launcher's own outbound-edge policy, copied at launch and frozen (`tool_filter` precedent, `session_create_filtered`) | registry `agent_delivery_default` (`quiescent`) seeds roots and the children of `explicit` sessions |
-| channel | `channel_chats.delivery_mode` of the session's chat, read live at every boundary — an edit applies to the next turn; `cclaw route add --mode`, `request_config` routes (`explicit`) | a new chat: `explicit` if its id is group-shaped, else `auto` (= `quiescent`); a cron `target:"new"` session reads the mode of the chat it reports to |
+| channel | `channel_chats.delivery_mode` of the session's chat, read live at every boundary — an edit applies to the next turn; `cclaw route add --mode`, `request_config` routes (`explicit`) | a new chat: `explicit` if its id is group-shaped, else `auto` (= `turn`); a cron `target:"new"` session reads the mode of the chat it reports to |
 
 ## Edge cases that are rules
 

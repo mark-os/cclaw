@@ -595,6 +595,44 @@ static int iteration_push_since(sqlite3 *db, int64_t sid, const DeliveryEdge *e,
     return n;
 }
 
+/* A chat whose mode is 'quiescent' held the answers of the turns that ended
+ * while sub-agents were still working. When the hold releases they are owed:
+ * the agent wrote its last message assuming the person had read the earlier
+ * ones. Push the final message of every turn in (cursor, current turn), in
+ * order; the caller ships the current turn's. A parent edge keeps the other
+ * rule — one notice, the real answer — because its reader is a model that
+ * can pull the rest with check_session. */
+static int channel_push_held_turns(sqlite3 *db, int64_t sid,
+                                   const DeliveryEdge *e,
+                                   const EdgeSessionRow *sr) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT MAX(id), content FROM entries"
+            " WHERE session_id=?1 AND id>?2 AND role=2"
+            "   AND content IS NOT NULL AND content != ''"
+            "   AND type NOT IN ('tool_call','reasoning')"
+            "   AND " SQL_NOT_STAND_IN
+            "   AND turn_id IS NOT (SELECT turn_id FROM entries WHERE id=?3)"
+            " GROUP BY turn_id ORDER BY 1;", -1, &st, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(st, 1, sid);
+    sqlite3_bind_int64(st, 2, e->cursor);
+    sqlite3_bind_int64(st, 3, sr->leaf_id);
+    /* Collect first — the pushes below write while this statement reads. */
+    char *texts[16];
+    int n = 0;
+    while (n < 16 && sqlite3_step(st) == SQLITE_ROW) {
+        const char *c = (const char *)sqlite3_column_text(st, 1);
+        if (c && (texts[n] = strdup(c))) n++;
+    }
+    sqlite3_finalize(st);
+    for (int i = 0; i < n; i++) {
+        channel_push(db, e->ref, sid, sr->chat_id, texts[i]);
+        free(texts[i]);
+    }
+    return n;
+}
+
 int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
                              int include_channel) {
     /* Most sessions (every CLI root, every unbound daemon session) have no
@@ -743,6 +781,8 @@ int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
                 pushed = 1;
             }
         } else {                                 /* turn | quiescent */
+            if (is_channel && strcmp(e->policy, "quiescent") == 0)
+                pushed += channel_push_held_turns(db, session_id, e, &sr);
             char *text = get_response_text(db, session_id);
             if (!text && is_parent)
                 text = no_response_text(db, session_id, is_error);
@@ -750,7 +790,7 @@ int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
                 if (is_parent) parent_push(db, sr.parent_sid, session_id, label, text);
                 else channel_push(db, e->ref, session_id, sr.chat_id, text);
                 free(text);
-                pushed = 1;
+                pushed++;
             }
         }
         edge_cursor_set(db, e->id, sr.leaf_id);

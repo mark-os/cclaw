@@ -258,15 +258,19 @@ int delivery_policy_valid(const char *p);
 /* The policy an edge row `e` delivers under, as an SQL expression over a
  * delivery_edges row aliased `e`. A channel edge has none of its own: it is
  * the delivery_mode of the chat the session belongs to, read now ('auto' =
- * quiescent; an unknown value or a missing chat row = quiescent). Every other
- * edge carries its frozen policy. The one definition every reader uses. */
+ * turn; an unknown value or a missing chat row = turn). A person is on the
+ * other end of a chat: each turn's answer is posted when the turn ends, where
+ * 'quiescent' — the default between agents — would hold "I've started it"
+ * until the sub-agents settle. Every other edge carries its frozen policy.
+ * The one definition every reader uses. */
 #define EDGE_POLICY \
     "(CASE WHEN e.target_kind <> 'channel' THEN e.policy ELSE COALESCE(" \
-    "  (SELECT CASE WHEN c.delivery_mode IN ('iteration','digest','turn','explicit')" \
-    "               THEN c.delivery_mode ELSE 'quiescent' END" \
+    "  (SELECT CASE WHEN c.delivery_mode IN" \
+    "                 ('iteration','digest','turn','quiescent','explicit')" \
+    "               THEN c.delivery_mode ELSE 'turn' END" \
     "     FROM sessions es JOIN channel_chats c" \
     "       ON c.channel_name = es.channel_name AND c.chat_id = es.chat_id" \
-    "    WHERE es.id = e.session_id), 'quiescent') END)"
+    "    WHERE es.id = e.session_id), 'turn') END)"
 
 /* The policy a new child's standing parent edge inherits: the launcher's own
  * outbound (non-one-shot) edge policy, frozen at launch — tool_filter

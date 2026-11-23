@@ -3135,9 +3135,23 @@ int delivery_policy_valid(const char *p) {
                  strcmp(p, "explicit") == 0);
 }
 
+/* What a child inherits from its launcher's edge. A chat's 'auto' is 'turn'
+ * for the person reading it (EDGE_POLICY), but that is a statement about the
+ * chat, not about how often a sub-agent should wake its parent: inherited,
+ * every turn end of every child would cost the parent a turn. For inheritance
+ * 'auto' stays 'quiescent' — one notice, the real answer. A chat set to a
+ * named policy still passes it down, as before. */
+#define EDGE_INHERIT_POLICY \
+    "(CASE WHEN e.target_kind <> 'channel' THEN e.policy ELSE COALESCE(" \
+    "  (SELECT CASE WHEN c.delivery_mode IN ('iteration','digest','turn','explicit')" \
+    "               THEN c.delivery_mode ELSE 'quiescent' END" \
+    "     FROM sessions es JOIN channel_chats c" \
+    "       ON c.channel_name = es.channel_name AND c.chat_id = es.chat_id" \
+    "    WHERE es.id = e.session_id), 'quiescent') END)"
+
 char *delivery_policy_resolve(sqlite3 *db, int64_t launcher_session_id) {
     char *p = db_scalar_text(db,
-        "SELECT p FROM (SELECT e.target_kind AS k, " EDGE_POLICY " AS p"
+        "SELECT p FROM (SELECT e.target_kind AS k, " EDGE_INHERIT_POLICY " AS p"
         "   FROM delivery_edges e WHERE e.session_id=?1 AND e.one_shot=0"
         "     AND e.target_kind IN ('parent','channel'))"
         " WHERE p <> 'explicit'"

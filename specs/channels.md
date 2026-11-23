@@ -236,8 +236,9 @@ between turns changes the very next turn. The full policy vocabulary
 (`iteration`, `digest`, `turn`, `quiescent`, `explicit`) is in
 [delivery.md](delivery.md). `cclaw route add --mode` accepts two values:
 
-- **`auto`** (DM default, alias for `quiescent`): the final assistant message
-  of a turn is inserted into `channel_outbox` for the origin chat.
+- **`auto`** (DM default, alias for `turn`): the final assistant message
+  of every turn is inserted into `channel_outbox` for the origin chat when
+  the turn ends — including "I've started it" while sub-agents work.
 - **`explicit`** (default for group chats): turn output stays in the
   session; the agent speaks only via `channel_send`. `channel_send` ships
   ungranted: an agent without the grant cannot speak in an `explicit` chat at

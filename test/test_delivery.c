@@ -291,6 +291,22 @@ static void test_policy_inheritance(void) {
     assert(pol && strcmp(pol, "quiescent") == 0);
     free(pol);
 
+    /* A session in an 'auto' chat posts every turn to the person, but its
+     * sub-agents do not inherit that: they report once, when settled. */
+    int64_t dm = session_create(db, "dm", "default", -1, 0);
+    test_seed_chat(db, "discord", "77");
+    assert(channel_pin_session(db, "discord", "77", dm) == 0);
+    pol = db_scalar_text(db,
+        "SELECT " EDGE_POLICY " FROM delivery_edges e WHERE e.session_id=?"
+        " AND e.target_kind='channel';", dm);
+    assert(pol && strcmp(pol, "turn") == 0);
+    free(pol);
+    int64_t worker = launch(db, dm, "{\"task\":\"t\",\"background\":true}", NULL);
+    pol = db_scalar_text(db,
+        "SELECT policy FROM delivery_edges WHERE session_id=?", worker);
+    assert(pol && strcmp(pol, "quiescent") == 0);
+    free(pol);
+
     db_close(db);
     printf("  PASS test_policy_inheritance\n");
 }
@@ -462,8 +478,8 @@ static void test_channel_edge_semantics(void) {
     sqlite3 *db = open_seeded();
 
     /* An unrouted chat-bound session (cron 'new' shape) in an 'auto' chat
-     * delivers quiescent. A follow-up already queued at turn end coalesces —
-     * only the final answer ships. */
+     * delivers at every turn end: a person is reading. A follow-up already
+     * queued at turn end does not hold the first answer. */
     int64_t sid = session_create(db, "chat", "default", -1, 0);
     bind_chat(db, sid, "42", -1);
     inbox_insert(db, sid, "discord", NULL, "q1");
@@ -475,24 +491,48 @@ static void test_channel_edge_semantics(void) {
     entry_append_with_iteration(db, sid, &m, db_next_iteration_id(db, sid));
     assert(advance_session(db, sid, 25).action == ADVANCE_DONE);
     assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
-                  sid) == 0);                       /* held: q2 pending */
-    /* The edge row holds no policy; the chat's 'auto' reads as quiescent. */
+                  sid) == 1);                       /* a1 posted, q2 pending */
+    /* The edge row holds no policy; the chat's 'auto' reads as turn. */
     assert(scalar(db, "SELECT policy IS NULL FROM delivery_edges WHERE session_id=?"
                       " AND target_kind='channel';", sid) == 1);
     char *pol = db_scalar_text(db,
         "SELECT " EDGE_POLICY " FROM delivery_edges e WHERE e.session_id=?"
         " AND e.target_kind='channel';", sid);
-    assert(pol && strcmp(pol, "quiescent") == 0);
+    assert(pol && strcmp(pol, "turn") == 0);
     free(pol);
 
-    assert(run_turn(db, sid, "a2 covering both") == ADVANCE_DONE);
+    assert(run_turn(db, sid, "a2") == ADVANCE_DONE);
     assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
-                  sid) == 1);
+                  sid) == 2);
     char *text = db_scalar_text(db,
-        "SELECT json_extract(payload,'$.text') FROM channel_outbox"
-        " WHERE session_id=?;", sid);
-    assert(text && strcmp(text, "a2 covering both") == 0);
+        "SELECT group_concat(json_extract(payload,'$.text'), '|' ORDER BY id)"
+        " FROM channel_outbox WHERE session_id=?;", sid);
+    assert(text && strcmp(text, "a1|a2") == 0);
     free(text);
+
+    /* A chat set to 'quiescent' holds while work is pending — and what it
+     * held is owed, not dropped: on release every held turn's final message
+     * ships, in order, then the current one. (The agent wrote the last
+     * message assuming the earlier ones were read.) */
+    int64_t held = session_create(db, "held", "default", -1, 0);
+    bind_chat(db, held, "44", -1);
+    set_mode(db, "44", "quiescent");
+    inbox_insert(db, held, "discord", NULL, "h1");
+    assert(advance_session(db, held, 25).action == ADVANCE_DISPATCH_LLM);
+    inbox_insert(db, held, "discord", NULL, "h2");  /* queued mid-turn */
+    Message hm = { .role = ROLE_ASSISTANT, .content = "started",
+                   .stop_reason = STOP_REASON_STOP };
+    entry_append_with_iteration(db, held, &hm, db_next_iteration_id(db, held));
+    assert(advance_session(db, held, 25).action == ADVANCE_DONE);
+    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
+                  held) == 0);                      /* held: h2 pending */
+    assert(run_turn(db, held, "finished") == ADVANCE_DONE);
+    text = db_scalar_text(db,
+        "SELECT group_concat(json_extract(payload,'$.text'), '|' ORDER BY id)"
+        " FROM channel_outbox WHERE session_id=?;", held);
+    assert(text && strcmp(text, "started|finished") == 0);
+    free(text);
+    assert(advance_sweep_undelivered(db) == 0);     /* nothing left owed */
 
     /* An 'explicit' chat never auto-ships — and its boundary still records
      * itself as evaluated (cursor at the leaf), so the sweep has nothing. */

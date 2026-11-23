@@ -34,18 +34,70 @@ const char *contain_backend(void) { return "linux-ns"; }
  * then refuses the shell. */
 #define CONTAIN_NS_FLAGS (CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID)
 
+/* One line into the probe's pipe: which step failed and why. */
+static void probe_fail(int fd, const char *step) {
+    char msg[160];
+    int n = snprintf(msg, sizeof(msg), "%s: %s", step, strerror(errno));
+    if (n > 0 && write(fd, msg, (size_t)n) < 0) { /* the parent reports a silent child */ }
+    _exit(1);
+}
+
+static int probe_write(const char *path, const char *text) {
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    ssize_t n = (ssize_t)strlen(text);
+    int ok = write(fd, text, (size_t)n) == n;
+    close(fd);
+    return ok ? 0 : -1;
+}
+
+/* Does what the sandbox does first, not only what it asks for first: creates
+ * the namespaces, maps the user and makes the mount tree private — the first
+ * step that needs a capability inside the new namespace. Creating alone is
+ * not the test: Ubuntu's AppArmor restriction lets an unprivileged process
+ * create a user namespace and then denies it every capability in it, so
+ * unshare() succeeds and the first mount() fails. A probe that stopped at
+ * unshare() called such a host contained, and every tool call then refused
+ * (seen on a real Ubuntu 24.04 kernel in CI, 2026-11-23). */
 int contain_probe(char *why, size_t cap) {
     if (why && cap) why[0] = '\0';
+    int pfd[2];
+    if (pipe(pfd) != 0) {
+        if (why) snprintf(why, cap, "pipe: %s", strerror(errno));
+        return 0;
+    }
+    uid_t uid = getuid();
+    gid_t gid = getgid();
     pid_t pid = fork();
     if (pid < 0) {
         if (why) snprintf(why, cap, "fork: %s", strerror(errno));
+        close(pfd[0]); close(pfd[1]);
         return 0;
     }
     if (pid == 0) {
-        /* errno rides home in the exit status; 0 is reserved for success. */
-        if (unshare(CONTAIN_NS_FLAGS) == 0) _exit(0);
-        _exit(errno > 0 && errno < 256 ? errno : 255);
+        close(pfd[0]);
+        char map[64];
+        if (unshare(CONTAIN_NS_FLAGS) != 0)
+            probe_fail(pfd[1], "unshare(user, mount, network, pid)");
+        snprintf(map, sizeof(map), "%u %u 1\n", (unsigned)uid, (unsigned)uid);
+        if (probe_write("/proc/self/uid_map", map) != 0)
+            probe_fail(pfd[1], "writing the user namespace's uid_map");
+        if (access("/proc/self/setgroups", F_OK) == 0 &&
+            probe_write("/proc/self/setgroups", "deny\n") != 0)
+            probe_fail(pfd[1], "writing the user namespace's setgroups");
+        snprintf(map, sizeof(map), "%u %u 1\n", (unsigned)gid, (unsigned)gid);
+        if (probe_write("/proc/self/gid_map", map) != 0)
+            probe_fail(pfd[1], "writing the user namespace's gid_map");
+        if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
+            probe_fail(pfd[1], "mount inside the new namespace");
+        _exit(0);
     }
+    close(pfd[1]);
+    char msg[160];
+    ssize_t n;
+    while ((n = read(pfd[0], msg, sizeof(msg) - 1)) < 0 && errno == EINTR) {}
+    close(pfd[0]);
+    msg[n > 0 ? n : 0] = '\0';
     int st;
     while (waitpid(pid, &st, 0) < 0) {
         if (errno == EINTR) continue;
@@ -53,13 +105,7 @@ int contain_probe(char *why, size_t cap) {
         return 0;
     }
     if (WIFEXITED(st) && WEXITSTATUS(st) == 0) return 1;
-    if (why) {
-        if (WIFEXITED(st) && WEXITSTATUS(st) != 255)
-            snprintf(why, cap, "unshare(user, mount, network, pid): %s",
-                     strerror(WEXITSTATUS(st)));
-        else
-            snprintf(why, cap, "namespace probe child failed");
-    }
+    if (why) snprintf(why, cap, "%s", msg[0] ? msg : "namespace probe child failed");
     return 0;
 }
 

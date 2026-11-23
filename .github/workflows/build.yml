@@ -32,16 +32,38 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev xxd
 
-      - name: Allow unprivileged user namespaces
-        # Ubuntu 24.04 runners restrict CLONE_NEWUSER via AppArmor by
-        # default; cclaw's namespace sandbox (and its tests) need it.
-        run: |
-          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-
       - name: Build
         run: make all
+
+      - name: The no-sandbox hint on a kernel that restricts user namespaces
+        # Ubuntu 23.10 and later restrict unprivileged user namespaces via
+        # AppArmor, and cclaw's sandbox is built on them. Proven both ways on
+        # this runner's real Ubuntu kernel: with the restriction on, --doctor
+        # reports no containment and prints the AppArmor command; running
+        # exactly the command it printed makes containment work. The tests
+        # below need it working, so this step is also what turns it on.
+        run: |
+          key=kernel.apparmor_restrict_unprivileged_userns
+          if ! sysctl "$key" >/dev/null 2>&1; then
+            echo "::warning::$key does not exist on this runner; the AppArmor hint was not exercised"
+            exit 0
+          fi
+          sudo sysctl -w "$key=1"
+          export HOME="$RUNNER_TEMP/hint-home" CCLAW_DB_PATH="$RUNNER_TEMP/hint-home/cclaw.db"
+          mkdir -p "$HOME"
+          out=$(./build/cclaw --doctor 2>&1 || true)
+          echo "$out" | grep -i -A1 "containment" || true
+          echo "$out" | grep -q "FAIL containment" \
+            || { echo "::error::doctor did not report missing containment under the AppArmor restriction"; exit 1; }
+          echo "$out" | grep -q "AppArmor restricts unprivileged user namespaces" \
+            || { echo "::error::doctor did not print the AppArmor hint"; exit 1; }
+          fix=$(echo "$out" | grep -o "sudo sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0")
+          [ -n "$fix" ] || { echo "::error::the hint names no command"; exit 1; }
+          $fix
+          out=$(./build/cclaw --doctor 2>&1 || true)
+          echo "$out" | grep -i "containment" || true
+          echo "$out" | grep -q "ok   containment: linux-ns" \
+            || { echo "::error::containment still unavailable after running the hinted command"; exit 1; }
 
       - name: Unit tests
         run: make test

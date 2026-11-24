@@ -790,6 +790,10 @@ static void test_secrets(void) {
     act(200, "{\"action\":\"secret_hosts_set\",\"name\":\"GH_TOKEN\",\"hosts\":[\"api.github.com\"]}");
     assert(qeq("SELECT group_concat(host) FROM secret_hosts WHERE secret_name='GH_TOKEN'", "api.github.com"));
     has(act(400, "{\"action\":\"secret_hosts_set\",\"name\":\"GH_TOKEN\",\"hosts\":[\"https://x\"]}"), "not a host");
+    /* request_config's rule: no wildcard, no bare top-level domain. */
+    has(act(400, "{\"action\":\"secret_hosts_set\",\"name\":\"GH_TOKEN\",\"hosts\":[\"*\"]}"), "not a host");
+    has(act(400, "{\"action\":\"secret_hosts_set\",\"name\":\"GH_TOKEN\",\"hosts\":[\".com\"]}"), "not a host");
+    assert(qeq("SELECT group_concat(host) FROM secret_hosts WHERE secret_name='GH_TOKEN'", "api.github.com"));
     has(act(400, "{\"action\":\"secret_hosts_set\",\"name\":\"GEM_API_KEY\",\"hosts\":[\"a.example\"]}"),
         "system secret");
     /* Remove: a provider's key is refused; otherwise everything goes with it. */

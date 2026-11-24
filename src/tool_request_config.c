@@ -370,7 +370,7 @@ static char *validate_config(sqlite3 *db, const char *changes) {
  * only, and — since a binding is a durable secret_hosts row a typo would
  * silently never match — no '*' and no bare TLD ('.com' would bind the
  * secret to half the internet). */
-static int binding_host_valid(const char *h) {
+int binding_host_valid(const char *h) {
     if (!h || !h[0]) return 0;
     size_t len = strlen(h);
     if (len > 253) return 0;

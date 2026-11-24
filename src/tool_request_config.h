@@ -15,6 +15,11 @@ typedef struct {
 
 int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx);
 
+/* A host a secret may be sent to (secret_hosts): an exact host or a
+ * '.suffix' rule, hostname characters only, no '*' and no bare TLD. 1 = ok.
+ * The explorer's secret hosts go through the same check. */
+int binding_host_valid(const char *h);
+
 /* Apply an approved request_changes document (args_json holds the parked
  * approval args; the document lives at $.changes). Applies grants, config
  * values, and the provider upsert inside one savepoint — all-or-nothing.

@@ -21,6 +21,7 @@
 #include "db.h"
 #include "log.h"
 #include "models_cache.h"
+#include "tool_request_config.h"   /* binding_host_valid */
 #include "validate.h"
 #include "wake.h"
 #include "web.h"
@@ -281,7 +282,8 @@ static int agent_exists(Act *a, const char *name) {
     return name && qi(a, "SELECT 1 FROM agents WHERE name=?1", name, NULL, NULL) == 1;
 }
 
-/* A host rule as grants and secret_hosts store it: "api.example.com",
+/* A host rule as a grant stores it (a secret's hosts are stricter,
+ * binding_host_valid): "api.example.com",
  * ".example.com" (a suffix), optionally with a port. */
 static int host_ok(const char *h) {
     if (!h || !h[0] || strlen(h) > 253) return 0;
@@ -1460,7 +1462,7 @@ static int act_secret_hosts_set(Act *a) {
     sqlite3_stmt *st = prep(a, "SELECT value FROM json_each(?1)", hosts, NULL, NULL, NULL);
     while (st && sqlite3_step(st) == SQLITE_ROW) {
         const char *h = (const char *)sqlite3_column_text(st, 0);
-        if (sqlite3_column_type(st, 0) != SQLITE_TEXT || !host_ok(h)) {
+        if (sqlite3_column_type(st, 0) != SQLITE_TEXT || !binding_host_valid(h)) {
             char bad[256];
             snprintf(bad, sizeof(bad), "%s", h ? h : "");
             sqlite3_finalize(st);

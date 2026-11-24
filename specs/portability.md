@@ -29,7 +29,7 @@ Two ways to get a binary, both supported on purpose:
 | # | Layer | What it is | Needs from the host |
 |---|---|---|---|
 | 1 | **Core** | Agent loop, SQLite, config and self-reconfiguration, LLM requests | Kernel, filesystem, a CA bundle for HTTPS |
-| 2 | **Mediated tools** | File tools, `web_fetch`, JavaScript (`js_eval`, extension tools) | Nothing: cclaw's own code is the only thing acting, so cclaw's own code can enforce the policy |
+| 2 | **Mediated tools** | File tools, JavaScript (`js_eval`, extension tools such as `web_fetch`) | Nothing: cclaw's own code is the only thing acting, so cclaw's own code can enforce the policy |
 | 3 | **Containment** | A boundary imposed from outside on code cclaw cannot inspect | A backend: Linux namespaces today; a platform sandbox (Android app sandbox) or none elsewhere |
 | 4 | **Shell** | Arbitrary programs (`shell_exec`) | Layer 3, or the operator's explicit `host` opt-out |
 | 5 | **Daemon** | Channels, cron, webhooks, multi-agent | `fork`/`exec` of the cclaw binary itself, signals |
@@ -47,9 +47,10 @@ file open and every connection is a line of cclaw's C.
 
 ## As built (2026-11-12)
 
-Layer 2 does not exist yet as a separate thing. All four tool tiers run in a
-`cclaw --run-tool` child that enters the same namespace sandbox, and the
-policy for the "mediated" tiers is in fact enforced by that namespace:
+Layer 2 does not exist yet as a separate thing. All three child vehicles
+(file, js, shell) run in a `cclaw --run-tool` child that enters the same
+namespace sandbox, and the policy for the "mediated" ones (file, js) is in
+fact enforced by that namespace:
 
 | Policy | Where it is enforced today | In cclaw's code? |
 |---|---|---|
@@ -65,7 +66,7 @@ and nothing between them:
 - `standard` / `restricted`: every tool call exits 126 (fail-closed,
   [sandbox-profiles.md](sandbox-profiles.md)). The agent can talk and
   reconfigure itself, and nothing else.
-- `host`: every tier runs with no policy at all — any file, any host, and the
+- `host`: every tool runs with no policy at all — any file, any host, and the
   shell.
 
 `--doctor` `[layers]` reports which of these applies, per agent.
@@ -115,7 +116,7 @@ restriction, `unprivileged_userns_clone` or `max_user_namespaces` is set
 against it) and the way to run uncontained. Nothing is switched
 automatically: `host` stays the operator's choice.
 
-1. **A mediated tier.** See the placeholders below: on a host with no
+1. **Mediation without a namespace.** See the placeholders below: on a host with no
    containment the choice today is all or nothing.
 2. **Platform backends.** A build for a platform with its own sandbox
    (Android) starts from `contain_none.c`.
@@ -126,7 +127,7 @@ Not planned work. Recorded so the code leaves room for it.
 
 - **Egress for `web_fetch` and JS.** The proxy is ordinary socket code and
   needs no namespace; only *forcing* traffic through it does. cclaw's own
-  libcurl can simply be pointed at it, which would give the js tier (and so
+  libcurl can simply be pointed at it, which would give the js child (and so
   web_fetch, a JS tool) a real host allowlist on any host. The shell cannot be forced this way: proxy
   environment variables are advice a program is free to ignore.
 - **Path policy in code.** One function deciding "may this call read / write

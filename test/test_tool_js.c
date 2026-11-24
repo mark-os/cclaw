@@ -1,4 +1,4 @@
-/* js_eval through the in-process tier leaf (host mode, no network). */
+/* js_eval through the in-process child leaf (host mode, no network). */
 #define _GNU_SOURCE
 #include <assert.h>
 #include <stdio.h>
@@ -27,14 +27,14 @@ static void test_eval_cases(void) {
     }
 }
 
-/* js_eval must dispatch to the sandboxed JS tier, never run in the parent. */
+/* js_eval must dispatch to the sandboxed js child, never run in the parent. */
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
     assert(tool_js_eval_register(&reg, NULL) == 0);
     ToolEntry *e = tools_lookup(&reg, "js_eval");
     assert(e);
-    assert(e->recipe.vehicle == EXEC_SANDBOX && e->recipe.tier == SBX_JS);
+    assert(e->recipe.vehicle == EXEC_JS);
     tools_free(&reg);
 }
 

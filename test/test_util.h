@@ -145,16 +145,16 @@ static inline int64_t test_legacy_compact(sqlite3 *db, int64_t session_id,
     return rc == SQLITE_DONE ? id : -1;
 }
 
-/* Tier-leaf drivers for sandboxed tools: extract args_json into wire params
+/* Child-leaf drivers for sandboxed tools: extract args_json into wire params
  * exactly as the dispatching parent does (tool_args_extract on a :memory:
  * db; NULL schema — every top-level key ships, file_edit's edits flatten),
- * build a RunToolParsed, run the tier leaf in-process (host mode, no
+ * build a RunToolParsed, run the child leaf in-process (host mode, no
  * namespace). Malformed args_json returns the dispatch-gate-equivalent
  * "error: invalid tool arguments". Result is malloc'd; caller frees. */
-static inline char *test_run_tier_status(int tier, const char *tool,
-                                         const char *args_json,
-                                         const FileReadCtx *fctx,
-                                         int *is_error) {
+static inline char *test_run_child_status(ExecVehicle vehicle, const char *tool,
+                                          const char *args_json,
+                                          const FileReadCtx *fctx,
+                                          int *is_error) {
     int sink = 0;
     if (!is_error) is_error = &sink;
     *is_error = 0;
@@ -168,7 +168,7 @@ static inline char *test_run_tier_status(int tier, const char *tool,
 
     RunToolParsed q;
     memset(&q, 0, sizeof(q));
-    q.tier = tier;
+    q.vehicle = vehicle;
     q.tool_name = (char *)tool;
     /* ToolWireArg and struct RunToolParam are field-identical on purpose. */
     q.params = (struct RunToolParam *)wa;
@@ -184,29 +184,27 @@ static inline char *test_run_tier_status(int tier, const char *tool,
         q.write_count  = fctx->sb.write_path_count;
     }
     char *r = NULL;
-    switch (tier) {
-    case RUNTOOL_TIER_FILE: r = tool_file_tier_run(&q, is_error); break;
-    case RUNTOOL_TIER_JS:   r = tool_js_tier_run(&q, is_error); break;
-    }
+    if (vehicle == EXEC_FILE)    r = tool_file_child_run(&q, is_error);
+    else if (vehicle == EXEC_JS) r = tool_js_child_run(&q, is_error);
     tool_wire_args_free(wa, wn);
-    if (!r) { *is_error = 1; r = test_strdup_("error: no tier"); }
+    if (!r) { *is_error = 1; r = test_strdup_("error: no such child vehicle"); }
     return r;
 }
 
 /* Status-agnostic form for tests that only look at the text. */
-static inline char *test_run_tier(int tier, const char *tool,
-                                  const char *args_json,
-                                  const FileReadCtx *fctx) {
-    return test_run_tier_status(tier, tool, args_json, fctx, NULL);
+static inline char *test_run_child(ExecVehicle vehicle, const char *tool,
+                                   const char *args_json,
+                                   const FileReadCtx *fctx) {
+    return test_run_child_status(vehicle, tool, args_json, fctx, NULL);
 }
 
 static inline char *test_file_tool_run(const char *tool, const char *args_json,
                                        const FileReadCtx *ctx) {
-    return test_run_tier(RUNTOOL_TIER_FILE, tool, args_json, ctx);
+    return test_run_child(EXEC_FILE, tool, args_json, ctx);
 }
 
 static inline char *test_js_eval_run_json(const char *args_json) {
-    return test_run_tier(RUNTOOL_TIER_JS, "js_eval", args_json, NULL);
+    return test_run_child(EXEC_JS, "js_eval", args_json, NULL);
 }
 
 #endif /* CCLAW_TEST_UTIL_H */

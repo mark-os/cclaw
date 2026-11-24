@@ -28,7 +28,7 @@ pair (known-sensitive vs unknown-plus-credential); neither may be
 
 1. **Sensitive targets always escalate** (`sensitive_targets`, operator-set
    via `cclaw sensitive`). Enforced twice, both fail-closed: the labels ride
-   every network-tier call as proxy *deny-before-allow* rules (`host_decide`),
+   every shell and js call as proxy *deny-before-allow* rules (`host_decide`),
    so no grant makes a sensitive host ambiently reachable; and the dispatch
    gate scans raw tool args (`host_in_text`, registered-domain+subdomain,
    lookalike-robust) and parks any match (`action='sensitive'`). An approval
@@ -39,7 +39,7 @@ pair (known-sensitive vs unknown-plus-credential); neither may be
    `cclaw secret-bind` or minted by an approved `request_config`
    `secret_bindings` document). Enforcement is two-fold and fail-closed:
    the dispatch gate denies inline any call using a secret with zero
-   bindings (any tier — the call would run narrowed to deny-all anyway)
+   bindings (any vehicle — the call would run narrowed to deny-all anyway)
    or, for a call whose arguments name a `url` (web_fetch), a url host not
    covered by every used secret's bindings; and a shell/js call carrying secrets has its egress *narrowed
    to the union of the bound hosts* — the proxy enforces the binding at
@@ -81,7 +81,7 @@ it as a grant. Concretely:
   `grants` row, never a profile check or a magic profile value. So is using a
   secret (`kind='secret'`).
 - `js_eval` today has exactly `web_fetch`'s reach (web_fetch *is* a JS tool:
-  same tier, same proxy, same host rules, same sensitivity deny and
+  same vehicle, same proxy, same host rules, same sensitivity deny and
   credential narrowing), so its grant cost
   already tracks its reach. When `cclaw.exec` lands (JS→shell bridge), that
   stops being true — **`cclaw.exec` must require the agent to also hold the

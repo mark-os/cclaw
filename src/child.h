@@ -27,7 +27,7 @@
 #define CHILD_MAX 48
 
 /* CHILD_CRON_SCRIPT is a --run-tool child like CHILD_TOOL_EXEC — same fork,
- * same JS tier, same result pipe — answering a cron fire instead of a model
+ * same js vehicle, same result pipe — answering a cron fire instead of a model
  * tool call, so its completion posts a cron_result (or an inbox row) rather
  * than a tool result. */
 /* CHILD_HOOK is the third of that kind: an extension's hook script, started

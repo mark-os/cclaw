@@ -50,7 +50,7 @@ void llm_payload_release(LlmPayload *p);
 
 /* The JSON object to merge into the request body for this route's
  * reasoning-effort level (models.effort_map spelling), or NULL when nothing
- * should be sent. Caller frees. Shared with the js-tier llm() wire builder. */
+ * should be sent. Caller frees. Shared with the js child's llm() wire builder. */
 char *llm_effort_fragment(sqlite3 *db, const ProviderConfig *prov);
 
 /* Whether the reasoning text a response carries is kept on its reasoning

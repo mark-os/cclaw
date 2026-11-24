@@ -5,8 +5,8 @@
  * do NOT start with "error:" — under the old strncmp sniff every one of them
  * would have been recorded as a success.
  *
- * No network: the shell tier runs local /bin/sh, the file tier runs
- * in-process, and the JS tier evaluates inline source. */
+ * No network: the shell runs local /bin/sh, the file tools run in-process,
+ * and the js child evaluates inline source. */
 #define _GNU_SOURCE
 #include "run_tool.h"
 #include "tools.h"
@@ -63,18 +63,18 @@ static void test_frame_status_error(void) {
  * one. */
 static void test_unprefixed_failure_is_flagged(void) {
     int is_error = 0;
-    char *r = test_run_tier_status(RUNTOOL_TIER_JS, "js_eval",
-                                   "{\"code\":\"throw new Error('nope')\"}",
-                                   NULL, &is_error);
+    char *r = test_run_child_status(EXEC_JS, "js_eval",
+                                    "{\"code\":\"throw new Error('nope')\"}",
+                                    NULL, &is_error);
     assert(is_error == 1);
     free(r);
 
     /* And the converse: a successful call must NOT be flagged, even though its
      * output happens to contain the word "error". */
     is_error = 1;
-    r = test_run_tier_status(RUNTOOL_TIER_JS, "js_eval",
-                             "{\"code\":\"'error: this is just text'\"}",
-                             NULL, &is_error);
+    r = test_run_child_status(EXEC_JS, "js_eval",
+                              "{\"code\":\"'error: this is just text'\"}",
+                              NULL, &is_error);
     assert(is_error == 0);
     assert(r && strstr(r, "error: this is just text") != NULL);
     free(r);

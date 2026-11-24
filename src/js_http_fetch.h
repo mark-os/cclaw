@@ -1,7 +1,7 @@
 #ifndef CCLAW_JS_HTTP_FETCH_H
 #define CCLAW_JS_HTTP_FETCH_H
 
-/* The http_request() bridge for the JS tier: performs one bounded HTTP
+/* The http_request() bridge for the js child: performs one bounded HTTP
  * fetch on behalf of sandboxed QuickJS, returning status + body to the
  * engine.
  */

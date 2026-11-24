@@ -2,7 +2,7 @@
  * js_eval: fs.readFile/writeFile/readdir/stat/lstat/cwd, console.log
  * capture, and the prelude traps (require/process/module) that turn missing
  * Node globals into helpful TypeErrors instead of silent
- * undefined-is-not-a-function failures. Runs the JS tier in-process (host
+ * undefined-is-not-a-function failures. Runs the js leaf in-process (host
  * mode, no fork), the same entry point test_tool_js.c uses. */
 #define _GNU_SOURCE
 #include "test_util.h"

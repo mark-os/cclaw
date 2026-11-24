@@ -24,7 +24,7 @@
 
 #define SHELL_BINARY "./build/cclaw"
 
-/* Request config for shell tier. Fields map 1:1 to RunToolReq but only expose
+/* Request config for the shell. Fields map 1:1 to RunToolReq but only expose
  * what shell tests need. Initialize with SHELL_REQ_DEFAULTS for sane values. */
 typedef struct {
     const char *command;
@@ -64,7 +64,7 @@ typedef struct {
     .secrets = NULL, .secret_count = 0, \
 }
 
-/* Send a shell-tier request via the real re-exec path and unpack the whole
+/* Send a shell request via the real re-exec path and unpack the whole
  * fd-3 frame: [status][4-byte BE meta_len][meta][result].
  * *out_hosts (optional) gets the hosts JSON, *out_status (optional) the
  * child's explicit tool status (0 ok, 1 error). Caller frees. */
@@ -74,7 +74,7 @@ static inline char *run_tool_shell_full(const ShellToolReq *r, char **out_hosts,
     if (out_status) *out_status = 0;
 
     RunToolReq req = {
-        .tier = RUNTOOL_TIER_SHELL,
+        .vehicle = EXEC_SHELL,
         .tool_name = "shell_exec",
         .env_mode = r->env_mode,
         .nproc = r->nproc,

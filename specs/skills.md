@@ -8,7 +8,7 @@ cross-tool difference in the ecosystem is discovery location, not format.
 
 Implementation: `src/skills.c` (discovery + frontmatter + index),
 `src/agent_config.c` (`agent_build_system_prompt` injects the index),
-`src/dispatch.c` file-tier dispatch (mounts skill dirs read-only).
+`src/dispatch.c` file-tool dispatch (mounts skill dirs read-only).
 
 ## Format
 
@@ -58,10 +58,10 @@ DB-stored body would break both lazy loading and drop-in ecosystem compat.
 The DB stores nothing about standalone skills; discovery rescans at prompt
 build (a few `readdir`s).
 
-To make locations readable, the file-tier dispatch (`src/dispatch.c`) appends
+To make locations readable, the file-tool dispatch (`src/dispatch.c`) appends
 the resolved skill dirs — plus the shared extension store, where attached
 extensions' skills live — to the child's read-only mounts, the same transient
-override pattern the JS tier uses for the extension store.
+override pattern the js dispatch uses for the extension store.
 
 ## Discovery
 

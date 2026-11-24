@@ -5,7 +5,7 @@
  * policy fields, plans the mounts, and prepares the tool child (environment,
  * rlimits, working directory). The boundary itself is the containment
  * backend's job (contain.h) — nothing here knows how it is built. Shared by
- * every --run-tool tier. Fail-closed by design.
+ * every --run-tool child. Fail-closed by design.
  */
 
 #include <limits.h>
@@ -18,10 +18,10 @@
 /* A requested extra bind-mount (read_path/write_path grant). path is borrowed. */
 typedef struct { const char *path; int ro; } SandboxMountReq;
 
-/* Sandbox policy + grant-path bundle, shared by the file/shell/web/js tool
+/* Sandbox policy + grant-path bundle, shared by the file/shell/js tool
  * contexts. Filled once per agent in agent_setup (policy from sandbox_profile
  * via sandbox_profile_resolve; paths from the agent's grants) and embedded in
- * each tool ctx — one definition instead of four identical copies. The policy
+ * each tool ctx — one definition instead of three identical copies. The policy
  * half maps 1:1 to the matching SandboxConfig fields. Path pointers
  * borrow AgentCaps and are rebound on cap refresh. */
 typedef struct {
@@ -37,7 +37,7 @@ typedef struct {
 /* A planned bind-mount: canonical path + ro flag, owned inline. */
 typedef struct { char path[PATH_MAX]; int ro; } SandboxMount;
 
-/* Child sandbox setup, shared by all --run-tool sandbox tiers (file/shell/web/js).
+/* Child sandbox setup, shared by every --run-tool child (file, shell and js).
  * Establishes the namespace sandbox, scrubs the environment, applies rlimits,
  * and starts the in-sandbox proxy. All fields default to 0/NULL. */
 typedef struct {
@@ -55,7 +55,7 @@ typedef struct {
     int sandbox;            /* 1 = namespace required, 0 = none (host sandbox_profile) */
     int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
     int net_mode;           /* 0 = proxy available, 1 = no network */
-    int skip_pid_ns;        /* 1 = omit CLONE_NEWPID (no inner fork); file tier */
+    int skip_pid_ns;        /* 1 = omit CLONE_NEWPID (no inner fork); file, js */
     int env_mode;           /* 0 = inherit-present-env + scrub secrets, 1 = clean
                              * allowlist. NB: under the --run-tool re-exec model the
                              * child starts from an empty environ (execve envp={NULL}),

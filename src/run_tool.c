@@ -30,14 +30,16 @@
 /* ── Flat binary wire format ────────────────────────────────────────────
  * Both ends are the same binary, so the request is not JSON: there is no
  * escaping, no key/value scan, no schema flexibility to pay for. Fields are
- * written and read in ONE fixed superset order; the tier byte drives dispatch,
- * not layout (write-all-always: a tier's unused fields are NULL/0/empty).
+ * written and read in ONE fixed superset order; the vehicle byte drives
+ * dispatch, not layout (write-all-always: a vehicle's unused fields are
+ * NULL/0/empty).
  *
  * Primitives: u32 = 4-byte little-endian. str = u32 length + that many raw
  * bytes (length 0 means NULL/absent). Secret values cross this boundary as
  * raw bytes — no escape/unescape round-trip touches the plaintext.
  *
- * Frame: 4-byte LE body-length prefix, then a tier byte, then the body. */
+ * Frame: 4-byte LE body-length prefix, then a vehicle byte (the ExecVehicle
+ * value), then the body. */
 
 /* ── Writer (parent side) ── */
 typedef struct { unsigned char *p; size_t cap; size_t len; int err; } Wbuf;
@@ -80,7 +82,7 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     if (!blob) return NULL;
     Wbuf b = { .p = blob, .cap = RUNTOOL_REQUEST_MAX, .len = 4 };
 
-    w_u8(&b, (unsigned char)req->tier);
+    w_u8(&b, (unsigned char)req->vehicle);
     w_str(&b, req->tool_name);
     w_u32(&b, (uint32_t)req->env_mode);
     w_u32(&b, (uint32_t)req->nproc);
@@ -127,12 +129,12 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     return (char *)blob;
 }
 
-void run_tool_req_init(RunToolReq *req, int tier, const char *tool_name,
+void run_tool_req_init(RunToolReq *req, ExecVehicle vehicle, const char *tool_name,
                        const SandboxProfile *sb,
                        const char *workspace, const char *cwd_path,
                        const char *db_path) {
     memset(req, 0, sizeof(*req));
-    req->tier = tier;
+    req->vehicle = vehicle;
     req->tool_name = tool_name;
     req->db_path = db_path;
     req->env_mode = sb->env_mode;
@@ -195,7 +197,7 @@ static char **r_str_array(Rbuf *r, size_t *count) {
  * mirrors RunToolReq's wire order. */
 static int parse_request(Rbuf *r, RunToolParsed *q) {
     memset(q, 0, sizeof(*q));
-    q->tier = r_u8(r);
+    q->vehicle = (ExecVehicle)r_u8(r);
     q->tool_name = r_str(r);
     q->env_mode  = (int)r_u32(r);
     q->nproc     = (int)r_u32(r);
@@ -332,7 +334,7 @@ static int write_all(int fd, const void *buf, size_t n) {
  * It is not the process's exit code: exit status keeps its lifecycle meaning
  * (sandbox refusal, crash, signal) and says nothing about tool success.
  *
- * meta_len=0 (NULL hosts) for non-network tiers and every error path — an
+ * meta_len=0 (NULL hosts) for the file vehicle and every error path — an
  * unframed write would be misparsed by the parent's drain loop. */
 static int write_framed(int fd, int status, const char *hosts_json,
                         const char *result) {
@@ -397,34 +399,36 @@ static void build_sandbox_cfg(const RunToolParsed *q, int skip_pid_ns,
     cfg->extra_mount_count = *n_extra;
 }
 
-/* ── Tier leaf run_fns ──────────────────────────────────────────────────
+/* ── Child leaf run_fns ─────────────────────────────────────────────────
  * Each leaf is owned by its tool's own file (tool_file.c / tool_js.c) — the
  * broker holds only these pointers and zero per-tool
- * knowledge. In-process tiers compute a result string. Shell is inner_exec
- * (run_fn == NULL) — the sandbox child calls tool_shell_tier_exec directly. */
+ * knowledge. In-process vehicles compute a result string. Shell is inner_exec
+ * (run_fn == NULL) — the sandbox child calls tool_shell_child_exec directly. */
 typedef char *(*RunFn)(const RunToolParsed *q, int *is_error);
 
-/* ── Tier descriptor (single source of truth) ────────────────────────────
- * Decode the tier byte ONCE into this; pass it down. "What makes js differ
+/* ── Vehicle descriptor (single source of truth) ─────────────────────────
+ * Decode the vehicle byte ONCE into this; pass it down. "What makes js differ
  * from shell" lives here, not scattered across call sites. */
 typedef struct {
     int   skip_pid_ns;   /* 1 = no CLONE_NEWPID (file/js); 0 = PID ns (shell) */
-    int   needs_proxy;   /* 1 = bind/serve proxy + inner fork (network tiers) */
+    int   needs_proxy;   /* 1 = bind/serve proxy + inner fork (shell/js) */
     int   inner_exec;    /* 1 = run_fn execs a foreign program (shell) */
     RunFn run_fn;        /* leaf result producer; NULL iff inner_exec */
-} TierDescriptor;
+} VehicleDescriptor;
 
-static const TierDescriptor *tier_descriptor(int tier) {
-    static const TierDescriptor table[] = {
-        [RUNTOOL_TIER_FILE]  = { .skip_pid_ns = 1, .needs_proxy = 0, .inner_exec = 0, .run_fn = tool_file_tier_run },
-        [RUNTOOL_TIER_SHELL] = { .skip_pid_ns = 0, .needs_proxy = 1, .inner_exec = 1, .run_fn = NULL },
-        [RUNTOOL_TIER_JS]    = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = tool_js_tier_run },
+/* NULL for anything but the three child vehicles: EXEC_INLINE/EXEC_THREAD
+ * slots are unpopulated, and a byte past the table is refused. */
+static const VehicleDescriptor *vehicle_descriptor(int vehicle) {
+    static const VehicleDescriptor table[] = {
+        [EXEC_FILE]  = { .skip_pid_ns = 1, .needs_proxy = 0, .inner_exec = 0, .run_fn = tool_file_child_run },
+        [EXEC_SHELL] = { .skip_pid_ns = 0, .needs_proxy = 1, .inner_exec = 1, .run_fn = NULL },
+        [EXEC_JS]    = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = tool_js_child_run },
     };
-    if (tier < 0 || tier >= (int)(sizeof(table) / sizeof(table[0])))
+    if (vehicle < 0 || vehicle >= (int)(sizeof(table) / sizeof(table[0])))
         return NULL;
-    if (!table[tier].run_fn && !table[tier].inner_exec)
-        return NULL;  /* unpopulated slot */
-    return &table[tier];
+    if (!vehicle_is_child((ExecVehicle)vehicle))
+        return NULL;
+    return &table[vehicle];
 }
 
 /* ── Runtime enforcement gate ───────────────────────────────────────────
@@ -438,18 +442,18 @@ static void run_tool_verify_clean(void) {
         die("error: run-tool: secret key present, refusing");
 }
 
-/* ── Network tiers: broker + sandbox child ───────────────────────────────
+/* ── Network vehicles: broker + sandbox child ────────────────────────────
  * proxy_bind (single-threaded, before fork) → fork → child (sandbox + run_fn
  * or inner exec) → proxy_serve → drain → waitpid/kill → proxy_stop. The
  * bind-before-fork-before-serve ordering is load-bearing. The broker IS this
- * --run-tool process. A proxy is interposed IFF the tier needs gated egress. */
+ * --run-tool process. A proxy is interposed IFF the vehicle needs gated egress. */
 
 #define NET_MAX_OUTPUT (256 * 1024)
 
 /* The pid==0 body of serve_network_child's fork: wire stdout/stderr to the
- * pipe, apply the sandbox, then exec (shell) or run the tier leaf in-process. */
+ * pipe, apply the sandbox, then exec (shell) or run the js leaf in-process. */
 __attribute__((noreturn))
-static void sandbox_child_main(const TierDescriptor *desc, RunToolParsed *q,
+static void sandbox_child_main(const VehicleDescriptor *desc, RunToolParsed *q,
                                const char *psock, int pipefd[2]) {
     setpgid(0, 0);
     /* Die if the broker dies (daemon SIGKILLs on backstop deadline):
@@ -484,9 +488,9 @@ static void sandbox_child_main(const TierDescriptor *desc, RunToolParsed *q,
     }
 
     if (desc->inner_exec)
-        tool_shell_tier_exec(q);  /* execs /bin/sh, or _exit(127); never returns */
+        tool_shell_child_exec(q);  /* execs /bin/sh, or _exit(127); never returns */
 
-    /* In-process tier (js): compute result, write to stdout (the pipe).
+    /* In-process vehicle (js): compute result, write to stdout (the pipe).
      * The tool's status rides back to the BROKER (our immediate parent, still
      * inside the sandbox boundary) as this inner child's exit code — the only
      * channel that stays out of the byte stream stdout and stderr share. The
@@ -705,10 +709,10 @@ static const char *signal_attribution(const RunToolParsed *q, int status) {
 /* Wrap the drained output for the fd-3 frame. Takes ownership of `output`
  * (NUL-terminated at out_len); returns the malloc'd result. *is_error carries
  * the tool's explicit outcome out to the response frame. */
-static char *format_tier_result(const TierDescriptor *desc, char *output,
-                                size_t out_len, int timed_out, int status,
-                                int timeout, const RunToolParsed *q,
-                                int *is_error) {
+static char *format_child_result(const VehicleDescriptor *desc, char *output,
+                                 size_t out_len, int timed_out, int status,
+                                 int timeout, const RunToolParsed *q,
+                                 int *is_error) {
     const char *attrib = signal_attribution(q, status);
     char *result;
     if (desc->inner_exec) {
@@ -729,7 +733,7 @@ static char *format_tier_result(const TierDescriptor *desc, char *output,
         }
         free(output);
     } else {
-        /* In-process tier: the child already produced the final result, and
+        /* In-process vehicle: the child already produced the final result, and
          * signalled its own status through its exit code (sandbox_child_main).
          * A signalled death is a failure too — nobody asked for it. */
         if (WIFEXITED(status) && WEXITSTATUS(status) != 0) *is_error = 1;
@@ -759,7 +763,7 @@ static char *format_tier_result(const TierDescriptor *desc, char *output,
     return result;
 }
 
-static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
+static void serve_network_child(const VehicleDescriptor *desc, RunToolParsed *q,
                                 unsigned char *body, size_t body_len) {
     if (q->timeout <= 0) q->timeout = 60;
 
@@ -826,8 +830,8 @@ static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
     output[out_len] = '\0';
 
     int is_error = 0;
-    char *result = format_tier_result(desc, output, out_len, timed_out, status,
-                                      q->timeout, q, &is_error);
+    char *result = format_child_result(desc, output, out_len, timed_out, status,
+                                       q->timeout, q, &is_error);
 
     /* Append proxy-deny summary so the model knows which hosts were blocked. */
     if (denied && result) {
@@ -854,7 +858,7 @@ static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
  * sent one descriptor per such param, in param order, each riding a single
  * byte on the request socket right behind the blob; the wire value is the
  * byte count to read from it. Done here, before any sandbox or fork, so the
- * tiers never learn the value came another way. Returns 0, -1 on any
+ * tool leaves never learn the value came another way. Returns 0, -1 on any
  * mismatch — a request that promised a file and did not deliver one must not
  * run with an argument missing. */
 static int load_fd_params(RunToolParsed *q) {
@@ -954,14 +958,14 @@ int run_tool_main(void) {
     if (load_fd_params(&q) != 0)
         die("error: could not read the request's file-carried argument");
 
-    const TierDescriptor *desc = tier_descriptor(q.tier);
-    if (!desc) die("error: unsupported tier");
+    const VehicleDescriptor *desc = vehicle_descriptor(q.vehicle);
+    if (!desc) die("error: unsupported vehicle");
 
     if (desc->needs_proxy) {
         serve_network_child(desc, &q, body, body_len);  /* _exit, never returns */
     }
 
-    /* Non-network tier (file): sandbox THIS process, run the handler in-process. */
+    /* The file vehicle (no network): sandbox THIS process, run the handler in-process. */
     if (!q.workspace) die("error: missing workspace");
 
     /* net_mode forced to "no network"; host mode (sandbox=0) runs the handler
@@ -987,7 +991,7 @@ int run_tool_main(void) {
     if (!result) result = strdup("");
     { char *spilled = spill_large_result(q.spill_path, result, 0);
       if (spilled) { free(result); result = spilled; } }
-    write_framed(FD_REQUEST, is_error, NULL, result);  /* file tier: zero-length meta */
+    write_framed(FD_REQUEST, is_error, NULL, result);  /* file: zero-length meta */
     free(result);
     _exit(0);
 }

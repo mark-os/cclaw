@@ -11,7 +11,7 @@
  * location) is injected into the system prompt; the model reads the body with
  * file_read when a task matches — so skill bodies must live on the filesystem
  * at paths the file-tool sandbox can read (skills_dirs are mounted read-only
- * into file-tier children).
+ * into file children).
  *
  * Discovery: every dir in the `skills_dirs` config key (JSON array, `~`
  * expanded), then the per-agent dir agents/<name>/skills/. First name wins on

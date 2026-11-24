@@ -52,7 +52,7 @@ static void cleanup(void) {
     system(cmd);
 }
 
-/* Send a file-tier request through the real broker path for `workspace`.
+/* Send a file request through the real broker path for `workspace`.
  * Returns the tool result (malloc'd). */
 static char *run_tool_request(const char *workspace, const char *tool_name,
                               const char *arguments) {
@@ -68,7 +68,7 @@ static char *run_tool_request(const char *workspace, const char *tool_name,
 
     size_t blob_len = 0;
     RunToolReq req = {
-        .tier = RUNTOOL_TIER_FILE,
+        .vehicle = EXEC_FILE,
         .tool_name = tool_name,
         .params = wa, .param_count = wn,
         .workspace = workspace, .sandbox = 1,

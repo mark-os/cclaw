@@ -101,7 +101,7 @@ memfd. Two modes:
   rewritten to origin form and forwarded as a single request
   (`Connection: close`), so `curl http://…` works without `--proxytunnel`.
 - **`connect <host> <port>`** — the same tunnel on stdin/stdout, for programs
-  that take a proxy *command* instead of proxy variables. The shell tier gets
+  that take a proxy *command* instead of proxy variables. The shell gets
   a copy at `/.cclaw_connect`; `GIT_SSH_COMMAND` is preset to
   `ssh -o ProxyCommand='/.cclaw_connect connect %h %p'`, so git over ssh works
   unprompted, and `$CCLAW_CONNECT` holds the command for a hand-written
@@ -156,7 +156,7 @@ unreachable" or a failed name lookup with no proxy DENIED/ERROR logged, the
 program never talked to the proxy. Raw TCP to arbitrary services is what the
 `host` profile is for.
 
-### `channel_runner`: a separate tier with its own, narrower control
+### `channel_runner`: a separate process with its own, narrower control
 
 `channel_runner.c` (the process that runs Telegram/etc. channel extensions —
 JS agents can author and promote via self-augmentation) is not proxy-fronted
@@ -168,7 +168,7 @@ instead: `make_easy()`'s `url_host_allowed()` (in `src/channel_runner.c`)
 checks every outbound URL's host against the channel's own configured
 `base_url` (via `curl_url()`, exact-host-equality, fail-closed if `base_url`
 is unset) before any request goes out. This is the equivalent mechanism for
-this tier, not an oversight — a proxy/allowlist model would be the wrong
+this process, not an oversight — a proxy/allowlist model would be the wrong
 shape for a process whose entire job is talking to one pre-known host.
 
 ## Secret Injection Model

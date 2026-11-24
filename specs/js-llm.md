@@ -1,6 +1,6 @@
-# LLM() — completions from the sandboxed JS tier
+# LLM() — completions from sandboxed JavaScript
 
-The `LLM()` global lets JS-tier code (js_eval, extension tools, cron scripts)
+The `LLM()` global lets code in the js child (js_eval, extension tools, cron scripts)
 run completions against the agent's **own** model routing list. It is a plain
 function, and that is the point: compose it — map it over data, use it as a
 classifier, chain models — and only what your code *returns* enters the

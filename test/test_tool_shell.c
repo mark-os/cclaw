@@ -112,8 +112,7 @@ static void test_register(void) {
     assert(rc == 0);
     ToolEntry *e = tools_lookup(&reg, "shell_exec");
     assert(e != NULL);
-    assert(e->recipe.vehicle == EXEC_SANDBOX);
-    assert(e->recipe.tier == SBX_SHELL);
+    assert(e->recipe.vehicle == EXEC_SHELL);
     tools_free(&reg);
 }
 

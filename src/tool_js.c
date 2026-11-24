@@ -27,13 +27,13 @@ static const char *JSEVAL_PARAMS_JSON =
 
 #define JSEVAL_MAX_OUTPUT (64 * 1024)
 
-/* js_eval is an SBX_JS tool: the daemon dispatch builds a blob and the
+/* js_eval is an EXEC_JS tool: the daemon dispatch builds a blob and the
  * --run-tool broker evals it in-process via qjs_eval_run inside the sandbox.
  * This handler is therefore NOT the production execution path — the dispatcher
- * never calls it for an EXEC_SANDBOX recipe. It remains as (a) the identity
+ * never calls it for a child vehicle. It remains as (a) the identity
  * marker js_tool_resolve_request keys on and (b) a host-mode, in-process
  * evaluator for unit tests. No fork, no re-exec — the fork-bomb hazard is gone. */
-/* js_eval is an SBX_JS tool: the daemon dispatch ships pre-extracted params
+/* js_eval is an EXEC_JS tool: the daemon dispatch ships pre-extracted params
  * and the --run-tool broker evals in-process via qjs_eval_run inside the
  * sandbox. This function is never executed — it exists as the identity
  * marker js_tool_resolve_request keys on (js_eval vs extension tool). */
@@ -96,7 +96,7 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
                           JSEVAL_PARAMS_JSON, tool_js_eval_handler, ctx);
     if (rc == 0)  /* sandboxed broker; qjs runs in-process, egress via proxy */
         tools_set_recipe(reg, "js_eval",
-                         (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_JS,
+                         (ToolRecipe){.vehicle = EXEC_JS,
                                       .needs_interp = 1, .droppable = 1});
     return rc;
 }
@@ -139,7 +139,7 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
         existing->parameters_json = parameters_json ? strdup(parameters_json) : NULL;
         existing->policy_json = policy_json ? strdup(policy_json) : NULL;
         existing->handler = js_defined_tool_handler;
-        existing->recipe = (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_JS};
+        existing->recipe = (ToolRecipe){.vehicle = EXEC_JS};
         return 0;
     }
     JsToolData *td = malloc(sizeof(JsToolData));
@@ -154,13 +154,13 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
         if (e) {
             e->free_fn = js_tool_data_free;
             e->policy_json = policy_json ? strdup(policy_json) : NULL;
-            e->recipe = (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_JS};
+            e->recipe = (ToolRecipe){.vehicle = EXEC_JS};
         }
     }
     return rc;
 }
 
-/* Resolve a JS-tier entry: which JsEvalCtx to sandbox with, and — for an
+/* Resolve a js entry: which JsEvalCtx to sandbox with, and — for an
  * extension tool — the handler .qjs path the child must run. js_eval itself
  * returns *out_path=NULL (the model's own code/filename params drive the
  * eval). No JSON is built here: the dispatch site ships wire params. */
@@ -179,7 +179,7 @@ int js_tool_resolve_request(const ToolEntry *te, JsEvalCtx **out_ctx,
     return 0;
 }
 
-char *tool_js_tier_run(const RunToolParsed *q, int *is_error) {
+char *tool_js_child_run(const RunToolParsed *q, int *is_error) {
     /* qjs runs in-process in the inner fork: netns + proxy +
      * mounts are already applied. code/filename/args arrive as pre-extracted
      * wire params; args is an opaque JSON blob QuickJS itself parses.

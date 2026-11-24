@@ -20,7 +20,7 @@
 #define FIND_DEFAULT_LIMIT 1000
 #define FIND_MAX_DEPTH 32
 
-/* All six file tools are EXEC_SANDBOX: they run only inside the --run-tool
+/* All six file tools are EXEC_FILE: they run only inside the --run-tool
  * child, on pre-extracted wire params (run_tool_param_*) — no JSON is parsed
  * in this process. The registry entries carry tool_sandboxed_stub. */
 
@@ -167,7 +167,7 @@ int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           FILE_READ_PARAMS_JSON, tool_sandboxed_stub,
                           (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_read", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE,
+        tools_set_recipe(reg, "file_read", (ToolRecipe){.vehicle = EXEC_FILE,
                                                   .droppable = 1});
     return rc;
 }
@@ -245,7 +245,7 @@ int tool_file_write_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           FILE_WRITE_PARAMS_JSON, tool_sandboxed_stub,
                           (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_write", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
+        tools_set_recipe(reg, "file_write", (ToolRecipe){.vehicle = EXEC_FILE});
     return rc;
 }
 
@@ -341,7 +341,7 @@ int tool_file_list_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "Use this to see what files exist.",
                           FILE_LIST_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_list", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE,
+        tools_set_recipe(reg, "file_list", (ToolRecipe){.vehicle = EXEC_FILE,
                                                   .droppable = 1});
     return rc;
 }
@@ -472,7 +472,7 @@ int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "(e.g. 'src/**/*.spec.ts'). Skips .git and node_modules.",
                           FIND_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_find", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE,
+        tools_set_recipe(reg, "file_find", (ToolRecipe){.vehicle = EXEC_FILE,
                                                   .droppable = 1});
     return rc;
 }
@@ -629,7 +629,7 @@ int tool_file_edit_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "overlap. Use file_write to create a file or replace it entirely.",
                           FILE_EDIT_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_edit", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE});
+        tools_set_recipe(reg, "file_edit", (ToolRecipe){.vehicle = EXEC_FILE});
     return rc;
 }
 
@@ -770,7 +770,7 @@ int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "under the given directory. Skips binary files, .git, and node_modules.",
                           GREP_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
-        tools_set_recipe(reg, "file_grep", (ToolRecipe){.vehicle = EXEC_SANDBOX, .tier = SBX_FILE,
+        tools_set_recipe(reg, "file_grep", (ToolRecipe){.vehicle = EXEC_FILE,
                                                   .droppable = 1});
     return rc;
 }
@@ -792,7 +792,7 @@ static char *dispatch_file(const RunToolParsed *q, FileReadCtx *ctx, int *is_err
     return tool_fail(is_error, "error: unknown file tool");
 }
 
-char *tool_file_tier_run(const RunToolParsed *q, int *is_error) {
+char *tool_file_child_run(const RunToolParsed *q, int *is_error) {
     /* Sandbox is already applied on this process; the run fns never set one
      * up themselves. sb.sandbox carries "mount enforcement is active" so
      * open failures outside the granted mounts produce a grant hint. */

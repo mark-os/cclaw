@@ -29,8 +29,8 @@
 
 const char *contain_backend(void) { return "linux-ns"; }
 
-/* The widest set the sandbox ever asks for (the shell tier; file/web/js omit
- * the PID namespace). Probing a narrower set would call a host usable that
+/* The widest set the sandbox ever asks for (the shell; the file and js
+ * children omit the PID namespace). Probing a narrower set would call a host usable that
  * then refuses the shell. */
 #define CONTAIN_NS_FLAGS (CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID)
 
@@ -145,7 +145,7 @@ void contain_hint(char *out, size_t cap) {
 #define SANDBOX_PROXY_SOCK_PATH "/tmp/.cclaw_proxy.sock"
 #define SANDBOX_LLM_SOCK_PATH   "/tmp/.cclaw_llm.sock"
 
-/* net_shim as a file the shell tier can run by name (`connect` mode, for
+/* net_shim as a file the shell can run by name (`connect` mode, for
  * ssh's ProxyCommand). It lives on the root tmpfs, not in /tmp: /tmp is a
  * persistent bind of the agent's own scratch directory, so anything we drop
  * there survives the call and is the agent's to modify; the root tmpfs is
@@ -451,7 +451,7 @@ int contain_enter(const char *workspace, const char *cwd_path,
         "/opt", NULL
     };
     for (int i = 0; sys_dirs[i]; i++) {
-        /* File tier (skip_pid_ns): exclude /proc — no PID namespace backs it,
+        /* File and js (skip_pid_ns): exclude /proc — no PID namespace backs it,
          * and the host procfs would leak process info. uid_map/gid_map writes
          * happen before pivot_root using the original /proc, so they're fine. */
         if (full_cfg && full_cfg->skip_pid_ns &&
@@ -572,7 +572,7 @@ int contain_enter(const char *workspace, const char *cwd_path,
 
     /* CLONE_NEWPID requires a fork — the child becomes PID 1 in the new
      * PID namespace. Mount setup is already done, so the fork+exec is clean.
-     * When skip_pid_ns is set (file tier), no PID NS was created so no fork. */
+     * When skip_pid_ns is set (file, js), no PID NS was created so no fork. */
     if (!full_cfg || !full_cfg->skip_pid_ns) {
         pid_t inner = fork();
         if (inner < 0) return -1;
@@ -657,7 +657,7 @@ static void sandbox_setup_proxy(const char *uds_path) {
     pid_t shim = fork();
     if (shim < 0) { close(mfd); close(lfd); return; }
     if (shim == 0) {
-        /* No PID namespace backs this tier (skip_pid_ns), so there's no
+        /* No PID namespace backs this child (skip_pid_ns), so there's no
          * kernel-enforced teardown when the tool process exits — without this,
          * the shim orphans to init and lingers forever. PDEATHSIG doesn't
          * survive fork(), so it must be set here, not inherited from the
@@ -679,8 +679,8 @@ static void sandbox_setup_proxy(const char *uds_path) {
         char fdbuf[16];
         snprintf(fdbuf, sizeof(fdbuf), "%d", lfd);
         /* fexecve (execveat AT_EMPTY_PATH under the hood on Linux ≥3.19) execs
-         * the memfd WITHOUT touching /proc — the skip_pid_ns network tiers (web)
-         * have no /proc, so an execl("/proc/self/fd/N") would ENOENT and the shim
+         * the memfd WITHOUT touching /proc — the js child (skip_pid_ns)
+         * has no /proc, so an execl("/proc/self/fd/N") would ENOENT and the shim
          * would die, closing the listener (curl → connection refused). */
         char *const argv[] = { "net_shim", fdbuf, (char *)uds_path, NULL };
         extern char **environ;
@@ -709,11 +709,11 @@ static void sandbox_setup_proxy(const char *uds_path) {
 void contain_egress(const SandboxConfig *cfg) {
     setenv("CCLAW_PROXY_SOCK", SANDBOX_PROXY_SOCK_PATH, 1);
 
-    /* The loopback HTTP proxy: the one mechanism for every tier — our own
-     * libcurl (web/js) and whatever the shell runs. */
+    /* The loopback HTTP proxy: the one mechanism for every child — our own
+     * libcurl (js) and whatever the shell runs. */
     sandbox_setup_proxy(SANDBOX_PROXY_SOCK_PATH);
 
-    /* Shell tier only: programs that take a proxy *command* rather than proxy
+    /* Shell only: programs that take a proxy *command* rather than proxy
      * variables. ssh is the one that matters, and git reads GIT_SSH_COMMAND,
      * so git-over-ssh works unprompted; a bare `ssh` needs the option spelled
      * out (the shell tool's description says how). Best-effort like the rest:

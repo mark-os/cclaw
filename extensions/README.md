@@ -72,7 +72,7 @@ an HTML page turned into markdown with `HTML.toMarkdown`, JSON and markdown
 returned as served, and one retry with a plain user agent when a CDN answers
 the browser with an empty page. It used to be C; it is a script now because
 everything it needs — the egress proxy, `{{SECRET:name}}` in the url,
-`save_secret`, spilling a long result — is the JS tier's anyway. Like
+`save_secret`, spilling a long result — is what every JS tool gets anyway. Like
 compaction it is attached to every agent; the tool still needs its `tool`
 grant (`agent_default_tools` carries it). To turn it off for an agent, revoke
 the grant or set its `agent_extensions` row to `enabled = 0`; a restart keeps

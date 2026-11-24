@@ -3,7 +3,7 @@
  * the jobs snapshot in the user context block, orphan reconciliation at recovery,
  * and the check_session/cancel surfaces. The full fork path (job start,
  * live log growth, inbox completion) is exercised against a live daemon
- * before release, like the other EXEC_SANDBOX behaviors. */
+ * before release, like the other sandboxed-child behaviors. */
 #define _GNU_SOURCE
 #include "test_util.h"
 #include "child.h"

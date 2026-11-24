@@ -78,7 +78,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     tool_file_edit_register(&setup->reg, &setup->file_read_ctx);
     tool_file_grep_register(&setup->reg, &setup->file_read_ctx);
 
-    /* JS eval (SBX_JS broker): qjs runs in-process in the
+    /* JS eval (EXEC_JS broker): qjs runs in-process in the
      * fork+execve --run-tool child, egress via per-hop proxy decide(). */
     setup->js_eval_ctx.workspace = cfg->workspace;
     setup->js_eval_ctx.cwd_path = getenv("CCLAW_PATH");

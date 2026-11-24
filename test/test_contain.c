@@ -8,7 +8,7 @@
 #include <unistd.h>
 
 /* What the probe claims must be what a child actually gets: ask for the same
- * namespaces the shell tier does and compare. A probe that says yes on a host
+ * namespaces the shell does and compare. A probe that says yes on a host
  * that then refuses the shell (or no on one that would run it) is worse than
  * no probe — doctor and first-run both act on its answer. */
 static int really_contains(void) {

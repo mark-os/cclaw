@@ -113,20 +113,20 @@ static void test_exact_key_grant_still_masked(void) {
     free(out);
 }
 
-/* The shell tier is not the only way to read a file. file_read reaches the
+/* The shell is not the only way to read a file. file_read reaches the
  * same bytes with no shell, no network and no command string, and it is
  * granted far more widely — so the mask has to hold there too. Nothing
- * covered it: every assertion above drives the shell tier.
+ * covered it: every assertion above drives the shell.
  *
  * Scope, honestly: this builds the request itself, so it proves the *broker*
- * masks on the file tier. It cannot catch a dispatch in main.c that fails to
- * put db_path on the wire — which is exactly how the file tier shipped
+ * masks for the file vehicle. It cannot catch a dispatch in main.c that fails
+ * to put db_path on the wire — which is exactly how the file tools shipped
  * unmasked. That gap is closed by making db_path a required parameter of
  * run_tool_req_init() rather than a field a caller may forget, so the
  * compiler now rejects the omission; a runtime test would need a full agent
  * turn to reach that code.
  *
- * Drives the real --run-tool broker (not tool_file_tier_run in-process) —
+ * Drives the real --run-tool broker (not tool_file_child_run in-process) —
  * masking happens in the child's sandbox setup, so an in-process call cannot
  * see it. */
 static char *file_read_via_broker(const char *path, const char *grant_path) {
@@ -134,7 +134,7 @@ static char *file_read_via_broker(const char *path, const char *grant_path) {
                         .value = (char *)path };
     const char *reads[] = { grant_path };
     RunToolReq req = {
-        .tier = RUNTOOL_TIER_FILE, .tool_name = "file_read",
+        .vehicle = EXEC_FILE, .tool_name = "file_read",
         .env_mode = 1, .nproc = 64, .as_mb = 0, .cpu_sec = 60,
         .sandbox = 1, .net_mode = 1,
         .workspace = WS, .db_path = DB, .agent_dir = WS,
@@ -193,7 +193,7 @@ static char *file_read_via_broker(const char *path, const char *grant_path) {
     return result;
 }
 
-static void test_file_tier_grant_masks_key_and_db(void) {
+static void test_file_grant_masks_key_and_db(void) {
     setup();
 
     /* Positive control first, or the assertions below are worthless: an empty
@@ -249,7 +249,7 @@ int main(void) {
     RUN(test_directory_grant_masks_both);
     RUN(test_exact_db_grant_still_masked);
     RUN(test_exact_key_grant_still_masked);
-    RUN(test_file_tier_grant_masks_key_and_db);
+    RUN(test_file_grant_masks_key_and_db);
     system("rm -rf " ROOT);
     return 0;
 }

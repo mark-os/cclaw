@@ -184,7 +184,7 @@ The `digest` delivery policy concatenates assistant prose instead; see [delivery
 
 A tool result's failure is carried by `entries.is_error`, and that flag comes
 from the tool itself — never from reading the message. Handlers (and the
-EXEC_THREAD and sandbox-tier leaves) take an `int *is_error` out-param and set
+EXEC_THREAD and `--run-tool` child leaves) take an `int *is_error` out-param and set
 it at the failure site, usually via `tool_fail()`; sandboxed `--run-tool`
 children frame the same verdict as a status byte ahead of the result body
 (`[status][meta_len][meta][body]`), so it crosses the sandbox boundary

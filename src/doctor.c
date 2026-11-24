@@ -361,7 +361,7 @@ static void layer_core(sqlite3 *db, const Config *cfg) {
     else print_ok("core", "database, config and a provider key");
 }
 
-/* Layers 2 and 4, per agent: every tool tier — file, js and shell
+/* Layers 2 and 4, per agent: every child vehicle — file, js and shell
  * alike — runs in one contained child, so they stand or fall together, and
  * which it is depends on the agent's profile. */
 static void layer_tools(sqlite3 *db, int contained) {

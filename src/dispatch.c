@@ -408,9 +408,10 @@ static char *unknown_secret_name(const char *args,
 
 /* First secret the call references that exists (in `all`) but is not granted
  * to the agent (absent from `granted`), or NULL. Two ways to reference one:
- * a {{SECRET:NAME}} placeholder, and — on the shell tier, where the child's
- * environment carries it — a $CCLAW_SECRET_NAME variable. Caller frees. */
-static char *ungranted_secret_ref(const char *args, int shell_tier,
+ * a {{SECRET:NAME}} placeholder, and — on the shell vehicle, where the
+ * child's environment carries it — a $CCLAW_SECRET_NAME variable. Caller
+ * frees. */
+static char *ungranted_secret_ref(const char *args, int is_shell,
                                   const ShellSecret *granted, size_t granted_n,
                                   const ShellSecret *all, size_t all_n) {
     if (!args || all_n == 0) return NULL;
@@ -426,7 +427,7 @@ static char *ungranted_secret_ref(const char *args, int shell_tier,
         if (known && !ok) hit = strdup(names[i]);
     }
     secret_names_free(names, n);
-    if (!hit && shell_tier) {
+    if (!hit && is_shell) {
         size_t rn = 0;
         RunToolSecret *refs = shell_filter_secrets(args, all, all_n, &rn);
         for (size_t i = 0; i < rn && !hit; i++) {
@@ -440,7 +441,7 @@ static char *ungranted_secret_ref(const char *args, int shell_tier,
     return hit;
 }
 
-/* Per-call egress state for one network-tier dispatch (specs/trust.md):
+/* Per-call egress state for one shell or js dispatch (specs/trust.md):
  *  - deny: sensitivity labels for req.deny_rules, minus labels covering an
  *    approved sensitive host (per-call exception, label-wide for exactly one
  *    human-approved call, gone when the call ends).
@@ -700,13 +701,12 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
         /* Using a secret is a grant (specs/security.md): a call that names a
          * secret this agent does not hold is refused here, before anything
          * can park — the agent asks for the grant like any other. Only on
-         * the tiers that would resolve it (the same rule as the unknown-name
-         * check below): a file_write may carry a placeholder as text. */
-        if (te->recipe.needs_interp ||
-            (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier != SBX_FILE)) {
+         * the vehicles that would resolve it (the same rule as the
+         * unknown-name check below): a file_write may carry a placeholder as
+         * text. */
+        if (te->recipe.needs_interp || vehicle_has_network(te->recipe.vehicle)) {
             char *ng = ungranted_secret_ref(tc->arguments,
-                                            te->recipe.tier == SBX_SHELL &&
-                                            te->recipe.vehicle == EXEC_SANDBOX,
+                                            te->recipe.vehicle == EXEC_SHELL,
                                             secrets, secret_count, all, all_n);
             if (ng) {
                 char err[512];
@@ -725,7 +725,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
          * approval class — the gate denies with attribution and the agent
          * requests the binding via request_config (secret_bindings), the
          * same shape as a proxy host denial (D17). An unbound secret denies
-         * on every tier: the call would run narrowed to deny-all, so nothing
+         * on every vehicle: the call would run narrowed to deny-all, so nothing
          * useful can happen with the credential anyway, and the secret never
          * enters a child that couldn't use it. A call that names its target
          * in a `url` argument (web_fetch) makes the uncovered-host case
@@ -876,7 +876,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
              * it never reaches the gate again; only a "once" approval lands
              * here, and consuming it stops a replayed tool_call_id from
              * re-using the same grant. A consumed sensitivity approval opens a
-             * per-call exception for the matched host (network tiers below).
+             * per-call exception for the matched host (shell/js paths below).
              * A ticket was already consumed inside approval_take_ticket. */
             *sens_once = sens_hit;
             if (!via_ticket) approval_consume(proc_db(), ap->id);
@@ -1127,7 +1127,7 @@ static const char *dispatch_scratch_dir(const char *agent_name,
     return r;
 }
 
-/* Serialize one SBX_JS --run-tool request. Everything that makes it a JS-tier
+/* Serialize one EXEC_JS --run-tool request. Everything that makes it a js
  * request — the agent's sandbox profile, its grant mounts, the read-only
  * extension store, the proxy egress snapshot — is the same whether the caller
  * is a model tool call or a scheduled cron script; only the params and the
@@ -1178,7 +1178,7 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
     }
 
     RunToolReq req;
-    run_tool_req_init(&req, RUNTOOL_TIER_JS, "js_eval",
+    run_tool_req_init(&req, EXEC_JS, "js_eval",
                       &jc->sb, jc->workspace, jc->cwd_path, jc->db_path);
     char scratch[PATH_MAX];
     req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
@@ -1307,7 +1307,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
     /* Dispatch gate (capability → policy → sensitivity/secret →
      * approval). sens_host survives the gate: an approved once-only
      * sensitivity park grants that host to THIS call via a per-call
-     * exception in the network-tier sections below. */
+     * exception in the shell and js sections below. */
     char sens_host[254];
     int sens_once = 0;
     {
@@ -1319,15 +1319,14 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
     }
 
     /* {{SECRET:name}} gate: paths that interpolate placeholders into this
-     * call's values (inline needs_interp tools; shell/js sandbox tiers).
+     * call's values (inline needs_interp tools; the shell and js vehicles).
      * A name that matches no loaded secret is a hard error naming the typo —
      * never an enumeration of what does exist (see search_config
      * secret_bindings for that, through the sanctioned surface). The file
-     * tier is exempt: file_write content is a document, not a resolution
+     * vehicle is exempt: file_write content is a document, not a resolution
      * site — writing a placeholder into a file is always legal; it resolves
      * (or errors) later, at the js fetch boundary. */
-    if ((te->recipe.needs_interp ||
-         (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier != SBX_FILE)) &&
+    if ((te->recipe.needs_interp || vehicle_has_network(te->recipe.vehicle)) &&
         tc->arguments && strstr(tc->arguments, "{{SECRET:")) {
         char *miss = unknown_secret_name(tc->arguments, secrets, secret_count);
         if (miss) {
@@ -1358,12 +1357,12 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                                secrets, secret_count, all, all_n);
 
 
-    /* ── File-tier re-exec path: fork+exec a clean --run-tool child ────
+    /* ── File re-exec path: fork+exec a clean --run-tool child ─────────
      * Replaces the fork-only path for file tools when sandbox is required.
      * The daemon is multithreaded; fork-without-exec is UB (frozen locks in
      * child). The re-exec'd child is single-threaded and sets up its own
      * namespace sandbox. */
-    if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_FILE &&
+    if (te->recipe.vehicle == EXEC_FILE &&
         te->user_data) {
         FileReadCtx *fctx = (FileReadCtx *)te->user_data;
         if (fctx->workspace) {
@@ -1373,7 +1372,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             session_set_state(proc_db(), session_id, "tool_running");
 
             /* Host mode (sandbox=0) rides the SAME broker path: the child sets
-             * up no namespace and run_file_tier runs the handler in-process,
+             * up no namespace and runs the handler in-process,
              * exactly as the (now-deleted) generic fork path did. */
             /* Decompose arguments HERE (trusted parent, SQLite JSON1) — the
              * child receives pre-extracted params and parses no JSON. */
@@ -1386,7 +1385,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 
             size_t blob_len = 0;
             RunToolReq req;
-            run_tool_req_init(&req, RUNTOOL_TIER_FILE, tc->name,
+            run_tool_req_init(&req, EXEC_FILE, tc->name,
                               &fctx->sb, fctx->workspace, fctx->cwd_path,
                               fctx->db_path);
             char scratch[PATH_MAX];
@@ -1459,13 +1458,13 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         }
     }
 
-    /* ── Shell-tier re-exec path: fork+exec a clean --run-tool broker ────
-     * A broker is interposed IFF the tier needs gated egress (js, shell).
+    /* ── Shell re-exec path: fork+exec a clean --run-tool broker ────────
+     * A broker is interposed IFF the vehicle needs gated egress (js, shell).
      * The broker IS the --run-tool process — fork+exec, never fork-only.
-     * Network-less tiers (file) spawn directly via spawn_run_tool_child.
+     * The network-less file vehicle spawns directly via spawn_run_tool_child.
      * Secrets: interpolated HERE in the daemon parent, blob carries resolved
      * values. Broker/child never hold the master key. */
-    if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_SHELL &&
+    if (te->recipe.vehicle == EXEC_SHELL &&
         te->user_data) {
         ShellConfig *sc = (ShellConfig *)te->user_data;
         if (sc->workspace) {
@@ -1517,7 +1516,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 
             size_t blob_len = 0;
             RunToolReq req;
-            run_tool_req_init(&req, RUNTOOL_TIER_SHELL, tc->name,
+            run_tool_req_init(&req, EXEC_SHELL, tc->name,
                               &sc->sb, sc->workspace, sc->cwd_path,
                               sc->db_path);
             char scratch[PATH_MAX];
@@ -1574,13 +1573,13 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         }
     }
 
-    /* ── JS-tier broker path (SBX_JS). The inner child evals qjs
+    /* ── JS broker path (EXEC_JS). The inner child evals qjs
      * in-process (no inner exec); http_request's curl reaches the proxy via
      * HTTP_PROXY → decide() per hop. fs.* paths are real bind-mounts; the shared
      * extension store is mounted read-only so promoted handler files resolve.
      * Covers both js_eval and JS-defined extension tools (resolved via the same
      * entry's recipe). Host mode rides the same path with sandbox=0. */
-    if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_JS &&
+    if (te->recipe.vehicle == EXEC_JS &&
         te->user_data) {
         JsEvalCtx *jc = NULL;
         const char *handler_path = NULL;
@@ -1691,7 +1690,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         job.args = strdup(tc->arguments ? tc->arguments : "{}");
         job.run = te->recipe.thread_run;
         /* No THREAD (DB) tool references {{SECRET}} — interpolation is a
-         * sandbox-tier concern. The thread still postprocesses (DLP scan). */
+         * child-vehicle concern. The thread still postprocesses (DLP scan). */
         job.secrets = proc_tool_setup() ? proc_tool_setup()->secrets : NULL;
         job.secret_count = proc_tool_setup() ? proc_tool_setup()->secret_count : 0;
 
@@ -1736,7 +1735,7 @@ int dispatch_tool(int64_t session_id, const char *agent_name,
  * A script with no model tool call in front of it — the daemon's half of
  * cron.c's script dispatcher, and a hook's handler. Resolve the file inside
  * the TARGET agent's workspace or the extension store, build exactly the
- * SBX_JS request a js_eval call would, and fork it. Refreshing caps to the
+ * EXEC_JS request a js_eval call would, and fork it. Refreshing caps to the
  * target agent first is what makes "runs under that agent's sandbox_profile
  * and grants" true — the shared setup is rebound before every tool batch
  * anyway, so borrowing it here between turns costs nothing on the single
@@ -1776,7 +1775,7 @@ static int unnamed_file(const char *data, size_t len) {
     return fd;
 }
 
-/* Fork a script file as `agent`, in exactly the JS-tier sandbox a js_eval
+/* Fork a script file as `agent`, in exactly the js sandbox a js_eval
  * tool call would get — the one vehicle behind a cron fire and a hook. The
  * agent's caps are re-read first; only the secrets it is granted ride along;
  * LLM() is bridged under `llm_source`. `args_json`, when given, becomes the
@@ -2173,7 +2172,7 @@ static char *child_output_finalize(ChildProc *c, int status, char **hosts_out,
      * dropped meta means we can't prove the result had no network
      * exposure — sanitize as if it did, and record no hosts tag
      * (never a partial one). Only an explicit zero-length meta
-     * (non-network tier / error frame) skips the strip. */
+     * (file vehicle / error frame) skips the strip. */
     char *hosts = c->hosts_json;
     int meta_damaged = c->frame_meta_len > 0 &&
         (!c->hosts_json || c->frame_meta_read != c->frame_meta_len);

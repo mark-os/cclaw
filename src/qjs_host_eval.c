@@ -1,4 +1,4 @@
-/* Host C functions for in-process qjs eval (the SBX_JS --run-tool broker child).
+/* Host C functions for in-process qjs eval (the EXEC_JS --run-tool broker child).
  * Registered into the QuickJS context as globals: http_request, fs.*, console.log, print. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -20,7 +20,7 @@
 
 /* ── Fetch-boundary {{SECRET:name}} resolution ─────────────────── */
 
-/* Set by tool_js_tier_run from the wire blob before eval. Placeholders in
+/* Set by tool_js_child_run from the wire blob before eval. Placeholders in
  * tool ARGUMENTS were already interpolated by the daemon parent; this table
  * serves everything the parent can't see — file bodies, extension code,
  * strings the script builds at runtime — at the one native sink where
@@ -36,7 +36,7 @@ void qjs_host_set_secrets(const JsHostSecret *secrets, size_t count) {
 
 /* The call's egress allow rules (wire blob host_rules) and whether the proxy
  * enforces them — read only to phrase a refusal (js_http_denied_hint); the
- * proxy is the enforcement. Set by tool_js_tier_run like the secrets. */
+ * proxy is the enforcement. Set by tool_js_child_run like the secrets. */
 static char **g_js_hosts;
 static size_t g_js_host_count;
 static int g_js_egress_enforced;
@@ -114,7 +114,7 @@ static char *js_resolve_secrets(const char *s, unsigned char *used,
 /* Every secret resolved into this request must be bound to the request's
  * host (secret_hosts, resolved parent-side into the wire blob) — same rule
  * the daemon's dispatch gate enforces on a call's url argument, so the js
- * tier can't carry a bound secret somewhere its binding doesn't allow.
+ * child can't carry a bound secret somewhere its binding doesn't allow.
  * Fail-closed on unbound. */
 static void js_secret_binding_check(const char *url, const unsigned char *used,
                                     char *errbuf, size_t errcap) {

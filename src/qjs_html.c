@@ -1,5 +1,5 @@
 /* HTML.toMarkdown(str) — the HTML-to-markdown converter web_fetch uses,
- * exposed to every script in the JS tier. In C because it is a byte scanner
+ * exposed to every script in the js child. In C because it is a byte scanner
  * over pages up to the 2 MB fetch cap, and a slow ARM box should not run that
  * in an interpreter; it parses untrusted bytes, so it lives only here, in the
  * engine's host functions, which run inside the sandboxed tool child. */

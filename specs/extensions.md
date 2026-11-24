@@ -300,7 +300,7 @@ grants inside the install transaction (the promote approval enumerated them);
 ## Tool Handler Contract
 
 A tool handler is a JS file. It runs in a **forked, sandboxed child** (`cclaw
---run-tool`, JS tier) — one fork+exec per call, no shared process state. The child wraps the
+--run-tool`, the js vehicle) — one fork+exec per call, no shared process state. The child wraps the
 handler file as a **function body** with the call's `args` (a parsed object) in
 scope — roughly `(function(args){ <file> })(args)` — so the handler must `return`
 its result (a bare trailing expression evaluates to `undefined`). The returned
@@ -340,7 +340,7 @@ Secrets are referenced as `{{SECRET:NAME}}` — in handler *arguments* and
 extension *config* they are interpolated by the daemon before execution; in
 the handler *file body* (or any string the handler builds) they resolve at
 the `http_request()` boundary in the child, with the secret's host binding
-enforced there (see specs/security.md, JS-Tier Secret Resolution). Either
+enforced there (see specs/security.md, JS Secret Resolution). Either
 way the value is never visible to the model or written to disk.
 
 ## Hooks

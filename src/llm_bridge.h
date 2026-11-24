@@ -1,7 +1,7 @@
 #ifndef CCLAW_LLM_BRIDGE_H
 #define CCLAW_LLM_BRIDGE_H
 
-/* Per-call UDS server for the JS tier's LLM() global (llm-core.md): the
+/* Per-call UDS server for the js child's LLM() global (llm-core.md): the
  * parent (daemon or CLI — whichever process dispatched the tool) listens on
  * <agent-dir>/.llm.<pid>.<seq>.sock for the life of one tool child and
  * answers each connection with llm_request(). Per-call socket identity is

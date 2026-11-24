@@ -100,7 +100,7 @@ static int run_call_as(const char *agent, int64_t sid, const char *tool,
  * naming the secret is refused inline — before any binding check, before
  * anything can park — and the refusal names the secret, the agent and the
  * way to ask. Covers both reference forms: {{SECRET:X}} in web_fetch's args and
- * $CCLAW_SECRET_X on the shell tier. Both secrets here are ENVIRONMENT
+ * $CCLAW_SECRET_X on the shell. Both secrets here are ENVIRONMENT
  * secrets (CCLAW_SECRET_*), which have no secrets row: the rule is by name. */
 static void test_ungranted_secret_refused(void) {
     char *r = NULL;
@@ -194,7 +194,7 @@ static void test_bound_covered_passes(void) {
     free(out);
 }
 
-/* Runtime discovery (shell tier, no static target): the call runs narrowed,
+/* Runtime discovery (shell, no static target): the call runs narrowed,
  * the proxy denies the unbound host, and the deny summary carries the
  * parent-composed note naming the secret and its bindings — so the model
  * learns the deny was a missing binding, not a missing host grant. */

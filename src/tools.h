@@ -2,7 +2,7 @@
 #define CCLAW_TOOLS_H
 
 /* The tool registry — the dispatch table mapping tool name to handler,
- * parameters schema, policy, and execution recipe (vehicle + sandbox tier).
+ * parameters schema, policy, and execution recipe (vehicle + traits).
  * The spine every tool module registers into.
  */
 
@@ -37,17 +37,30 @@ typedef char *(*ToolHandlerFn)(const char *arguments, void *user_data, int *is_e
 /* Optional destructor for user_data */
 typedef void (*ToolFreeFn)(void *user_data);
 
-/* ── Execution recipe (axis A: vehicle, axis B: sandbox tier) ──────────
+/* ── Execution recipe ──────────────────────────────────────────────────
  * Each tool carries its own recipe — the dispatcher reads it instead of
- * comparing names. See specs/tool-execution-model.md and the sandbox plan.
+ * comparing names. See specs/tool-execution-model.md.
  *
- * EXEC_INLINE   — run on the poll thread (control-flow holdouts that read live
- *                 session state or mutate the registry: launch_agent,
- *                 check_session, request_config, extension_*).
- * EXEC_THREAD   — fire-and-forget detached thread; DB/session-only tools.
- * EXEC_SANDBOX  — fork+execve --run-tool child (file/shell/js). */
-typedef enum { EXEC_INLINE, EXEC_THREAD, EXEC_SANDBOX } ExecVehicle;
-typedef enum { SBX_NONE, SBX_FILE, SBX_SHELL, SBX_JS } SandboxTier;
+ * The vehicle says where a call runs:
+ * EXEC_INLINE — run on the poll thread (control-flow holdouts that read live
+ *               session state or mutate the registry: launch_agent,
+ *               check_session, request_config, extension_*).
+ * EXEC_THREAD — fire-and-forget detached thread; DB/session-only tools.
+ * EXEC_FILE, EXEC_SHELL, EXEC_JS — fork+execve a sandboxed --run-tool child
+ *               that runs the file tools, a shell command, or QuickJS. The
+ *               value also rides the --run-tool wire and picks what the
+ *               child runs (run_tool.c). */
+typedef enum { EXEC_INLINE, EXEC_THREAD, EXEC_FILE, EXEC_SHELL, EXEC_JS } ExecVehicle;
+
+/* The vehicles that fork a --run-tool child. */
+static inline int vehicle_is_child(ExecVehicle v) {
+    return v == EXEC_FILE || v == EXEC_SHELL || v == EXEC_JS;
+}
+
+/* The child vehicles that reach the network through the egress proxy. */
+static inline int vehicle_has_network(ExecVehicle v) {
+    return v == EXEC_SHELL || v == EXEC_JS;
+}
 
 /* NULL-result protocol for EXEC_INLINE tools: a handler returning NULL means
  * it dispatched async work instead of finishing inline.
@@ -58,7 +71,6 @@ typedef enum { NULL_NONE = 0, NULL_ASYNC, NULL_PARK } ToolNullKind;
 
 typedef struct {
     ExecVehicle  vehicle;
-    SandboxTier  tier;                 /* meaningful iff EXEC_SANDBOX */
     /* iff EXEC_THREAD: rebuilds the tool's ctx around the thread's own db +
      * agent_name (+ session_id for the few tools that need it) and runs the
      * handler. */
@@ -144,8 +156,8 @@ char *extension_config_json(sqlite3 *db, const char *extension);
 /* Free all heap strings in the registry */
 void tools_free(ToolRegistry *reg);
 
-/* Registered as the handler for sandboxed-tier tools: the dispatcher never
- * runs those in-process (EXEC_SANDBOX goes through the --run-tool broker,
+/* Registered as the handler for sandboxed tools: the dispatcher never runs
+ * those in-process (a child vehicle goes through the --run-tool broker,
  * which consumes pre-extracted wire params), so any call here is a wiring
  * bug — fail loudly rather than parse arguments. */
 char *tool_sandboxed_stub(const char *arguments, void *user_data, int *is_error);

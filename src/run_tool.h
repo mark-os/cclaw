@@ -9,6 +9,7 @@
 #include <limits.h>
 #include "sandbox.h"
 #include "tool_args.h"
+#include "tools.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -64,21 +65,17 @@
 
 /* Wire format: a flat little-endian binary frame, NOT JSON — both ends are
  * the same binary, so there is no escaping and no key/value scan. A 4-byte LE
- * body-length prefix is followed by a tier byte and the fields in ONE fixed
- * superset order known to both sides (write-all-always: fields a tier doesn't
- * use are NULL/0/empty). The tier byte drives *dispatch* (which TierDescriptor),
- * not the wire layout. Primitives: u32 = 4-byte LE; str = u32 length + that many
+ * body-length prefix is followed by a vehicle byte and the fields in ONE fixed
+ * superset order known to both sides (write-all-always: fields a vehicle
+ * doesn't use are NULL/0/empty). The vehicle byte is the ExecVehicle value
+ * (EXEC_FILE, EXEC_SHELL or EXEC_JS; the child refuses any other) and drives
+ * *dispatch* (which VehicleDescriptor), not the wire layout. Primitives: u32 = 4-byte LE; str = u32 length + that many
  * raw bytes (length 0 = NULL/absent). See run_tool.c for the canonical order. */
-
-/* Sandbox tier wire discriminator (first body byte). Mirrors SandboxTier. */
-#define RUNTOOL_TIER_FILE  0
-#define RUNTOOL_TIER_SHELL 1
-#define RUNTOOL_TIER_JS    2
 
 /* A name/value secret for env injection (pre-filtered/resolved in parent).
  * `hosts` — space-joined bound-host rules (secret_hosts, resolved in the
  * parent: the child has no DB) — gates fetch-boundary {{SECRET}} resolution
- * in the JS tier; NULL/empty means unbound (fail-closed at use). Shell tier
+ * in the js child; NULL/empty means unbound (fail-closed at use). The shell
  * ignores it (its enforcement is the proxy's credential narrowing). */
 typedef struct {
     const char *name;
@@ -86,13 +83,13 @@ typedef struct {
     const char *hosts;
 } RunToolSecret;
 
-/* Superset request — one struct for every sandbox tier. Fields a tier does not
- * use are left zero/NULL. Secrets: pre-resolved by the daemon parent (the
+/* Superset request — one struct for every child vehicle. Fields a vehicle
+ * does not use are left zero/NULL. Secrets: pre-resolved by the daemon parent (the
  * broker/child never hold the master key); `command` already has {{SECRET}}
  * interpolated. Callers carrying secrets MUST explicit_bzero the blob after
  * write(fd3). */
 typedef struct {
-    int tier;                     /* RUNTOOL_TIER_* */
+    ExecVehicle vehicle;          /* EXEC_FILE, EXEC_SHELL or EXEC_JS */
     const char *tool_name;
     int env_mode, nproc, as_mb, cpu_sec;
     int sandbox, net_mode;
@@ -107,7 +104,7 @@ typedef struct {
     int mount_cwd;
     const char **read_paths;  size_t read_count;
     const char **write_paths; size_t write_count;
-    /* network tiers (shell/js) */
+    /* network vehicles (shell/js) */
     const char *agent_dir;
     const char **host_rules;  size_t host_count;
     const char **deny_rules;  size_t deny_count;
@@ -117,7 +114,7 @@ typedef struct {
     int timeout;
     const RunToolSecret *secrets; size_t secret_count;
     /* Pre-extracted tool params (tool_args_extract in the parent) — the
-     * child never parses argument JSON. file/js tiers. */
+     * child never parses argument JSON. file/js vehicles. */
     const ToolWireArg *params; size_t param_count;
     /* Parent-composed advice for the proxy-deny summary — set when the call's
      * egress was narrowed to its secrets' bound hosts, so a denial names the
@@ -127,7 +124,7 @@ typedef struct {
     /* Where to write output too large for the wire (parent-resolved, dir
      * already created; NULL disables spilling for this call). */
     const char *spill_path;
-    /* JS tier: the parent's per-call LLM bridge socket (llm_bridge.c) in the
+    /* js only: the parent's per-call LLM bridge socket (llm_bridge.c) in the
      * agent dir. The sandbox bind-mounts it and exports CCLAW_LLM_SOCK; the
      * child's LLM() global speaks the bridge protocol over it. No key
      * material — completions execute in the parent. NULL = no LLM(). */
@@ -136,10 +133,10 @@ typedef struct {
 
 /* Child-side parsed request (owned strings). Mirrors RunToolReq's wire order.
  * Strings/arrays are heap-owned by the --run-tool process for its (short)
- * lifetime; never freed before _exit. This is the one type the per-tool tier
- * leaves (tool_*_tier_run / tool_shell_tier_exec) consume. */
+ * lifetime; never freed before _exit. This is the one type the per-tool child
+ * leaves (tool_*_child_run / tool_shell_child_exec) consume. */
 typedef struct {
-    int   tier;
+    ExecVehicle vehicle;  /* as read off the wire: not yet checked */
     char *tool_name;
     int   env_mode, nproc, as_mb, cpu_sec;
     int   sandbox, net_mode;
@@ -175,16 +172,16 @@ const char *run_tool_param_json(const RunToolParsed *q, const char *key);
 /* Flattened string list (TOOL_ARG_LIST); NULL + *n=0 if absent. */
 char **run_tool_param_list(const RunToolParsed *q, const char *key, size_t *n);
 
-/* Zero req; set tier/tool_name plus all SandboxProfile-derived fields and
- * workspace/cwd_path. Callers set tier-specific fields (params, command,
+/* Zero req; set vehicle/tool_name plus all SandboxProfile-derived fields and
+ * workspace/cwd_path. Callers set vehicle-specific fields (params, command,
  * egress rules) after.
  *
  * db_path is a parameter rather than a field the caller may set afterwards
  * because forgetting it is silent and unsafe: sandbox_mask_state_files()
- * returns immediately on NULL, so a tier that omits it ships with the key
- * mask disabled. The file tier did exactly that. Pass the path (never the
+ * returns immediately on NULL, so a vehicle that omits it ships with the key
+ * mask disabled. The file vehicle did exactly that. Pass the path (never the
  * handle — the child does not open the DB); NULL only where there is no DB. */
-void run_tool_req_init(RunToolReq *req, int tier, const char *tool_name,
+void run_tool_req_init(RunToolReq *req, ExecVehicle vehicle, const char *tool_name,
                        const SandboxProfile *sb,
                        const char *workspace, const char *cwd_path,
                        const char *db_path);
@@ -195,8 +192,8 @@ void run_tool_req_init(RunToolReq *req, int tier, const char *tool_name,
 char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len);
 
 /* Entry point for the re-exec'd `cclaw --run-tool` child.
- * Reads request from fd 3, decodes the tier into a TierDescriptor, sets up the
- * sandbox, runs the tier's run_fn, writes result to fd 3, _exit. Never returns
+ * Reads request from fd 3, decodes the vehicle into a VehicleDescriptor, sets
+ * up the sandbox, runs the vehicle's run_fn, writes result to fd 3, _exit. Never returns
  * on success. */
 int run_tool_main(void);
 

@@ -13,7 +13,7 @@ typedef struct {
     SandboxProfile sb;          /* trust-derived policy + grant paths */
 } FileReadCtx;
 
-/* Register the six file tools (all EXEC_SANDBOX; registry entries carry
+/* Register the six file tools (all EXEC_FILE; registry entries carry
  * tool_sandboxed_stub — execution happens only in the --run-tool child on
  * pre-extracted wire params). ctx must remain valid for tool lifetime. */
 int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx);
@@ -23,8 +23,8 @@ int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx);
 int tool_file_edit_register(ToolRegistry *reg, FileReadCtx *ctx);
 int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx);
 
-/* --run-tool tier leaf: dispatch a file tool by name on the request's wire
+/* --run-tool child leaf: dispatch a file tool by name on the request's wire
  * params. Called by the broker after the sandbox is applied. */
-char *tool_file_tier_run(const RunToolParsed *q, int *is_error);
+char *tool_file_child_run(const RunToolParsed *q, int *is_error);
 
 #endif

@@ -48,12 +48,12 @@ constructs and executes the shell command internally.
 
 ```
 LLM calls tool
-  → main process dispatches (SBX_JS tier)
+  → main process dispatches (EXEC_JS vehicle)
   → secret interpolation in parent (pre-serialization)
   → serialize RunToolReq blob → fork+execve cclaw --run-tool
-  → broker: run_tool_verify_clean, parse blob, tier_descriptor(RUNTOOL_TIER_JS)
+  → broker: run_tool_verify_clean, parse blob, vehicle_descriptor(EXEC_JS)
   → serve_network_child: proxy_bind, fork inner child
-    → inner child: namespace sandbox, tool_js_tier_run(q)
+    → inner child: namespace sandbox, tool_js_child_run(q)
       → tool_js_eval_handler: QuickJS eval of handler file
       → handler can use: http_request (curl via HTTP_PROXY → proxy), fs.*
       → handler CANNOT use: shell_exec, callTool
@@ -63,8 +63,8 @@ LLM calls tool
 ```
 
 JS tools (both `js_eval` and JS-defined extension tools) run through the same
-`--run-tool` broker path as shell and web. The dispatch in `src/dispatch.c`
-routes via `te->recipe.tier == SBX_JS`; `tool_js_tier_run` (`src/tool_js.c`) is
+`--run-tool` broker path as shell. The dispatch in `src/dispatch.c`
+routes via `te->recipe.vehicle == EXEC_JS`; `tool_js_child_run` (`src/tool_js.c`) is
 the in-process leaf in the inner fork.
 
 ## Design
@@ -170,7 +170,7 @@ agent's tool grants. Only the handler resolution differs:
   `agent_extensions` → `extensions` and records schema, policy and `path` on
   each `ToolEntry`.
 - **Call** (per invocation). The parent forks `--run-tool` with the
-  `RUNTOOL_TIER_JS` request. The inner child wraps the handler file as a
+  `EXEC_JS` request. The inner child wraps the handler file as a
   function body with `args` in scope and calls it (see
   [extensions.md](extensions.md#tool-handler-contract)).
 
@@ -540,7 +540,7 @@ to settle before `email` — or any send-capable tool — ships.
   per-tool mode gate; `ask` → set gate to ASK, taking the shipped
   `approval_create(..., "rerun")` + park path (human picks once/always/deny)
 - Secret interpolation wired for JS dispatch: `{{SECRET:name}}` in arguments
-  resolves in the parent before blob serialization (`src/dispatch.c` JS-tier
+  resolves in the parent before blob serialization (`src/dispatch.c` js
   path)
 
 ### Phase 3: `cclaw.callTool` (not yet implemented, deferred)
@@ -570,14 +570,14 @@ host, a path, or a trust level. It is just files in the agent's own workspace.
   handler or `cclaw.exec`, so a JS tool cannot mutate capability/trust config
   (see "Config & Authority Boundary"). It can only create `resolve="rerun"`
   approvals, never `resolve="apply"`.
-- **Secret interpolation is wired for all SBX dispatch tiers.**
-  `{{SECRET:name}}` resolution happens in the daemon parent's per-tier dispatch
+- **Secret interpolation is wired for every child vehicle.**
+  `{{SECRET:name}}` resolution happens in the daemon parent's per-vehicle dispatch
   path (`src/dispatch.c`) *before* the RunToolReq blob is serialized — shell
-  interpolates `command`, web and js interpolate `arguments`. The interpolated
+  interpolates `command`, js interpolates `arguments`. The interpolated
   values cross to the broker in the blob; the broker/child never holds the
   master key. A JS-defined extension tool's args are interpolated via the
-  SBX_JS tier path. `{{SECRET:name}}` in a handler file body resolves in the
-  child at the `http_request()` boundary (specs/security.md, JS-Tier Secret
+  js dispatch path. `{{SECRET:name}}` in a handler file body resolves in the
+  child at the `http_request()` boundary (specs/security.md, JS Secret
   Resolution).
 - Handler code is workspace-scoped (agent authored) — same trust as a draft extension
 - Network from `cclaw.exec` (if built) goes through the same `HTTP_PROXY`/`HTTPS_PROXY` loopback proxy and host allowlist as `shell_exec` ([shell-networking.md](shell-networking.md))

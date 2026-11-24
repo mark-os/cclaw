@@ -53,7 +53,7 @@ static void cleanup(void) {
     system(cmd);
 }
 
-/* Send a file-tier request via the real re-exec path.
+/* Send a file request via the real re-exec path.
  * Returns the tool result (malloc'd) or NULL on spawn failure. */
 static char *run_tool_request(const char *tool_name, const char *arguments) {
     /* Extract wire params exactly as the dispatching parent does. */
@@ -68,7 +68,7 @@ static char *run_tool_request(const char *tool_name, const char *arguments) {
 
     size_t blob_len = 0;
     RunToolReq req = {
-        .tier = RUNTOOL_TIER_FILE,
+        .vehicle = EXEC_FILE,
         .tool_name = tool_name,
         .params = wa, .param_count = wn,
         .workspace = workspace, .sandbox = 1,

@@ -1,4 +1,4 @@
-/* Fetch-boundary {{SECRET:name}} resolution in the JS tier (qjs_host_eval.c):
+/* Fetch-boundary {{SECRET:name}} resolution in the js child (qjs_host_eval.c):
  * placeholders in url/body/headers — including ones read from a .qjs file
  * body, the case the parent's arg interpolation can never see — resolve in
  * the child at http_request time. Unknown names and unbound/unmatched host

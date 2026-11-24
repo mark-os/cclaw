@@ -10,8 +10,8 @@ without a containment backend gets).
 
 Resolution happens in ONE place: `sandbox_policy_from_profile()`
 (`src/sandbox.c`), called from `agent_setup_init()` (`src/agent_setup.c`),
-which fills the `SandboxProfile` used by every sandboxed tool tier (shell,
-web, js, file — all via the `--run-tool` broker, `src/run_tool.c`).
+which fills the `SandboxProfile` used by every sandboxed tool child (shell,
+js, file — all via the `--run-tool` broker, `src/run_tool.c`).
 
 `src/sandbox.c` holds the policy and the child setup. The mechanism that
 establishes the boundary is the containment backend (`src/contain.h`), chosen
@@ -129,9 +129,9 @@ agent workspace instead.
   to `standard` by the forward patch. The seeded default agent (`Assistant`)
   is `standard`.
 - **clean allowlist env**: the environment is wiped, then only `PATH`,
-  `TMPDIR` and `HOME` are set. Additions by tier: network tiers get
+  `TMPDIR` and `HOME` are set. Additions by vehicle: shell and js get
   `CCLAW_PROXY_SOCK` and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`,
-  `ALL_PROXY`, `NO_PROXY`, and their lowercase forms); the shell tier also
+  `ALL_PROXY`, `NO_PROXY`, and their lowercase forms); the shell also
   gets `CCLAW_CONNECT` and `GIT_SSH_COMMAND`
   ([shell-networking.md](shell-networking.md)); JS gets `CCLAW_LLM_SOCK`
   except under `restricted`; a shell child gets the `CCLAW_SECRET_*` values

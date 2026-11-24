@@ -1,7 +1,7 @@
 #ifndef CCLAW_QJS_LLM_H
 #define CCLAW_QJS_LLM_H
 
-/* The LLM() global for the sandboxed JS tier: a thin client for the parent's
+/* The LLM() global for the sandboxed js child: a thin client for the parent's
  * per-call bridge socket (llm_bridge.h, path in $CCLAW_LLM_SOCK). All
  * routing, key resolution, body construction, accounting, and archiving
  * happen in the parent (llm_request, llm_proc.c) — no key material exists in

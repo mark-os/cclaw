@@ -66,7 +66,7 @@ void qjs_host_set_secrets(const JsHostSecret *secrets, size_t count);
  * message — the proxy decides. (NULL, 0, 0) clears. */
 void qjs_host_set_egress(char **rules, size_t count, int enforced);
 
-/* In-process JS evaluator (SBX_JS run_fn + unit-test entry). Runs the eval
+/* In-process JS evaluator (EXEC_JS run_fn + unit-test entry). Runs the eval
  * profile with host functions in THIS process — the caller is responsible for
  * any sandbox/namespace setup beforehand (the broker child does it; unit tests
  * run host-mode in-process). Exactly one of `code` / `filename` is used; with

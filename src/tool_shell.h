@@ -1,7 +1,7 @@
 #ifndef CCLAW_TOOL_SHELL_H
 #define CCLAW_TOOL_SHELL_H
 
-/* The shell_exec tool (SBX_SHELL tier): runs a command in the namespace
+/* The shell_exec tool (EXEC_SHELL vehicle): runs a command in the namespace
  * sandbox via the --run-tool broker, with secret injection and the
  * transparent credential proxy for egress.
  */
@@ -31,7 +31,7 @@ typedef struct {
 /* Register shell_exec tool into registry.
  * workspace: agent workspace path (namespace sandbox restricts fs).
  * shell_path: interpreter for -c (NULL = /bin/sh).
- * Execution is via --run-tool broker (EXEC_SANDBOX); no in-process handler. */
+ * Execution is via --run-tool broker (EXEC_SHELL); no in-process handler. */
 int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *workspace,
                         const char *shell_path);
 
@@ -49,10 +49,10 @@ void shell_secrets_free(ShellSecret *secrets, size_t count);
 RunToolSecret *shell_filter_secrets(const char *cmd, const ShellSecret *all,
                                     size_t n, size_t *out_count);
 
-/* --run-tool tier leaf (inner_exec): inject the pre-filtered secrets into env,
+/* --run-tool child leaf (inner_exec): inject the pre-filtered secrets into env,
  * scrub the plaintext copies, and exec /bin/sh -c on q->command. Called from
  * the broker's sandbox child after sandbox setup; never returns (_exit(127)
  * if exec fails). */
-void tool_shell_tier_exec(RunToolParsed *q) __attribute__((noreturn));
+void tool_shell_child_exec(RunToolParsed *q) __attribute__((noreturn));
 
 #endif

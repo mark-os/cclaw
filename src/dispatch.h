@@ -14,7 +14,7 @@
  *
  * Also here: the LLM request path (the other thing run_advance dispatches),
  * the capacity-stalled session set, and the cron fire pipeline, which is a
- * JS-tier dispatch with a schedule instead of a tool_call in front of it.
+ * js dispatch with a schedule instead of a tool_call in front of it.
  *
  * Lib-resident: loop.c's run_advance dispatches through here on every turn,
  * so dispatch.o cannot live in main.o (which the Makefile filters out of
@@ -56,7 +56,7 @@ void reap_children(void);
 void child_sweep_deadlines(void);
 
 /* cron.c's script dispatcher (registered with cron_set_script_runner): run a
- * scheduled script as the target agent, in exactly the JS-tier sandbox a
+ * scheduled script as the target agent, in exactly the js sandbox a
  * js_eval tool call would get. */
 CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len);
 

@@ -1,5 +1,5 @@
 /* web_fetch is the shipped web-fetch extension: its handler (the embedded
- * fetch.qjs, exactly what installs) runs in the JS tier in-process, host
+ * fetch.qjs, exactly what installs) runs in the js leaf in-process, host
  * mode, against the loopback mock. The C pieces it stands on — the
  * HTML-to-markdown parser and http_request's denied-host hint — get their
  * own tables. */
@@ -27,7 +27,7 @@ static char *run_web_fetch(const char *args, char **rules, size_t n, int sandbox
     };
     RunToolParsed q;
     memset(&q, 0, sizeof(q));
-    q.tier = RUNTOOL_TIER_JS;
+    q.vehicle = EXEC_JS;
     q.tool_name = "web_fetch";
     q.params = p;
     q.param_count = 2;
@@ -35,7 +35,7 @@ static char *run_web_fetch(const char *args, char **rules, size_t n, int sandbox
     q.host_count = n;
     q.sandbox = sandbox;
     *is_error = 0;
-    return tool_js_tier_run(&q, is_error);
+    return tool_js_child_run(&q, is_error);
 }
 
 /* Untrusted page bytes: what survives conversion, and malformed markup that

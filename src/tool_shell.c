@@ -49,8 +49,7 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
         ToolEntry *e = tools_lookup(reg, "shell_exec");
         if (e) {
             e->free_fn = free;
-            e->recipe = (ToolRecipe){.vehicle = EXEC_SANDBOX,
-                                     .tier = SBX_SHELL,
+            e->recipe = (ToolRecipe){.vehicle = EXEC_SHELL,
                                      .needs_interp = 1,
                                      .backgroundable = 1,
                                      .droppable = 1};
@@ -158,7 +157,7 @@ RunToolSecret *shell_filter_secrets(const char *cmd, const ShellSecret *all,
     return min;
 }
 
-void tool_shell_tier_exec(RunToolParsed *q) {
+void tool_shell_child_exec(RunToolParsed *q) {
     /* Inject secrets into env — only after env scrub (ordering matters).
      * These are the minimal set pre-filtered by the parent. */
     for (size_t i = 0; i < q->secret_count; i++) {
@@ -170,7 +169,7 @@ void tool_shell_tier_exec(RunToolParsed *q) {
     }
     for (size_t i = 0; i < q->secret_count; i++)
         if (q->secrets[i].value) explicit_bzero(q->secrets[i].value, strlen(q->secrets[i].value));
-    /* The one inner exec — shell is the only tier with a foreign program.
+    /* The one inner exec — shell is the only vehicle with a foreign program.
      * command carries interpolated secrets; exec replaces the address space so
      * they don't persist after execl. shell_path is operator/agent config
      * (see agent_setup.c), not model input — the command string is what's

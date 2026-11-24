@@ -1,6 +1,6 @@
 # Egress Filter Model — Host Policy at the Proxy
 
-Status: spec. Sits under the **js** and **shell** tiers (web_fetch is a JS
+Status: spec. Sits under the **js** and **shell** vehicles (web_fetch is a JS
 extension tool). Both reach the
 network only through the proxy (netns → UDS / loopback CONNECT shim → proxy is
 the sole route). The proxy is therefore the single, unbypassable chokepoint

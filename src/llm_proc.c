@@ -599,7 +599,7 @@ static int llm_attempt(sqlite3 *db, ModelCandidate *m, const char *body,
 
 /* ── llm_request: the LLM() bridge's parent-side core ──────────────
  *
- * One completion on behalf of a JS-tier caller (llm-core.md): the agent's
+ * One completion on behalf of a js caller (llm-core.md): the agent's
  * OWN routing list (same loader, same order as its turns — agent_models IS
  * the authority to spend these models), body built in SQL, key resolved
  * here and never crossing into any child, every attempt archived to

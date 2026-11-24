@@ -6,7 +6,7 @@
 #define JSEVAL_DEFAULT_TIMEOUT 120
 
 /* The js_eval tool and extension tools — JS evaluation in the sandboxed
- * engine (SBX_JS tier). */
+ * engine (the EXEC_JS vehicle). */
 
 #include "tools.h"
 #include "sandbox.h"
@@ -22,8 +22,8 @@ typedef struct {
     size_t allowed_hosts_count;
 } JsHostCtx;
 
-/* Context for js_eval (SBX_JS tier) — carries the sandbox profile, mirroring
- * the shell/web profile. js runs in the same fork+execve --run-tool broker; its
+/* Context for js_eval (EXEC_JS) — carries the sandbox profile, mirroring the
+ * shell's. js runs in the same fork+execve --run-tool broker; its
  * http_request curl reaches the per-hop decide() proxy via HTTP_PROXY. Egress is
  * the proxy's job (allowed_hosts feed proxy_bind), not a pre-flight. */
 typedef struct {
@@ -45,21 +45,21 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx);
 char *tool_js_eval_handler(const char *arguments, void *user_data, int *is_error);
 
 /* Register an extension tool. `path` is the absolute handler .qjs file in the
- * shared store; the SBX_JS broker evals it (filename mode) with the call args in
+ * shared store; the js broker evals it (filename mode) with the call args in
  * scope when the tool runs (same model as js_eval's filename mode). */
 int js_tool_register_ext(ToolRegistry *reg, const char *name,
                          const char *description, const char *parameters_json,
                          const char *path, JsEvalCtx *ectx,
                          const char *policy_json);
 
-/* Resolve a JS-tier tool entry (js_eval OR an extension tool) into its sandbox
+/* Resolve a js tool entry (js_eval OR an extension tool) into its sandbox
  * profile and — for extension tools — the handler .qjs path the child runs
  * (*out_path=NULL for js_eval). Both outputs borrow the entry's storage. */
 int js_tool_resolve_request(const ToolEntry *te, JsEvalCtx **out_ctx,
                             const char **out_path);
 
-/* --run-tool tier leaf: eval qjs in-process inside the broker's inner fork
+/* --run-tool child leaf: eval qjs in-process inside the broker's inner fork
  * (netns + proxy + mounts already applied). */
-char *tool_js_tier_run(const RunToolParsed *q, int *is_error);
+char *tool_js_child_run(const RunToolParsed *q, int *is_error);
 
 #endif

@@ -183,7 +183,7 @@ static char *check_script(const ToolCronCtx *ctx, const CronDoc *d) {
                     "'..' path segments)", d->script);
     size_t sl = strlen(d->script);
     if (sl < 5 || strcmp(d->script + sl - 4, ".qjs") != 0)
-        return errf("error: script '%s' must end in .qjs — the JS tier refuses "
+        return errf("error: script '%s' must end in .qjs — the js child refuses "
                     "anything else at fire time", d->script);
     if (!ctx->workspace || !ctx->workspace[0])
         return errf("error: no workspace configured — script jobs need one");

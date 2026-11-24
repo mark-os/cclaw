@@ -63,7 +63,7 @@ These look odd at a glance but are deliberate. Understand them before touching t
 - **A SQL query emits the LLM request JSON.** `src/llm_payload.c` returns the request body zero-copy from an open statement. This is intentional and fast — do not replace it with a C JSON builder.
 - **Forked tool children, threaded LLM calls.** LLM requests run on a worker thread pool in the long-lived process; only untrusted/blocking tools fork. (This replaced an earlier fork-per-turn design — don't reintroduce it.)
 - **No config files in agent logic, no compat shims.** Config comes from env at startup; delete old code instead of versioning it. The one sanctioned versioning mechanism is the DB schema patch list (`schema_patches[]` in `src/db.c`).
-- **One binary for every process mode — no per-subsystem "thin" child.** The re-exec'd `cclaw --run-tool` broker (all sandboxed tool tiers, including JS) and the `cclaw --channel` runner reuse the full image. COW fork + demand paging already keep the subsystems a child never calls (civetweb, most of SQLite) out of its resident set; `--run-tool` is intercepted at the top of `main()` before any DB/config/key init, so the child never even starts them. Splitting out a minimal child binary would buy nothing and is not worth the build/maintenance cost.
+- **One binary for every process mode — no per-subsystem "thin" child.** The re-exec'd `cclaw --run-tool` broker (every sandboxed tool child: file, shell and JS) and the `cclaw --channel` runner reuse the full image. COW fork + demand paging already keep the subsystems a child never calls (civetweb, most of SQLite) out of its resident set; `--run-tool` is intercepted at the top of `main()` before any DB/config/key init, so the child never even starts them. Splitting out a minimal child binary would buy nothing and is not worth the build/maintenance cost.
 
 ### Code that touches the world outside the process
 
@@ -189,7 +189,7 @@ This is what CClaw *is for*, not an add-on. Agents extend themselves at runtime 
 See [specs/security.md](specs/security.md) for full details and [specs/trust.md](specs/trust.md) for the axis model (containment / authority / escalation / sensitivity).
 
 - **Agent process**: trusted binary, unsandboxed. Tool egress is decided at the credential proxy (`host_decide()`, default-deny).
-- **Tool children** (`--run-tool`: shell, js, file tiers): untrusted. `setrlimit` caps per profile. Namespace sandbox; the only route out is the egress proxy, reached through the `HTTP(S)_PROXY` variables (a program that ignores them has no network). See [specs/shell-networking.md](specs/shell-networking.md).
+- **Tool children** (`--run-tool`: the shell, js and file vehicles): untrusted. `setrlimit` caps per profile. Namespace sandbox; the only route out is the egress proxy, reached through the `HTTP(S)_PROXY` variables (a program that ignores them has no network). See [specs/shell-networking.md](specs/shell-networking.md).
 - **Secrets**: encrypted in cclaw.db (ChaCha20-Poly1305). Decrypted at runtime in the parent, delivered to tool children by argument interpolation or `CCLAW_SECRET_*` env, never exposed to the model or logged.
 - **Secret scanner**: AC-based DLP scans all tool results and user messages for leaked credentials before they enter the context window. See [specs/security.md](specs/security.md#secret-scanner-ac-based-content-dlp).
 - **Secret interpolation**: LLMs reference secrets via `{{SECRET:name}}` — cclaw interpolates the real value before tool execution, the context never sees it.

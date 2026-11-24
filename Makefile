@@ -120,7 +120,7 @@ test-asan: clean
 $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(BUILDDIR)/templates.h $(BUILDDIR)/templates.c: $(TEMPLATES) scripts/gen_templates.sh | $(BUILDDIR)/
+$(BUILDDIR)/templates.h $(BUILDDIR)/templates.c: $(TEMPLATES) scripts/gen_templates.sh scripts/schema_doc.awk | $(BUILDDIR)/
 	./scripts/gen_templates.sh $(BUILDDIR)/templates.h templates $(SHIPPED_BUNDLES)
 
 $(BUILDDIR)/templates.o: $(BUILDDIR)/templates.c $(BUILDDIR)/templates.h | $(BUILDDIR)/

@@ -30,7 +30,6 @@
 #define NAME_MAX_LEN 64
 #define MAX_KEY 8
 #define MAX_FILTERS 16
-#define MAX_LINKS 48
 #define LIST_PREVIEW 200          /* characters of a long value in a list */
 #define ROW_PREVIEW 1000000       /* characters of a long value on a row page */
 #define COUNT_CAP 1000            /* "1000+" rather than a full scan */
@@ -233,189 +232,6 @@ static char *triples_close(Triples *t) {
     return buf_take(&t->out);
 }
 
-/* ── column explanations from the comments in templates/schema.sql ────────
- * The file's conventions: comment lines right above a CREATE TABLE explain
- * the table; inside it a column's comment trails its line and continues on
- * deeper-indented comment-only lines, while comment lines at the column
- * indent explain the column that follows them. */
-
-typedef struct {
-    Buf b;
-    int prev;     /* indent of the previous line's text; -1 after a blank line */
-} DocText;
-
-/* Add one comment line's text (after the "--"). Wrapped prose joins with a
- * space; indented lines are list items and start a new line; a blank
- * comment line is a paragraph break. */
-static void doc_line(DocText *d, const char *s, size_t n) {
-    if (n && s[0] == ' ') { s++; n--; }
-    while (n && (s[n - 1] == ' ' || s[n - 1] == '\r')) n--;
-    size_t lead = 0;
-    while (lead < n && s[lead] == ' ') lead++;
-    if (lead == n) { if (d->b.len) d->prev = -1; return; }
-    int cont = lead > 0 && d->prev > 0 && (int)lead > d->prev;
-    if (d->b.len) {
-        if (d->prev < 0) buf_append_str(&d->b, "\n\n");
-        else if (cont) buf_append_char(&d->b, ' ');
-        else if (lead > 0 || d->prev > 0) buf_append_char(&d->b, '\n');
-        else buf_append_char(&d->b, ' ');
-    }
-    buf_append(&d->b, s + lead, n - lead);
-    if (!cont) d->prev = (int)lead;
-}
-
-static char *doc_take(DocText *d) {
-    char *s = buf_take(&d->b);
-    d->prev = 0;
-    return s;
-}
-
-typedef struct {
-    Triples *sink;
-    DocText tdoc, cdoc, pend;
-    char header[96];
-    char table[NAME_MAX_LEN], col[NAME_MAX_LEN];
-    int in_table, base;
-} DocParse;
-
-static void doc_emit(DocParse *p, const char *col, DocText *d) {
-    char *s = doc_take(d);
-    if (s && s[0]) triples_add(p->sink, p->table, col, s);
-    free(s);
-}
-
-static void col_flush(DocParse *p) {
-    if (p->col[0]) doc_emit(p, p->col, &p->cdoc);
-    else buf_free(&p->cdoc.b);
-    p->col[0] = '\0';
-}
-
-/* Identifier at s (copied into out), or 0 when s does not start with one. */
-static size_t ident(const char *s, size_t n, char *out) {
-    size_t i = 0;
-    while (i < n && i < NAME_MAX_LEN - 1 &&
-           (s[i] == '_' || (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') ||
-            (i > 0 && s[i] >= '0' && s[i] <= '9')))
-        i++;
-    memcpy(out, s, i);
-    out[i] = '\0';
-    return i;
-}
-
-/* Offset of a trailing "--" outside quotes, or -1. */
-static long comment_at(const char *s, size_t n) {
-    int q = 0;
-    for (size_t i = 0; i + 1 < n; i++) {
-        if (s[i] == '\'') q = !q;
-        else if (!q && s[i] == '-' && s[i + 1] == '-') return (long)i;
-    }
-    return -1;
-}
-
-static void doc_comment(DocParse *p, size_t indent, const char *s, size_t n) {
-    if (!p->in_table) {
-        const char *h = strstr(s, "\xe2\x95\x90");   /* ═ : a section header */
-        if (h && (size_t)(h - s) < n) {
-            const char *a = s;
-            size_t m = n;
-            while (m && (*a == ' ' || (unsigned char)*a >= 0x80)) { a++; m--; }
-            while (m && (a[m - 1] == ' ' || (unsigned char)a[m - 1] >= 0x80 || a[m - 1] == '\r')) m--;
-            snprintf(p->header, sizeof(p->header), "%.*s", (int)m, a);
-            return;
-        }
-        doc_line(&p->tdoc, s, n);
-        return;
-    }
-    if (p->base >= 0 && (int)indent > p->base && p->col[0]) doc_line(&p->cdoc, s, n);
-    else doc_line(&p->pend, s, n);
-}
-
-static void doc_table_start(DocParse *p, const char *s, size_t n) {
-    static const char kw[] = "CREATE TABLE IF NOT EXISTS ";
-    if (ident(s + sizeof(kw) - 1, n - (sizeof(kw) - 1), p->table) == 0) return;
-    p->in_table = 1;
-    p->base = -1;
-    p->col[0] = '\0';
-    if (p->tdoc.b.len) {
-        doc_emit(p, NULL, &p->tdoc);
-    } else if (p->header[0]) {
-        triples_add(p->sink, p->table, NULL, p->header);
-    }
-    p->header[0] = '\0';
-}
-
-static void doc_body_line(DocParse *p, size_t indent, const char *s, size_t n) {
-    if (p->base < 0) p->base = (int)indent;
-    if ((int)indent == p->base) {
-        col_flush(p);
-        char word[NAME_MAX_LEN];
-        size_t w = ident(s, n, word);
-        static const char *const CONSTRAINT[] = { "PRIMARY", "FOREIGN", "UNIQUE",
-                                                  "CHECK", "CONSTRAINT" };
-        int is_con = 0;
-        for (size_t i = 0; i < sizeof(CONSTRAINT) / sizeof(CONSTRAINT[0]); i++)
-            if (strcasecmp(word, CONSTRAINT[i]) == 0) is_con = 1;
-        if (w && !is_con) {
-            memcpy(p->col, word, sizeof(word));
-            p->cdoc = p->pend;            /* comments above it explain it */
-            memset(&p->pend, 0, sizeof(p->pend));
-        } else {
-            buf_free(&p->pend.b);
-            p->pend.prev = 0;
-        }
-    }
-    long c = comment_at(s, n);
-    if (c >= 0 && p->col[0]) doc_line(&p->cdoc, s + c + 2, n - (size_t)c - 2);
-}
-
-static void doc_parse_line(DocParse *p, const char *l, size_t n) {
-    size_t indent = 0;
-    while (indent < n && l[indent] == ' ') indent++;
-    const char *s = l + indent;
-    size_t m = n - indent;
-    if (m >= 2 && s[0] == '-' && s[1] == '-') {
-        doc_comment(p, indent, s + 2, m - 2);
-        return;
-    }
-    if (!p->in_table) {
-        if (m > 27 && strncmp(s, "CREATE TABLE IF NOT EXISTS ", 27) == 0) {
-            doc_table_start(p, s, m);
-        } else {
-            buf_free(&p->tdoc.b);
-            p->tdoc.prev = 0;
-            p->header[0] = '\0';
-        }
-        return;
-    }
-    if (m && s[0] == ')') {
-        col_flush(p);
-        buf_free(&p->pend.b);
-        p->in_table = 0;
-        return;
-    }
-    if (m) doc_body_line(p, indent, s, m);
-}
-
-/* [[table, column|null, explanation], ...] for every commented table and
- * column of the schema this binary was built with. */
-static char *schema_doc_json(sqlite3 *db) {
-    Triples t;
-    if (triples_open(db, &t) != 0) return NULL;
-    DocParse p;
-    memset(&p, 0, sizeof(p));
-    p.sink = &t;
-    for (const char *l = TPL_SCHEMA_SQL; *l;) {
-        const char *e = strchr(l, '\n');
-        size_t n = e ? (size_t)(e - l) : strlen(l);
-        doc_parse_line(&p, l, n);
-        l += n + (e ? 1 : 0);
-    }
-    buf_free(&p.tdoc.b);
-    buf_free(&p.cdoc.b);
-    buf_free(&p.pend.b);
-    return triples_close(&t);
-}
-
 /* [[table, column, setting|measurement|secret], ...] — the change log's list. */
 static char *class_json(sqlite3 *db) {
     static const char *const NAMES[] = { "setting", "measurement", "secret" };
@@ -448,7 +264,7 @@ static char *hidden_json(sqlite3 *db) {
     " AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
 
 /* Every link, one row per column pair: declared FKs, then the hand list.
- * lid groups the pairs of one link. */
+ * lid groups the pairs of one link; linkobj is each link as the API shows it. */
 #define LINKS_CTE \
     "tbl(name) AS (" TABLES_SQL "), " \
     "links(lid, ft, tt, seq, fcol, tcol, declared, wcol, wval) AS (" \
@@ -460,7 +276,13 @@ static char *hidden_json(sqlite3 *db) {
     " SELECT 'h:' || printf('%02d', h.key), h.value ->> 0, h.value ->> 2, c.key, c.value," \
     "  json_extract(h.value, '$[3][' || c.key || ']'), 0, h.value ->> 4, h.value ->> 5" \
     "  FROM json_each(:hand) h, json_each(h.value, '$[1]') c" \
-    "  WHERE h.value ->> 0 IN tbl AND h.value ->> 2 IN tbl)"
+    "  WHERE h.value ->> 0 IN tbl AND h.value ->> 2 IN tbl), " \
+    "linkobj(lid, ft, tt, o) AS (SELECT lid, ft, tt, json_object(" \
+    "  'from', ft, 'from_columns', json_group_array(fcol ORDER BY seq)," \
+    "  'to', tt, 'to_columns', json_group_array(tcol ORDER BY seq)," \
+    "  'declared', json(iif(max(declared), 'true', 'false'))," \
+    "  'when', CASE WHEN max(wcol) IS NULL THEN NULL ELSE json_object(max(wcol), max(wval)) END)" \
+    "  FROM links GROUP BY lid)"
 
 typedef struct {
     char name[NAME_MAX_LEN];
@@ -624,13 +446,7 @@ static const char META_SQL[] =
     "WITH " LINKS_CTE ", "
     "doc(t, c, d) AS (SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(:doc)), "
     "cls(t, c, k) AS (SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(:cls)), "
-    "hid(t, c, h) AS (SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(:hid)), "
-    "linkobj(lid, ft, tt, o) AS (SELECT lid, ft, tt, json_object("
-    "  'from', ft, 'from_columns', json_group_array(fcol ORDER BY seq),"
-    "  'to', tt, 'to_columns', json_group_array(tcol ORDER BY seq),"
-    "  'declared', json(iif(max(declared), 'true', 'false')),"
-    "  'when', CASE WHEN max(wcol) IS NULL THEN NULL ELSE json_object(max(wcol), max(wval)) END)"
-    "  FROM links GROUP BY lid) "
+    "hid(t, c, h) AS (SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(:hid)) "
     "SELECT json_object("
     " 'tables', (SELECT json_group_array(json_object("
     "   'name', m.name,"
@@ -666,16 +482,15 @@ static const char META_SQL[] =
     "                      GROUP BY block_id HAVING count(*) > 1))))";
 
 int explore_meta(sqlite3 *db, char **out) {
-    char *doc = schema_doc_json(db), *cls = class_json(db);
-    char *hid = hidden_json(db), *cnt = counts_json(db);
+    char *cls = class_json(db), *hid = hidden_json(db), *cnt = counts_json(db);
     int status;
     sqlite3_stmt *st;
-    if (!doc || !cls || !hid || !cnt) {
+    if (!cls || !hid || !cnt) {
         status = fail(db, 500, "could not describe the schema", NULL, out);
     } else if (sqlite3_prepare_v2(db, META_SQL, -1, &st, NULL) != SQLITE_OK) {
         status = fail(db, 500, "query failed", sqlite3_errmsg(db), out);
     } else {
-        bind_text(st, ":doc", doc);
+        bind_text(st, ":doc", TPL_SCHEMA_DOC_JSON);
         bind_text(st, ":cls", cls);
         bind_text(st, ":hid", hid);
         bind_text(st, ":cnt", cnt);
@@ -685,7 +500,7 @@ int explore_meta(sqlite3 *db, char **out) {
         bind_text(st, ":hand", HAND_LINKS_JSON);
         status = take_json(db, st, out);
     }
-    free(doc); free(cls); free(hid); free(cnt);
+    free(cls); free(hid); free(cnt);
     return status;
 }
 
@@ -901,176 +716,61 @@ int explore_rows(sqlite3 *db, const ExploreQuery *q, char **out) {
 
 /* ── row ─────────────────────────────────────────────────────────────────── */
 
-typedef struct {
-    char ft[NAME_MAX_LEN], tt[NAME_MAX_LEN];
-    char fc[MAX_KEY][NAME_MAX_LEN], tc[MAX_KEY][NAME_MAX_LEN];
-    int n;
-    int declared;
-    char wcol[NAME_MAX_LEN], wval[64];
-} Link;
+/* The row query's two link lists, as SQL text: one expression per link
+ * touching :t, those it points out along, then those pointing in. Schema
+ * names go into the text through %w (inside "") and the link's own fields
+ * through %Q, so nothing from the request does. A link whose values would
+ * expose a hidden column is not shown at all. */
+static const char LINK_SQL[] =
+    "WITH " LINKS_CTE ", "
+    "hid(t, c) AS (SELECT value ->> 0, value ->> 1 FROM json_each(:hid)), "
+    "lk AS (SELECT lid, l.ft, l.tt, o, max(wcol) AS wc, max(wval) AS wv,"
+    "  group_concat(printf(' AND t.\"%w\" IS NOT NULL', fcol), '' ORDER BY seq) AS nn,"
+    "  group_concat(printf('t.\"%w\"', fcol), ', ' ORDER BY seq) AS vals,"
+    "  group_concat(printf('x.\"%w\" = t.\"%w\"', tcol, fcol), ' AND ' ORDER BY seq) AS m_out,"
+    "  group_concat(printf('x.\"%w\" = t.\"%w\"', fcol, tcol), ' AND ' ORDER BY seq) AS m_in,"
+    "  group_concat(printf('%Q, t.\"%w\"', fcol, tcol), ', ' ORDER BY seq) AS filt"
+    "  FROM links l JOIN linkobj USING (lid) WHERE l.ft = :t OR l.tt = :t GROUP BY lid"
+    "  HAVING NOT max(EXISTS (SELECT 1 FROM hid WHERE hid.t = l.ft AND hid.c = l.fcol"
+    "                                           OR hid.t = l.tt AND hid.c = l.tcol))), "
+    "w AS (SELECT *, iif(wc IS NULL, '', printf(' AND t.\"%w\" = %Q', wc, wv)) AS wt,"
+    "  iif(wc IS NULL, '', printf(' AND x.\"%w\" = %Q', wc, wv)) AS wx,"
+    "  iif(wc IS NULL, '', printf(', %Q, %Q', wc, wv)) AS wf FROM lk) "
+    "SELECT"
+    " COALESCE((SELECT group_concat(printf('CASE WHEN 1%s%s THEN json_set(%Q, ''$.values'','"
+    "   || ' json_array(%s), ''$.exists'', json(iif(EXISTS (SELECT 1 FROM \"%w\" AS x'"
+    "   || ' WHERE %s%s), ''true'', ''false''))) END',"
+    "   nn, wt, o, vals, tt, m_out, wt), ', ' ORDER BY lid) FROM w WHERE ft = :t), ''),"
+    " COALESCE((SELECT group_concat(printf('json_set(%Q, ''$.filter'', json_object(%s%s),'"
+    "   || ' ''$.count'', (SELECT count(*) FROM (SELECT 1 FROM \"%w\" AS x WHERE %s%s'"
+    "   || ' LIMIT %d)), ''$.count_capped'', %d)',"
+    "   o, filt, wf, ft, m_in, wx, :cap + 1, :cap), ', ' ORDER BY lid) FROM w WHERE tt = :t), '')";
 
-static void copy_name(char *dst, const unsigned char *src) {
-    snprintf(dst, NAME_MAX_LEN, "%s", src ? (const char *)src : "");
-}
-
-/* A link whose values would expose a hidden column is not shown at all. */
-static int link_hidden(const Link *l) {
-    for (int i = 0; i < l->n; i++)
-        if (explore_hidden(l->ft, l->fc[i]) || explore_hidden(l->tt, l->tc[i])) return 1;
-    return 0;
-}
-
-/* Every link touching table `name`, as from-side or to-side. */
-static int links_load(sqlite3 *db, const char *name, Link *L, int max) {
+/* LINK_SQL's two lists for `table`, into *lo and *li (caller frees). */
+static int links_sql(sqlite3 *db, const char *table, char **lo, char **li) {
+    char *hid = hidden_json(db);
     sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db,
-            "WITH " LINKS_CTE " SELECT lid, ft, tt, fcol, tcol, declared, wcol, wval"
-            " FROM links WHERE ft = :t OR tt = :t ORDER BY lid, seq",
-            -1, &st, NULL) != SQLITE_OK)
-        return -1;
-    bind_text(st, ":hand", HAND_LINKS_JSON);
-    bind_text(st, ":t", name);
-    int n = 0;
-    char last[96] = "";
-    while (sqlite3_step(st) == SQLITE_ROW) {
-        const char *lid = (const char *)sqlite3_column_text(st, 0);
-        if (strcmp(lid, last) != 0) {
-            if (n >= max) break;
-            snprintf(last, sizeof(last), "%s", lid);
-            Link *l = &L[n++];
-            memset(l, 0, sizeof(*l));
-            copy_name(l->ft, sqlite3_column_text(st, 1));
-            copy_name(l->tt, sqlite3_column_text(st, 2));
-            l->declared = sqlite3_column_int(st, 5);
-            copy_name(l->wcol, sqlite3_column_text(st, 6));
-            snprintf(l->wval, sizeof(l->wval), "%s",
-                     sqlite3_column_text(st, 7) ? (const char *)sqlite3_column_text(st, 7) : "");
+    *lo = *li = NULL;
+    if (hid && sqlite3_prepare_v2(db, LINK_SQL, -1, &st, NULL) == SQLITE_OK) {
+        bind_text(st, ":hand", HAND_LINKS_JSON);
+        bind_text(st, ":hid", hid);
+        bind_text(st, ":t", table);
+        bind_int(st, ":cap", COUNT_CAP);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            *lo = strdup((const char *)sqlite3_column_text(st, 0));
+            *li = strdup((const char *)sqlite3_column_text(st, 1));
         }
-        Link *l = &L[n - 1];
-        if (l->n < MAX_KEY) {
-            copy_name(l->fc[l->n], sqlite3_column_text(st, 3));
-            copy_name(l->tc[l->n], sqlite3_column_text(st, 4));
-            l->n++;
-        }
+        sqlite3_finalize(st);
     }
-    sqlite3_finalize(st);
-    int kept = 0;
-    for (int i = 0; i < n; i++)
-        if (!link_hidden(&L[i])) L[kept++] = L[i];
-    return kept;
+    free(hid);
+    return *lo && *li ? 0 : -1;
 }
 
-/* 'from', .., 'from_columns', .., 'to', .., 'to_columns', .., 'declared', .., 'when', .. */
-static void link_fields(Buf *b, const Link *l) {
-    buf_append_str(b, "'from', ");
-    sql_str(b, l->ft);
-    buf_append_str(b, ", 'from_columns', json_array(");
-    for (int i = 0; i < l->n; i++) { if (i) buf_append_str(b, ", "); sql_str(b, l->fc[i]); }
-    buf_append_str(b, "), 'to', ");
-    sql_str(b, l->tt);
-    buf_append_str(b, ", 'to_columns', json_array(");
-    for (int i = 0; i < l->n; i++) { if (i) buf_append_str(b, ", "); sql_str(b, l->tc[i]); }
-    buf_appendf(b, "), 'declared', json('%s'), 'when', ", l->declared ? "true" : "false");
-    if (l->wcol[0]) {
-        buf_append_str(b, "json_object(");
-        sql_str(b, l->wcol);
-        buf_append_str(b, ", ");
-        sql_str(b, l->wval);
-        buf_append_str(b, ")");
-    } else {
-        buf_append_str(b, "NULL");
-    }
-}
-
-/* x.<to col> = t.<from col> AND ... (side 0: x is the to-table) or the
- * reverse (side 1: x is the from-table, t the to-table). */
-static void link_match(Buf *b, const Link *l, int side) {
-    for (int i = 0; i < l->n; i++) {
-        buf_append_str(b, i ? " AND x." : "x.");
-        sql_id(b, side ? l->fc[i] : l->tc[i]);
-        buf_append_str(b, " = t.");
-        sql_id(b, side ? l->tc[i] : l->fc[i]);
-    }
-    if (l->wcol[0]) {
-        buf_append_str(b, side ? " AND x." : " AND t.");
-        sql_id(b, l->wcol);
-        buf_append_str(b, " = ");
-        sql_str(b, l->wval);
-    }
-}
-
-static void link_out(Buf *b, const Link *l) {
-    buf_append_str(b, "CASE WHEN 1");
-    for (int i = 0; i < l->n; i++) {
-        buf_append_str(b, " AND t.");
-        sql_id(b, l->fc[i]);
-        buf_append_str(b, " IS NOT NULL");
-    }
-    if (l->wcol[0]) {
-        buf_append_str(b, " AND t.");
-        sql_id(b, l->wcol);
-        buf_append_str(b, " = ");
-        sql_str(b, l->wval);
-    }
-    buf_append_str(b, " THEN json_object(");
-    link_fields(b, l);
-    buf_append_str(b, ", 'values', json_array(");
-    for (int i = 0; i < l->n; i++) {
-        if (i) buf_append_str(b, ", ");
-        buf_append_str(b, "t.");
-        sql_id(b, l->fc[i]);
-    }
-    buf_append_str(b, "), 'exists', json(iif(EXISTS (SELECT 1 FROM ");
-    sql_id(b, l->tt);
-    buf_append_str(b, " AS x WHERE ");
-    link_match(b, l, 0);
-    buf_append_str(b, "), 'true', 'false'))) END");
-}
-
-static void link_in(Buf *b, const Link *l) {
-    buf_append_str(b, "json_object(");
-    link_fields(b, l);
-    buf_append_str(b, ", 'filter', json_object(");
-    for (int i = 0; i < l->n; i++) {
-        if (i) buf_append_str(b, ", ");
-        sql_str(b, l->fc[i]);
-        buf_append_str(b, ", t.");
-        sql_id(b, l->tc[i]);
-    }
-    if (l->wcol[0]) {
-        buf_append_str(b, ", ");
-        sql_str(b, l->wcol);
-        buf_append_str(b, ", ");
-        sql_str(b, l->wval);
-    }
-    buf_appendf(b, "), 'count', (SELECT count(*) FROM (SELECT 1 FROM ");
-    sql_id(b, l->ft);
-    buf_append_str(b, " AS x WHERE ");
-    link_match(b, l, 1);
-    buf_appendf(b, " LIMIT %d)), 'count_capped', %d)", COUNT_CAP + 1, COUNT_CAP);
-}
-
-static char *row_sql(const XTable *t, const Link *L, int nl) {
+static char *row_sql(const XTable *t, const char *lo, const char *li) {
     Buf b = {0};
     buf_append_str(&b, "SELECT json_object('table', :t, 'key', json(:keycols), 'row', ");
     row_object(&b, t, ROW_PREVIEW);
-    buf_append_str(&b, ", 'links_out', json_array(");
-    int first = 1;
-    for (int i = 0; i < nl; i++)
-        if (strcmp(L[i].ft, t->name) == 0) {
-            if (!first) buf_append_str(&b, ", ");
-            link_out(&b, &L[i]);
-            first = 0;
-        }
-    buf_append_str(&b, "), 'links_in', json_array(");
-    first = 1;
-    for (int i = 0; i < nl; i++)
-        if (strcmp(L[i].tt, t->name) == 0) {
-            if (!first) buf_append_str(&b, ", ");
-            link_in(&b, &L[i]);
-            first = 0;
-        }
-    buf_append_str(&b, ")) FROM ");
+    buf_appendf(&b, ", 'links_out', json_array(%s), 'links_in', json_array(%s)) FROM ", lo, li);
     sql_id(&b, t->name);
     buf_append_str(&b, " AS t WHERE 1");
     for (int k = 0; k < key_count(t); k++) {
@@ -1086,13 +786,11 @@ int explore_row(sqlite3 *db, const ExploreQuery *q, char **out) {
     if (table_load(db, q->table, &t) != 0)
         return fail(db, 404, "no such table", q->table, out);
     int status;
-    Link *L = calloc(MAX_LINKS, sizeof(*L));
-    int nl = L ? links_load(db, t.name, L, MAX_LINKS) : -1;
-    char *sql = NULL, *kc = keycols_json(&t);
+    char *lo = NULL, *li = NULL, *sql = NULL, *kc = keycols_json(&t);
     sqlite3_stmt *st;
     if (!json_is(db, q->key, "array", key_count(&t))) {
         status = fail(db, 400, "key must be a JSON array of the key values", NULL, out);
-    } else if (nl < 0 || !kc || !(sql = row_sql(&t, L, nl))) {
+    } else if (links_sql(db, t.name, &lo, &li) != 0 || !kc || !(sql = row_sql(&t, lo, li))) {
         status = fail(db, 500, "could not build the query", NULL, out);
     } else if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
         status = fail(db, 500, "query failed", sqlite3_errmsg(db), out);
@@ -1102,9 +800,10 @@ int explore_row(sqlite3 *db, const ExploreQuery *q, char **out) {
         bind_text(st, ":key", q->key);
         status = take_json(db, st, out);
     }
+    free(lo);
+    free(li);
     free(sql);
     free(kc);
-    free(L);
     table_free(&t);
     return status;
 }

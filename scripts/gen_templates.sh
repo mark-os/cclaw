@@ -6,6 +6,8 @@
 # Variable name: templates/foo_bar.md        -> TPL_FOO_BAR_MD
 #                extensions/compaction/x.qjs -> TPL_EXT_COMPACTION_X_QJS
 # A bundle's README.md is documentation for the source tree, not shipped.
+# One derived file is embedded too: TPL_SCHEMA_DOC_JSON, the explanations in
+# schema.sql's comments (scripts/schema_doc.awk) that the data explorer shows.
 #
 # Usage: gen_templates.sh <out.h> <templates dir> [bundle dir ...]
 
@@ -13,11 +15,21 @@ HFILE="$1"
 TMPL_DIR="$2"
 shift 2
 CFILE="${HFILE%.h}.c"
+DOCFILE="$(dirname "$HFILE")/schema_doc.json"
+
+# Fail the build rather than embed an empty or partial explanation list.
+LC_ALL=C awk -f "$(dirname "$0")/schema_doc.awk" "$TMPL_DIR/schema.sql" > "$DOCFILE" &&
+    grep -q '^\[\[' "$DOCFILE" || {
+    echo "gen_templates: could not extract the schema's comments" >&2
+    rm -f "$DOCFILE"
+    exit 1
+}
 
 upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr '.-' '__'; }
 
 # "<path> <varname>" per embedded file, templates first.
 list() {
+    printf '%s TPL_SCHEMA_DOC_JSON\n' "$DOCFILE"
     for f in "$TMPL_DIR"/*; do
         [ -f "$f" ] || continue
         printf '%s TPL_%s\n' "$f" "$(upper "$(basename "$f")")"

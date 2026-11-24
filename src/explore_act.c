@@ -362,6 +362,9 @@ static int grant_value_check(Act *a, const char *kind, const char *value) {
         if (qi(a, "SELECT 1 FROM secrets WHERE name=?1 AND scope='system'", value, NULL, NULL) == 1)
             return refuse(a, 400, "%s is a system secret (a provider key): the daemon uses it, and"
                                   " no agent can be granted it.", value);
+        if (qi(a, "SELECT 1 FROM secrets WHERE name=?1", value, NULL, NULL) != 1)
+            return refuse(a, 400, "There is no secret called %s. Store it first, then grant it.",
+                          value);
     } else {
         if (value[0] != '/')
             return refuse(a, 400, "A path grant needs an absolute path, starting with /.");

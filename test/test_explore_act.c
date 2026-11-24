@@ -257,6 +257,8 @@ static void test_grants(void) {
         "kind must be one of");
     has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"tool\",\"value\":\"rm_rf\"}"),
         "no tool called");
+    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"secret\","
+                 "\"value\":\"NO_SUCH_SECRET\"}"), "no secret called");
     has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"host\","
                  "\"value\":\"https://x.example/path\"}"), "not a host name");
     has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"read_path\",\"value\":\"rel/dir\"}"),

@@ -248,6 +248,20 @@ build/         Build output (gitignored)
 
 ## Testing Guidelines
 
+**What earns a test.** A test earns its place if breaking the code under it
+would cause one of: a security or authority hole, a stranded or corrupted
+session or a lost message, a request a provider rejects, or a bug that
+already happened (name the commit in a comment).
+
+- Write the test that fails on the old code, and say so in the commit.
+- Code that crosses a process, a fork or a DB handle is tested through the real binary.
+- One table-driven test per contract, not one function per case.
+- No tests for getters or CRUD round-trips, for SQLite/libc/QuickJS behaviour, for error wording (assert the refusal, at most a keyword), for the exact JSON/SQL we build unless an outside party reads those bytes, or for "does not crash" on trusted input. The sanitizers cover that last one: CI runs the suite under ASan/UBSan before every release.
+- Every parser of untrusted bytes keeps a table of malformed inputs. A sanitizer only sees the inputs a test feeds it.
+- A test that skips everywhere guards nothing; a skip must be visible in the output.
+- Delete a feature's tests in the commit that deletes the feature.
+- Fixtures, one-value queries and `RUN()` live in `test/test_util.h`; the integration harness in `test/test_integ.h`. A test reports failure by `assert`.
+
 Tests must never hang. Follow these rules:
 
 - **No real network** — unit tests (`make test`) must not connect to real hosts. Use UDS-based mocks or loopback.
@@ -296,7 +310,7 @@ make clean        # remove build/
 - While actively editing: `make smoke` after each change.
 - Before a commit: `make test` — cheap enough to run every time.
 - Before a commit that touches channels, LLM proc, retries, or shell proxy (mock-server-exercised paths): also `make test-integration` (~66s). Skip it for changes clearly orthogonal to those areas.
-- `make test-asan` (full suite under ASan/UBSan, ~200s clean-instrumented rebuild): never unprompted — only when explicitly asked.
+- `make test-asan` (full suite under ASan/UBSan, ~200s clean-instrumented rebuild): never unprompted locally — only when explicitly asked. CI runs it on every release tag, and a release waits for it.
 
 - **`make debug` uses clang, not gcc.** GCC-only `#pragma GCC diagnostic` directives must be guarded with `#if defined(__GNUC__) && !defined(__clang__)` — under `-Werror` clang turns an unknown warning group (e.g. `-Wformat-truncation`) into a hard error.
 - **`make test` builds `build/cclaw` first.** Several unit tests (`test_run_tool_escape`, `test_sandbox_mounts`, `test_shell_namespace`, `test_shell_secrets`, `test_workspace_isolation`) fork the main binary via the `--run-tool` path, so the `test` target depends on `$(BUILDDIR)/cclaw` — it's always rebuilt before the suite runs, even after `make clean`. (`make smoke` deliberately omits the dep: its curated subset has no fork-the-binary tests.)

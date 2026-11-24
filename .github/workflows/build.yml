@@ -71,6 +71,28 @@ jobs:
       - name: Integration tests
         run: make test-integration
 
+  asan:
+    name: sanitizers (unit tests under ASan/UBSan)
+    # The suite does not carry tests whose only job is "does not crash on
+    # this input": the sanitizers see that, over every path the tests run.
+    # That trade holds only if they do run, so a release waits for this job.
+    # It runs on a tag, and by hand (workflow_dispatch) to prove it before one.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev xxd clang
+
+      - name: Allow the sandbox its user namespaces
+        # The test job proves this hint; here it is only switched on.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Unit tests under ASan/UBSan
+        run: make test-asan
+
   compat:
     name: compat (source build on an old distro, compile only)
     # Rocky 9 carries libcurl 7.76 (no WebSocket API) and gcc 11: the oldest
@@ -310,7 +332,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [test, compat, no-containment, release-build, whatsapp-bridge]
+    needs: [test, asan, compat, no-containment, release-build, whatsapp-bridge]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

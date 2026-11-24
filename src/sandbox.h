@@ -1,7 +1,7 @@
 #ifndef CCLAW_SANDBOX_H
 #define CCLAW_SANDBOX_H
 
-/* Sandbox policy and child setup: resolves a sandbox_profile string into the
+/* Sandbox policy and child setup: resolves a containment string into the
  * policy fields, plans the mounts, and prepares the tool child (environment,
  * rlimits, working directory). The boundary itself is the containment
  * backend's job (contain.h) — nothing here knows how it is built. Shared by
@@ -19,20 +19,20 @@
 typedef struct { const char *path; int ro; } SandboxMountReq;
 
 /* Sandbox policy + grant-path bundle, shared by the file/shell/js tool
- * contexts. Filled once per agent in agent_setup (policy from sandbox_profile
- * via sandbox_profile_resolve; paths from the agent's grants) and embedded in
+ * contexts. Filled once per agent in agent_setup (policy from the agent's
+ * containment via containment_resolve; paths from the agent's grants) and embedded in
  * each tool ctx — one definition instead of three identical copies. The policy
  * half maps 1:1 to the matching SandboxConfig fields. Path pointers
  * borrow AgentCaps and are rebound on cap refresh. */
 typedef struct {
-    int sandbox;            /* 1 = namespace required, 0 = none (host sandbox_profile) */
+    int sandbox;            /* 1 = namespace required, 0 = none (containment none) */
     int env_mode;           /* 0 = inherit-present-env + scrub, 1 = clean allowlist */
     int net_mode;           /* 0 = proxy available, 1 = no network */
     int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
     struct { int nproc, as_mb, cpu_sec; } rlimits; /* 0 = no limit */
     char **read_paths;  size_t read_path_count;    /* extra bind-mounts from grants */
     char **write_paths; size_t write_path_count;
-} SandboxProfile;
+} Containment;
 
 /* A planned bind-mount: canonical path + ro flag, owned inline. */
 typedef struct { char path[PATH_MAX]; int ro; } SandboxMount;
@@ -52,7 +52,7 @@ typedef struct {
                              * scratch the parent created and owns. NULL = no bind;
                              * /tmp then stays a dir on the tiny root tmpfs, which
                              * is functional but too small to build in. */
-    int sandbox;            /* 1 = namespace required, 0 = none (host sandbox_profile) */
+    int sandbox;            /* 1 = namespace required, 0 = none (containment none) */
     int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
     int net_mode;           /* 0 = proxy available, 1 = no network */
     int skip_pid_ns;        /* 1 = omit CLONE_NEWPID (no inner fork); file, js */
@@ -74,15 +74,15 @@ typedef struct {
  * unconfined. The in-sandbox proxy failing to start is soft (returns 0): no network. */
 int sandbox_child_setup(const SandboxConfig *cfg);
 
-/* Single source of truth: sandbox_profile string → sandbox policy fields.
+/* Single source of truth: containment string → sandbox policy fields.
  * Fills cfg->sandbox, env_mode, net_mode, mount_cwd, rlimits. Does NOT touch workspace/db_path/proxy_sock/cwd_path/tmp_dir (the
- * caller sets those — they are paths, not profile policy). */
-void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg);
+ * caller sets those — they are paths, not containment policy). */
+void sandbox_policy_from_containment(const char *containment, SandboxConfig *cfg);
 
-/* Fill the policy half of a SandboxProfile (sandbox/env_mode/net_mode/mount_cwd/
- * rlimits) from sandbox_profile. The caller sets the
- * grant-path fields separately (they come from AgentCaps, not the profile). */
-void sandbox_profile_resolve(const char *sandbox_profile, SandboxProfile *p);
+/* Fill the policy half of a Containment (sandbox/env_mode/net_mode/mount_cwd/
+ * rlimits) from the containment string. The caller sets the
+ * grant-path fields separately (they come from AgentCaps, not the containment). */
+void containment_resolve(const char *containment, Containment *p);
 
 /* Resolve extra-mount requests into a bind plan: canonicalize each path (drop
  * those whose realpath() fails), dedup by canonical path (rw wins over ro — a

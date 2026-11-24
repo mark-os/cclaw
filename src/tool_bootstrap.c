@@ -22,7 +22,7 @@ static const char *CREATE_AGENT_PARAMS =
     "\"description\":{\"type\":\"string\",\"description\":\"One-line hint: when to delegate to this agent\"},"
     "\"system_prompt\":{\"type\":\"string\",\"description\":\"The agent's role and persona. The built-in operating rules (tools, secrets, escalation) are added above it for every agent — do not repeat them\"},"
     "\"models\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Routing order: registered model ids, first is primary (omit to inherit your own list)\"},"
-    "\"sandbox_profile\":{\"type\":\"string\",\"enum\":[\"host\",\"standard\",\"restricted\"],\"description\":\"Containment profile; must not be looser than yours\"},"
+    "\"containment\":{\"type\":\"string\",\"enum\":[\"none\",\"standard\",\"offline\"],\"description\":\"How the agent's tool calls are contained; must not be looser than yours\"},"
     "\"grants\":{\"type\":\"object\",\"properties\":{"
       "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
       "\"hosts\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
@@ -75,7 +75,7 @@ static const char *UPDATE_AGENT_PARAMS =
     "\"description\":{\"type\":\"string\"},"
     "\"system_prompt\":{\"type\":\"string\",\"description\":\"Replacement role/persona text (full text, not a diff); the built-in operating rules are not part of it\"},"
     "\"models\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Replacement routing order: registered model ids within your own list, first is primary\"},"
-    "\"sandbox_profile\":{\"type\":\"string\",\"enum\":[\"host\",\"standard\",\"restricted\"],\"description\":\"Must not be looser than yours\"},"
+    "\"containment\":{\"type\":\"string\",\"enum\":[\"none\",\"standard\",\"offline\"],\"description\":\"Must not be looser than yours\"},"
     "\"grants\":{\"type\":\"object\",\"properties\":{"
       "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
       "\"hosts\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
@@ -121,10 +121,10 @@ int tool_update_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
     int rc = tools_register(reg, "update_agent",
                           "Propose changes to an existing agent — yourself, or one you "
                           "created (requires human approval). Overlays the fields you set "
-                          "(description, system_prompt, models, sandbox_profile, "
+                          "(description, system_prompt, models, containment, "
                           "max_iterations, shell_timeout) and ADDS grants; absent fields "
                           "keep their value, grants are never removed. Capped by your own "
-                          "profile and grants, like create_agent.",
+                          "containment and grants, like create_agent.",
                           UPDATE_AGENT_PARAMS,
                           tool_update_agent_handler, ctx);
     if (rc == 0)
@@ -138,8 +138,8 @@ int tool_create_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
     int rc = tools_register(reg, "create_agent",
                           "Propose creation of a named agent (requires human approval). "
                           "Takes an agent definition: description, system_prompt, models, "
-                          "sandbox_profile, grants, extensions, memory_blocks, or clone_from. "
-                          "The new agent is capped by your own profile and grants.",
+                          "containment, grants, extensions, memory_blocks, or clone_from. "
+                          "The new agent is capped by your own containment and grants.",
                           CREATE_AGENT_PARAMS,
                           tool_create_agent_handler, ctx);
     if (rc == 0)

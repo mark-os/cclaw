@@ -276,7 +276,7 @@ same `decide()` across every redirect hop. Therefore:
   allowed it unconditionally." That's only true for an agent that *already
   holds* a hostname grant resolving to that IP — `addr_permitted()` only ever
   runs after `host_decide()` already spent a hostname grant via `host_match()`.
-  For an agent with **no** hostname grants (fresh `standard`/`restricted`
+  For an agent with **no** hostname grants (fresh `standard`/`offline`
   agents), the parity gave literal-IP targets a strictly *weaker* bar than
   hostnames: `web_fetch("https://espn.com")` correctly denied with zero
   grants, but `web_fetch("http://<espn's IP>")` sailed through unconditionally

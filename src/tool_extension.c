@@ -28,7 +28,7 @@ static char *sql_text(sqlite3 *db, const char *sql, const char *a1,
 /* ── extension_promote ──────────────────────────────────────────────── */
 
 /* Enumerate a validated bundle's declared contents for the approval prompt:
- * "adds N tools, M hooks, ..." plus agent names/profiles. Heap; caller frees. */
+ * "adds N tools, M hooks, ..." plus agent names/containments. Heap; caller frees. */
 static char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
     char mpath[2*PATH_MAX];
     snprintf(mpath, sizeof(mpath), "%s/extension.json", bundle_dir);
@@ -60,7 +60,7 @@ static char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
         " || json_array_length(COALESCE(json_extract(?1,'$.agents'),'[]')) || ' agents'"
         " || COALESCE((SELECT ' (' || group_concat("
         "      json_extract(value,'$.name') || ':' ||"
-        "      COALESCE(json_extract(value,'$.sandbox_profile'),'standard'), ', ') || ')'"
+        "      COALESCE(json_extract(value,'$.containment'),'standard'), ', ') || ')'"
         "    FROM json_each(json_extract(?1,'$.agents'))), '')"
         " || CASE WHEN json_extract(?1,'$.channel') IS NOT NULL"
         "         THEN ', 1 channel' ELSE '' END"

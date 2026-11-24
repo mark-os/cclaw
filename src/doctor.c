@@ -363,11 +363,11 @@ static void layer_core(sqlite3 *db, const Config *cfg) {
 
 /* Layers 2 and 4, per agent: every child vehicle — file, js and shell
  * alike — runs in one contained child, so they stand or fall together, and
- * which it is depends on the agent's profile. */
+ * which it is depends on the agent's containment. */
 static void layer_tools(sqlite3 *db, int contained) {
     sqlite3_stmt *st;
     if (!db || sqlite3_prepare_v2(db,
-            "SELECT name, COALESCE(sandbox_profile,'standard') FROM agents ORDER BY name;",
+            "SELECT name, COALESCE(containment,'standard') FROM agents ORDER BY name;",
             -1, &st, NULL) != SQLITE_OK) {
         printf("  tools: no agents yet (database not initialised)\n");
         return;
@@ -375,20 +375,20 @@ static void layer_tools(sqlite3 *db, int contained) {
     int refused = 0, rows = 0;
     while (sqlite3_step(st) == SQLITE_ROW) {
         const char *name = (const char *)sqlite3_column_text(st, 0);
-        const char *prof = (const char *)sqlite3_column_text(st, 1);
+        const char *level = (const char *)sqlite3_column_text(st, 1);
         char d[320];
         rows++;
-        if (strcmp(prof, "host") == 0) {
-            snprintf(d, sizeof(d), "%s (host) — uncontained: acts as this user, "
+        if (strcmp(level, "none") == 0) {
+            snprintf(d, sizeof(d), "%s (none) — uncontained: acts as this user, "
                      "with no file, secret or network boundary", name);
             print_warn("tools", d);
         } else if (contained) {
             snprintf(d, sizeof(d), "%s (%s) — file, js and shell contained",
-                     name, prof);
+                     name, level);
             print_ok("tools", d);
         } else {
             snprintf(d, sizeof(d), "%s (%s) — every tool call is refused (exit 126)",
-                     name, prof);
+                     name, level);
             print_fail("tools", d);
             refused = 1;
         }
@@ -397,8 +397,8 @@ static void layer_tools(sqlite3 *db, int contained) {
     if (!rows) printf("  tools: no agents yet\n");
     if (refused)
         printf("       this host cannot contain a tool child. To run an agent\n"
-               "       uncontained, set its sandbox_profile to 'host' (CLI:\n"
-               "       --trust-host) — the device itself is then the boundary\n");
+               "       uncontained, set its containment to 'none' (CLI:\n"
+               "       --no-containment) — the device itself is then the boundary\n");
 }
 
 static void check_layers(sqlite3 *db, const Config *cfg) {

@@ -2,7 +2,7 @@
 
 The model doc: what we defend against, where each boundary actually lives, and
 which mechanism owns which question. Companions: [security.md](security.md)
-(secret handling, DLP, defense-in-depth), [sandbox-profiles.md](sandbox-profiles.md)
+(secret handling, DLP, defense-in-depth), [containment.md](containment.md)
 (the containment bundles), [egress-filter.md](egress-filter.md) (proxy host rules),
 [portability.md](portability.md) (layers, and what a host without a
 containment backend gets).
@@ -15,7 +15,7 @@ prevent.
 
 | Axis | Question | Mechanism | Enforced by |
 |------|----------|-----------|-------------|
-| **Containment** | What can a tool child touch if it misbehaves? | `agents.sandbox_profile` → policy bundle | containment backend: kernel (namespaces, rlimits, netns+proxy) on Linux; nothing under `host` |
+| **Containment** | What can a tool child touch if it misbehaves? | `agents.containment` → policy bundle | containment backend: kernel (namespaces, rlimits, netns+proxy) on Linux; nothing under `none` |
 | **Authority** | What is this agent allowed to do? | `grants` rows (kind/value, `approval_mode`, `expires_at`; kinds tool/host/read_path/write_path/secret; `source`/`approval_id` say where each came from) | dispatch gate in the trusted process |
 | **Escalation** | Does this call need a human right now? | `approvals` park/resolve (`rerun`/`apply`), `request_config` | dispatch gate + channel/CLI approver |
 | **Sensitivity** | Is this *target* special regardless of grants? | `sensitive_targets` labels + `secret_hosts` bindings | dispatch gate + proxy deny |
@@ -69,16 +69,16 @@ agent can reach. Details: [security.md](security.md#using-a-secret-is-a-grant).
 
 ## The invariant
 
-**Only sandbox setup reads `sandbox_profile`. Every authority decision reads
+**Only sandbox setup reads `agents.containment`. Every authority decision reads
 `grants`.**
 
-`sandbox_policy_from_profile()` (`src/sandbox.c`) is the single consumer that
-turns the profile string into a containment bundle. If a change makes tool,
-secret, or host access depend on the profile, it is on the wrong axis — express
+`sandbox_policy_from_containment()` (`src/sandbox.c`) is the single consumer
+that turns the containment string into a policy bundle. If a change makes tool,
+secret, or host access depend on the containment, it is on the wrong axis — express
 it as a grant. Concretely:
 
 - Gating a privileged tool (e.g. a future `secret_store_write`) is a
-  `grants` row, never a profile check or a magic profile value. So is using a
+  `grants` row, never a containment check or a magic containment value. So is using a
   secret (`kind='secret'`).
 - `js_eval` today has exactly `web_fetch`'s reach (web_fetch *is* a JS tool:
   same vehicle, same proxy, same host rules, same sensitivity deny and
@@ -88,29 +88,29 @@ it as a grant. Concretely:
   `shell_exec` grant**, so granting `js_eval` never silently grants the
   union. Grant cost tracks actual reach, always.
 - `create_agent` caps the child on both axes independently: child
-  `sandbox_profile` ≤ parent's (the three values are ordered
-  `restricted < standard < host` by looseness) AND child grants ⊆ parent
+  `containment` ≤ parent's (the three values are ordered
+  `offline < standard < none` by looseness) AND child grants ⊆ parent
   grants. Subset-of-grants, not a fuzzy "trust" comparison.
 - **Reach may live on a capability (declared hosts, activated at promotion) or
-  on a principal (host grants) — never on a profile.** A promoted tool whose
+  on a principal (host grants) — never on a containment.** A promoted tool whose
   manifest declares hosts reaches exactly those; everything else runs under the
-  agent's `host` grants. Neither is a profile field, and no profile may become
-  a way to say "this agent may reach X". Mechanically: ingest writes the
+  agent's `host` grants. Neither is a containment field, and no containment may
+  become a way to say "this agent may reach X". Mechanically: ingest writes the
   declaration to `tools.egress_hosts` (only at promotion — a draft has no row),
   and `call_egress_build()` uses it *instead of* the grants for that call
   (`specs/security.md`, `specs/extensions.md`).
-- The profile is a *creation-time preset* for containment **only** — pick one
-  word, get a containment bundle. It confers no authority:
-  `agent_grant_defaults()` never reads `sandbox_profile`, so every new agent
-  gets the same `agent_default_tools` regardless of profile. After creation the
+- The containment is a *creation-time preset* **only** — pick one word, get a
+  policy bundle. It confers no authority:
+  `agent_grant_defaults()` never reads `agents.containment`, so every new agent
+  gets the same `agent_default_tools` regardless of containment. After creation the
   axes are edited independently; `search_config` reports both.
 
-**The canonical failure mode** is a *resource* profile silently widening what
+**The canonical failure mode** is a *resource* preset silently widening what
 an agent could *see*: `trusted` used to mount the invoking user's CWD, so
 picking "unbounded resources" also handed over the user's files. Fixed in
-`5b73a23` (and `trusted` itself is gone as of the three-profile lineup). Widening
+`5b73a23` (and `trusted` itself is gone as of the three-value lineup). Widening
 visibility is the grant system's job — and therefore the approval flow's — never
-a side effect of picking a looser profile.
+a side effect of picking a looser containment.
 
 ## Threat model — two classes, stated honestly
 
@@ -139,7 +139,7 @@ cclaw targets dedicated boxes (Mac Minis, old laptops, SBCs, rooted phones)
 where the daemon often runs as or can escalate to root. There, the kernel
 sandbox is **not** a security boundary against an adversary already at the
 daemon's privilege (ns-root can remount and tear down namespaces). What it
-still provides, and why it stays mandatory (fail-closed, `host` excepted):
+still provides, and why it stays mandatory (fail-closed, containment `none` excepted):
 
 1. **Stability** — a misbehaving tool can't break the machine.
 2. **Fail-closed egress** — empty netns + default-deny proxy is the floor.
@@ -152,7 +152,7 @@ still provides, and why it stays mandatory (fail-closed, `host` excepted):
 The real security boundary on such a box moves up to the authority/escalation
 layer. The kernel cannot enforce intent.
 
-Under `host` (chosen per agent, or the only option on a host without a
+Under containment `none` (chosen per agent, or the only option on a host without a
 containment backend) the first four rows of the table below do not hold: the
 tool child acts as the user running cclaw, with direct network access. The
 authority, escalation and sensitivity gates still run in dispatch, but the
@@ -195,7 +195,10 @@ because no proxy is started. See
 
 ## History
 
-`agents.sandbox_profile` was named `trust_level` until 2026-07. The rename
+`agents.containment` was named `trust_level` until 2026-07, then
+`sandbox_profile` (values `host | standard | restricted`) until schema v71
+(2026-11), when it took its present name and the values became
+`none | standard | offline`. The first rename
 records the resolution of a two-meanings ambiguity: the column only ever
 selected the containment bundle, but the name invited authority checks to
 accrete onto it. Design notes that referenced "trust levels" mean the

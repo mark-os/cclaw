@@ -42,7 +42,7 @@
 #define STEP_BYTES 6000
 
 static IntegEnv g_env = {.db = DB_PATH, .workspace = WS, .home = HOME,
-                         .sandbox = "host", .verbose = 1};
+                         .containment = "none", .verbose = 1};
 #define db_int(sql) integ_db_int(DB_PATH, (sql), NULL)
 #define db_exec(sql) integ_db_exec(DB_PATH, (sql))
 
@@ -94,7 +94,7 @@ static int configure(int64_t sid, char *agent_out, size_t cap) {
              " WHERE agent_name='%s' AND purpose='chat';"
              "UPDATE agent_extensions SET enabled=0 WHERE agent_name='%s'"
              " AND extension_name='compaction';"
-             "UPDATE agents SET sandbox_profile='host' WHERE name='%s';",
+             "UPDATE agents SET containment='none' WHERE name='%s';",
              head + STEP_BYTES / 6, head + STEP_BYTES / 12, agent, agent, agent);
     int rc = head > 0 && agent && sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK
              ? 0 : -1;

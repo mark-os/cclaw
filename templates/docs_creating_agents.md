@@ -6,7 +6,7 @@ description: Design and create a purpose-built agent with create_agent — the f
 # Creating Agents
 
 Creating a dedicated agent is a first-class move, not an edge case. A narrow
-agent with a tight sandbox profile and minimal grants is safer than widening
+agent with tight containment and minimal grants is safer than widening
 yourself, keeps your own context clean, and gives recurring work a stable
 home (its own sessions, memory, workspace, and cron pulse).
 
@@ -55,7 +55,7 @@ One JSON schema everywhere an agent is defined (`create_agent` arguments,
   "description": "Watches the NWS feed and alerts on warnings",
   "system_prompt": "You are…",
   "models": ["openrouter/deepseek/deepseek-v4.1-flash"],
-  "sandbox_profile": "standard",
+  "containment": "standard",
   "grants": { "tools": ["web_fetch"], "hosts": ["api.weather.gov"],
               "read_paths": [], "write_paths": [], "secrets": ["NWS_TOKEN"] },
   "extensions": ["nws"],
@@ -80,7 +80,7 @@ registered through `request_config` look like `model@provider`.
 
 An agent you create can never exceed you:
 
-- `sandbox_profile` ≤ yours in looseness (host > standard > restricted).
+- `containment` ≤ yours in looseness (none > standard > offline).
 - Every grant ⊆ your own live grants. Exact values, no fuzzy matching. That
   includes `secrets`: a child may use only secrets you may use yourself, and a
   new agent gets none it was not given.
@@ -102,7 +102,7 @@ will need, plus a provider definition and your own model switch. See the
 
 `create_agent` validates eagerly — a definition that would fail caps never
 parks — then parks one operator approval enumerating every grant value, the
-profile, extensions, and models. Give the approver a good `description`.
+containment, extensions, and models. Give the approver a good `description`.
 
 ## Refining an agent you created
 
@@ -113,7 +113,7 @@ creation, applied against you:
 - Fields overlay: `description`, `system_prompt` (full replacement text),
   `models` (an ordered array of registered model ids within your own routing
   list — the agent's full new routing order),
-  `sandbox_profile` (never looser than yours), `max_iterations`,
+  `containment` (never looser than yours), `max_iterations`,
   `shell_timeout`. Absent fields keep their value; unknown keys are errors.
 - `grants` **adds** (each must be one you hold) — it never removes. Removing
   a grant is an operator act, and expanding *your own* grants stays with

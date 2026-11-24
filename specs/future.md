@@ -181,7 +181,7 @@ The agent's SQLite DB contains sessions, messages, tool results, sub-agent state
 - **Sub-agent coordination**: check status of spawned agents without the `check_session` tool
 - **Analytics**: token usage over time, tool call frequency, error rates
 
-Implementation: inject a `db.query(sql)` global that runs read-only queries against cclaw.db. The JS child has no DB (it is masked in every sandboxed profile), so the query must run in the trusted parent over a per-call bridge, as `LLM()` does ([js-llm.md](js-llm.md)) and as the `db_query` tool already does.
+Implementation: inject a `db.query(sql)` global that runs read-only queries against cclaw.db. The JS child has no DB (it is masked under every sandboxed containment), so the query must run in the trusted parent over a per-call bridge, as `LLM()` does ([js-llm.md](js-llm.md)) and as the `db_query` tool already does.
 
 - Read-only (no INSERT/UPDATE/DELETE from JS)
 - Or: separate `db.read(sql)` and `db.write(sql)` with write restricted to agent's own tables
@@ -238,7 +238,7 @@ notification (`SECCOMP_RET_USER_NOTIF`). The parent reads the target address
 from the child's memory, performs the proxy logic, and injects the connected
 fd back. Works for everything regardless of linking — no .so, no proxy-env
 cooperation needed. Requires kernel ≥5.9 and is significantly more complex
-(~500 LOC). Currently listed as a non-goal in specs/sandbox-profiles.md.
+(~500 LOC). Currently listed as a non-goal in specs/containment.md.
 
 ### Helper-script wrapper
 Partly shipped: `net_shim`'s `connect <host> <port>` mode is a helper of this
@@ -390,7 +390,7 @@ them all — so the missing piece is **distribution**, not a new format.
   downloaded package gets zero authority until promotion approval, same as an
   agent-written draft.
 - **Trust**: third-party authors are hostile until proven otherwise. The
-  promotion gate, sandbox profiles, and grants already model exactly this; a
+  promotion gate, containment, and grants already model exactly this; a
   registry adds provenance (checksums, maybe signing) on top, not a new trust
   system. Skills are the lowest-risk contribution tier (prose the model
   reads), JS tools/channels the highest — the tiering should be visible at

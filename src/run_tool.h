@@ -172,7 +172,7 @@ const char *run_tool_param_json(const RunToolParsed *q, const char *key);
 /* Flattened string list (TOOL_ARG_LIST); NULL + *n=0 if absent. */
 char **run_tool_param_list(const RunToolParsed *q, const char *key, size_t *n);
 
-/* Zero req; set vehicle/tool_name plus all SandboxProfile-derived fields and
+/* Zero req; set vehicle/tool_name plus all Containment-derived fields and
  * workspace/cwd_path. Callers set vehicle-specific fields (params, command,
  * egress rules) after.
  *
@@ -182,7 +182,7 @@ char **run_tool_param_list(const RunToolParsed *q, const char *key, size_t *n);
  * mask disabled. The file vehicle did exactly that. Pass the path (never the
  * handle — the child does not open the DB); NULL only where there is no DB. */
 void run_tool_req_init(RunToolReq *req, ExecVehicle vehicle, const char *tool_name,
-                       const SandboxProfile *sb,
+                       const Containment *sb,
                        const char *workspace, const char *cwd_path,
                        const char *db_path);
 

@@ -351,8 +351,8 @@ An inbox item larger than 64 KB (`RUNTOOL_RESULT_MAX`) is cut when it
 becomes a user entry: the entry keeps the first 64 KB (at a character
 boundary) and a line saying where the full text is,
 `<workspace>/.tool_results/<session>/inbox-<id>.out` — the same home as a
-spilled tool result, readable by the agent's file tools under every sandbox
-profile (`src/inbox_cap.c`). The text was already through the secret
+spilled tool result, readable by the agent's file tools under every
+containment (`src/inbox_cap.c`). The text was already through the secret
 scanner at insert. If the file cannot be written the entry says so.
 Attachments and images are not touched.
 

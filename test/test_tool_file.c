@@ -14,7 +14,7 @@ static void setup(void) {
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cclaw_test_file_XXXXXX");
     assert(mkdtemp(tmpdir) != NULL);
 
-    /* In-process (host) context — for roundtrip tests */
+    /* In-process (uncontained) context — for roundtrip tests */
     memset(&file_ctx, 0, sizeof(file_ctx));
     file_ctx.workspace = tmpdir;
 

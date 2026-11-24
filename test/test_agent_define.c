@@ -10,7 +10,7 @@
 
 static sqlite3 *g_db;
 
-static void seed_creator(const char *name, const char *profile) {
+static void seed_creator(const char *name, const char *containment) {
     db_agent_upsert(g_db, name, NULL, NULL);
     /* Every creator gets a routing list — created agents inherit it (R2). */
     sqlite3_exec(g_db,
@@ -24,9 +24,9 @@ static void seed_creator(const char *name, const char *profile) {
     sqlite3_exec(g_db, q, NULL, NULL, NULL);
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(g_db,
-        "UPDATE agents SET sandbox_profile=?2 WHERE name=?1", -1, &s, NULL) == SQLITE_OK);
+        "UPDATE agents SET containment=?2 WHERE name=?1", -1, &s, NULL) == SQLITE_OK);
     sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(s, 2, profile, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, containment, -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_DONE);
     sqlite3_finalize(s);
 }
@@ -39,7 +39,7 @@ static void test_operator_apply(void) {
     char *err = NULL;
     int rc = agent_definition_apply(g_db,
         "{\"name\":\"Scout\",\"description\":\"scouts\",\"models\":[\"p/m\"],"
-        "\"system_prompt\":\"be scouty\",\"sandbox_profile\":\"restricted\","
+        "\"system_prompt\":\"be scouty\",\"containment\":\"offline\","
         "\"grants\":{\"tools\":[\"web_fetch\"],\"hosts\":[\".example.com\"]},"
         "\"max_iterations\":7,"
         "\"memory_blocks\":[{\"label\":\"notes\",\"description\":\"d\",\"value\":\"v\"}]}",
@@ -49,10 +49,10 @@ static void test_operator_apply(void) {
 
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(g_db,
-        "SELECT sandbox_profile, max_iterations, description FROM agents WHERE name='Scout'",
+        "SELECT containment, max_iterations, description FROM agents WHERE name='Scout'",
         -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "restricted") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "offline") == 0);
     assert(sqlite3_column_int(s, 1) == 7);
     assert(strcmp((const char *)sqlite3_column_text(s, 2), "scouts") == 0);
     sqlite3_finalize(s);
@@ -82,26 +82,32 @@ static void test_operator_apply(void) {
     free(err2);
 }
 
-static void test_profile_escalation_refused(void) {
+static void test_containment_escalation_refused(void) {
     seed_creator("Std", "standard");
     char *err = NULL;
     int rc = agent_definition_validate(g_db,
-        "{\"name\":\"Escaper\",\"sandbox_profile\":\"host\"}", "Std", &err);
+        "{\"name\":\"Escaper\",\"containment\":\"none\"}", "Std", &err);
     assert(rc != 0);
     assert(err && strstr(err, "looser"));
     free(err);
 
-    /* 'trusted' is deleted, not merely un-grantable: it is now an invalid
-     * profile name, refused before any looseness comparison. */
-    err = NULL;
-    assert(agent_definition_validate(g_db,
-        "{\"name\":\"Ghost\",\"sandbox_profile\":\"trusted\"}", "Std", &err) != 0);
-    assert(err && strstr(err, "invalid sandbox_profile"));
-    free(err);
+    /* Retired values are invalid, not aliases, and refused before any
+     * looseness comparison: 'trusted', and the pre-v71 'host' and
+     * 'restricted' a call parked before the upgrade may still carry. */
+    static const char *retired[] = { "trusted", "host", "restricted" };
+    for (size_t i = 0; i < sizeof(retired) / sizeof(retired[0]); i++) {
+        char def[96];
+        snprintf(def, sizeof(def), "{\"name\":\"Ghost\",\"containment\":\"%s\"}",
+                 retired[i]);
+        err = NULL;
+        assert(agent_definition_validate(g_db, def, "Std", &err) != 0);
+        assert(err && strstr(err, "invalid containment"));
+        free(err);
+    }
 
     /* Equal or tighter is fine. */
     assert(agent_definition_validate(g_db,
-        "{\"name\":\"Tight\",\"sandbox_profile\":\"restricted\"}", "Std", NULL) == 0);
+        "{\"name\":\"Tight\",\"containment\":\"offline\"}", "Std", NULL) == 0);
 }
 
 static void test_grants_superset_refused(void) {
@@ -164,7 +170,7 @@ static void test_extension_gate(void) {
 }
 
 static void test_clone_from(void) {
-    seed_creator("Template", "restricted");
+    seed_creator("Template", "offline");
     agent_config_grant(g_db, "Template", "tool", "web_fetch", 0, GRANT_ORIGIN("operator", 0));
     sqlite3_exec(g_db,
         "UPDATE agents SET description='tmpl', system_prompt='sp',"
@@ -189,13 +195,13 @@ static void test_clone_from(void) {
 
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(g_db,
-        "SELECT description, system_prompt, max_iterations, sandbox_profile"
+        "SELECT description, system_prompt, max_iterations, containment"
         " FROM agents WHERE name='Copy'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "copied") == 0);   /* overlay */
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "sp") == 0);       /* cloned */
     assert(sqlite3_column_int(s, 2) == 11);                                    /* cloned */
-    assert(strcmp((const char *)sqlite3_column_text(s, 3), "restricted") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "offline") == 0);
     sqlite3_finalize(s);
     assert(grants_contains(g_db, "Copy", "tool", "web_fetch"));
     assert(sqlite3_prepare_v2(g_db,
@@ -230,7 +236,7 @@ static void test_update_agent(void) {
     char *err = NULL;
     assert(agent_definition_apply(g_db,
         "{\"name\":\"Pupil\",\"description\":\"orig\",\"system_prompt\":\"v1\","
-        "\"sandbox_profile\":\"restricted\",\"max_iterations\":9}",
+        "\"containment\":\"offline\",\"max_iterations\":9}",
         "Mentor", NULL, GRANT_ORIGIN("agent_create", 0), &err) == 0);
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(g_db,
@@ -301,7 +307,7 @@ static void test_update_agent(void) {
         "{\"name\":\"Pupil\",\"models\":[\"p/m\"]}", "Mentor", NULL) == 0);
     err = NULL;
     assert(agent_definition_update_validate(g_db,
-        "{\"name\":\"Pupil\",\"sandbox_profile\":\"host\"}", "Mentor", &err) != 0);
+        "{\"name\":\"Pupil\",\"containment\":\"none\"}", "Mentor", &err) != 0);
     assert(err && strstr(err, "looser"));
     free(err);
     err = NULL;
@@ -320,13 +326,13 @@ static void test_update_agent(void) {
     if (rc != 0) fprintf(stderr, "err: %s\n", err ? err : "?");
     assert(rc == 0);
     assert(sqlite3_prepare_v2(g_db,
-        "SELECT system_prompt, max_iterations, description, sandbox_profile"
+        "SELECT system_prompt, max_iterations, description, containment"
         " FROM agents WHERE name='Pupil'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "v2 much better") == 0);
     assert(sqlite3_column_int(s, 1) == 40);
     assert(strcmp((const char *)sqlite3_column_text(s, 2), "orig") == 0);       /* kept */
-    assert(strcmp((const char *)sqlite3_column_text(s, 3), "restricted") == 0); /* kept */
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "offline") == 0); /* kept */
     sqlite3_finalize(s);
     assert(grants_contains(g_db, "Pupil", "host", "api.weather.gov"));
 
@@ -392,7 +398,7 @@ static void test_bad_input(void) {
     assert(agent_definition_validate(g_db, "{}", NULL, NULL) != 0);
     assert(agent_definition_validate(g_db, "{\"name\":\"bad name\"}", NULL, NULL) != 0);
     assert(agent_definition_validate(g_db,
-        "{\"name\":\"X\",\"sandbox_profile\":\"ultra\"}", NULL, NULL) != 0);
+        "{\"name\":\"X\",\"containment\":\"ultra\"}", NULL, NULL) != 0);
 }
 
 /* Sharing a block through a definition: a creator may share only a block it
@@ -513,7 +519,7 @@ int main(void) {
     g_db = test_db_open(":memory:");
     assert(g_db);
     RUN(test_operator_apply);
-    RUN(test_profile_escalation_refused);
+    RUN(test_containment_escalation_refused);
     RUN(test_grants_superset_refused);
     RUN(test_extension_gate);
     RUN(test_clone_from);

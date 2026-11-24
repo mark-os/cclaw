@@ -161,8 +161,8 @@ The CLI never fires it.
 
 Run by the vehicle cron scripts use (`script_child_spawn`): the agent's caps
 are re-read, the path must be inside the extension store, only the secrets
-the agent is granted ride along, and it runs under the agent's sandbox
-profile.
+the agent is granted ride along, and it runs under the agent's
+containment.
 
 - **`args`** — the session as plain data: the JSON `turn_edit_input()`
   builds ([Input and reply](#input-and-reply)). It does not travel in the
@@ -414,7 +414,7 @@ constant.
 ## Security
 
 A hook script has exactly what a tool call by the same agent has: the
-agent's sandbox profile, its grants, its granted secrets, egress through the
+agent's containment, its grants, its granted secrets, egress through the
 proxy. Promoting the extension is the approval. What it is shown is the
 session's own entries — all of them already scanned on their way in — as
 far back as its manifest asks; the approval line says how much. What it can

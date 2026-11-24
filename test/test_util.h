@@ -148,7 +148,7 @@ static inline int64_t test_legacy_compact(sqlite3 *db, int64_t session_id,
 /* Child-leaf drivers for sandboxed tools: extract args_json into wire params
  * exactly as the dispatching parent does (tool_args_extract on a :memory:
  * db; NULL schema — every top-level key ships, file_edit's edits flatten),
- * build a RunToolParsed, run the child leaf in-process (host mode, no
+ * build a RunToolParsed, run the child leaf in-process (uncontained, no
  * namespace). Malformed args_json returns the dispatch-gate-equivalent
  * "error: invalid tool arguments". Result is malloc'd; caller frees. */
 static inline char *test_run_child_status(ExecVehicle vehicle, const char *tool,

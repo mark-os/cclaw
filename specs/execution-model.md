@@ -79,7 +79,7 @@ state would be a lie.
    readable live from inside the sandbox (`tail`/`file_read`; the same
    `.tool_results` home as spill files). The log carries stdout-level trust
    only: it is rw inside the job's own sandbox. Under a sandboxed
-   profile `ps` structurally cannot see jobs — each runs in its own PID
+   containment `ps` structurally cannot see jobs — each runs in its own PID
    namespace.
 3. **Ambient status**: a `<background_jobs>` section in the frozen turn
    context (id, command snippet, age, log path, howto). Frozen with the

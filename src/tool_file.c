@@ -81,7 +81,7 @@ static int granted_exactly(const FileReadCtx *ctx, const char *fullpath,
  * is active at all). */
 static char *path_grant_hint(const FileReadCtx *ctx, const char *fullpath,
                              int want_write, int suggest_parent) {
-    if (!ctx->sb.sandbox) return NULL; /* host trust / direct call: nothing hidden */
+    if (!ctx->sb.sandbox) return NULL; /* uncontained / direct call: nothing hidden */
 
     /* An exact grant that still cannot be opened is a broken grant, not a
      * missing file — say so rather than falling through to a bare error or,

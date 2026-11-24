@@ -28,15 +28,15 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* Collect secrets from env, clear from process env */
     setup->secrets = shell_secrets_collect(&setup->secret_count);
 
-    /* Containment config (sandbox_profile, shell_path) is not resolved here:
+    /* Containment config (containment, shell_path) is not resolved here:
      * agent_setup_refresh_caps re-reads it from the agents table before every
      * tool batch, same as grants. Only capture whether an operator env
-     * override exists now (--trust-host sets CCLAW_SANDBOX_PROFILE=host) — refresh
+     * override exists now (--no-containment sets CCLAW_CONTAINMENT=none) — refresh
      * setenv's for children, so a later getenv can't distinguish the two. */
-    const char *ev = getenv("CCLAW_SANDBOX_PROFILE");
+    const char *ev = getenv("CCLAW_CONTAINMENT");
     if (ev) {
-        snprintf(setup->sandbox_profile_buf, sizeof(setup->sandbox_profile_buf), "%s", ev);
-        setup->sandbox_profile_env = 1;
+        snprintf(setup->containment_buf, sizeof(setup->containment_buf), "%s", ev);
+        setup->containment_env = 1;
     }
     ev = getenv("CCLAW_SHELL_PATH");
     if (ev) {
@@ -56,7 +56,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* Shell — shell_path bound by refresh below, like the caps */
     tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace, NULL);
 
-    /* Inject secrets into shell config; the sandbox profile is bound by
+    /* Inject secrets into shell config; the containment is bound by
      * agent_setup_refresh_caps (and per-dispatch reloads keep it fresh) */
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
@@ -67,7 +67,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         sc->db_path = cfg->db_path;           /* mask .cclaw_key + db ciphertext from shell children */
     }
 
-    /* File tools — forked sandbox path shares the refreshed profile with shell */
+    /* File tools — forked sandbox path shares the refreshed containment with shell */
     setup->file_read_ctx.workspace = cfg->workspace;
     setup->file_read_ctx.cwd_path = getenv("CCLAW_PATH");
     setup->file_read_ctx.db_path = cfg->db_path;
@@ -205,46 +205,46 @@ static void agents_column_read(sqlite3 *db, const char *agent, const char *sql,
 }
 
 /* Re-read containment config from the agents table (unless an operator env
- * override was present at init) and rebind the resolved profile into every
+ * override was present at init) and rebind the resolved containment into every
  * tool ctx. Same freshness contract as the caps: a mid-run update_agent or
  * an agent switch takes effect on the next dispatch, not at restart. */
 static void containment_refresh(AgentSetup *setup, sqlite3 *db, const char *agent) {
-    if (!setup->sandbox_profile_env)
+    if (!setup->containment_env)
         agents_column_read(db, agent,
-            "SELECT sandbox_profile FROM agents WHERE name=?",
-            setup->sandbox_profile_buf, sizeof(setup->sandbox_profile_buf));
+            "SELECT containment FROM agents WHERE name=?",
+            setup->containment_buf, sizeof(setup->containment_buf));
     if (!setup->shell_path_env)
         agents_column_read(db, agent,
             "SELECT shell_path FROM agents WHERE name=?",
             setup->shell_path_buf, sizeof(setup->shell_path_buf));
 
-    const char *profile_str =
-        setup->sandbox_profile_buf[0] ? setup->sandbox_profile_buf : NULL;
+    const char *containment =
+        setup->containment_buf[0] ? setup->containment_buf : NULL;
     const char *shell_path =
         setup->shell_path_buf[0] ? setup->shell_path_buf : NULL;
 
     /* Export so children forked this dispatch inherit the *current* values
      * (js_eval; search_config also reads the shell env). */
-    if (profile_str) setenv("CCLAW_SANDBOX_PROFILE", profile_str, 1);
-    else unsetenv("CCLAW_SANDBOX_PROFILE");
+    if (containment) setenv("CCLAW_CONTAINMENT", containment, 1);
+    else unsetenv("CCLAW_CONTAINMENT");
     if (shell_path) setenv("CCLAW_SHELL_PATH", shell_path, 1);
     else unsetenv("CCLAW_SHELL_PATH");
 
     /* Trust-derived policy, whole-struct copied into each ctx; the caps
      * rebind that follows overwrites the grant-path half. */
-    SandboxProfile profile = {0};
-    sandbox_profile_resolve(profile_str, &profile);
+    Containment policy = {0};
+    containment_resolve(containment, &policy);
 
-    setup->file_read_ctx.sb = profile;
+    setup->file_read_ctx.sb = policy;
 
-    setup->js_eval_ctx.sb = profile;
-    setup->js_eval_ctx.host_mode = profile.sandbox ? 0 : 1;
-    setup->js_eval_ctx.sandbox_profile = profile_str;
+    setup->js_eval_ctx.sb = policy;
+    setup->js_eval_ctx.uncontained = policy.sandbox ? 0 : 1;
+    setup->js_eval_ctx.containment = containment;
 
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
         ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
-        sc->sb = profile;
+        sc->sb = policy;
         sc->shell_path = shell_path;  /* NULL = /bin/sh (tool_shell.c default) */
     }
 }
@@ -292,7 +292,7 @@ static void workspace_refresh(AgentSetup *setup, const char *agent) {
 void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent) {
     agent_caps_refresh(db, agent, &setup->caps);
 
-    /* Containment first: it whole-struct copies each embedded profile, then
+    /* Containment first: it whole-struct copies each embedded policy, then
      * the grant-path half below is layered on top. Trust policy is a
      * per-dispatch snapshot too — no longer fixed at init. */
     containment_refresh(setup, db, agent);

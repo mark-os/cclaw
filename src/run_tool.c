@@ -130,7 +130,7 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
 }
 
 void run_tool_req_init(RunToolReq *req, ExecVehicle vehicle, const char *tool_name,
-                       const SandboxProfile *sb,
+                       const Containment *sb,
                        const char *workspace, const char *cwd_path,
                        const char *db_path) {
     memset(req, 0, sizeof(*req));
@@ -465,9 +465,9 @@ static void sandbox_child_main(const VehicleDescriptor *desc, RunToolParsed *q,
     dup2(pipefd[1], STDERR_FILENO);
     close(pipefd[1]);
 
-    /* Host mode (sandbox=0): no namespace, no proxy (proxy_active is
+    /* Uncontained (sandbox=0): no namespace, no proxy (proxy_active is
      * already gated on q->sandbox) — run_fn / exec runs on the bare host.
-     * The LLM bridge socket needs no namespace, so host mode exports the
+     * The LLM bridge socket needs no namespace, so uncontained exports the
      * real path directly (the sandboxed path is set in sandbox_child_setup). */
     if (!q->sandbox && q->llm_sock && q->llm_sock[0])
         setenv("CCLAW_LLM_SOCK", q->llm_sock, 1);
@@ -977,9 +977,9 @@ int run_tool_main(void) {
     /* The file vehicle (no network): sandbox THIS process, run the handler in-process. */
     if (!q.workspace) die("error: missing workspace");
 
-    /* net_mode forced to "no network"; host mode (sandbox=0) runs the handler
+    /* net_mode forced to "no network"; uncontained (sandbox=0) runs the handler
      * on the bare host. Nothing in the file tools confines a path — the mount
-     * namespace is the only workspace boundary — so under host they open
+     * namespace is the only workspace boundary — so uncontained they open
      * whatever the user can (specs/portability.md). */
     q.net_mode = 1;
     if (q.sandbox) {

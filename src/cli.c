@@ -139,7 +139,7 @@ void print_usage(void) {
            "options:\n"
            "  -p <prompt>        single-turn: send prompt, print response, exit\n"
            "  -s <id>            session id\n"
-           "  --trust-host       no kernel sandbox, no rlimits, no egress proxy,\n"
+           "  --no-containment   no kernel sandbox, no rlimits, no egress proxy,\n"
            "                     full env — tool allowlist still applies (CLI\n"
            "                     only, ignored by --daemon)\n"
            "  --auto-approve     answer parked approvals without prompting;\n"

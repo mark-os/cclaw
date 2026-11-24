@@ -3,7 +3,7 @@
  *     ladder fallback, opts.model narrowing, llm_responses archiving —
  *     against a seeded temp DB and a loopback HTTP mock;
  *   - the bridge: llm_bridge_start() serving a real UDS, driven by real QJS
- *     eval calling the LLM() global (the exact child code path, host mode);
+ *     eval calling the LLM() global (the exact child code path, uncontained);
  *   - the call cap (llm_max_calls_per_tool).
  * No real network; providers are loopback. */
 #define _GNU_SOURCE
@@ -148,7 +148,7 @@ static char *req(const char *agent, const char *request_json) {
 #define BRIDGE_DIR "/tmp/test_qjs_llm_bridge"
 
 /* Evaluate js in real QJS with the LLM() global wired to a fresh bridge for
- * agent 't' (the exact child code path, host mode). */
+ * agent 't' (the exact child code path, uncontained). */
 static char *bridge_run(const char *source, const char *js, int *is_error) {
     LlmBridge *b = llm_bridge_start(BRIDGE_DIR, DB_PATH, "t", source, 7, 42);
     assert(b);

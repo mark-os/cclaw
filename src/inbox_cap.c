@@ -46,7 +46,7 @@ char *inbox_cap_text(sqlite3 *db, int64_t session_id, int64_t inbox_id,
     /* The text was already through the secret scanner at inbox insert, so
      * the file holds exactly what the entry would have held uncut. Same home
      * as a tool result's spill: the agent's workspace, which its file tools
-     * can read under every sandbox profile. */
+     * can read under every containment. */
     char id[64];
     snprintf(id, sizeof(id), "inbox-%lld", (long long)inbox_id);
     char path[PATH_MAX + 64];

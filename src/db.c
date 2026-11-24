@@ -393,9 +393,29 @@ int db_ensure_schema(sqlite3 *db) {
  * Frozen at v70 (2026-11-24, v0.8.0): the floor is v0.8.0's schema and the
  * patch history below it is gone. An older DB migrates by a hop — install
  * v0.8.0, which patches it to v70, then update again. Append the next patch
- * (v71) above the terminator; C11 has no empty initializer, so version 0
- * ends the list. */
+ * above the terminator; version 0 ends the list. */
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
+    /* v71: the per-agent setting is `containment`, valued none | standard |
+     * offline (was sandbox_profile: host | standard | restricted). Values
+     * first, so the log trigger records the rewrite under the column's name
+     * at the time; the rename then carries the generated change_log triggers
+     * along, and change_log_sync regenerates them from the column list. Past
+     * change_log rows keep the old key: the log is append-only and records
+     * what was true then.
+     * A create_agent/update_agent call still waiting for a human carries the
+     * old key, which apply would ignore (create) or refuse (update): give it
+     * a past deadline, so the next sweep expires it the normal way — nothing
+     * applied, the agent told, and it asks again in today's words. args_json
+     * stays as asked: it must match the call that parked. */
+    { 71,
+      "UPDATE agents SET sandbox_profile='none' WHERE sandbox_profile='host';"
+      "UPDATE agents SET sandbox_profile='offline' WHERE sandbox_profile='restricted';"
+      "ALTER TABLE agents RENAME COLUMN sandbox_profile TO containment;"
+      "UPDATE approvals SET expires_at = unixepoch() - 1"
+      " WHERE state='pending' AND tool_name IN ('create_agent','update_agent')"
+      "   AND json_valid(args_json)"
+      "   AND json_type(args_json,'$.sandbox_profile') IS NOT NULL;",
+      NULL },
     { 0, NULL, NULL },
 };
 

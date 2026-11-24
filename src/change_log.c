@@ -35,7 +35,7 @@ const ChangeLogColumn CHANGE_LOG_COLUMNS[] = {
     { "agents", "max_output_tokens", COL_SETTING },
     { "agents", "shell_timeout",     COL_SETTING },
     { "agents", "shell_path",        COL_SETTING },
-    { "agents", "sandbox_profile",   COL_SETTING },
+    { "agents", "containment",       COL_SETTING },
     { "agents", "created_by",        COL_SETTING },
     { "agents", "hold_until",        COL_MEASUREMENT },
     { "agents", "hold_holder",       COL_MEASUREMENT },

@@ -370,7 +370,7 @@ UPDATE models SET effort_map='{"format":"gemini-budget",
 - Decryption key: `<dir of cclaw.db>/.cclaw_key` (32 bytes, mode 0600, daemon-only)
 - Decrypted by the trusted process and held only in its memory; used by LLM worker threads
 - `shell_exec` children have provider-native env vars (e.g. `OPENROUTER_API_KEY`) unset before exec
-- Agents have no access to the `.cclaw_key` file: every sandboxed profile masks it
+- Agents have no access to the `.cclaw_key` file: every sandboxed containment masks it
 - Provider changes are approval-gated: a `request_config` document with a `provider` section parks for human approval; the upsert happens in the trusted parent on approve (savepoint-wrapped, all-or-nothing with any co-batched grants/config). The approval args carry only the secret's *name* (`api_key_env`) — never key material. (The old `configure_provider` tool applied inline, letting a granted agent silently repoint `base_url` at an attacker — deleted, schema v28.)
 
 ## Future: OAuth (Device Code)

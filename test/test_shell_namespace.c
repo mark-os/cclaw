@@ -187,7 +187,7 @@ static void test_no_cwd_path_blocked(void) {
 }
 
 /* Key/DB masking is covered in test_sandbox_key_mask.c. */
-/* sandbox=0 (host mode) — namespace NOT applied, child runs unsandboxed */
+/* sandbox=0 (uncontained) — namespace NOT applied, child runs unsandboxed */
 static void test_sandbox_none_skips_namespace(void) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.workspace = workspace;
@@ -243,8 +243,8 @@ static void test_host_dev_not_shared(void) {
 }
 
 /* A sandboxed child runs with no_new_privs, so a setuid binary the payload
- * runs does not elevate (fails on 8a6ba35, where it was never set). host does
- * not set it: that profile keeps the operator's own reach, sudo included. */
+ * runs does not elevate (fails on 8a6ba35, where it was never set). Containment
+ * none does not set it: it keeps the operator's own reach, sudo included. */
 static int g_ns_ok;
 static void test_no_new_privs(void) {
     static const struct { int sandbox; const char *want; } cases[] = {

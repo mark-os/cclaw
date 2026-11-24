@@ -41,8 +41,8 @@ cclaw sqlite3 ~/.cclaw/cclaw.db \
 
 There is no per-agent key/value table. Per-agent state lives in:
 
-- **`agents` table columns** — `sandbox_profile` (containment: `host`,
-  `standard`, `restricted`), system prompt, `max_iterations`,
+- **`agents` table columns** — `containment` (`none`,
+  `standard`, `offline`), system prompt, `max_iterations`,
   `max_output_tokens`, `shell_timeout`, `shell_path` (interpreter for
   `shell_exec`'s `-c`; NULL = `/bin/sh`; the `CCLAW_SHELL_PATH` env var
   overrides both, e.g. `/bin/bash`).

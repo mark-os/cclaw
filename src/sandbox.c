@@ -54,14 +54,14 @@ size_t sandbox_plan_mounts(const SandboxMountReq *in, size_t n, SandboxMount *ou
  * which is what HOME has to name: with a symlink component the raw path is not
  * a directory inside the namespace at all.
  *
- * Sandboxed profiles get the agent workspace: it is bind-mounted rw at its own
+ * A contained child gets the agent workspace: it is bind-mounted rw at its own
  * absolute path, it is the one directory the agent owns, and it persists across
  * tool calls. That makes the usual user-level install paths work and *stay*
  * working — `pip install --user`, `cargo install`, `npm -g --prefix $HOME` all
  * land under the workspace and are on PATH next call, so an agent can bootstrap
  * its own toolchain into the one place it is allowed to write.
  *
- * The host profile has no namespace, so the honest answer is the invoking
+ * Containment none has no namespace, so the honest answer is the invoking
  * user's real home, read from the passwd database rather than an inherited
  * HOME (under the --run-tool re-exec the child starts from an empty environ,
  * so there is nothing to inherit). */
@@ -107,9 +107,9 @@ static void sandbox_scrub_env(const SandboxConfig *cfg, const char *workspace) {
         return;
     }
 
-    /* host mode: inherit whatever env the child was given, minus known
-     * secret-bearing names. Only `host` reaches here — every sandboxed
-     * profile uses the clean allowlist above. */
+    /* Uncontained: inherit whatever env the child was given, minus known
+     * secret-bearing names. Only containment `none` reaches here — every
+     * sandboxed containment uses the clean allowlist above. */
     sandbox_set_path(home);
     setenv("TMPDIR", "/tmp", 1);
     setenv("HOME", home, 1);
@@ -173,7 +173,7 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     const char *cwd = cfg->cwd_path;
     const char *psock = cfg->proxy_sock;
 
-    /* Sandbox profile: suppress CWD mount / proxy per policy */
+    /* Containment policy: suppress CWD mount / proxy */
     if (!cfg->mount_cwd) cwd = NULL;
     if (cfg->net_mode) psock = NULL;
 
@@ -184,14 +184,14 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
      * fails. It cannot be resolved later: sandbox_scrub_env runs after
      * pivot_root, where the symlink itself is gone. A realpath failure leaves
      * the raw path, which is exactly what the bind does with it — no new
-     * failure mode, and host (no namespace, no bind) is unaffected either way. */
+     * failure mode, and containment none (no namespace, no bind) is unaffected either way. */
     char ws_abs[PATH_MAX];
     if (ws && ws[0] && realpath(ws, ws_abs)) ws = ws_abs;
 
     /* No privilege gain for a contained child: a setuid or file-capability
      * binary the payload runs gets the caller's own rights. Inherited across
      * fork and exec, never cleared; unshare(CLONE_NEWUSER) is allowed under
-     * it. Not under host, which promises the operator's own reach, sudo
+     * it. Not under containment none, which promises the operator's own reach, sudo
      * included. Fail closed. */
     if (cfg->sandbox && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
         fprintf(stderr, "error: could not set no_new_privs, refusing to run\n");
@@ -203,19 +203,19 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
         int e = errno;  /* log call below may clobber it */
         LOG_INFO_("sandbox namespace_fail errno=%d action=abort", e);
         fprintf(stderr, "error: namespace sandbox unavailable (errno=%d); "
-                "this sandbox profile requires it — enable unprivileged user "
-                "namespaces or set the agent's sandbox_profile to 'host'\n", e);
+                "this agent's containment requires it — enable unprivileged user "
+                "namespaces or set the agent's containment to 'none'\n", e);
         return -1;
     }
 
-    /* host has no boundary, so contain_enter's chdir never ran. In
+    /* Containment none has no boundary, so contain_enter's chdir never ran. In
      * CLI mode cwd_path is the user's own CWD and inheriting it is the whole
-     * point of host — `cclaw` in a repo operates on that repo. Under --daemon
+     * point of running uncontained — `cclaw` in a repo operates on that repo. Under --daemon
      * cwd_path is NULL and the daemon's CWD is meaningless to the agent, so
      * start in the workspace instead. */
     if (!cfg->sandbox && !cwd && ws && ws[0]) {
         if (chdir(ws) != 0)
-            LOG_INFO_("sandbox host_chdir_fail errno=%d", errno);
+            LOG_INFO_("sandbox uncontained_chdir_fail errno=%d", errno);
     }
 
     sandbox_scrub_env(cfg, ws);
@@ -233,25 +233,25 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     return 0;
 }
 
-/* No profile sets RLIMIT_AS. It caps *address space*, not resident memory, and
+/* No containment sets RLIMIT_AS. It caps *address space*, not resident memory, and
  * every modern runtime reserves VA far beyond its footprint — Go's allocator
  * arenas, V8's heap cages, LLVM — so a cap large enough to be safe is too large
  * to bound anything, and one small enough to bound anything refuses to start
  * `go`, `node`, or `rustc` before they do a byte of work. NPROC and CPU are the
  * knobs that actually bound a runaway; a cgroup memory limit is the right tool
  * if a real memory ceiling is ever needed. */
-void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg) {
-    if (sandbox_profile && strcmp(sandbox_profile, "host") == 0) {
+void sandbox_policy_from_containment(const char *containment, SandboxConfig *cfg) {
+    if (containment && strcmp(containment, "none") == 0) {
         /* No namespace, no proxy: the tool child runs with the invoking user's
          * own filesystem and network. cwd_path (CLI only) keeps the user's CWD;
          * under --daemon there is none, so the child starts in the workspace. */
         cfg->sandbox = 0;
         cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1;
         cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
-    } else if (sandbox_profile && strcmp(sandbox_profile, "restricted") == 0) {
+    } else if (containment && strcmp(containment, "offline") == 0) {
         /* Bounded, but still able to run real programs: the limits are a
          * runaway backstop, not a straitjacket. The workspace stays rw so
-         * $HOME works — what makes this restricted is no packets, ever: no
+         * $HOME works — what makes this offline is no packets, ever: no
          * proxy socket reaches the child, so the empty netns is the whole
          * story and not even a promoted declared-hosts tool egresses. */
         cfg->sandbox = 1;
@@ -271,17 +271,17 @@ void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg
     }
 }
 
-/* Delegates sandbox-profile branching to sandbox_policy_from_profile() — the
+/* Delegates containment branching to sandbox_policy_from_containment() — the
  * only duplication here is this manual field-by-field copy from SandboxConfig
- * into SandboxProfile. The two structs deliberately have different shapes
- * (SandboxProfile adds read_paths/write_paths; SandboxConfig adds mount/path
+ * into Containment. The two structs deliberately have different shapes
+ * (Containment adds read_paths/write_paths; SandboxConfig adds mount/path
  * fields), so a memcpy shortcut would be fragile — it'd silently break on
  * field reordering instead of failing to compile. This field list must be
  * kept in sync with SandboxConfig's policy fields by hand whenever either
  * struct's policy fields change. */
-void sandbox_profile_resolve(const char *sandbox_profile, SandboxProfile *p) {
+void containment_resolve(const char *containment, Containment *p) {
     SandboxConfig c = {0};
-    sandbox_policy_from_profile(sandbox_profile, &c);
+    sandbox_policy_from_containment(containment, &c);
     p->sandbox      = c.sandbox;
     p->env_mode     = c.env_mode;
     p->net_mode     = c.net_mode;

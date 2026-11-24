@@ -25,7 +25,7 @@ typedef struct {
     size_t allowed_host_count;
     ShellSecret *secrets;   /* array of secrets to inject + mask */
     size_t secret_count;
-    SandboxProfile sb;      /* trust-derived policy + grant paths */
+    Containment sb;         /* trust-derived policy + grant paths */
 } ShellConfig;
 
 /* Register shell_exec tool into registry.

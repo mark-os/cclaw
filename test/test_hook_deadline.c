@@ -2,7 +2,7 @@
  * deadline ends it, the daemon ends a broker that cannot end it, and a script
  * killed from outside is a failure like any other. In a suite of its own
  * because these waits are real seconds — the frozen-broker case alone is six —
- * and test_turn_settle.c holds the rest. Same fixture, same `host` profile.
+ * and test_turn_settle.c holds the rest. Same fixture, same containment `none`.
  *
  * main() doubles as the broker: the children re-exec this binary. */
 #define _DEFAULT_SOURCE

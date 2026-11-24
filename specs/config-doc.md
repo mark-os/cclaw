@@ -48,10 +48,10 @@ Two axes, both shown on the approval card:
   records what exists (a provider endpoint, a model's context window) without
   by itself pointing any agent at it.
 
-`sandbox_profile` is **containment, not authority**, and is on no axis here:
+`containment` is **containment, not authority**, and is on no axis here:
 no `changes` section can move it. Widening what an agent can see is always
 `grants` plus an approval (see [trust.md](trust.md),
-[sandbox-profiles.md](sandbox-profiles.md)).
+[containment.md](containment.md)).
 
 ## Patch semantics — the verb table
 
@@ -116,7 +116,7 @@ possible path would teach exactly the wrong lesson.
 Rules:
 
 - Only the four grant kinds. An unrecognized kind is refused by name. The path
-  only ever `DELETE`s from `grants`, so `sandbox_profile` and every system-wide
+  only ever `DELETE`s from `grants`, so `containment` and every system-wide
   section are out of its reach by construction, not by check.
 - Every value must be a **live grant of this agent**. Removing something you
   never had is a mistaken belief about your own state, not a no-op — it is
@@ -165,7 +165,7 @@ serializer, as in `llm_payload.c`), never by C string assembly.
 Read-shape sections mirror the write-shape names, with three read-only
 additions and one deliberate difference:
 
-- `agent` also carries `name`, `sandbox_profile`, and the effective
+- `agent` also carries `name`, `containment`, and the effective
   `shell_path` — state you can read but not patch here.
 - `session` (`id`, `tool_filter`) — per-session narrowing, not agent config.
   Effective tools = grants ∩ filter.

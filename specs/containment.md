@@ -1,30 +1,31 @@
-# Sandbox Profiles — Per-Agent Containment Bundles (as built)
+# Containment — Per-Agent Policy Bundles (as built)
 
-`agents.sandbox_profile` selects a **sandbox policy bundle** — containment only.
-It carries no authority: which tools an agent may call and which hosts it may
-reach are governed by the `grants` table, never by the profile. Complements
+`agents.containment` selects a **policy bundle** for the agent's tool children —
+containment only. It carries no authority: which tools an agent may call and
+which hosts it may reach are governed by the `grants` table, never by the
+containment. Complements
 [security.md](security.md) (secret handling, defense-in-depth),
 [egress-filter.md](egress-filter.md) (proxy host rules) and
 [portability.md](portability.md) (containment as layer 3, and what a host
 without a containment backend gets).
 
-Resolution happens in ONE place: `sandbox_policy_from_profile()`
+Resolution happens in ONE place: `sandbox_policy_from_containment()`
 (`src/sandbox.c`), called from `agent_setup_init()` (`src/agent_setup.c`),
-which fills the `SandboxProfile` used by every sandboxed tool child (shell,
+which fills the `Containment` used by every sandboxed tool child (shell,
 js, file — all via the `--run-tool` broker, `src/run_tool.c`).
 
 `src/sandbox.c` holds the policy and the child setup. The mechanism that
 establishes the boundary is the containment backend (`src/contain.h`), chosen
 at build time: `make CONTAIN=linux` (default, `src/contain_linux.c`:
 namespaces, mounts, the proxy wiring) or `make CONTAIN=none`
-(`src/contain_none.c`: no boundary, so only `host` runs tools).
+(`src/contain_none.c`: no boundary, so only containment `none` runs tools).
 
 ## Policy bundles
 
-Three profiles, deliberately: no sandbox, sandbox, sandbox-without-network.
+Three values, deliberately: no sandbox, sandbox, sandbox-without-network.
 None of them is merely a tuning preset.
 
-| Policy                  | host             | standard (default) | restricted |
+| Policy                  | none             | standard (default) | offline    |
 |-------------------------|------------------|--------------------|------------|
 | namespace sandbox       | **none**         | required           | required   |
 | env                     | inherit+scrub    | clean allowlist    | clean allowlist |
@@ -40,33 +41,33 @@ None of them is merely a tuning preset.
 agent sees its own workspace and whatever `read_path`/`write_path` grants add,
 and nothing of the user's files or another agent's workspace. Widening
 visibility is the grant system's job (and therefore the approval flow's), never
-a side effect of picking a looser profile. `host` is the one profile that sees
-the user's files, because it establishes no namespace at all.
+a side effect of picking a looser containment. `none` is the one value that
+sees the user's files, because it establishes no namespace at all.
 
 **Why `standard` has NPROC but no CPU cap.** The NPROC cap is not policy, it is
 the fork-bomb backstop: on a 128 MB target one bad generated shell line
 otherwise takes the daemon down with it. A per-process CPU cap punishes nothing
 real — legitimate builds brush it — so it is gone. (`standard` absorbed the
-former `trusted` profile, whose mount set was already identical; the merge cost
+former `trusted` value, whose mount set was already identical; the merge cost
 `trusted`'s env inheritance, which was a hygiene regression acquired as a side
 effect rather than anything anyone chose.)
 
-**`restricted` means no packets, ever.** The child gets no proxy socket and an
+**`offline` means no packets, ever.** The child gets no proxy socket and an
 empty netns, so the denial is kernel-enforced rather than a `grants` row —
 not even a promoted tool with declared hosts egresses. Parent-side tools
-(memory, `db_query`, the LLM loop itself) are untouched, so a `restricted`
+(memory, `db_query`, the LLM loop itself) are untouched, so an `offline`
 note-taking agent converses, remembers, and runs local programs fine. File
-grants to a `restricted` agent remain legal: the profile constrains packets,
+grants to an `offline` agent remain legal: the containment constrains packets,
 not files.
 
-**`$HOME` is set under every profile.** Sandboxed profiles point it at the agent
-workspace: it is bind-mounted rw at its own absolute path and persists across
+**`$HOME` is set under every containment.** Sandboxed values point it at the
+agent workspace: it is bind-mounted rw at its own absolute path and persists across
 tool calls, so `pip install --user`, `cargo install`, and `npm -g --prefix
 $HOME` land inside the one directory the agent owns and are on `PATH` next call
-— an agent can bootstrap its own toolchain without a grant. `host` reads the
+— an agent can bootstrap its own toolchain without a grant. `none` reads the
 invoking user's home from the passwd database (the `--run-tool` child starts
 from an empty environ, so there is nothing to inherit). This is also why no
-sandboxed profile mounts the workspace read-only any more: `$HOME` has to be
+sandboxed containment mounts the workspace read-only any more: `$HOME` has to be
 writable or every toolchain fails on its cache.
 
 **`PATH`** is the agent's workspace-local bin dirs (`$HOME/.local/bin`,
@@ -75,7 +76,7 @@ writable or every toolchain fails on its cache.
 `cargo`, `rustc`) install outside `/bin:/usr/bin`, so a shorter `PATH` hides
 them.
 
-**`/tmp` is a bind of the agent's own scratch directory on the host**, not a
+**`/tmp` is a bind of the agent's own scratch directory on the host machine**, not a
 directory on the (deliberately tiny) root tmpfs and not a tmpfs we size
 ourselves. Toolchains write real volume there — `cc` intermediates, configure
 scripts, npm staging — and a shared 1 MB root failed every build with ENOSPC.
@@ -125,40 +126,41 @@ call.
 **`no_new_privs` is set on every sandboxed `--run-tool` child**
 (`sandbox_child_setup`): a setuid or file-capability binary the payload runs
 gets no more than the caller has. Nothing a sandboxed child does needs
-elevation; the namespace and its mounts come from the user namespace. `host`
-does not set it: that profile is the operator's own reach, `sudo` included.
+elevation; the namespace and its mounts come from the user namespace.
+Containment `none` does not set it: it is the operator's own reach, `sudo`
+included.
 
-**No profile sets `RLIMIT_AS`.** It caps *address space*, not resident memory,
+**No containment sets `RLIMIT_AS`.** It caps *address space*, not resident memory,
 and every modern runtime reserves VA far beyond its footprint — Go's allocator
 arenas, V8's heap cages, LLVM. A cap loose enough to be safe bounds nothing; a
 cap tight enough to bound anything refuses to start `go`, `node`, or `rustc`
 before they do a byte of work. NPROC and CPU bound a runaway; a cgroup memory
 limit is the right tool if a real memory ceiling is ever wanted.
 
-**`host` and the CWD.** `host` runs no namespace, so nothing is mounted and no
-`chdir` is implied. In CLI mode the child inherits the user's CWD — that is the
-point of `host`, since `cclaw` invoked in a repo should operate on that repo.
+**Containment `none` and the CWD.** `none` runs no namespace, so nothing is
+mounted and no `chdir` is implied. In CLI mode the child inherits the user's
+CWD — that is the point of `none`, since `cclaw` invoked in a repo should operate on that repo.
 Under `--daemon` there is no meaningful user CWD, so the child starts in the
 agent workspace instead.
 
 - **Unknown or NULL values fall through to `standard`.** There is no
-  `bootstrap` profile and no `trusted` profile — both are treated like
-  any other unknown value (→ standard, which is strictly tighter than the old
-  `trusted`). A DB stamped before schema v34 has its `trusted` rows rewritten
-  to `standard` by the forward patch. The seeded default agent (`Assistant`)
-  is `standard`.
+  `bootstrap` and no `trusted` — both are treated like any other unknown
+  value (→ standard, which is strictly tighter than the old `trusted`). The
+  pre-v71 names `host` and `restricted` are unknown too; the v71 schema patch
+  rewrites stored rows to `none` and `offline`, and agent definitions naming
+  them are refused. The seeded default agent (`Assistant`) is `standard`.
 - **clean allowlist env**: the environment is wiped, then only `PATH`,
   `TMPDIR` and `HOME` are set. Additions by vehicle: shell and js get
   `CCLAW_PROXY_SOCK` and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`,
   `ALL_PROXY`, `NO_PROXY`, and their lowercase forms); the shell also
   gets `CCLAW_CONNECT` and `GIT_SSH_COMMAND`
   ([shell-networking.md](shell-networking.md)); JS gets `CCLAW_LLM_SOCK`
-  except under `restricted`; a shell child gets the `CCLAW_SECRET_*` values
-  its command references. `host` uses a blacklist scrub instead
+  except under `offline`; a shell child gets the `CCLAW_SECRET_*` values
+  its command references. `none` uses a blacklist scrub instead
   (inherit-minus-blacklist: `CCLAW_*` names and names containing
   API_KEY/APIKEY/TOKEN/SECRET/PASSWORD/CREDENTIALS are dropped,
   `CCLAW_SECRET_*` re-injected as the deliberate channel).
-- **network none** (`restricted`): no proxy is started and no proxy socket
+- **no network** (`offline`): no proxy is started and no proxy socket
   or proxy variable reaches the child; the empty netns then has zero egress.
 - **grant-path bind mounts**: `read_path`/`write_path` grants add bind
   mounts on top of the bundle (`contain_enter()`, `src/contain_linux.c`);
@@ -174,14 +176,14 @@ agent workspace instead.
 
 ## Fail-closed rule
 
-Every profile except `host` **requires** the containment backend. If
+Every containment except `none` **requires** the containment backend. If
 `contain_enter()` cannot establish the boundary (`unshare`/`pivot_root`
 fails on Linux; always under `CONTAIN=none`), the child prints an error and
 exits 126 instead of degrading. A runtime failure must not grant what only
-`host` may grant. `host` never attempts the sandbox; it is the explicit
-opt-out, per-agent via `agents.sandbox_profile` or session-wide via
-`--trust-host` (sets `CCLAW_SANDBOX_PROFILE=host`). Sandbox on/off is derived
-from the profile; there is no separate sandbox knob. `contain_probe()` answers
+`none` may grant. `none` never attempts the sandbox; it is the explicit
+opt-out, per-agent via `agents.containment` or session-wide via
+`--no-containment` (sets `CCLAW_CONTAINMENT=none`). Sandbox on/off is derived
+from the containment; there is no separate sandbox knob. `contain_probe()` answers
 "can this host contain a child" ahead of time, and `cclaw --doctor` `[layers]`
 reports it per agent ([portability.md](portability.md)).
 
@@ -191,22 +193,22 @@ reports it per agent ([portability.md](portability.md)).
   `expires_at`). Withholding a `tool` grant for `shell_exec` is the strongest
   lockdown; an empty host-grant set is deny-all egress at the proxy.
 - **Escalation** = `approvals` (park/resolve, `rerun`/`apply`).
-- The profile must never gate a capability. If a change makes tool/secret
-  access depend on `sandbox_profile`, it belongs on `grants` instead.
+- The containment must never gate a capability. If a change makes tool/secret
+  access depend on `agents.containment`, it belongs on `grants` instead.
 
 ## Test coverage
 
 Integration tests exercise the namespace, proxy-deny, and static-mount paths
 (`test/test_shell_namespace.c`, `test_integration_shell_proxy*.c`,
-`test_sandbox_mounts.c`). The profile→bundle mapping is pinned field-by-field in
-`test/test_sandbox_profile.c`, which also enforces two invariants directly: no
-profile may set `RLIMIT_AS`, and every unknown value (`trusted` and `bootstrap`
-included) falls through to `standard`. The state-file mask has its own suite,
+`test_sandbox_mounts.c`). The containment→bundle mapping is pinned field-by-field in
+`test/test_containment.c`, which also enforces two invariants directly: no
+containment may set `RLIMIT_AS`, and every unknown value (`trusted`, `bootstrap`
+and the retired `host` included) falls through to `standard`. The state-file mask has its own suite,
 `test/test_sandbox_key_mask.c` — every masking assertion there is paired with a
 positive control read of a decoy file in the same granted directory.
 
-`cclaw.db` and `.cclaw_key` are masked **unconditionally** in every sandboxed
-profile, and no grant can unmask either: the DB is the policy store for the
+`cclaw.db` and `.cclaw_key` are masked **unconditionally** under every sandboxed
+containment, and no grant can unmask either: the DB is the policy store for the
 containment mechanism itself, so read is reconnaissance and write is
 escalation. A `read_path`/`write_path` grant naming the DB, one of its
 `-wal`/`-shm` siblings, or any directory containing it is refused at *grant*

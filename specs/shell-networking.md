@@ -160,8 +160,8 @@ was linked no longer matters.
 
 The last two rows fail safe, not open. If a tool call gets "network
 unreachable" or a failed name lookup with no proxy DENIED/ERROR logged, the
-program never talked to the proxy. Raw TCP to arbitrary services is what the
-`host` profile is for.
+program never talked to the proxy. Raw TCP to arbitrary services is what
+containment `none` is for.
 
 ### `channel_runner`: a separate process with its own, narrower control
 

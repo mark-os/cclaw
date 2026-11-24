@@ -19,7 +19,7 @@
 │  LLM-directed shell/js/file tool calls                  │
 │  Contained by: backend (namespaces), proxy, clean env   │
 │  Cannot: reach ungranted hosts, read key/DB, see paths  │
-│  outside workspace + grants (all void under `host`)     │
+│  outside workspace + grants (all void uncontained)      │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -28,7 +28,7 @@
 | Main process (CLI/daemon) | Full | Your binary, root of trust, holds encryption key |
 | Agent loop (same process) | High (self-constrained) | Your binary, but executes LLM-directed logic; respects DB + env config |
 | LLM output | Untrusted input | Adversarial by assumption (prompt injection, jailbreaks) |
-| --run-tool broker children | Untrusted | Re-exec'd for each tool call; contained by the backend (shell, js and file children), except under `host` |
+| --run-tool broker children | Untrusted | Re-exec'd for each tool call; contained by the backend (shell, js and file children), except under containment `none` |
 | JS runtime (in broker child) | Untrusted | Executes LLM-generated code; heap-capped, instruction-limited |
 | External HTTP responses | Untrusted | Wrapped at query time in `<UNTRUSTED_EXTERNAL_CONTENT id="…">` tags carrying a per-entry random id the content cannot know |
 
@@ -46,7 +46,7 @@ The agent process is **your compiled code** — not a container running arbitrar
 | Failure mode | Impact | Mitigation |
 |--------------|--------|-----------|
 | Bug in policy enforcement | Agent reaches blocked host | Code review; integration tests |
-| Agent ignores config limit | Infinite loop, resource exhaustion | `max_iterations` and turn caps in the loop; tool children get kernel-enforced `setrlimit` caps per profile |
+| Agent ignores config limit | Infinite loop, resource exhaustion | `max_iterations` and turn caps in the loop; tool children get kernel-enforced `setrlimit` caps per containment |
 | Memory corruption | Arbitrary behavior | `-Wall -Wextra -Werror`, ASAN in dev, arena allocator limits scope |
 | Agent leaks secret to LLM context | Key visible in session history | Never include provider-native env var (e.g. `OPENROUTER_API_KEY`) in any message/tool_result; grep for leaks in tests |
 | Agent writes to wrong DB | Cross-agent data corruption | Agent only opens `CCLAW_DB_PATH` path; writes scoped by agent_name |
@@ -58,7 +58,7 @@ The agent process is **your compiled code** — not a container running arbitrar
 - Long-lived process with per-tool isolation — untrusted work runs in short-lived `--run-tool` broker children (re-exec'd, namespace-sandboxed), not in the parent
 - `setrlimit` gives tool children hard kernel caps regardless of bugs
 - The namespace sandbox gives tool children filesystem isolation even if cclaw's code has path-traversal bugs
-- None of the last two applies under `host`; that profile is the operator's explicit choice ([portability.md](portability.md#boundaries-by-what-the-host-offers))
+- None of the last two applies under containment `none`; that is the operator's explicit choice ([portability.md](portability.md#boundaries-by-what-the-host-offers))
 
 ## Config Loading
 
@@ -93,7 +93,7 @@ Ordered from most to least critical:
 
 | # | Layer | Scope | Kernel-enforced? | Bypassable by agent? |
 |---|-------|-------|------------------|---------------------|
-| 1 | `setrlimit` | Tool children (per profile) | Yes | No |
+| 1 | `setrlimit` | Tool children (per containment) | Yes | No |
 | 2 | Containment backend (namespace sandbox) | All `--run-tool` children | Yes | No (separate process) |
 | 3 | Credential proxy (`proxy.c` `host_decide()`) | Shell and js children network | Yes (netns has no other route) | No (separate netns) |
 | 4 | Clean environment | Tool children | No (app-level) | Only via code bug |
@@ -103,8 +103,8 @@ Layers 1–3 are hard boundaries (kernel-enforced, separate address space).
 Layer 4 is a soft boundary (correct code required).
 Layer 5 is bonus hardening (Linux-specific).
 
-Under `host`, layers 1–3 are absent and layer 4 is a blacklist scrub
-([sandbox-profiles.md](sandbox-profiles.md)). These layers are the
+Under containment `none`, layers 1–3 are absent and layer 4 is a blacklist
+scrub ([containment.md](containment.md)). These layers are the
 containment layer (layer 3) of [portability.md](portability.md#the-layers).
 
 Egress for all three network tools is decided by `host_decide()` on every
@@ -249,7 +249,7 @@ shell and js `RunToolReq`, in this order:
 3. **Sensitivity** — deny labels ride alongside and are checked first, minus a
    one-call approved exception.
 
-Under `restricted` none of this reaches the wire: the child gets no proxy
+Under `offline` none of this reaches the wire: the child gets no proxy
 socket, so a declared-hosts tool still egresses nothing. Containment is
 kernel-enforced and beats every declaration.
 
@@ -317,7 +317,7 @@ All actions use `resolve='apply'` approvals (ambient capability grants, not one-
 
 ### read_path / write_path grants → sandbox bind-mounts
 
-Path grants (`kind='read_path'` or `kind='write_path'`) become extra bind-mounts inside the sandboxed tool child. `agent_setup_init()` (`src/agent_setup.c`) loads them into the `SandboxProfile`, and `contain_enter()` (`src/contain_linux.c`) mounts them (canonicalized, deduped, rw-wins, sorted shallow→deep) alongside the workspace.
+Path grants (`kind='read_path'` or `kind='write_path'`) become extra bind-mounts inside the sandboxed tool child. `agent_setup_init()` (`src/agent_setup.c`) loads them into the `Containment`, and `contain_enter()` (`src/contain_linux.c`) mounts them (canonicalized, deduped, rw-wins, sorted shallow→deep) alongside the workspace.
 
 ### One answer vocabulary, one rule
 
@@ -395,7 +395,7 @@ All agents share one cclaw.db. A query bug could read or write another agent's r
 
 Mitigations:
 - Every agent-owned table is scoped by `agent_name`, and queries filter on it.
-- Tool children never open the DB; it is masked in every sandboxed profile.
+- Tool children never open the DB; it is masked under every sandboxed containment.
 
 ### Malicious config in cclaw.db
 
@@ -430,19 +430,19 @@ Provider API keys resolve env → system-scope secret: `config_load()` reads the
 
 **Key-protection ceiling.** The DB store is encrypted at rest, but the key sits on the *same disk* as the ciphertext. Whole-disk theft yields both → plaintext. So the built-in store protects against *exfiltration of `cclaw.db` alone* (a leaked backup, a mis-scoped file copy) — **not** against full-disk capture or the running host. Closing that gap means deriving the key from a user passphrase (KDF) or binding it to hardware (TPM / Secure Enclave) — which is exactly what a keychain storage provider gets for free (see [Storage providers](#storage-providers-design--not-yet-implemented)). For a single-user box a chmod-600 key file is a reasonable default; it is not a substitute for a hardware-backed vault, and users who care should use the keychain provider.
 
-**The key file is invisible to sandboxed shell children by omission.** `.cclaw_key` lives next to `cclaw.db` (`<dir of db_path>/.cclaw_key`). That directory is *not* the workspace, and no sandboxed profile mounts anything else by default — no sandboxed profile mounts the CWD — so the key and the DB ciphertext simply never materialize in the child's mount tree. `host` establishes no namespace and is exposed by construction; that is what picking `host` means.
+**The key file is invisible to sandboxed shell children by omission.** `.cclaw_key` lives next to `cclaw.db` (`<dir of db_path>/.cclaw_key`). That directory is *not* the workspace, and no sandboxed containment mounts anything else by default — none of them mounts the CWD — so the key and the DB ciphertext simply never materialize in the child's mount tree. Containment `none` establishes no namespace and is exposed by construction; that is what picking `none` means.
 
 **Grant-mounted paths are masked.** A `read_path`/`write_path` grant covering a directory that contains `cclaw.db` binds that directory into the child. Without further work, key + ciphertext together is a full secret compromise, and the approver would see only "read access to a directory" — no hint that it means every stored secret. `sandbox_mask_state_files()` (`src/sandbox.c`) closes this by binding an empty read-only file over the key and the DB family (`cclaw.db`, `-wal`, `-shm`) after all binds and before `pivot_root`. Paths not reachable in the child's mount tree never materialize under the new root, so the unmounted case skips them — they are already invisible by omission.
 
 The mask is **provisional and path-based**. It exists because the default key backend is a file co-located with the DB; it does not generalize to a key held in the kernel keyring, behind libsecret, on an agent UDS, or sealed to a TPM. For those backends unreachability follows from the sandbox mounting almost nothing, and the mask becomes dead code.
 
-Both files follow the same rule: **masked unconditionally, and no grant can unmask either.** For the **key**, reading it is not access to a resource but escalation to every secret in the store, including system-scope entries and other agents' — a grant made on one agent's behalf must not confer authority over agents that never consented. For the **DB**, it is the policy store for the mechanism doing the containment (`grants`, `agents.sandbox_profile`), so reading it is reconnaissance and writing it *is* escalation; it is also not one agent's state, but every agent's sessions, entries, grants and approvals. `db_query` is the sanctioned inspection path — SELECT-only, separately grant-gated, and running in the trusted parent, never through this mount tree.
+Both files follow the same rule: **masked unconditionally, and no grant can unmask either.** For the **key**, reading it is not access to a resource but escalation to every secret in the store, including system-scope entries and other agents' — a grant made on one agent's behalf must not confer authority over agents that never consented. For the **DB**, it is the policy store for the mechanism doing the containment (`grants`, `agents.containment`), so reading it is reconnaissance and writing it *is* escalation; it is also not one agent's state, but every agent's sessions, entries, grants and approvals. `db_query` is the sanctioned inspection path — SELECT-only, separately grant-gated, and running in the trusted parent, never through this mount tree.
 
 There is no escape hatch at mount time, by design. A `read_path`/`write_path` grant naming `cclaw.db`, one of its `-wal`/`-shm` siblings, or any directory containing it is **refused when the grant is created** (`grant_path_hits_db()`, `src/agent_config.c` — the single insert chokepoint, so every grant route inherits it), with the reason surfaced at request time by `request_config` validation. Refusing loudly is the point: an approved grant that silently does nothing at mount is its own class of bug. Losing raw `sqlite3` against the live DB from an agent shell is a second win — it was a WAL-corruption hazard against the daemon's open handle.
 
-Regression coverage is `test/test_sandbox_key_mask.c`. The load-bearing case is the *granted* one — with no grant the key is already invisible by omission, which is why the earlier breakage (the broker setting `db_path = NULL`, leaving the mask a silent no-op in every profile) went unnoticed.
+Regression coverage is `test/test_sandbox_key_mask.c`. The load-bearing case is the *granted* one — with no grant the key is already invisible by omission, which is why the earlier breakage (the broker setting `db_path = NULL`, leaving the mask a silent no-op under every containment) went unnoticed.
 
-The one remaining exposure is **`host`** (per agent, or `--trust-host`; the answer on a host without a containment backend, see [portability.md](portability.md)): it runs with *no* sandbox, so a shell child reads the host filesystem directly, key included. That is the documented price of `host` — never run untrusted-derived work at `host` on a box whose `.cclaw_key` matters. See [Sandbox Profile Policy Bundles](#sandbox-profile-policy-bundles).
+The one remaining exposure is containment **`none`** (per agent, or `--no-containment`; the answer on a host without a containment backend, see [portability.md](portability.md)): it runs with *no* sandbox, so a shell child reads the host filesystem directly, key included. That is the documented price of `none` — never run untrusted-derived work uncontained on a box whose `.cclaw_key` matters. See [Containment Policy Bundles](#containment-policy-bundles).
 
 ### What `db_query` does not return
 
@@ -533,7 +533,7 @@ never enter the snapshot and no grant can name one.
   bindings and its grants in one transaction (no foreign key exists to
   cascade from: environment secrets have no row).
 
-**Three orthogonal axes.** Secret access is a *grant* — do not collapse it into sandbox_profile:
+**Three orthogonal axes.** Secret access is a *grant* — do not collapse it into the containment:
 
 | Axis | Mechanism | Question it answers |
 |------|-----------|---------------------|
@@ -541,7 +541,7 @@ never enter the snapshot and no grant can name one.
 | Granted | `grants` kind `secret` | which agents may *use* it? |
 | Bound | `secret_hosts` | which hosts may it be *sent to*? |
 
-sandbox_profile governs sandbox strictness (env scrub, network, rlimits) — what a compromised agent can *do*, not which secrets it may use. The axes compose (a `restricted` agent granted a secret still reaches no host) but must stay independent: never gate secret access on sandbox_profile.
+`agents.containment` governs sandbox strictness (env scrub, network, rlimits) — what a compromised agent can *do*, not which secrets it may use. The axes compose (an `offline` agent granted a secret still reaches no host) but must stay independent: never gate secret access on the containment.
 
 ### Storage providers (design — not yet implemented)
 
@@ -756,13 +756,13 @@ Keeping values out of the QuickJS heap is **not a goal**. The trust model's hard
 
 A `SECRET("name")` opaque-handle design (native binding returning a name-only handle, C-side `crypto.hmac` primitives, a grant-gated `.reveal()`) was fully specced and **rejected** (2026-08-22): it existed to serve a heap-avoidance goal the trust model does not have, at the cost of new API surface and vendored crypto. If a signing scheme (SigV4, webhook HMAC) ever needs a raw key inside a computation, interpolate it via args — sanctioned — or extend the proxy to sign at the network boundary, which would be the one mechanism that genuinely denies the child the plaintext.
 
-## Sandbox Profile Policy Bundles
+## Containment Policy Bundles
 
-`agents.sandbox_profile` selects the containment bundle for every `--run-tool`
+`agents.containment` selects the policy bundle for every `--run-tool`
 child (shell, js, file). The bundle table, the rationale and the
-fail-closed rule live in [sandbox-profiles.md](sandbox-profiles.md); this
+fail-closed rule live in [containment.md](containment.md); this
 section keeps only the points that concern secrets.
 
-- The profile governs containment only. It never gates a tool, a host or a secret ([trust.md](trust.md#the-invariant)).
-- Unknown values fall through to `standard` in `sandbox_policy_from_profile()` (`src/sandbox.c`). `sandbox_profile_resolve()` copies the result into the `SandboxProfile` once, in `agent_setup_init()`.
-- **`.cclaw_key` and the DB family are outside every sandboxed profile's mount set**, so no sandboxed child can read the secret key or the DB ciphertext. Both are masked unconditionally, and a path grant that would expose either is refused at grant time. `host` (no sandbox) is exposed by construction. See [Secret Storage](#secret-storage).
+- It governs containment only. It never gates a tool, a host or a secret ([trust.md](trust.md#the-invariant)).
+- Unknown values fall through to `standard` in `sandbox_policy_from_containment()` (`src/sandbox.c`). `containment_resolve()` copies the result into the `Containment` once, in `agent_setup_init()`.
+- **`.cclaw_key` and the DB family are outside every sandboxed containment's mount set**, so no sandboxed child can read the secret key or the DB ciphertext. Both are masked unconditionally, and a path grant that would expose either is refused at grant time. Containment `none` (no sandbox) is exposed by construction. See [Secret Storage](#secret-storage).

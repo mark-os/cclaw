@@ -32,7 +32,7 @@ Today, to use `gh` CLI the agent calls `shell_exec` with a raw command string:
 shell_exec({"command": "gh pr merge 123 --auto"})
 ```
 
-The only gating is the sandbox profile and the agent's host grants.
+The only gating is the agent's containment and its host grants.
 There's no way to say "allow pr list but deny pr merge" short of regexing the
 command string.
 
@@ -84,7 +84,7 @@ var result = cclaw.exec("gh pr list --json number,title", {
 
 **Implementation**: the JS child (already forked) fork+execs `/bin/sh -c`
 with the same namespace sandbox applied to normal shell_exec calls. The JS
-child's sandbox_profile determines the sandbox profile. The call is synchronous
+agent's containment determines the sandbox. The call is synchronous
 (blocks the JS handler until the shell command completes or times out).
 
 This is NOT re-entrant into the agent — it's a direct fork+exec from the
@@ -521,7 +521,7 @@ to settle before `email` — or any send-capable tool — ships.
 
 - Add `cclaw_exec` native function to the JS tool child environment
 - Implementation: `fork()` + `exec("/bin/sh", "-c", cmd)` from the JS child
-- Apply same sandbox as shell_exec (inherit sandbox_profile from agent)
+- Apply same sandbox as shell_exec (inherit the agent's containment)
 - Timeout via alarm/waitpid
 - Return `{stdout, stderr, exit_code}` as JS object
 - Scope: only available in tool handler context (not js_eval, not channels)
@@ -564,7 +564,7 @@ host, a path, or a trust level. It is just files in the agent's own workspace.
 
 ## Security Considerations
 
-- `cclaw.exec` inherits the agent's sandbox_profile sandbox — no privilege escalation
+- `cclaw.exec` inherits the agent's containment — no privilege escalation
 - Policy evaluation is in C, before JS runs — can't be bypassed from handler
 - **The forked child has no DB handle** — config rows are unreachable from a
   handler or `cclaw.exec`, so a JS tool cannot mutate capability/trust config

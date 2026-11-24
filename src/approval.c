@@ -939,7 +939,7 @@ static const char *SQL_CREATE_AGENT_LINES =
     "     CASE WHEN length(atom) > 200 THEN substr(atom,1,200)||'...' ELSE atom END)"
     "   FROM json_each(?1)"
     "   WHERE type NOT IN ('object','array')"
-        "     AND key NOT IN ('name','sandbox_profile','clone_from')";
+        "     AND key NOT IN ('name','containment','clone_from')";
 
 /* The two inherited-facts blocks (Livermore thread 5/6): each renders ONLY
  * when the definition is silent on its key, showing what apply will actually
@@ -1102,9 +1102,9 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
                     f[1] ? f[1] : "(no summary)");
     } else if (a->tool_name && strcmp(a->tool_name, "create_agent") == 0) {
         f[0] = tool_args_str(db, args, "name");
-        f[1] = tool_args_str(db, args, "sandbox_profile");
+        f[1] = tool_args_str(db, args, "containment");
         f[2] = tool_args_str(db, args, "clone_from");
-        buf_appendf(&out, "wants to create agent **%s** (profile %s%s%s):\n",
+        buf_appendf(&out, "wants to create agent **%s** (containment %s%s%s):\n",
                     f[0] ? f[0] : "?", f[1] ? f[1] : "default",
                     f[2] ? ", clone of " : "", f[2] ? f[2] : "");
         append_enum_block(db, &out, "Capabilities (all within the creator's own):",

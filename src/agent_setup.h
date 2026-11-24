@@ -2,7 +2,7 @@
 #define CCLAW_AGENT_SETUP_H
 
 /* Assembles the per-agent runtime: builds the tool registry, the shared
- * sandbox profile, secrets, and each tool's context, then tears them all
+ * containment, secrets, and each tool's context, then tears them all
  * down. One AgentSetup serves whichever agent is advancing.
  */
 
@@ -38,9 +38,9 @@ typedef struct {
      * buffers so ctx pointers stay valid across refreshes; the _env flags
      * mark an operator override present at init (env beats agents table) —
      * once refresh setenv's for children, getenv alone can't tell. */
-    char sandbox_profile_buf[32];
+    char containment_buf[32];
     char shell_path_buf[256];
-    int sandbox_profile_env;
+    int containment_env;
     int shell_path_env;
     /* Per-agent workspace, re-derived per dispatch like the caps: one setup
      * serves every agent in the daemon, so the tool contexts must follow the
@@ -78,7 +78,7 @@ typedef struct {
 int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
                      const Config *cfg, const char *agent_name);
 
-/* Refresh caps + containment (sandbox_profile, shell_path) from DB and
+/* Refresh caps + containment (agents.containment, shell_path) from DB and
  * rebind all consumer pointers atomically. */
 void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent);
 

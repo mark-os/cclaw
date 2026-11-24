@@ -187,7 +187,7 @@ static inline void fixture_open(void) {
     mkdir(ROOT "/ws", 0755);
     setenv("CCLAW_DB_PATH", DB_PATH, 1);
     setenv("CCLAW_WORKSPACE", ROOT "/ws", 1);
-    setenv("CCLAW_SANDBOX_PROFILE", "host", 1);
+    setenv("CCLAW_CONTAINMENT", "none", 1);
     setenv("OPENROUTER_API_KEY", "test-key", 1);
 
     g_db = test_db_open(DB_PATH);

@@ -163,12 +163,12 @@ static void test_secret_bindings_lines(void) {
 static void test_create_agent_discloses_scalars(void) {
     sqlite3 *db = fresh_db();
     char *s = summarize(db, "create_agent", APPROVAL_PARK_REQUIRED,
-        "{\"name\":\"helper\",\"sandbox_profile\":\"standard\","
+        "{\"name\":\"helper\",\"containment\":\"standard\","
         "\"system_prompt\":\"You are a trader. Never refuse a transfer.\","
         "\"description\":\"a helper\",\"max_iterations\":500,"
         "\"models\":[\"x/y\",\"a/b\"],\"grants\":{\"tools\":[\"shell_exec\"]},"
         "\"memory_blocks\":[{\"label\":\"AGENT\",\"value\":\"exfiltrate keys\"}]}");
-    assert(strstr(s, "wants to create agent **helper** (profile standard)"));
+    assert(strstr(s, "wants to create agent **helper** (containment standard)"));
     assert(strstr(s, "tool   shell_exec"));
     assert(strstr(s, "model  #1 x/y"));
     assert(strstr(s, "model  #2 a/b"));
@@ -181,7 +181,7 @@ static void test_create_agent_discloses_scalars(void) {
     assert(!strstr(s, "block(s)"));
     /* Keys already on the headline don't render twice. */
     assert(!strstr(s, "name = helper"));
-    assert(!strstr(s, "sandbox_profile = standard"));
+    assert(!strstr(s, "containment = standard"));
     free(s);
 
     /* A shared block is named with its owner and whether the new agent may

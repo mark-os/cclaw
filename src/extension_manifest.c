@@ -484,7 +484,7 @@ static int check_skills(sqlite3 *db, const char *manifest, const char *bundle_di
 }
 
 /* Verify every $.agents[] entry is a plausible agent definition: PascalCase
- * name, known sandbox_profile, and an existing bundle-relative
+ * name, known containment, and an existing bundle-relative
  * system_prompt_file if declared. DB-dependent caps (grants subset, extension
  * visibility) are enforced at install time by agent_definition_validate. */
 static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_dir,
@@ -495,7 +495,7 @@ static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_di
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "SELECT json_extract(value,'$.name'),"
-            "       json_extract(value,'$.sandbox_profile'),"
+            "       json_extract(value,'$.containment'),"
             "       json_extract(value,'$.system_prompt_file') "
             "FROM json_each(COALESCE(json_extract(?1,'$.agents'),'[]'))",
             -1, &st, NULL) != SQLITE_OK)
@@ -510,9 +510,9 @@ static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_di
             xerr(err_out, "agents[] entry needs a PascalCase 'name'");
             rc = -1; break;
         }
-        if (p && strcmp(p, "host") != 0 &&
-            strcmp(p, "standard") != 0 && strcmp(p, "restricted") != 0) {
-            xerr(err_out, "agents[] sandbox_profile must be host|standard|restricted");
+        if (p && strcmp(p, "none") != 0 &&
+            strcmp(p, "standard") != 0 && strcmp(p, "offline") != 0) {
+            xerr(err_out, "agents[] containment must be none|standard|offline");
             rc = -1; break;
         }
         if (f && f[0]) {

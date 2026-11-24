@@ -44,20 +44,20 @@ static char *jext(sqlite3 *db, const char *json, const char *path) {
     return res;
 }
 
-/* Looseness order host > standard > restricted; -1 = unknown. */
-static int profile_rank(const char *p) {
-    if (!p) return -1;
-    if (strcmp(p, "host") == 0) return 2;
-    if (strcmp(p, "standard") == 0) return 1;
-    if (strcmp(p, "restricted") == 0) return 0;
+/* Looseness order none > standard > offline; -1 = unknown. */
+static int containment_rank(const char *c) {
+    if (!c) return -1;
+    if (strcmp(c, "none") == 0) return 2;
+    if (strcmp(c, "standard") == 0) return 1;
+    if (strcmp(c, "offline") == 0) return 0;
     return -1;
 }
 
-static char *agent_profile(sqlite3 *db, const char *name) {
+static char *agent_containment(sqlite3 *db, const char *name) {
     sqlite3_stmt *st;
     char *res = NULL;
     if (sqlite3_prepare_v2(db,
-            "SELECT COALESCE(sandbox_profile,'standard') FROM agents WHERE name=?1",
+            "SELECT COALESCE(containment,'standard') FROM agents WHERE name=?1",
             -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
@@ -175,19 +175,19 @@ static int extensions_check(sqlite3 *db, const char *json, const char *creator,
     return rc;
 }
 
-/* Creator cap on a profile value (validate path). */
-static int profile_capped(sqlite3 *db, const char *profile, const char *creator,
-                          char **err) {
-    if (!profile) return 0;
-    int r = profile_rank(profile);
+/* Creator cap on a containment value (validate path). */
+static int containment_capped(sqlite3 *db, const char *containment,
+                              const char *creator, char **err) {
+    if (!containment) return 0;
+    int r = containment_rank(containment);
     if (r < 0)
-        return failf(err, "invalid sandbox_profile '%s' (host|standard|restricted)%s",
-                     profile, "");
+        return failf(err, "invalid containment '%s' (none|standard|offline)%s",
+                     containment, "");
     if (creator) {
-        char *cp = agent_profile(db, creator);
-        int cr = profile_rank(cp);
+        char *cp = agent_containment(db, creator);
+        int cr = containment_rank(cp);
         if (r > cr) {
-            failf(err, "sandbox_profile '%s' looser than creator's '%s'", profile, cp);
+            failf(err, "containment '%s' looser than creator's '%s'", containment, cp);
             free(cp);
             return -1;
         }
@@ -260,7 +260,7 @@ static int models_check(sqlite3 *db, const char *json, const char *creator,
     return rc;
 }
 
-/* Validate name/profile/grants/extensions/clone_from; no writes.
+/* Validate name/containment/grants/extensions/clone_from; no writes.
  * name_out (optional): heap copy of $.name on success. */
 static int validate_inner(sqlite3 *db, const char *json, const char *creator,
                           char **name_out, char **err) {
@@ -289,9 +289,9 @@ static int validate_inner(sqlite3 *db, const char *json, const char *creator,
     }
 
     int rc = 0;
-    char *profile = jext(db, json, "$.sandbox_profile");
-    rc = profile_capped(db, profile, creator, err);
-    free(profile);
+    char *containment = jext(db, json, "$.containment");
+    rc = containment_capped(db, containment, creator, err);
+    free(containment);
 
     char *clone = NULL;
     if (rc == 0) {
@@ -300,10 +300,10 @@ static int validate_inner(sqlite3 *db, const char *json, const char *creator,
             if (!agent_exists(db, clone)) {
                 rc = failf(err, "clone_from agent '%s' does not exist%s", clone, "");
             } else if (creator) {
-                /* Cloning must not launder capabilities: source profile and
-                 * live grants are capped like declared ones. */
-                char *sp = agent_profile(db, clone);
-                rc = profile_capped(db, sp, creator, err);
+                /* Cloning must not launder capabilities: source containment
+                 * and live grants are capped like declared ones. */
+                char *sp = agent_containment(db, clone);
+                rc = containment_capped(db, sp, creator, err);
                 free(sp);
                 if (rc == 0) {
                     sqlite3_stmt *gs;
@@ -402,7 +402,7 @@ static int apply_fields_and_grants(sqlite3 *db, const char *name,
         "UPDATE agents SET"
         " description   = COALESCE(json_extract(?2,'$.description'), description),"
         " system_prompt = COALESCE(json_extract(?2,'$.system_prompt'), system_prompt),"
-        " sandbox_profile = COALESCE(json_extract(?2,'$.sandbox_profile'), sandbox_profile),"
+        " containment   = COALESCE(json_extract(?2,'$.containment'), containment),"
         " max_iterations  = COALESCE(json_extract(?2,'$.max_iterations'), max_iterations),"
         " shell_timeout   = COALESCE(json_extract(?2,'$.shell_timeout'), shell_timeout)"
         " WHERE name=?1";
@@ -493,10 +493,10 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
         static const char *copies[] = {
             ("INSERT INTO agents(name, created_by,"
              " system_prompt, description, max_iterations, max_output_tokens,"
-             " shell_timeout, shell_path, sandbox_profile)"
+             " shell_timeout, shell_path, containment)"
              " SELECT ?1, ?3, system_prompt, description,"
              "  max_iterations, max_output_tokens, shell_timeout, shell_path,"
-             "  sandbox_profile FROM agents WHERE name=?2"),
+             "  containment FROM agents WHERE name=?2"),
             /* The copies are new rows of a new agent: their origin is this
              * creation, never the source agent's history. */
             ("INSERT OR IGNORE INTO grants(agent_name, kind, value, approval_mode,"
@@ -666,7 +666,7 @@ void agent_attach_default_extensions(sqlite3 *db, const char *name) {
  * anything outside the whitelist instead. */
 #define UPDATE_KEYS_SQL \
     "('name','description','system_prompt','models'," \
-    "'sandbox_profile','max_iterations','shell_timeout','grants','reason')"
+    "'containment','max_iterations','shell_timeout','grants','reason')"
 
 static int update_validate_inner(sqlite3 *db, const char *json,
                                  const char *caller, char **err) {
@@ -717,7 +717,7 @@ static int update_validate_inner(sqlite3 *db, const char *json,
           "'%s' must be a positive integer%s" },
         { "SELECT key FROM json_each(?1) WHERE key IN"
           " ('description','system_prompt',"
-          "  'sandbox_profile','reason') AND type!='text'",
+          "  'containment','reason') AND type!='text'",
           "'%s' must be a string%s" },
         { "SELECT 1 FROM json_each(?1)"
           " WHERE key NOT IN ('name','reason') LIMIT 1",
@@ -747,9 +747,9 @@ static int update_validate_inner(sqlite3 *db, const char *json,
     }
 
     /* Caps, both applied against the caller (creator-or-self alike). */
-    char *profile = jext(db, json, "$.sandbox_profile");
-    int rc = profile_capped(db, profile, caller, err);
-    free(profile);
+    char *containment = jext(db, json, "$.containment");
+    int rc = containment_capped(db, containment, caller, err);
+    free(containment);
     for (size_t i = 0; rc == 0 && i < GRANT_KIND_COUNT; i++)
         rc = grants_walk(db, json, NULL, caller, 0, i, GRANT_ORIGIN(NULL, 0), err);
     if (rc == 0)

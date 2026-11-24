@@ -5,12 +5,12 @@
 #include "sandbox.h"
 #include "run_tool.h"
 
-/* Context for file tools — workspace + trust-derived sandbox profile. */
+/* Context for file tools — workspace + trust-derived containment. */
 typedef struct {
     const char *workspace;
     const char *cwd_path;       /* CWD rw mount (CLI mode, NULL in daemon) */
     const char *db_path;        /* cclaw.db path for masking */
-    SandboxProfile sb;          /* trust-derived policy + grant paths */
+    Containment sb;             /* trust-derived policy + grant paths */
 } FileReadCtx;
 
 /* Register the six file tools (all EXEC_FILE; registry entries carry

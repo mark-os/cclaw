@@ -164,7 +164,7 @@ One JSON object describes an agent, everywhere an agent is declared:
   "description": "Monitors feeds and reports anomalies",
   "system_prompt": "…",
   "models": ["…", "…"],
-  "sandbox_profile": "standard",
+  "containment": "standard",
   "grants": {
     "tools": ["web_fetch", "file_read"],
     "hosts": [".example.com"],
@@ -183,7 +183,7 @@ One JSON object describes an agent, everywhere an agent is declared:
 }
 ```
 
-Only `name` is required. Everything else defaults: profile from the operator
+Only `name` is required. Everything else defaults: containment from the operator
 default, grants from `agent_default_tools` (+ `agent_approval_tools` modes),
 no extensions beyond `agent_default_extensions` (see Docs below), no memory
 blocks. In a manifest, `system_prompt_file` (bundle-relative path) may replace
@@ -207,8 +207,8 @@ nothing writes `agent.json` back to disk; the disk file is a one-shot seed.
 When `creator` is non-NULL (agent-initiated: `create_agent`, or a manifest
 promoted by an agent), the child is capped on both axes independently:
 
-- **Containment**: child `sandbox_profile` ≤ creator's, by looseness order
-  `host > standard > restricted`. Requesting a looser profile is a
+- **Containment**: child `containment` ≤ creator's, by looseness order
+  `none > standard > offline`. Requesting a looser containment is a
   hard refusal, not a clamp — the definition was wrong, say so.
 - **Authority**: child grants ⊆ creator's *live* grants (exact
   subset-of-values per kind: tool, host, read_path, write_path). No fuzzy
@@ -221,7 +221,7 @@ promoted by an agent), the child is capped on both axes independently:
 Approval is still required on top of the caps: `create_agent` parks its own
 apply-approval like `request_config` (it is deliberately *not* in
 `agent_approval_tools` — a standing approval_mode would double-prompt), and
-the approval summary enumerates what is being created: profile, N tools,
+the approval summary enumerates what is being created: containment, N tools,
 M hosts, extensions, whether cloned. Eager validation happens at request
 time — a definition that would fail caps or parse never parks.
 
@@ -235,7 +235,7 @@ immutable to agents once applied.
 - **Authorization**: the caller must be the target itself or its creator
   (`agents.created_by`). An agent with NULL `created_by` (operator-created) is
   operator-only.
-- **Same caps as creation, against the caller**: `sandbox_profile` never
+- **Same caps as creation, against the caller**: `containment` never
   looser than the caller's; every added grant ⊆ the caller's live grants.
   Grants are **additive-only** — removal is an operator act. A self-update's
   grant adds are no-ops by construction, so authority *expansion* remains
@@ -243,7 +243,7 @@ immutable to agents once applied.
   split survives.
 - **Overlay semantics, typo-hostile**: provided fields overwrite
   (`description`, `system_prompt`, models — canonical `models.id` only —
-  `sandbox_profile`, `max_iterations`, `shell_timeout`); absent fields keep
+  `containment`, `max_iterations`, `shell_timeout`); absent fields keep
   their value, so unknown keys are hard errors (a typo would otherwise
   silently change nothing). An update with no updatable field is an error.
 - **Approval**: parks like `create_agent`; the summary enumerates every
@@ -261,7 +261,7 @@ operator verb (future `cclaw agent rm`), never a side effect.
 
 `extension.json` gains `agents[]`: an array of agent-definition objects
 (`system_prompt_file` allowed). Validation (`extension_manifest_validate`)
-checks name shape, profile value, and grants shape; caps are enforced at
+checks name shape, containment value, and grants shape; caps are enforced at
 install time against the promoting agent (`creator = owner_agent`; builtin
 bundles install with no owner — `owner_agent` NULL — and apply as the
 operator, uncapped).

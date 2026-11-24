@@ -22,19 +22,19 @@ typedef struct {
     size_t allowed_hosts_count;
 } JsHostCtx;
 
-/* Context for js_eval (EXEC_JS) — carries the sandbox profile, mirroring the
+/* Context for js_eval (EXEC_JS) — carries the containment, mirroring the
  * shell's. js runs in the same fork+execve --run-tool broker; its
  * http_request curl reaches the per-hop decide() proxy via HTTP_PROXY. Egress is
  * the proxy's job (allowed_hosts feed proxy_bind), not a pre-flight. */
 typedef struct {
     char **allowed_hosts;        /* egress allowlist for the per-call proxy */
     size_t allowed_hosts_count;
-    int host_mode;               /* 1 = sandbox_profile host (sandbox=0), 0 = sandboxed */
-    const char *sandbox_profile;
+    int uncontained;             /* 1 = containment none (sandbox=0), 0 = sandboxed */
+    const char *containment;
     const char *workspace;
     const char *cwd_path;
     const char *db_path;         /* for the shared extension-store mount */
-    SandboxProfile sb;           /* trust-derived policy + grant paths */
+    Containment sb;              /* trust-derived policy + grant paths */
 } JsEvalCtx;
 
 /* Register js_eval tool into registry. */
@@ -52,8 +52,8 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
                          const char *path, JsEvalCtx *ectx,
                          const char *policy_json);
 
-/* Resolve a js tool entry (js_eval OR an extension tool) into its sandbox
- * profile and — for extension tools — the handler .qjs path the child runs
+/* Resolve a js tool entry (js_eval OR an extension tool) into its
+ * containment and — for extension tools — the handler .qjs path the child runs
  * (*out_path=NULL for js_eval). Both outputs borrow the entry's storage. */
 int js_tool_resolve_request(const ToolEntry *te, JsEvalCtx **out_ctx,
                             const char **out_path);

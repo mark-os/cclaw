@@ -182,7 +182,7 @@ int main(void) {
          * validation refuses a document whose key resolves nowhere. */
         setenv("MYLLM_API_KEY", "test-myllm-key", 1);
         setenv("CCLAW_MODEL", "test-model", 1);
-        unsetenv("CCLAW_SANDBOX_PROFILE");
+        unsetenv("CCLAW_CONTAINMENT");
         execl(exe, exe, (char *)NULL);
         _exit(113);
     }

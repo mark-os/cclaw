@@ -31,7 +31,7 @@ Two ways to get a binary, both supported on purpose:
 | 1 | **Core** | Agent loop, SQLite, config and self-reconfiguration, LLM requests | Kernel, filesystem, a CA bundle for HTTPS |
 | 2 | **Mediated tools** | File tools, JavaScript (`js_eval`, extension tools such as `web_fetch`) | Nothing: cclaw's own code is the only thing acting, so cclaw's own code can enforce the policy |
 | 3 | **Containment** | A boundary imposed from outside on code cclaw cannot inspect | A backend: Linux namespaces today; a platform sandbox (Android app sandbox) or none elsewhere |
-| 4 | **Shell** | Arbitrary programs (`shell_exec`) | Layer 3, or the operator's explicit `host` opt-out |
+| 4 | **Shell** | Arbitrary programs (`shell_exec`) | Layer 3, or the operator's explicit opt-out (containment `none`) |
 | 5 | **Daemon** | Channels, cron, webhooks, multi-agent | `fork`/`exec` of the cclaw binary itself, signals |
 
 Layers 1 and 2 are the bare-minimum useful offering: an agent that can read
@@ -63,10 +63,10 @@ fact enforced by that namespace:
 So on a kernel without unprivileged user namespaces there are two outcomes
 and nothing between them:
 
-- `standard` / `restricted`: every tool call exits 126 (fail-closed,
-  [sandbox-profiles.md](sandbox-profiles.md)). The agent can talk and
+- `standard` / `offline`: every tool call exits 126 (fail-closed,
+  [containment.md](containment.md)). The agent can talk and
   reconfigure itself, and nothing else.
-- `host`: every tool runs with no policy at all — any file, any host, and the
+- `none`: every tool runs with no policy at all — any file, any host, and the
   shell.
 
 `--doctor` `[layers]` reports which of these applies, per agent.
@@ -90,10 +90,10 @@ What is already in good shape:
 
 - **Host with a containment backend** (Linux with unprivileged user
   namespaces): everything in [security.md](security.md) and
-  [sandbox-profiles.md](sandbox-profiles.md) holds. Every tool call, JS
+  [containment.md](containment.md) holds. Every tool call, JS
   included, runs in a forked, namespaced child.
 - **Host without one** (old kernels, vendor kernels built without user
-  namespaces, Android): the `host` profile is the answer, and it means what it
+  namespaces, Android): containment `none` is the answer, and it means what it
   says. The agent acts as the user running cclaw: any file that user can read,
   including cclaw's own database and key; any host on the network; the shell.
   Agents are not isolated from each other, so a sub-agent has the same reach
@@ -102,19 +102,19 @@ What is already in good shape:
 
 That second case is a supported way to run cclaw, not a degraded one: a
 lightweight agent loop on a device given over to it. What it must never be is
-a surprise — a sandboxed profile still fails closed rather than sliding into
-it.
+a surprise — a sandboxed containment still fails closed rather than sliding
+into it.
 
 ## Work, in order
 
 Done: one probe for "can this host contain a child" (`contain_probe`),
 `--doctor` `[layers]`, containment as a backend (`CONTAIN=linux|none`), and
 the answer at startup: when the probe fails and an agent has a sandboxed
-profile, the CLI and the daemon say so before the first tool call does, with
+containment, the CLI and the daemon say so before the first tool call does, with
 the backend's hint (`contain_hint` — on Linux, whichever of the AppArmor
 restriction, `unprivileged_userns_clone` or `max_user_namespaces` is set
 against it) and the way to run uncontained. Nothing is switched
-automatically: `host` stays the operator's choice.
+automatically: `none` stays the operator's choice.
 
 1. **Mediation without a namespace.** See the placeholders below: on a host with no
    containment the choice today is all or nothing.

@@ -134,7 +134,7 @@ GRANT_KINDS[] = {
  * already holds needs nobody's permission, and making it wait behind an
  * approval would mean the safest possible request is also the slowest.
  * Reach is bounded to the four grant kinds by construction: this path only
- * ever DELETEs from `grants`, so sandbox_profile (containment) and every
+ * ever DELETEs from `grants`, so the agent's containment and every
  * system-wide section are structurally out of its reach. */
 
 /* Validate $.grants.remove and DELETE the named rows. On success *receipt_out
@@ -155,7 +155,7 @@ static char *grants_remove_apply(sqlite3 *db, const char *agent,
     if (bad) {
         char *m = errf("error: unknown grants.remove kind '%s' (use tools, "
                        "hosts, read_paths, write_paths, secrets) — removal touches "
-                       "grants only, never sandbox_profile or system config",
+                       "grants only, never containment or system config",
                        bad);
         free(bad);
         return m;

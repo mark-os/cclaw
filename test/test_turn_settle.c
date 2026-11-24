@@ -6,7 +6,7 @@
  * an iteration: Stop / SubagentStop, then ContextThreshold while over the
  * threshold, then C's trim, then the next request or idle.
  *
- * The scripts run under the `host` profile so the test does not depend on
+ * The scripts run under containment `none` so the test does not depend on
  * the machine having unprivileged user namespaces; the sandboxed path is the
  * same code and is exercised on a real instance (specs/hooks.md).
  *

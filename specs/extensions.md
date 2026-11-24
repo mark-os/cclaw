@@ -143,7 +143,7 @@ sensitivity deny rules still apply.
   default: a manifest may name hosts, never unpin the bound. Entries are bare
   hosts or `.suffix` in `host_match`'s vocabulary — schemes and paths are
   rejected, because they would silently never match.
-- **`restricted` still means no packets.** That profile gives the child no
+- **`offline` still means no packets.** That containment gives the child no
   proxy socket at all, so a declared-hosts tool egresses nothing under it.
   Containment is kernel-enforced and beats any declaration.
 
@@ -346,7 +346,7 @@ way the value is never visible to the model or written to disk.
 ## Hooks
 
 A hook is a `.qjs` handler the runtime forks when an event happens, through
-the same vehicle as a scheduled script: the agent's sandbox profile, its
+the same vehicle as a scheduled script: the agent's containment, its
 granted secrets, `LLM()` bridged under the source `hook:<extension>`, and
 `getConfig()` reading the extension's own settings. Four events fire:
 
@@ -548,7 +548,7 @@ something a promote or fork can trigger.
   Both are rendered per tool, and the whole summary is clipped once at ~4KB —
   a summary an approver cannot finish is not surfacing.
 - **Trust level unchanged.** Extension tools run at the same sandbox trust as the
-  agent's other tools (`agents.sandbox_profile`); they get no extra privilege. Per-tool
+  agent's other tools (`agents.containment`); they get no extra privilege. Per-tool
   `policy` and `grants` gate *callability* — a statically-declared tool can still be
   approval-gated or denied. Conditional availability is a policy concern, not a
   registration-time concern.

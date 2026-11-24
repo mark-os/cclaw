@@ -463,8 +463,8 @@ function systemCard(d) {
 }
 
 /* ── Agent ── */
-var PROFILE = { host: "No sandbox: runs directly on this machine", standard: "Sandboxed; network only through cclaw's proxy",
-  restricted: "Sandboxed; no network at all" };
+var CONTAINMENT = { none: "No sandbox: runs directly on this machine", standard: "Sandboxed; network only through cclaw's proxy",
+  offline: "Sandboxed; no network at all" };
 
 function agentPage(name, my) {
   var change = explorer("agents", [name]);
@@ -490,10 +490,10 @@ function agentPage(name, my) {
           MAIN.appendChild(h("p", { class: "back" }, h("a", { href: "#/", text: "‹ Home" })));
           MAIN.appendChild(h("h1", null, a.name, " ", pill(st[0], st[1])));
           MAIN.appendChild(h("p", { class: "sub" }, a.description ? [txt(a.description), h("br")] : null,
-            PROFILE[a.sandbox_profile] || "Sandbox: " + a.sandbox_profile));
+            CONTAINMENT[a.containment] || "Containment: " + a.containment));
           MAIN.appendChild(thinksWith(R[0], change));
           MAIN.appendChild(canUse(grants, change));
-          MAIN.appendChild(canReach(grants, R2[0], a.sandbox_profile, change));
+          MAIN.appendChild(canReach(grants, R2[0], a.containment, change));
           MAIN.appendChild(canSee(name, grants, R[2], R2[1], R2[2], change));
           MAIN.appendChild(talksAndRuns(R[3], R2[3], R[4], change));
         });
@@ -536,10 +536,10 @@ function canUse(grants, change) {
   return c;
 }
 
-function canReach(grants, binds, profile, change) {
+function canReach(grants, binds, containment, change) {
   var c = card("Can reach", [change, "change"]);
-  if (profile === "restricted") { c.appendChild(none("Nothing: its sandbox has no network.")); return c; }
-  if (profile === "host") c.appendChild(row("Any host: it runs without a sandbox", pill("unfiltered", "warn")));
+  if (containment === "offline") { c.appendChild(none("Nothing: its sandbox has no network.")); return c; }
+  if (containment === "none") c.appendChild(row("Any host: it runs without a sandbox", pill("unfiltered", "warn")));
   var hosts = grants.filter(function (g) { return g.kind === "host"; }).map(function (g) { return g.value; }).sort();
   var used = {};
   hosts.forEach(function (hst) {
@@ -553,7 +553,7 @@ function canReach(grants, binds, profile, change) {
   });
   var unbound = grants.filter(function (g) { return g.kind === "secret" && !binds.some(function (b) { return b.secret_name === g.value; }); });
   unbound.forEach(function (g) { c.appendChild(row([code(g.value), h("span", { class: "why", text: "not allowed to any host yet, so it cannot be used" })], "secret")); });
-  if (!hosts.length && !binds.length && !unbound.length && profile !== "host") c.appendChild(none("No hosts allowed yet."));
+  if (!hosts.length && !binds.length && !unbound.length && containment !== "none") c.appendChild(none("No hosts allowed yet."));
   return c;
 }
 

@@ -219,7 +219,7 @@ static void test_format_json(void) {
     assert(v && strcmp(v, "default") == 0); free(v);
     v = doc_get(db, doc, "$.agent.models[0]");
     assert(v && strcmp(v, "claude-opus-4.5@gw") == 0); free(v);
-    v = doc_get(db, doc, "$.agent.sandbox_profile");
+    v = doc_get(db, doc, "$.agent.containment");
     assert(v && v[0]); free(v);
     v = doc_get(db, doc, "$.grants.hosts[0]");
     assert(v && strcmp(v, "api.example.com") == 0); free(v);

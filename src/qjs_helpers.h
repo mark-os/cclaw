@@ -62,14 +62,14 @@ typedef struct {
 void qjs_host_set_secrets(const JsHostSecret *secrets, size_t count);
 
 /* The call's egress allow rules (borrowed) and whether the proxy enforces
- * them (0 under the host profile). Only phrases http_request's refusal
+ * them (0 under containment none). Only phrases http_request's refusal
  * message — the proxy decides. (NULL, 0, 0) clears. */
 void qjs_host_set_egress(char **rules, size_t count, int enforced);
 
 /* In-process JS evaluator (EXEC_JS run_fn + unit-test entry). Runs the eval
  * profile with host functions in THIS process — the caller is responsible for
  * any sandbox/namespace setup beforehand (the broker child does it; unit tests
- * run host-mode in-process). Exactly one of `code` / `filename` is used; with
+ * run uncontained in-process). Exactly one of `code` / `filename` is used; with
  * `filename`, `args_json` (may be NULL) is bound as `args`. `config_json` (may
  * be NULL) backs getConfig(). Returns a malloc'd result string (never NULL):
  * the last expression value, console output, or an "error: ..." message.

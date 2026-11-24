@@ -45,7 +45,7 @@ stores only definitions and paths.
   "config":  [ { "key": "api_base", "default": "https://…", "description": "…",
                  "secret": false, "required": false } ],
   "channel": { "type": "…", "handler": "channel.qjs" },
-  "agents":  [ { "name": "Scout", "sandbox_profile": "restricted", "…": "…" } ]
+  "agents":  [ { "name": "Scout", "containment": "offline", "…": "…" } ]
 }
 ```
 

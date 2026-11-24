@@ -30,7 +30,7 @@ typedef struct {
                               * (the Anthropic suites) */
     const char *workspace;   /* CCLAW_WORKSPACE, when set */
     const char *home;        /* HOME, when set */
-    const char *sandbox;     /* CCLAW_SANDBOX_PROFILE; NULL unsets it */
+    const char *containment; /* CCLAW_CONTAINMENT; NULL unsets it */
     const char *max_iter;    /* CCLAW_MAX_ITERATIONS, when set */
     int verbose;             /* pass -v to -p runs that resume a session */
 } IntegEnv;
@@ -40,8 +40,8 @@ static inline void integ_child_env(const IntegEnv *e) {
     if (e->workspace) setenv("CCLAW_WORKSPACE", e->workspace, 1);
     if (e->home) setenv("HOME", e->home, 1);
     if (e->max_iter) setenv("CCLAW_MAX_ITERATIONS", e->max_iter, 1);
-    if (e->sandbox) setenv("CCLAW_SANDBOX_PROFILE", e->sandbox, 1);
-    else unsetenv("CCLAW_SANDBOX_PROFILE");
+    if (e->containment) setenv("CCLAW_CONTAINMENT", e->containment, 1);
+    else unsetenv("CCLAW_CONTAINMENT");
     if (e->url) {
         setenv("CCLAW_PROVIDER_BASE_URL", e->url, 1);
         setenv("OPENROUTER_API_KEY", "test-key", 1);

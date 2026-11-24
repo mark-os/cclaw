@@ -159,7 +159,7 @@ static void run_output(int64_t session_id, AdvanceOutput out) {
         /* The shared setup serves whichever session is advancing — root or any
          * sub-agent (in the daemon, many agents through one setup). This is the
          * ONLY caps/containment binding point: every batch reloads the
-         * advancing agent's grants, sandbox_profile, and shell_path from the
+         * advancing agent's grants, containment, and shell_path from the
          * DB, so the in-memory snapshot can never go stale (expiry, revoke,
          * rename, update_agent, agent switch). */
         if (proc_tool_setup())

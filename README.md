@@ -57,13 +57,13 @@ This has limits you can hit — an 8 MB heap for each JavaScript run, per-call t
 
 ## Secure
 
-What an agent can reach is decided in two places: its **sandbox profile** (containment — what the sandbox lets a program touch) and its **grants** (authority — which tools, hosts and paths it may use). A missing grant means no. Agents ask for more with `request_config`, and a human approves — at the terminal prompt, with a button or `/approve` in a chat channel, on the dashboard, or with `cclaw approvals`. A plain yes always grants the least that works; a standing grant has to be asked for by name ("always").
+What an agent can reach is decided in two places: its **containment** (what the sandbox lets a program touch) and its **grants** (authority — which tools, hosts and paths it may use). A missing grant means no. Agents ask for more with `request_config`, and a human approves — at the terminal prompt, with a button or `/approve` in a chat channel, on the dashboard, or with `cclaw approvals`. A plain yes always grants the least that works; a standing grant has to be asked for by name ("always").
 
-- **Sandboxed tool calls** — every tool call runs in a forked child inside Linux namespaces (user, mount, network). The child sees its workspace read-write and system directories read-only; anything else needs a path grant. `cclaw.db` and `.cclaw_key` are hidden from the child under every sandboxed profile.
+- **Sandboxed tool calls** — every tool call runs in a forked child inside Linux namespaces (user, mount, network). The child sees its workspace read-write and system directories read-only; anything else needs a path grant. `cclaw.db` and `.cclaw_key` are hidden from the child under every sandboxed containment.
 - **Network** — the sandbox has only a loopback interface. Programs reach the network through `HTTP_PROXY`/`HTTPS_PROXY`, which point at a proxy on that loopback. The proxy checks the agent's host allowlist (default-deny); a denied host gets a `403`, and the tool result names the blocked host. Programs that ignore the proxy variables have no network at all. `git` over ssh is preconfigured; plain `ssh` needs `-o ProxyCommand="$CCLAW_CONNECT %h %p"`.
-- **Sandbox profiles** — `standard` (the default), `restricted` (no network, ever), and `host` (no sandbox at all, for machines that are already isolated or cannot run one). A sandboxed profile that cannot set up its sandbox refuses to run the tool rather than running it unsandboxed. See [specs/sandbox-profiles.md](specs/sandbox-profiles.md).
+- **Containment** — `standard` (the default), `offline` (no network, ever), and `none` (no sandbox at all, for machines that are already isolated or cannot run one). An agent whose sandbox cannot be set up has the tool call refused rather than run unsandboxed. See [specs/containment.md](specs/containment.md).
 - **Secrets** — encrypted at rest in `cclaw.db` (ChaCha20-Poly1305, via Monocypher). The model refers to a secret as `{{SECRET:NAME}}`; cclaw substitutes the real value just before the tool runs, so the value never enters the context window or the logs. An agent may use only the secrets granted to it. A scanner redacts credential-shaped text from tool results and user messages.
-- **Resource limits** — `setrlimit` caps the process count (and, under `restricted`, CPU time) to bound a runaway. Address space is deliberately *not* capped: `RLIMIT_AS` limits reservations rather than usage, which stops `go`/`node`/`rustc` from starting without bounding real memory.
+- **Resource limits** — `setrlimit` caps the process count (and, under `offline`, CPU time) to bound a runaway. Address space is deliberately *not* capped: `RLIMIT_AS` limits reservations rather than usage, which stops `go`/`node`/`rustc` from starting without bounding real memory.
 
 The full model, including how the proxy and the namespaces work, is in [specs/security.md](specs/security.md).
 
@@ -159,7 +159,7 @@ cclaw -s 3               # resume session 3
 cclaw --new              # force new session
 cclaw --daemon           # daemon mode (channels, cron, multi-agent)
 cclaw dashboard          # links to the daemon's web pages: /admin and /admin/data
-cclaw --trust-host       # run tools without the sandbox, on a host that cannot provide one
+cclaw --no-containment   # run tools without the sandbox, on a host that cannot provide one
 cclaw install [--system] # set up the daemon as a systemd (or SysV init) service
 cclaw --doctor           # redacted diagnostic report: TLS, layers, updates, …
 cclaw update             # install the latest release (refuses one that can't open this DB)
@@ -177,7 +177,7 @@ Updating, rollback and pre-release channels (`cclaw publish`) are described in [
 
 The daemon's web pages (the dashboard at `/admin`, the data explorer at `/admin/data`) listen on `127.0.0.1:8080` by default. They are plain HTTP, so reach them from another machine through an SSH tunnel or a reverse proxy, or set `web_bind` to `0.0.0.0` on a network you trust. An admin can ask an agent for the sign-in link by sending `/admin` in a direct message.
 
-The sandbox needs unprivileged user namespaces. Some hosts switch them off — Ubuntu 23.10 and later restrict them through AppArmor, and most containers do not allow them. cclaw says so when it starts, with the setting to change; `--trust-host` runs without the sandbox where the machine or container is already the boundary.
+The sandbox needs unprivileged user namespaces. Some hosts switch them off — Ubuntu 23.10 and later restrict them through AppArmor, and most containers do not allow them. cclaw says so when it starts, with the setting to change; `--no-containment` runs without the sandbox where the machine or container is already the boundary.
 
 ## Configuration
 
@@ -233,7 +233,7 @@ Network and model, per request:
 
 ### The cost of a sandbox
 
-Same machine, static arm64 release binary, the default `standard` profile (user, mount and network namespaces around every call).
+Same machine, static arm64 release binary, the default `standard` containment (user, mount and network namespaces around every call).
 
 ```
 One sandboxed call, from fork to result (median of 20):
@@ -253,7 +253,7 @@ Sub-agents are sessions inside the one agent process; only tool calls fork. A to
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) — the full architecture: processes, threads, the main loop, how they talk, who touches the database, and the limits you can hit.
-- [specs/](specs/) — the detailed reference. Start with `security.md`, `sandbox-profiles.md`, `extensions.md`, `memory.md`, `operations.md` and `schema.md`.
+- [specs/](specs/) — the detailed reference. Start with `security.md`, `containment.md`, `extensions.md`, `memory.md`, `operations.md` and `schema.md`.
 - [docs/](docs/) — operator how-tos: configuration, debugging, templates.
 - [AGENTS.md](AGENTS.md) — project ethos, coding conventions, build instructions.
 - A running agent has its own copy of the user-facing material as built-in skills it can read (the `cclaw-docs` extension, built from `templates/docs_*.md`).

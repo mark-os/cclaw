@@ -2,7 +2,7 @@
  * placeholders in url/body/headers — including ones read from a .qjs file
  * body, the case the parent's arg interpolation can never see — resolve in
  * the child at http_request time. Unknown names and unbound/unmatched host
- * bindings throw before anything is sent. Host mode (no fork, no sandbox);
+ * bindings throw before anything is sent. Uncontained (no fork, no sandbox);
  * the success paths talk to a loopback server, never a real host. */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

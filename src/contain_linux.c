@@ -175,7 +175,7 @@ void contain_hint(char *out, size_t cap) {
  *          grant made on one agent's behalf must not confer authority over
  *          agents that never consented.
  *   DB   — it is the policy store for the mechanism doing the containment
- *          (`grants`, `agents.sandbox_profile`), so reading it is
+ *          (`grants`, `agents.containment`), so reading it is
  *          reconnaissance and writing it *is* escalation. It is also not one
  *          agent's state: it holds every agent's sessions, entries, grants and
  *          approvals. Nothing breaks — db_query is the sanctioned read path

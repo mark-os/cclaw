@@ -88,7 +88,7 @@ static const char SQL_CONFIG_DOC[] =
     "SELECT json_object("
     " 'agent', json_object("
     "   'name', ?1,"
-    "   'sandbox_profile', (SELECT sandbox_profile FROM agents WHERE name=?1),"
+    "   'containment', (SELECT containment FROM agents WHERE name=?1),"
     /* An entry with a reasoning effort, trim numbers, a cache lifetime or a
      * reasoning display other than the default shows as an object {id,
      * effort?, trim_threshold?, prune_target?, cache_lifetime?,
@@ -183,7 +183,7 @@ static const char SQL_CONFIG_DOC[] =
     "   FROM agent_extensions ae JOIN extensions e ON e.name=ae.extension_name"
     "   WHERE ae.agent_name=?1)),"
     " 'agents', json((SELECT json_group_array(json_object("
-    "     'name', name, 'sandbox_profile', sandbox_profile))"
+    "     'name', name, 'containment', containment))"
     "   FROM (SELECT * FROM agents ORDER BY name))),"
     " 'pending_approvals', json(?5))";
 
@@ -278,13 +278,13 @@ static char *render_text(SearchConfigCtx *ctx, const char *query,
 
     /* Section 1: current grants */
     rc = sqlite3_prepare_v2(ctx->db,
-        "SELECT sandbox_profile FROM agents WHERE name=?1", -1, &st, NULL);
+        "SELECT containment FROM agents WHERE name=?1", -1, &st, NULL);
     if (rc == SQLITE_OK) {
         sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
             buf_appendf(&out,
                 "\n## Your current grants (agent: %s)\n"
-                "sandbox_profile: %s\n",
+                "containment: %s\n",
                 ctx->agent_name, sqlite3_column_text(st, 0));
         }
         sqlite3_finalize(st);
@@ -549,7 +549,7 @@ static char *render_text(SearchConfigCtx *ctx, const char *query,
      * decisions (check before creating a duplicate). */
     buf_appendf(&out, "\n## Agent roster\n");
     rc = sqlite3_prepare_v2(ctx->db,
-        "SELECT name, sandbox_profile, COALESCE(description,'')"
+        "SELECT name, containment, COALESCE(description,'')"
         " FROM agents ORDER BY name", -1, &st, NULL);
     if (rc == SQLITE_OK) {
         while (sqlite3_step(st) == SQLITE_ROW) {
@@ -628,7 +628,7 @@ static char *search_config_thread_run(sqlite3 *db, const char *agent_name,
 
 int tool_search_config_register(ToolRegistry *reg, SearchConfigCtx *ctx) {
     int rc = tools_register(reg, "search_config",
-        "Discover your current configuration and what you can request: your sandbox profile, "
+        "Discover your current configuration and what you can request: your containment, "
         "granted tools and hosts, the full list of available tools, pending approvals, and "
         "how to request more via request_config. Optional 'query' filters the tool list; "
         "optional 'format':'json' returns the same state as one canonical document whose "

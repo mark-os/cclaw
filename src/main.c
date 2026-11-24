@@ -274,7 +274,7 @@ static void ensure_default_agent(const char *base_dir) {
          * (config key system_prompt) renders for every agent, and identity
          * lives in the memory blocks seeded below. */
         sqlite3_exec(proc_db(),
-            "INSERT OR IGNORE INTO agents(name, sandbox_profile)"
+            "INSERT OR IGNORE INTO agents(name, containment)"
             " VALUES('Assistant', 'standard');", NULL, NULL, NULL);
         /* One-row routing list: the seeded bootstrap model. Explicit — an
          * agent with no list is unroutable by design (model-routing.md R2). */
@@ -342,13 +342,13 @@ static void ensure_default_agent(const char *base_dir) {
  * agent (the daemon). Nothing is changed here — running uncontained stays the
  * operator's explicit choice. */
 static void warn_if_uncontained(sqlite3 *db, const char *agent, int daemon) {
-    const char *env = getenv("CCLAW_SANDBOX_PROFILE");
-    if (!daemon && env && strcmp(env, "host") == 0) return;
+    const char *env = getenv("CCLAW_CONTAINMENT");
+    if (!daemon && env && strcmp(env, "none") == 0) return;
     char who[256] = "";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "SELECT group_concat(name, ', ') FROM agents"
-            " WHERE COALESCE(sandbox_profile,'standard') <> 'host'"
+            " WHERE COALESCE(containment,'standard') <> 'none'"
             "   AND (?1 IS NULL OR name = ?1)", -1, &st, NULL) != SQLITE_OK)
         return;
     if (agent) sqlite3_bind_text(st, 1, agent, -1, SQLITE_STATIC);
@@ -363,7 +363,7 @@ static void warn_if_uncontained(sqlite3 *db, const char *agent, int daemon) {
         /* The daemon's log is syslog: one line. */
         LOG_ERROR_("daemon: this host cannot sandbox tool calls (%s: %s) — every"
                    " tool call by %s will be refused. %s%sTo run without the sandbox"
-                   " instead, put CCLAW_SANDBOX_PROFILE=host in the daemon's"
+                   " instead, put CCLAW_CONTAINMENT=none in the daemon's"
                    " environment; `cclaw --doctor` has more",
                    contain_backend(), why, who, hint, hint[0] ? ". " : "");
         return;
@@ -372,7 +372,7 @@ static void warn_if_uncontained(sqlite3 *db, const char *agent, int daemon) {
             "warning: this host cannot sandbox tool calls (%s: %s).\n"
             "  Every tool call by a sandboxed agent (%s) will be refused.\n"
             "%s%s%s"
-            "  To run without the sandbox instead, start cclaw with --trust-host —\n"
+            "  To run without the sandbox instead, start cclaw with --no-containment —\n"
             "  the machine itself is then the only boundary. `cclaw --doctor` has more.\n",
             contain_backend(), why, who,
             hint[0] ? "  " : "", hint, hint[0] ? "\n" : "");
@@ -666,7 +666,7 @@ static void first_run_key_prompt(void) {
 }
 
 static int run_cli(char *db_path, const char *prompt,
-                   int64_t session_id, int new_session, int host_mode, int auto_approve) {
+                   int64_t session_id, int new_session, int no_containment, int auto_approve) {
     /* ── CLI mode ────────────────────────────────────────────────── */
     proc_set_daemon(0);
     proc_set_auto_approve(auto_approve);
@@ -715,7 +715,7 @@ static int run_cli(char *db_path, const char *prompt,
     proc_set_agent_name(agent_sel);
     free(agent_sel);
 
-    if (host_mode) setenv("CCLAW_SANDBOX_PROFILE", "host", 1);
+    if (no_containment) setenv("CCLAW_CONTAINMENT", "none", 1);
     warn_if_uncontained(proc_db(), proc_agent_name(), 0);
     workspace_init(proc_cfg());
     /* Make the workspace the process cwd so relative paths, shell children, and
@@ -1113,7 +1113,7 @@ int main(int argc, char *argv[]) {
     /* dashboard: print the tokenized /admin URL (token minted at daemon start). */
     if (argc >= 2 && strcmp(argv[1], "dashboard") == 0) return dashboard_main();
 
-    int daemon_mode = 0, new_session = 0, host_mode = 0, auto_approve = 0;
+    int daemon_mode = 0, new_session = 0, no_containment = 0, auto_approve = 0;
     int channel_check = 0, channel_activate_flag = 0;
     const char *channel_mode = NULL;
     const char *channel_harness_scenario = NULL;
@@ -1146,7 +1146,7 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-v") == 0) { log_level_override = LOG_LEVEL_DEBUG; log_level_set = 1; }
         else if (strcmp(argv[i], "--trace") == 0 || strcmp(argv[i], "-vv") == 0) { log_level_override = LOG_LEVEL_TRACE; log_level_set = 1; }
         else if (strcmp(argv[i], "--new") == 0) new_session = 1;
-        else if (strcmp(argv[i], "--trust-host") == 0) host_mode = 1;
+        else if (strcmp(argv[i], "--no-containment") == 0) no_containment = 1;
         else if (strcmp(argv[i], "--auto-approve") == 0) auto_approve = 1;
         else if (strncmp(argv[i], "--llm-threads=", 14) == 0) g_llm_threads = atoi(argv[i]+14);
         else if (strcmp(argv[i], "-p") == 0) { if (++i >= argc) { fprintf(stderr, "-p requires arg\n"); return 1; } prompt = argv[i]; }
@@ -1155,9 +1155,9 @@ int main(int argc, char *argv[]) {
         else { fprintf(stderr, "unknown option: %s\n", argv[i]); return 1; }
     }
 
-    if (host_mode && daemon_mode)
-        fprintf(stderr, "warning: --trust-host is ignored by --daemon; daemon agents "
-                "sandbox per their sandbox_profile\n");
+    if (no_containment && daemon_mode)
+        fprintf(stderr, "warning: --no-containment is ignored by --daemon; daemon "
+                "agents are contained per their containment setting\n");
 
     if ((channel_check || channel_activate_flag || channel_harness_scenario) && !channel_mode) {
         fprintf(stderr, "--check / --activate / --harness require --channel <name>\n");
@@ -1344,5 +1344,5 @@ int main(int argc, char *argv[]) {
         LOG_WARN_("startup recovery failed");
 
     if (daemon_mode) return run_daemon(db_path);
-    return run_cli(db_path, prompt, session_id, new_session, host_mode, auto_approve);
+    return run_cli(db_path, prompt, session_id, new_session, no_containment, auto_approve);
 }

@@ -31,7 +31,7 @@ static const char *JSEVAL_PARAMS_JSON =
  * --run-tool broker evals it in-process via qjs_eval_run inside the sandbox.
  * This handler is therefore NOT the production execution path — the dispatcher
  * never calls it for a child vehicle. It remains as (a) the identity
- * marker js_tool_resolve_request keys on and (b) a host-mode, in-process
+ * marker js_tool_resolve_request keys on and (b) an uncontained, in-process
  * evaluator for unit tests. No fork, no re-exec — the fork-bomb hazard is gone. */
 /* js_eval is an EXEC_JS tool: the daemon dispatch ships pre-extracted params
  * and the --run-tool broker evals in-process via qjs_eval_run inside the

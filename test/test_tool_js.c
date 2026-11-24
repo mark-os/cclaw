@@ -1,4 +1,4 @@
-/* js_eval through the in-process child leaf (host mode, no network). */
+/* js_eval through the in-process child leaf (uncontained, no network). */
 #define _GNU_SOURCE
 #include <assert.h>
 #include <stdio.h>

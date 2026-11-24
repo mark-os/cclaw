@@ -34,7 +34,7 @@
     fprintf(stderr, "FAIL: %s\n", msg); goto done; } } while (0)
 
 static const IntegEnv ENV = {.db = DB_PATH, .workspace = WS, .home = HOME,
-                             .sandbox = "host"};
+                             .containment = "none"};
 #define db_int(sql, arg) integ_db_int(DB_PATH, (sql), (arg))
 #define db_exec(sql) integ_db_exec(DB_PATH, (sql))
 
@@ -151,7 +151,7 @@ int main(void) {
     snprintf(sql, sizeof(sql),
              "UPDATE agent_extensions SET enabled=0 WHERE agent_name='%s'"
              " AND extension_name='compaction';"
-             "UPDATE agents SET sandbox_profile='host' WHERE name='%s';"
+             "UPDATE agents SET containment='none' WHERE name='%s';"
              /* Over even its trim threshold: a C check after the hook would
               * trim it, and must not run. */
              "UPDATE agent_models SET trim_threshold=40, prune_target=20"

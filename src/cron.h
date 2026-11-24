@@ -99,7 +99,7 @@ int64_t cron_upsert(sqlite3 *db, const char *agent_name,
 typedef struct {
     const char *job_name;    /* cron_jobs.name — the fire's source_ref */
     const char *script;      /* workspace-relative path; the runner resolves it */
-    const char *agent_name;  /* whose sandbox_profile / grants / workspace it uses */
+    const char *agent_name;  /* whose containment / grants / workspace it uses */
     int64_t session_id;      /* session the result is posted to */
     const char *prompt;      /* NULL = script-only. Non-NULL is the 'both' payload:
                               * prompt and script output enter as ONE user entry. */

@@ -173,7 +173,7 @@ static void test_refusals(void) {
          * nothing like it registered gets no invented suggestion */
         {AGM("\"deepseek/deepseek-v4.1-flash\""), DS, NULL},
         {AGM("\"ghost\""), "unknown model 'ghost'", "Did you mean"},
-        {"{\"changes\":{\"agent\":{\"sandbox_profile\":\"host\"}}}", "unknown agent key", NULL},
+        {"{\"changes\":{\"agent\":{\"containment\":\"none\"}}}", "unknown agent key", NULL},
         {"{\"changes\":{\"agent\":{\"max_iterations\":0}}}", "positive integer", NULL},
         /* agent.models entries */
         {DSM("\"effort\":\"max\""), "effort 'max'", NULL},
@@ -679,8 +679,8 @@ static void test_grants_remove(void) {
 
     /* Unknown kind refuses — and cannot reach containment settings. */
     r = call(&f, "rm2",
-        "{\"changes\":{\"grants\":{\"remove\":{\"sandbox_profile\":[\"host\"]}}}}");
-    assert(r != NULL && strstr(r, "sandbox_profile") && strstr(r, "error"));
+        "{\"changes\":{\"grants\":{\"remove\":{\"containment\":[\"none\"]}}}}");
+    assert(r != NULL && strstr(r, "containment") && strstr(r, "error"));
     free(r);
 
     /* A value that is not a live grant refuses, naming it. */

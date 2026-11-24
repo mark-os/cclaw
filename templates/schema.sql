@@ -238,8 +238,8 @@ CREATE TABLE IF NOT EXISTS agents (
   max_output_tokens INTEGER,                  -- cap on tokens per reply; NULL = the model's
   shell_timeout INTEGER DEFAULT 30,           -- seconds a shell_exec call may run
   shell_path TEXT,               -- interpreter for shell_exec's -c; NULL = /bin/sh
-  sandbox_profile TEXT DEFAULT 'standard',    -- containment: host | standard | restricted (specs/sandbox-
-                                              -- profiles.md)
+  containment TEXT DEFAULT 'standard',        -- how tool calls are contained: none | standard |
+                                              -- offline (specs/containment.md)
   created_by TEXT REFERENCES agents(name) ON UPDATE CASCADE,
                                  -- creating agent (update_agent authorization); NULL = operator
   hold_until INTEGER,            -- quiesce lease (cclaw rename-agent): while in the

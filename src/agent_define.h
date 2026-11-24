@@ -9,7 +9,7 @@
  * extension.json agents[]. See specs/self-configuration.md.
  *
  * creator == NULL means operator (no creation caps). A non-NULL creator is
- * capped: child sandbox_profile <= creator's (host > standard > restricted
+ * capped: child containment <= creator's (none > standard > offline
  * by looseness), child grants a subset of creator's live grants,
  * extensions published or creator-owned.
  *
@@ -35,7 +35,7 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
 void agent_attach_default_extensions(sqlite3 *db, const char *name);
 
 /* Update an existing agent (update_agent tool). Authorization is
- * creator-or-self via agents.created_by; caps (profile, grants) apply against
+ * creator-or-self via agents.created_by; caps (containment, grants) apply against
  * the caller exactly as at creation. Fields overlay (absent = keep, unknown
  * keys refused); grants are additive-only. */
 int agent_definition_update_validate(sqlite3 *db, const char *json,

@@ -1128,7 +1128,7 @@ static const char *dispatch_scratch_dir(const char *agent_name,
 }
 
 /* Serialize one EXEC_JS --run-tool request. Everything that makes it a js
- * request — the agent's sandbox profile, its grant mounts, the read-only
+ * request — the agent's containment, its grant mounts, the read-only
  * extension store, the proxy egress snapshot — is the same whether the caller
  * is a model tool call or a scheduled cron script; only the params and the
  * egress key differ, so those come in as arguments. `params` is consumed
@@ -1235,8 +1235,8 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
 
     /* LLM() for the child (llm-core.md): completions run in THIS process via
      * a per-call bridge socket — no key, no provider egress, no routing
-     * knowledge crosses into the child. Gated off for no-network profiles
-     * (restricted means no packets on the child's behalf, whoever sends
+     * knowledge crosses into the child. Gated off for no-network containment
+     * (offline means no packets on the child's behalf, whoever sends
      * them). The bridge outlives this call: ownership passes to the caller,
      * who parks it on the ChildProc so reap stops it. */
     LlmBridge *bridge = NULL;
@@ -1371,7 +1371,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 cli_print_tool_call(tc->name, tc->arguments);
             session_set_state(proc_db(), session_id, "tool_running");
 
-            /* Host mode (sandbox=0) rides the SAME broker path: the child sets
+            /* Uncontained (sandbox=0) rides the SAME broker path: the child sets
              * up no namespace and runs the handler in-process,
              * exactly as the (now-deleted) generic fork path did. */
             /* Decompose arguments HERE (trusted parent, SQLite JSON1) — the
@@ -1468,9 +1468,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         te->user_data) {
         ShellConfig *sc = (ShellConfig *)te->user_data;
         if (sc->workspace) {
-            /* Host mode (sandbox=0) rides the SAME broker path: the child execs
+            /* Uncontained (sandbox=0) rides the SAME broker path: the child execs
              * /bin/sh with no namespace (sandbox is threaded into SandboxConfig),
-             * replacing the deleted host-mode fork-only branch. */
+             * replacing the deleted uncontained fork-only branch. */
             if (!proc_is_daemon())
                 cli_print_tool_call(tc->name, tc->arguments);
             session_set_state(proc_db(), session_id, "tool_running");
@@ -1578,7 +1578,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
      * HTTP_PROXY → decide() per hop. fs.* paths are real bind-mounts; the shared
      * extension store is mounted read-only so promoted handler files resolve.
      * Covers both js_eval and JS-defined extension tools (resolved via the same
-     * entry's recipe). Host mode rides the same path with sandbox=0. */
+     * entry's recipe). Uncontained rides the same path with sandbox=0. */
     if (te->recipe.vehicle == EXEC_JS &&
         te->user_data) {
         JsEvalCtx *jc = NULL;
@@ -1736,7 +1736,7 @@ int dispatch_tool(int64_t session_id, const char *agent_name,
  * cron.c's script dispatcher, and a hook's handler. Resolve the file inside
  * the TARGET agent's workspace or the extension store, build exactly the
  * EXEC_JS request a js_eval call would, and fork it. Refreshing caps to the
- * target agent first is what makes "runs under that agent's sandbox_profile
+ * target agent first is what makes "runs under that agent's containment
  * and grants" true — the shared setup is rebound before every tool batch
  * anyway, so borrowing it here between turns costs nothing on the single
  * event-loop thread. {{SECRET:name}} in the script file is never rewritten on

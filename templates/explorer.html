@@ -1288,8 +1288,8 @@ function copyAgentPanel(name, src) {
     var descIn = textIn("description", src.description || "");
     var mem = checkIn("attach_memory", "Also share its " + r[3].length + " memory block" + (r[3].length === 1 ? "" : "s") +
                       ", read only", false);
-    box.appendChild(h("p", { class: "note" }, "A new agent with the same prompt and limits (iterations, output, shell timeout and interpreter, sandbox profile ",
-      h("span", { class: "mono", text: src.sandbox_profile || "standard" }), "), the same model lists — chat " + by.chat +
+    box.appendChild(h("p", { class: "note" }, "A new agent with the same prompt and limits (iterations, output, shell timeout and interpreter, containment ",
+      h("span", { class: "mono", text: src.containment || "standard" }), "), the same model lists — chat " + by.chat +
       ", images " + by.image + ", audio " + by.audio + ", effort included — the same " + r[0].length + " grants (recorded as given when it was created) and the same " +
       r[2].length + " extension" + (r[2].length === 1 ? "" : "s") + ". Not copied: sessions, schedules, history and memory notes; memory blocks only if you tick the box, and then read only."));
     box.appendChild(formBox([fieldIn("Name of the copy", nameIn, "PascalCase: a capital letter, then letters and digits."),

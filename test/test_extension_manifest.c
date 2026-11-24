@@ -412,9 +412,10 @@ static void test_validate_manifests(void) {
          * "1 config key" summary. */
         {EGRESS("api.example.com, *"), -1, "egress_hosts"},
         {EGRESS("gateway.discord.gg,.discord.gg"), 0, NULL},
-        /* agents[]: PascalCase name, known profile, prompt file present */
+        /* agents[]: PascalCase name, known containment, prompt file present */
         {B("\"agents\":[{\"name\":\"lower\"}]"), -1, "PascalCase"},
-        {B("\"agents\":[{\"name\":\"Ok\",\"sandbox_profile\":\"ultra\"}]"), -1, "sandbox_profile"},
+        {B("\"agents\":[{\"name\":\"Ok\",\"containment\":\"ultra\"}]"), -1, "containment"},
+        {B("\"agents\":[{\"name\":\"Ok\",\"containment\":\"restricted\"}]"), -1, "containment"},
         {B("\"agents\":[{\"name\":\"Ok\",\"system_prompt_file\":\"ghost.md\"}]"), -1, "system_prompt_file"},
     };
 #undef B
@@ -848,7 +849,7 @@ static void test_manifest_agents(void) {
     write_file(BUNDLE "/extension.json",
         "{ \"name\": \"nws\","
         "  \"agents\": [ { \"name\": \"WxScout\", \"description\": \"weather agent\","
-        "    \"sandbox_profile\": \"restricted\","
+        "    \"containment\": \"offline\","
         "    \"system_prompt_file\": \"scout.md\","
         "    \"grants\": { \"tools\": [\"web_fetch\"] } } ] }");
     int rc = extension_install(db, BUNDLE, "Owner", 0, &err);
@@ -856,8 +857,8 @@ static void test_manifest_agents(void) {
     assert(rc == 0);
     char *v = test_qs(db, "SELECT system_prompt FROM agents WHERE name='WxScout'");
     assert(v && strstr(v, "You scout the weather")); free(v);
-    v = test_qs(db, "SELECT sandbox_profile FROM agents WHERE name='WxScout'");
-    assert(v && strcmp(v, "restricted") == 0); free(v);
+    v = test_qs(db, "SELECT containment FROM agents WHERE name='WxScout'");
+    assert(v && strcmp(v, "offline") == 0); free(v);
     assert(test_qi(db, "SELECT COUNT(*) FROM grants WHERE agent_name='WxScout'"
                     " AND kind='tool' AND value='web_fetch'") == 1);
 

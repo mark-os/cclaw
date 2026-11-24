@@ -3,7 +3,7 @@
  *
  * This guards a regression that was live and silent: the broker used to set
  * cfg->db_path = NULL ("no DB in this process"), which made the mask a no-op
- * in every profile. Nothing caught it, because with no grant the key is
+ * under every containment. Nothing caught it, because with no grant the key is
  * already invisible by omission — the sandbox simply never mounts ~/.cclaw.
  * So the test that matters is the *granted* case: mount the directory, then
  * prove the key still reads empty.

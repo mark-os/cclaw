@@ -170,11 +170,11 @@ static void test_schema_state(void) {
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
     assert(db_schema_compat(db) == 0);
 
-    /* At the floor the patch list has nothing to run: compat succeeds and
-     * leaves the version where it was. */
+    /* At the floor: inside the patchable band. Classification only — running
+     * the upgrade here would re-patch a DB that already has the current
+     * shape; test_schema_patch_v71 does that against a real v70 fixture. */
     set_user_version(db, CCLAW_SCHEMA_MIN);
-    assert(db_schema_compat(db) == 1);
-    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_MIN);
+    assert(db_schema_state(db, NULL) == DB_SCHEMA_UPGRADABLE);
 
     set_user_version(db, 0);             /* v0 but tables exist → pre-freeze */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
@@ -182,6 +182,126 @@ static void test_schema_state(void) {
 
     db_close(db);
     test_db_clean(path);
+}
+
+/* Canonical shape: "table.column:type notnull pk" lines, every declared
+ * foreign key, and the name of every table/index/trigger, sorted. Compared
+ * by structure rather than sqlite_master.sql text, which comments and
+ * IF NOT EXISTS would make differ between schema.sql and a patch. */
+static char *schema_shape(sqlite3 *db) {
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT group_concat(line, char(10) ORDER BY line) FROM ("
+        "  SELECT m.name || '.' || ti.name || ':' || ti.type || ' nn' || ti.\"notnull\""
+        "         || ' pk' || ti.pk || ' dflt ' || COALESCE(ti.dflt_value,'') AS line"
+        "  FROM sqlite_master m JOIN pragma_table_info(m.name) ti"
+        "  WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%'"
+        "  UNION ALL"
+        "  SELECT 'fk ' || m.name || '.' || fk.\"from\" || ' -> ' || fk.\"table\" || '.'"
+        "         || COALESCE(fk.\"to\",'') || ' ' || fk.on_update || '/' || fk.on_delete"
+        "  FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) fk"
+        "  WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%'"
+        "  UNION ALL"
+        "  SELECT m.type || ' ' || m.name || ' on ' || m.tbl_name FROM sqlite_master m"
+        "  WHERE m.name NOT LIKE 'sqlite_%' AND m.type IN ('table','index','trigger','view')"
+        "    AND m.name NOT LIKE 'entries_fts_%'"
+        /* Index and trigger bodies, whitespace-folded: a partial index's WHERE
+         * or a trigger's logic is not visible in the lines above. */
+        "  UNION ALL"
+        "  SELECT 'sql ' || m.name || ': ' || lower(replace(replace(replace(replace("
+        "         replace(replace(m.sql, char(10), ' '), char(9), ' '), '    ', ' '),"
+        "         '  ', ' '), '  ', ' '), ' if not exists', ''))"
+        "  FROM sqlite_master m WHERE m.type IN ('index','trigger','view') AND m.sql IS NOT NULL)",
+        -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    char *shape = test_strdup_((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    assert(shape != NULL);
+    return shape;
+}
+
+/* v70 -> v71 on a frozen v70 database (the schema the v0.8.0 release binary
+ * creates, its change_log triggers included — never a current DB reshaped),
+ * then the startup sequence (compat, ensure_schema), and the result must
+ * match a fresh current DB column for column. This is what catches a
+ * schema.sql change that shipped without the matching patch. The rows check
+ * the v71 rewrite: containment values renamed, and a parked create_agent /
+ * update_agent call still carrying the old key given a past deadline (the
+ * sweep then expires it — applying it would silently drop the old key). */
+static void test_schema_patch_v71(void) {
+    const char *old_path = "/tmp/test_cclaw_schema_patch_old.sqlite";
+    const char *new_path = "/tmp/test_cclaw_schema_patch_new.sqlite";
+    char bak[192];
+    snprintf(bak, sizeof(bak), "%s.v70.bak", old_path);
+    test_db_clean(old_path); test_db_clean(new_path); unlink(bak);
+
+    size_t sql_len = 0;
+    char *fixture = util_read_file("test/fixtures/schema_v70.sql", &sql_len);
+    assert(fixture != NULL && sql_len > 0);
+    sqlite3 *old_db = db_open(old_path);
+    assert(old_db != NULL);
+    char *err = NULL;
+    if (sqlite3_exec(old_db, fixture, NULL, NULL, &err) != SQLITE_OK) {
+        fprintf(stderr, "fixture: %s\n", err ? err : "?");
+        assert(0);
+    }
+    free(fixture);
+    assert(sqlite3_exec(old_db,
+        "INSERT INTO agents(name, sandbox_profile) VALUES"
+        " ('Bare','host'), ('Quiet','restricted'), ('Usual','standard');"
+        "INSERT INTO agents(name) VALUES('Dflt');"
+        "INSERT INTO approvals(id, session_id, tool_name, args_json, state, expires_at) VALUES"
+        " (1, 1, 'create_agent', '{\"name\":\"Kid\",\"sandbox_profile\":\"restricted\"}',"
+        "  'pending', unixepoch()+3600),"
+        " (2, 1, 'update_agent', '{\"name\":\"Usual\",\"sandbox_profile\":\"host\"}',"
+        "  'pending', unixepoch()+3600),"
+        " (3, 1, 'create_agent', '{\"name\":\"Kid2\"}', 'pending', unixepoch()+3600),"
+        " (4, 1, 'shell_exec', '{\"sandbox_profile\":\"x\"}', 'pending', unixepoch()+3600),"
+        " (5, 1, 'create_agent', '{\"name\":\"Kid3\",\"sandbox_profile\":\"host\"}',"
+        "  'denied', unixepoch()+3600);",
+        NULL, NULL, &err) == SQLITE_OK);
+    set_user_version(old_db, 70);
+
+    assert(db_schema_compat(old_db) == 1);
+    assert(db_ensure_schema(old_db) == 0);   /* what startup runs next */
+    int uv = 0;
+    assert(db_schema_state(old_db, &uv) == DB_SCHEMA_CURRENT && uv == CCLAW_SCHEMA_VERSION);
+
+    static const struct { const char *agent, *want; } rows[] = {
+        { "Bare", "none" }, { "Quiet", "offline" }, { "Usual", "standard" }, { "Dflt", "standard" },
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        char q[128];
+        snprintf(q, sizeof(q), "SELECT containment FROM agents WHERE name='%s'", rows[i].agent);
+        char *v = test_qs(old_db, q);
+        if (!v || strcmp(v, rows[i].want) != 0) {
+            fprintf(stderr, "  row %s: %s\n", rows[i].agent, v ? v : "(null)");
+            assert(0);
+        }
+        free(v);
+    }
+    /* Only the pending agent calls with the old key are due; the rest keep
+     * their deadline, and a decided row is history. */
+    assert(test_qi(old_db, "SELECT COUNT(*) FROM approvals WHERE expires_at < unixepoch()") == 2);
+    assert(test_qi(old_db, "SELECT COUNT(*) FROM approvals WHERE expires_at < unixepoch()"
+                           " AND id IN (1, 2)") == 2);
+    assert(test_qi(old_db, "SELECT COUNT(*) FROM sqlite_master"
+                           " WHERE sql LIKE '%sandbox_profile%'") == 0);
+
+    sqlite3 *new_db = db_open(new_path);
+    assert(new_db != NULL && db_ensure_schema(new_db) == 0);
+    char *old_shape = schema_shape(old_db);
+    char *new_shape = schema_shape(new_db);
+    if (strcmp(old_shape, new_shape) != 0) {
+        fprintf(stderr, "patched v70 shape != fresh v%d shape\n-- patched:\n%s\n-- fresh:\n%s\n",
+                CCLAW_SCHEMA_VERSION, old_shape, new_shape);
+        assert(0);
+    }
+    free(old_shape); free(new_shape);
+
+    db_close(old_db);
+    db_close(new_db);
+    test_db_clean(old_path); test_db_clean(new_path); unlink(bak);
 }
 
 static void test_rate_limit_and_cost(void) {
@@ -371,6 +491,7 @@ int main(void) {
     RUN(test_free_mb);
     RUN(test_seed_backfills_and_preserves);
     RUN(test_schema_state);
+    RUN(test_schema_patch_v71);
     RUN(test_agent_models_capability_gate);
     RUN(test_agent_models_cache_lifetime);
     RUN(test_agent_models_reasoning_display);

@@ -81,8 +81,8 @@ INSERT OR IGNORE INTO tools(name, description) VALUES
   ('memory_note_edit', 'Replace the text of notes, by note id — correct a note that has gone out of date rather than adding a new one. Args: block (label), notes (array of {id, text}).'),
   ('memory_note_delete', 'Delete notes, by note id. Other notes keep their ids. Args: block (label), ids (array of integers).'),
   ('request_config', 'Request configuration changes — one batched changes document per approval (requires human approval). The document is a patch against what search_config shows: agent.* fields replace; grants.* add; models/provider upsert; grants.remove narrows immediately without approval.'),
-  ('search_config', 'Discover your current configuration and what you can request: your sandbox profile, granted tools and hosts, the full list of available tools, pending approvals, and how to request more via request_config. format:json returns the same state as one canonical document.'),
+  ('search_config', 'Discover your current configuration and what you can request: your containment, granted tools and hosts, the full list of available tools, pending approvals, and how to request more via request_config. format:json returns the same state as one canonical document.'),
   ('launch_agent', 'Delegate a task to another agent — blocking, or background with the result delivered to you when the child finishes'),
   ('check_session', 'Peek at a sub-agent session state and its final text once idle — a progress peek, not a way to wait'),
   ('secret_create', 'Mint a new random credential, stored encrypted in the DB. Returns only its {{SECRET:name}} placeholder — never the value.'),
-  ('create_agent', 'Propose creation of a named agent (requires human approval). Takes an agent definition; the new agent is capped by the creator''s profile and grants.');
+  ('create_agent', 'Propose creation of a named agent (requires human approval). Takes an agent definition; the new agent is capped by the creator''s containment and grants.');

@@ -55,7 +55,7 @@
 /* The hook scripts run unsandboxed so the test does not depend on user
  * namespaces; the sandboxed path is the same code. */
 static IntegEnv g_env = {.db = DB_PATH, .workspace = WS, .max_iter = "40",
-                         .sandbox = "host", .verbose = 1};
+                         .containment = "none", .verbose = 1};
 #define db_count(sql) integ_db_int(DB_PATH, (sql), NULL)
 
 /* No prompt count: a mock's would be fiction, and a usable report's count

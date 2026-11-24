@@ -1,7 +1,7 @@
 /* Containment backend: none. For hosts and platforms where cclaw cannot
  * impose a boundary on a child itself (specs/portability.md). A contained
- * profile is refused exactly as on a Linux host without namespaces; only the
- * `host` profile runs tools, and it never reaches this file. */
+ * agent is refused exactly as on a Linux host without namespaces; only
+ * containment `none` runs tools, and it never reaches this file. */
 #include "contain.h"
 #include <errno.h>
 #include <stdio.h>

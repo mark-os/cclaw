@@ -106,8 +106,8 @@ reclaims such sessions on its own.
 # What tools exist: built-in (extension_name NULL) or from an extension.
 cclaw sqlite3 "$DB" "SELECT name, extension_name, agent_name, enabled FROM tools ORDER BY name;"
 
-# An agent's sandbox profile and grants (tools, hosts, paths).
-cclaw sqlite3 "$DB" "SELECT sandbox_profile FROM agents WHERE name = 'Assistant';"
+# An agent's containment and grants (tools, hosts, paths).
+cclaw sqlite3 "$DB" "SELECT containment FROM agents WHERE name = 'Assistant';"
 cclaw sqlite3 "$DB" "SELECT kind, value FROM grants WHERE agent_name = 'Assistant';"
 
 # Approvals still waiting for a decision.

@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode). A custom busy handler (`src/db.c`) replaces `busy_timeout`: it retries with progressive backoff for about 4.3 s and logs contention, then returns `SQLITE_BUSY`. CLI and daemon are peers that share one source of truth. Per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped, so recovery never resets the in-flight sessions of a live peer.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v70 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v70 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-11-24 freeze at v0.8.0's schema deleted earlier patch history; an older DB hops through v0.8.0, which patches it to v70.
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v71 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`). Floor: v70 (`CCLAW_SCHEMA_MIN`, also in `src/cclaw.h`). The 2026-11-24 freeze at v0.8.0's schema deleted earlier patch history; an older DB hops through v0.8.0, which patches it to v70.
 
 **Patch rule — a new column whose NULL triggers action must backfill in the same patch.** If NULL means "something is owed" to any reader (a sweep, a retry, a guard), every pre-existing row satisfies that predicate the moment the column lands, and the first post-deploy tick acts on all of history at once. The `ALTER TABLE … ADD COLUMN` and the `UPDATE` that stamps old rows to the no-action value belong in one patch entry (precedent: v41's `parent_notified_at` backfill — without it the convergence sweep would have re-notified every terminal child ever recorded).
 
@@ -314,7 +314,7 @@ Agent identity and per-agent config. Name is the primary key — no integer id.
 | `max_output_tokens` | INTEGER | per-request cap |
 | `shell_timeout` | INTEGER DEFAULT 30 | seconds |
 | `shell_path` | TEXT | interpreter for shell_exec's `-c`; NULL = `/bin/sh` |
-| `sandbox_profile` | TEXT DEFAULT 'standard' | host / standard / restricted |
+| `containment` | TEXT DEFAULT 'standard' | none / standard / offline ([containment.md](containment.md)) |
 | `created_by` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; creating agent (`update_agent` authorization); NULL = operator |
 | `hold_until` | INTEGER | quiesce lease deadline (`cclaw rename-agent`); while in the future no new turn opens for this agent. NULL = no hold; expiry self-heals |
 | `hold_holder` | TEXT | who holds the lease (`cli:<pid>`) |
@@ -1020,7 +1020,7 @@ seconds) — the unused fields are `''` / NULL / NULL respectively
 | `interval_s` | INTEGER | fixed-period cadence; not exposed on the model-facing `cron_set` schema and no longer written by anything — a legal column that only pre-v41 rows still use |
 | `session_id` | INTEGER NOT NULL | meaning follows `target`: the pinned session (`'pin'`), else the fire anchor — the session that set the job, and for `'new'` the most recently fired one. `0` = resolve to the agent's most recently active session at fire time (its state is not a filter: a fire into a busy session queues and lands at the next turn boundary) |
 | `task` | TEXT NOT NULL | injected message — the model-facing name is `prompt`; `''` = no prompt payload (with no `script` either, the fire is a bare wake) |
-| `script` | TEXT | QJS path run sandboxed at fire time under the target agent's profile+grants; composes with `task` (script first). NULL = no script payload. Workspace-relative when an agent set the job (existence checked at set time, so a typo fails then rather than unattended hours later); absolute-inside-the-shared-extension-store when `extension_promote` seeded it from a manifest `scripts[]` entry. Both shapes are re-validated at fire time, and nothing else is accepted |
+| `script` | TEXT | QJS path run sandboxed at fire time under the target agent's containment+grants; composes with `task` (script first). NULL = no script payload. Workspace-relative when an agent set the job (existence checked at set time, so a typo fails then rather than unattended hours later); absolute-inside-the-shared-extension-store when `extension_promote` seeded it from a manifest `scripts[]` entry. Both shapes are re-validated at fire time, and nothing else is accepted |
 | `channel_name` | TEXT | chat stamp — the durable route identity a fire resolves through `channel_chats.session_id` at fire time, rather than binding a session id at set time. With `chat_id`, a composite FK → `channel_chats` (v61); both NULL = no chat. In the default target mode it is copied from the setting session's own binding (NULL for CLI/sub-agent callers); under `'new'` it is the explicit delivery target |
 | `chat_id` | TEXT | with `channel_name`, the stamped chat |
 | `target` | TEXT | target-mode discriminator: NULL = follow the conversation (stamped chat, else the stamped `session_id`); `'pin'` = explicit session pin; `'new'` = a fresh session per fire |
@@ -1094,7 +1094,7 @@ chat now routes to a **different** agent does not fire, and says so.
   a no-op.)
 
 The script child is a `--run-tool` fork of the js vehicle, identical to a
-`js_eval` call under the target agent's `sandbox_profile` and grants;
+`js_eval` call under the target agent's `containment` and grants;
 `{{SECRET:name}}` in the script file is never rewritten on disk — it resolves
 in the child at the `http_request()` boundary, like any js dispatch (see
 specs/security.md, JS Secret Resolution). `cron.c` decides that a script must run and hands the

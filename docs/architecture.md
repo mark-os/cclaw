@@ -20,14 +20,14 @@ cclaw                                 (CLI or --daemon)
 │                                     sqlite3* and a CURL*; idle ones exit after 30 s,
 │                                     the last one stays
 ├─ tool threads                       one detached thread per database-only tool call
-├─ LLM() bridge thread                one per JS run (not under `restricted`)
+├─ LLM() bridge thread                one per JS run (not under `offline`)
 ├─ civetweb threads                   daemon: 4 workers sharing one locked DB handle
 │
 ├─ fork+exec → cclaw --run-tool       the broker: one per sandboxed call, scheduled
 │    │                                script or hook; no key, no database
 │    ├─ (file tools run right here, inside the sandbox, and stop)
 │    └─ fork → sandboxed child        web, JS, shell: namespaces, rlimits, then
-│         ├─ net_shim                 the loopback proxy (not under `restricted`)
+│         ├─ net_shim                 the loopback proxy (not under `offline`)
 │         └─ shell only: fork → PID 1 of a new PID namespace → exec /bin/sh …
 └─ fork+exec → cclaw --channel <n>    daemon: one long-lived runner per channel
 ```
@@ -131,10 +131,10 @@ request and result; the database carries state.
 A sandboxed tool child never opens `cclaw.db`. `--run-tool` is intercepted at
 the very top of `main()`, before any database, config or key setup; the child
 closes every inherited descriptor above fd 3 and refuses to run if the
-encryption key is loaded. Under the `standard` and `restricted` profiles the
+encryption key is loaded. Under the `standard` and `offline` containments the
 database, its `-wal`/`-shm` files and `.cclaw_key` are also masked inside the
 sandbox even if a path grant would otherwise expose them. The one exception is
-the `host` profile, which has no sandbox: a shell command there runs as the
+containment `none`, which has no sandbox: a shell command there runs as the
 operator's user and could open any file that user can.
 
 Every handle memory-maps the database (up to 64 MB of it — a ceiling, not an
@@ -204,9 +204,9 @@ and `settling` (waiting for a hook script; [specs/hooks.md](../specs/hooks.md)).
 | Secret scanner | Credentials entering the context | Tool results and user messages |
 | Encrypted secrets | Disk theft | ChaCha20-Poly1305 in `cclaw.db` |
 
-Under `host` the namespace sandbox and the proxy are both skipped. See
-[specs/security.md](../specs/security.md) and
-[specs/sandbox-profiles.md](../specs/sandbox-profiles.md).
+Under containment `none` the namespace sandbox and the proxy are both
+skipped. See [specs/security.md](../specs/security.md) and
+[specs/containment.md](../specs/containment.md).
 
 ## Limits you can hit
 
@@ -224,9 +224,9 @@ need a rebuild.
 | Background job timeout | 600 s, ceiling 3600 s | per call `timeout`, `job_timeout_max` | a `job:timeout` notice next turn |
 | Tool output kept inline | 64 KB or 2000 lines | constant `RUNTOOL_RESULT_MAX` | over either, the head (about 60 KB or 1998 lines) and `[truncated — … Full output: <path>]`; the file holds all of it |
 | Sandboxed request size | 32 KB | constant `RUNTOOL_REQUEST_MAX` | `error: … exceeds 32KB cap` |
-| Processes per sandbox | 256 (`standard`), 64 (`restricted`) | sandbox profile | `fork` fails inside the program |
-| CPU time per sandbox | none (`standard`), 120 s (`restricted`) | sandbox profile | `[killed by SIGXCPU — CPU limit reached; …]` |
-| Address space | not capped | — | — (`RLIMIT_AS` stops `go`/`node` starting; see sandbox-profiles.md) |
+| Processes per sandbox | 256 (`standard`), 64 (`offline`) | containment | `fork` fails inside the program |
+| CPU time per sandbox | none (`standard`), 120 s (`offline`) | containment | `[killed by SIGXCPU — CPU limit reached; …]` |
+| Address space | not capped | — | — (`RLIMIT_AS` stops `go`/`node` starting; see specs/containment.md) |
 | Simultaneous connections per sandboxed call | 64 | constant `PROXY_MAX_RELAYS` | the program gets `502 Bad Gateway` |
 | Running tool children | 48 | constant `CHILD_MAX` | nothing; the call waits for a slot |
 | Model request | 300 s per attempt | `llm_request_timeout` | a retry, then an error entry citing `[resp #N]` |

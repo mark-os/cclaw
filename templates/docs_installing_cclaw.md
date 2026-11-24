@@ -122,7 +122,7 @@ machine and copy the file over (`scp`, a USB stick).
 
 `--doctor` says what the host supports. The line that matters most is the
 sandbox: where it cannot be set up, tool calls are refused until the host is
-fixed or the operator chooses the `host` profile knowingly.
+fixed or the operator chooses containment `none` knowingly.
 
 ## Move this instance to another machine
 

@@ -24,14 +24,14 @@
 #define DB_PATH "/tmp/cclaw_pty_ca.db"
 #define FAIL(m) do { fprintf(stderr, "FAIL: %s\n", m); return 1; } while (0)
 
-/* Assistant proposes a restricted Scout with a subset grant. */
+/* Assistant proposes an offline Scout with a subset grant. */
 static const char *RESP_TOOL_CALL =
     "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,"
     "\"tool_calls\":[{\"id\":\"call_ca1\",\"type\":\"function\",\"function\":"
     "{\"name\":\"create_agent\",\"arguments\":"
     "\"{\\\"name\\\":\\\"Scout\\\",\\\"description\\\":\\\"scouts things\\\","
     "\\\"system_prompt\\\":\\\"You scout.\\\","
-    "\\\"sandbox_profile\\\":\\\"restricted\\\","
+    "\\\"containment\\\":\\\"offline\\\","
     "\\\"grants\\\":{\\\"tools\\\":[\\\"file_read\\\"]}}\"}}]},"
     "\"finish_reason\":\"tool_calls\"}],"
     "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
@@ -137,7 +137,7 @@ int main(void) {
         setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
         setenv("OPENROUTER_API_KEY", "test-key", 1);
         setenv("CCLAW_MODEL", "test-model", 1);
-        unsetenv("CCLAW_SANDBOX_PROFILE");
+        unsetenv("CCLAW_CONTAINMENT");
         execl(exe, exe, (char *)NULL);
         _exit(113);
     }
@@ -158,7 +158,7 @@ int main(void) {
     }
     if (pid) goto done;
 
-    /* Assert DB effects: agent row with declared profile, grants, approval. */
+    /* Assert DB effects: agent row with declared containment, grants, approval. */
     {
         sqlite3 *db;
         if ((db = db_open(DB_PATH)) == NULL) { fprintf(stderr, "FAIL: db open\n"); goto done; }
@@ -166,7 +166,7 @@ int main(void) {
         int ok = 0;
         if (sqlite3_prepare_v2(db,
                 "SELECT 1 FROM agents WHERE name='Scout'"
-                " AND sandbox_profile='restricted' AND description='scouts things'",
+                " AND containment='offline' AND description='scouts things'",
                 -1, &s, NULL) == SQLITE_OK) {
             ok = (sqlite3_step(s) == SQLITE_ROW);
             sqlite3_finalize(s);

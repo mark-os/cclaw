@@ -36,7 +36,8 @@ static sqlite3 *verb_db_open(void) {
     if (!db) { fprintf(stderr, "error: cannot open %s\n", db_path); free(db_path); return NULL; }
     db_set_actor(db, "cli");   /* change_log: an operator verb did this */
     if (!db_schema_compat(db)) {
-        fprintf(stderr, "error: %s was created by a different cclaw schema — delete it\n", db_path);
+        fprintf(stderr, "error: %s is from a newer build, or older than this one migrates (v%d) — run the v0.8.0 release on it once first\n",
+                db_path, CCLAW_SCHEMA_MIN);
         sqlite3_close(db); free(db_path); return NULL;
     }
     free(db_path);

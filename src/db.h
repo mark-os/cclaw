@@ -39,8 +39,8 @@ sqlite3 *db_open_immutable(const char *path);
 int db_ensure_schema(sqlite3 *db);
 
 /* 1 if the DB's schema generation is compatible with this build (fresh/empty,
- * current, or successfully patched forward), 0 if it can't be used and must be
- * deleted. Check before db_ensure_schema — a stale DB silently misbehaves
+ * current, or successfully patched forward), 0 if this build can't use it.
+ * Check before db_ensure_schema — a stale DB silently misbehaves
  * otherwise. Applies pending schema patches as a side effect. */
 int db_schema_compat(sqlite3 *db);
 
@@ -51,7 +51,7 @@ typedef enum {
     DB_SCHEMA_CURRENT,    /* stamped with this build's version */
     DB_SCHEMA_UPGRADABLE, /* older, in patch range — auto-upgraded at next startup */
     DB_SCHEMA_FUTURE,     /* stamped by a newer build — refused */
-    DB_SCHEMA_TOO_OLD     /* below the schema floor (v29 freeze) — refused, delete it */
+    DB_SCHEMA_TOO_OLD     /* below CCLAW_SCHEMA_MIN — refused; hop through v0.8.0 */
 } DbSchemaState;
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version);
 
@@ -647,6 +647,11 @@ long db_free_mb(sqlite3 *db);
  * to overwrite; unlinks a partial on failure. Returns 0 (and sets *out_bytes,
  * if non-NULL, to the snapshot size) on success, -1 on error (logged). */
 int db_backup_to(sqlite3 *db, const char *dest, long long *out_bytes);
+
+/* Run one statement with up to three integer parameters (binding one the
+ * statement does not have is a harmless no-op). 0 when it ran to SQLITE_DONE,
+ * -1 otherwise; logs nothing. */
+int db_exec_ids(sqlite3 *db, const char *sql, int64_t a, int64_t b, int64_t c);
 
 /* Scalar query helpers — single int64 bind on param 1, read column 0.
  * db_scalar_i64: returns column 0 as int64 or dflt if no row / prepare fails.

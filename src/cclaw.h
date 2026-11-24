@@ -11,6 +11,7 @@
  * `cclaw --schema-range` prints so an update can be refused *before* it is
  * installed — patches are forward-only, so a binary that strands the database
  * cannot simply be swapped back out. */
-#define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */
+#define CCLAW_SCHEMA_MIN 70   /* schema freeze 2026-11-24: v0.8.0's schema. An older
+                               * DB hops through v0.8.0, which patches it to v70. */
 
 #endif

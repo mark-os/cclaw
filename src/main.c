@@ -1225,9 +1225,12 @@ int main(int argc, char *argv[]) {
     if (!db_schema_compat(proc_db())) {
         fprintf(stderr,
             "error: %s cannot be upgraded to schema v%d.\n"
-            "The DB may be from a future build or too old. Delete it and restart:\n"
+            "A DB from a newer build needs that build. A DB older than v%d\n"
+            "migrates by a hop: run the v0.8.0 release on it once (that patches\n"
+            "the DB to v70), then this build. Or start over:\n"
             "  rm %s %s-wal %s-shm\n",
-            db_path, CCLAW_SCHEMA_VERSION, db_path, db_path, db_path);
+            db_path, CCLAW_SCHEMA_VERSION, CCLAW_SCHEMA_MIN,
+            db_path, db_path, db_path);
         db_close(proc_db()); free(db_path); return 1;
     }
 

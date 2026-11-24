@@ -223,7 +223,9 @@ int update_schema_ok(const char *range, int db_version, char *why, size_t cap) {
     }
     if (db_version < cand_min) {
         snprintf(why, cap, "this database is schema v%d but that build only "
-                           "patches forward from v%d — it would refuse to open it",
+                           "patches forward from v%d — hop through it: "
+                           "`cclaw update --tag v0.8.0` (migrates the database "
+                           "to v70), then update again",
                  db_version, cand_min);
         return 0;
     }

@@ -146,7 +146,8 @@ static void check_db(const char *db_path, sqlite3 **out_db) {
         db_close(db);
         return;
     case DB_SCHEMA_TOO_OLD:
-        snprintf(sv, sizeof(sv), "v%d — below the schema floor, delete the DB", uv);
+        snprintf(sv, sizeof(sv), "v%d — below the floor v%d, run v0.8.0 on it first",
+                 uv, CCLAW_SCHEMA_MIN);
         print_fail("schema", sv);
         db_close(db);
         return;

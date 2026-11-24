@@ -1124,17 +1124,6 @@ static TurnEditResult mark_edits(Branch *b, Reply *reply, char **err_out) {
 
 /* ── Writing: one path for every edit, the script's and the trim's ─*/
 
-static int exec_ids(sqlite3 *db, const char *sql, int64_t a, int64_t b, int64_t c) {
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_int64(st, 1, a);
-    sqlite3_bind_int64(st, 2, b);
-    sqlite3_bind_int64(st, 3, c);   /* out of range, and ignored, where unused */
-    int rc = sqlite3_step(st);
-    sqlite3_finalize(st);
-    return rc == SQLITE_DONE ? 0 : -1;
-}
-
 /* One new entry under `parent` carrying a script's text. ?1 = the entry it
  * stands in for, or the session; ?2 parent, ?3 text, ?4 tokens, ?5 bytes,
  * ?6 turn id, ?7 label. turn_id is always given, so entries_turn_ai leaves
@@ -1267,9 +1256,9 @@ static int write_chain(sqlite3 *db, int64_t session_id, const Branch *b, Reply *
             if (id <= 0) return -1;
             changed = 1;
         } else if (r->parent_id != prev) {
-            if (exec_ids(db, "UPDATE entries SET"
-                             " original_parent_id=COALESCE(original_parent_id, parent_id),"
-                             " parent_id=?2 WHERE id=?1;", r->id, prev, 0) != 0)
+            if (db_exec_ids(db, "UPDATE entries SET"
+                                " original_parent_id=COALESCE(original_parent_id, parent_id),"
+                                " parent_id=?2 WHERE id=?1;", r->id, prev, 0) != 0)
                 return -1;
             changed = 1;
         }
@@ -1277,8 +1266,8 @@ static int write_chain(sqlite3 *db, int64_t session_id, const Branch *b, Reply *
         prev = id;
     }
     /* Each insert moved the leaf to itself (entries_leaf_ai). */
-    return out->n > 0 ? exec_ids(db, "UPDATE sessions SET leaf_id=?2 WHERE id=?1;",
-                                 session_id, prev, 0)
+    return out->n > 0 ? db_exec_ids(db, "UPDATE sessions SET leaf_id=?2 WHERE id=?1;",
+                                    session_id, prev, 0)
                       : -1;
 }
 

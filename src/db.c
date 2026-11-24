@@ -106,14 +106,8 @@ int process_unregister(sqlite3 *db, const char *id) {
 int process_gc_dead(sqlite3 *db, int ttl_sec) {
     if (!db) return -1;
     /* Stale heartbeat → dead, regardless of pid liveness. */
-    sqlite3_stmt *del;
-    if (sqlite3_prepare_v2(db,
-            "DELETE FROM processes WHERE unixepoch() - heartbeat_at > ?;",
-            -1, &del, NULL) == SQLITE_OK) {
-        sqlite3_bind_int(del, 1, ttl_sec);
-        sqlite3_step(del);
-        sqlite3_finalize(del);
-    }
+    db_exec_ids(db, "DELETE FROM processes WHERE unixepoch() - heartbeat_at > ?;",
+                ttl_sec, 0, 0);
     /* Among the rest, prune any whose pid no longer exists. */
     sqlite3_stmt *sel;
     if (sqlite3_prepare_v2(db, "SELECT instance_id, pid FROM processes;",
@@ -376,34 +370,6 @@ int db_ensure_schema(sqlite3 *db) {
         return -1;
     }
 
-    /* Keep entries_fts in sync with the current tokenizer: IF NOT EXISTS
-     * leaves an existing table on its old definition, so if it differs,
-     * drop and re-index. DROP only removes index shadow tables ('entries'
-     * is the content source); the check just avoids re-indexing every boot. */
-    int fts_needs_porter = 0;
-    sqlite3_stmt *fts_chk;
-    if (sqlite3_prepare_v2(db, "SELECT sql FROM sqlite_master WHERE name='entries_fts'",
-                           -1, &fts_chk, NULL) == SQLITE_OK) {
-        if (sqlite3_step(fts_chk) == SQLITE_ROW) {
-            const char *fsql = (const char *)sqlite3_column_text(fts_chk, 0);
-            if (fsql && !strstr(fsql, "porter")) fts_needs_porter = 1;
-        }
-        sqlite3_finalize(fts_chk);
-    }
-    if (fts_needs_porter) {
-        rc = sqlite3_exec(db,
-            "DROP TABLE entries_fts;"
-            "CREATE VIRTUAL TABLE entries_fts USING fts5("
-            "  content, content=entries, content_rowid=id,"
-            "  tokenize='porter unicode61');"
-            "INSERT INTO entries_fts(entries_fts) VALUES('rebuild');",
-            NULL, NULL, &err);
-        if (rc != SQLITE_OK) {
-            LOG_WARN_("db_ensure_schema fts rebuild failed err=%s", err);
-            sqlite3_free(err);  /* non-fatal — recall degrades, chat still works */
-        }
-    }
-
     /* The change_log triggers are generated from the column list, not written
      * in schema.sql (src/change_log.c says why). A no-op when they already
      * match, so this costs a few sqlite_master reads per start. */
@@ -422,1667 +388,15 @@ int db_ensure_schema(sqlite3 *db) {
 /* Each patch brings the DB from (version-1) to (version). SQL may contain
  * multiple statements separated by semicolons. Run in order, one transaction
  * per patch. A patch may instead be a C function (fn) for shapes SQL can't
- * express idempotently — exactly one of sql/fn is set. */
-/* v44: bare model names in agents.primary_model/secondary_model become
- * canonical models.id, once.
+ * express idempotently — exactly one of sql/fn is set.
  *
- * A bare name was ambiguous by construction — 'm.id=?1 OR m.model=?1' picked
- * whichever row the scan reached first, so two providers carrying the same
- * model made an agent's declared model a coin flip. Afterwards the config
- * surface accepts canonical ids only (a bare name gets a did-you-mean), so
- * this is the one and only rewrite; no fallback parser is kept.
- *
- * Per row: exactly one match → rewrite. Zero → leave as-is (that agent was
- * already unroutable; the degrade path surfaces it, and inventing an id here
- * would silently move it to a model nobody chose). Several → the row routing
- * would have preferred (lowest models.priority, then the provider's own
- * priority), preserving the observed choice rather than reshuffling live
- * agents. Every rewrite is logged: this edits operator-visible config. */
-static int patch_v44_canonical_model_ids(sqlite3 *db) {
-    static const char *COLS[] = { "primary_model", "secondary_model" };
-    for (size_t c = 0; c < sizeof(COLS) / sizeof(*COLS); c++) {
-        char sel[512];
-        snprintf(sel, sizeof(sel),
-            "SELECT a.name, a.%s,"
-            "       (SELECT COUNT(*) FROM models m WHERE m.model = a.%s),"
-            "       (SELECT m.id FROM models m"
-            "          LEFT JOIN providers p ON p.name = m.provider_name"
-            "         WHERE m.model = a.%s"
-            "         ORDER BY m.priority, COALESCE(p.priority, 1000000), m.id"
-            "         LIMIT 1)"
-            "  FROM agents a"
-            " WHERE a.%s IS NOT NULL AND a.%s != ''"
-            "   AND NOT EXISTS(SELECT 1 FROM models m WHERE m.id = a.%s)",
-            COLS[c], COLS[c], COLS[c], COLS[c], COLS[c], COLS[c]);
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db, sel, -1, &st, NULL) != SQLITE_OK) return -1;
-        /* Collect before writing — never write inside an open SELECT. */
-        char **names = NULL, **olds = NULL, **news = NULL;
-        size_t n = 0;
-        int rc = 0;
-        while (sqlite3_step(st) == SQLITE_ROW) {
-            if (sqlite3_column_int(st, 2) == 0) continue;   /* zero matches */
-            const char *nm = (const char *)sqlite3_column_text(st, 0);
-            const char *ov = (const char *)sqlite3_column_text(st, 1);
-            const char *nv = (const char *)sqlite3_column_text(st, 3);
-            if (!nm || !ov || !nv) continue;
-            char **t1 = realloc(names, (n + 1) * sizeof(*names));
-            char **t2 = realloc(olds, (n + 1) * sizeof(*olds));
-            char **t3 = realloc(news, (n + 1) * sizeof(*news));
-            if (!t1 || !t2 || !t3) { rc = -1; break; }
-            names = t1; olds = t2; news = t3;
-            names[n] = strdup(nm); olds[n] = strdup(ov); news[n] = strdup(nv);
-            if (!names[n] || !olds[n] || !news[n]) { rc = -1; n++; break; }
-            n++;
-        }
-        sqlite3_finalize(st);
-        char upd[128];
-        snprintf(upd, sizeof(upd), "UPDATE agents SET %s=?1 WHERE name=?2",
-                 COLS[c]);
-        for (size_t i = 0; rc == 0 && i < n; i++) {
-            sqlite3_stmt *us;
-            if (sqlite3_prepare_v2(db, upd, -1, &us, NULL) != SQLITE_OK) {
-                rc = -1;
-                break;
-            }
-            sqlite3_bind_text(us, 1, news[i], -1, SQLITE_STATIC);
-            sqlite3_bind_text(us, 2, names[i], -1, SQLITE_STATIC);
-            if (sqlite3_step(us) != SQLITE_DONE) rc = -1;
-            sqlite3_finalize(us);
-            if (rc == 0)
-                LOG_INFO_("schema v44: agent '%s' %s '%s' -> '%s'",
-                          names[i], COLS[c], olds[i], news[i]);
-        }
-        for (size_t i = 0; i < n; i++) {
-            free(names[i]); free(olds[i]); free(news[i]);
-        }
-        free(names); free(olds); free(news);
-        if (rc != 0) return rc;
-    }
-    return 0;
-}
-
-/* v59: the v0.8 tidy-up (plan/projects/v0.8-data-and-explorer.md, decisions
- * 11/12/18/19/20).
- *
- * Links on the configuration side become declared foreign keys, which needs a
- * table rebuild each (SQLite cannot add an FK in place). The runner holds
- * foreign_keys=ON inside the patch transaction, so every rebuilt row is
- * checked as it is copied — which is why rows that point at nothing are dealt
- * with first, one rule per column, each change logged:
- *  - a row that is only a pointer to nothing the code can act on is deleted:
- *    routing rows of a model whose provider is gone (routing already skipped
- *    them — its JOIN found no provider) and that model, the tools, hooks and
- *    attachments of an extension that does not exist (their loaders JOIN
- *    extensions), channel_state of a channel with no row, a decision for an
- *    approval that does not exist;
- *  - a reference on a row worth keeping is NULLed: a channel whose extension
- *    is empty or gone keeps its row and operator settings (NULL = no
- *    extension); a missing revert target or default agent becomes NULL (for
- *    default_agent that is the fail-closed setting); an extension whose owner
- *    is not an agent keeps its row with no owner;
- *  - extensions.owner_agent 'system' (the shipped-in-the-binary marker, never
- *    an agents row) becomes NULL, which is how the code now reads it.
- * secret_hosts gets no FK: bindings of CCLAW_SECRET_* environment secrets
- * have no secrets row to point at. */
-static int v59_exec(sqlite3 *db, const char *sql) {
-    char *err = NULL;
-    if (sqlite3_exec(db, sql, NULL, NULL, &err) == SQLITE_OK) return 0;
-    LOG_ERROR_("schema patch: %s", err ? err : "?");
-    sqlite3_free(err);
-    return -1;
-}
-
-/* Log every row `sel` returns (column 0 describes it), then run `act`
- * (NULL: the table rebuild below applies the change as it copies). */
-static int v59_fix(sqlite3 *db, const char *what, const char *sel, const char *act) {
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db, sel, -1, &st, NULL) != SQLITE_OK) {
-        LOG_ERROR_("schema v59: %s: %s", what, sqlite3_errmsg(db));
-        return -1;
-    }
-    int n = 0;
-    while (sqlite3_step(st) == SQLITE_ROW) {
-        const char *d = (const char *)sqlite3_column_text(st, 0);
-        LOG_WARN_("schema v59: %s: %s", what, d ? d : "?");
-        n++;
-    }
-    sqlite3_finalize(st);
-    return n && act ? v59_exec(db, act) : 0;
-}
-
-#define V59_NO_PROVIDER \
-    "(SELECT id FROM models WHERE provider_name NOT IN (SELECT name FROM providers))"
-#define V59_NO_EXT(col) \
-    "(" col " IS NOT NULL AND " col " NOT IN (SELECT name FROM extensions))"
-#define V59_NO_AGENT(col) \
-    "(" col " IS NOT NULL AND " col " NOT IN (SELECT name FROM agents))"
-
-static int patch_v59_orphans(sqlite3 *db) {
-    static const struct { const char *what, *sel, *act; } FIX[] = {
-        { "removed routing row (its model's provider is gone)",
-          "SELECT agent_name||' pos '||pos||' -> '||model_id FROM agent_models"
-          " WHERE model_id IN " V59_NO_PROVIDER,
-          "DELETE FROM agent_models WHERE model_id IN " V59_NO_PROVIDER },
-        { "removed model (its provider is gone)",
-          "SELECT id||' (provider '||provider_name||')' FROM models"
-          " WHERE provider_name NOT IN (SELECT name FROM providers)",
-          "DELETE FROM models WHERE provider_name NOT IN (SELECT name FROM providers)" },
-        { "removed routing row (agent or model is gone)",
-          "SELECT agent_name||' pos '||pos||' -> '||model_id FROM agent_models"
-          " WHERE agent_name NOT IN (SELECT name FROM agents)"
-          "    OR model_id NOT IN (SELECT id FROM models)",
-          "DELETE FROM agent_models WHERE agent_name NOT IN (SELECT name FROM agents)"
-          "    OR model_id NOT IN (SELECT id FROM models)" },
-        { "extension owner is not an agent, owner now NULL",
-          "SELECT name||' (owner '||owner_agent||')' FROM extensions"
-          " WHERE owner_agent <> 'system' AND " V59_NO_AGENT("owner_agent"),
-          "UPDATE extensions SET owner_agent=NULL"
-          " WHERE owner_agent <> 'system' AND " V59_NO_AGENT("owner_agent") },
-        { "tool with an empty extension_name, now NULL",
-          "SELECT name FROM tools WHERE extension_name=''",
-          "UPDATE tools SET extension_name=NULL WHERE extension_name=''" },
-        { "removed tool (its extension or owning agent is gone)",
-          "SELECT name||' (extension '||COALESCE(extension_name,'-')||', agent '"
-          "||COALESCE(agent_name,'-')||')' FROM tools"
-          " WHERE " V59_NO_EXT("extension_name") " OR " V59_NO_AGENT("agent_name"),
-          "DELETE FROM tools"
-          " WHERE " V59_NO_EXT("extension_name") " OR " V59_NO_AGENT("agent_name") },
-        { "removed hook (its extension is gone)",
-          "SELECT extension_name||' '||event||' '||path FROM hooks"
-          " WHERE " V59_NO_EXT("extension_name"),
-          "DELETE FROM hooks WHERE " V59_NO_EXT("extension_name") },
-        { "removed extension attachment (extension or agent is gone)",
-          "SELECT COALESCE(agent_name,'-')||' -> '||extension_name FROM agent_extensions"
-          " WHERE " V59_NO_EXT("extension_name") " OR " V59_NO_AGENT("agent_name"),
-          "DELETE FROM agent_extensions"
-          " WHERE " V59_NO_EXT("extension_name") " OR " V59_NO_AGENT("agent_name") },
-        /* The old column is NOT NULL: the channels copy does the NULLing. */
-        { "channel extension is empty or gone, now NULL",
-          "SELECT name||' (extension \"'||extension_name||'\")' FROM channels"
-          " WHERE extension_name NOT IN (SELECT name FROM extensions)",
-          NULL },
-        { "channel revert target is empty or gone, now NULL",
-          "SELECT name||' (prev_extension_name \"'||prev_extension_name||'\")'"
-          " FROM channels"
-          " WHERE prev_extension_name NOT IN (SELECT name FROM extensions)",
-          NULL },
-        { "channel default agent is gone, now NULL (unknown chats drop)",
-          "SELECT name||' (default_agent '||default_agent||')' FROM channels"
-          " WHERE " V59_NO_AGENT("default_agent"),
-          "UPDATE channels SET default_agent=NULL WHERE " V59_NO_AGENT("default_agent") },
-        { "removed channel_state (no such channel)",
-          "SELECT channel_name||'.'||key FROM channel_state"
-          " WHERE channel_name NOT IN (SELECT name FROM channels)",
-          "DELETE FROM channel_state WHERE channel_name NOT IN (SELECT name FROM channels)" },
-        { "removed approval decision (no such approval)",
-          "SELECT approval_id||' '||decision FROM approval_decisions"
-          " WHERE approval_id NOT IN (SELECT id FROM approvals)",
-          "DELETE FROM approval_decisions WHERE approval_id NOT IN (SELECT id FROM approvals)" },
-    };
-    for (size_t i = 0; i < sizeof(FIX) / sizeof(*FIX); i++)
-        if (v59_fix(db, FIX[i].what, FIX[i].sel, FIX[i].act) != 0) return -1;
-    int64_t sys = db_scalar_i64(db,
-        "SELECT COUNT(*) FROM extensions WHERE owner_agent='system'", 0, 0);
-    if (sys > 0) {
-        if (v59_exec(db, "UPDATE extensions SET owner_agent=NULL"
-                         " WHERE owner_agent='system'") != 0) return -1;
-        LOG_INFO_("schema v59: %lld shipped extension(s): owner 'system' -> NULL",
-                  (long long)sys);
-    }
-    return 0;
-}
-
-/* Rebuild order matters with foreign_keys=ON: a parent is rebuilt before any
- * table that gains an FK to it (DROP TABLE on a referenced parent checks its
- * children), and agent_models — the one existing child of models — is held
- * aside while models is rebuilt. Each table is created under its final name,
- * so sqlite_master reads like a fresh database's. */
-static const char V59_REBUILD[] =
-    "CREATE TEMP TABLE v59_hold AS SELECT * FROM extensions;"
-    "DROP TABLE extensions;"
-    "CREATE TABLE extensions ("
-    "  name TEXT PRIMARY KEY,"
-    "  path TEXT NOT NULL,"
-    "  version TEXT DEFAULT '0.0.0',"
-    "  owner_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
-    "  published INTEGER NOT NULL DEFAULT 0,"
-    "  enabled INTEGER NOT NULL DEFAULT 1,"
-    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
-    "INSERT INTO extensions(name, path, version, owner_agent, published, enabled, created_at)"
-    "  SELECT name, path, version, owner_agent, published, enabled, created_at FROM v59_hold;"
-    "DROP TABLE v59_hold;"
-
-    "CREATE TEMP TABLE v59_hold AS SELECT * FROM channels;"
-    "DROP TABLE channels;"
-    "CREATE TABLE channels ("
-    "  name TEXT PRIMARY KEY,"
-    "  extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,"
-    "  prev_extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,"
-    "  type TEXT NOT NULL DEFAULT '',"
-    "  status TEXT NOT NULL DEFAULT 'draft',"
-    "  pid INTEGER,"
-    "  default_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
-    "  default_tool_filter TEXT,"
-    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
-    /* binary_path is not carried over (decision 20: written, never read). */
-    "INSERT INTO channels(name, extension_name, prev_extension_name, type, status, pid,"
-    "                     default_agent, default_tool_filter, created_at)"
-    "  SELECT name,"
-    "         CASE WHEN extension_name IN (SELECT name FROM extensions)"
-    "              THEN extension_name END,"
-    "         CASE WHEN prev_extension_name IN (SELECT name FROM extensions)"
-    "              THEN prev_extension_name END,"
-    "         type, status, pid,"
-    "         default_agent, default_tool_filter, created_at FROM v59_hold;"
-    "DROP TABLE v59_hold;"
-
-    "CREATE TEMP TABLE v59_am AS SELECT * FROM agent_models;"
-    "DROP TABLE agent_models;"
-    "CREATE TEMP TABLE v59_hold AS SELECT * FROM models;"
-    "DROP TABLE models;"
-    "CREATE TABLE models ("
-    "  id TEXT PRIMARY KEY,"
-    "  provider_name TEXT NOT NULL REFERENCES providers(name) ON UPDATE CASCADE,"
-    "  model TEXT NOT NULL,"
-    "  context_window INTEGER,"
-    "  max_output_tokens INTEGER,"
-    "  capabilities TEXT DEFAULT '[]',"
-    "  effort_map TEXT,"
-    "  status TEXT NOT NULL DEFAULT 'healthy',"
-    "  degraded_until INTEGER,"
-    "  total_requests INTEGER DEFAULT 0,"
-    "  total_tokens_in INTEGER DEFAULT 0,"
-    "  total_tokens_out INTEGER DEFAULT 0,"
-    "  total_cost_nano INTEGER DEFAULT 0,"
-    "  consec_failures INTEGER DEFAULT 0,"
-    "  last_success_at INTEGER,"
-    "  last_error_at INTEGER,"
-    "  synced_at INTEGER,"
-    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
-    "INSERT INTO models(id, provider_name, model, context_window, max_output_tokens,"
-    "                   capabilities, effort_map, status, degraded_until, total_requests,"
-    "                   total_tokens_in, total_tokens_out, total_cost_nano,"
-    "                   consec_failures, last_success_at, last_error_at, synced_at,"
-    "                   created_at)"
-    "  SELECT id, provider_name, model, context_window, max_output_tokens,"
-    "         capabilities, effort_map, status, degraded_until, total_requests,"
-    "         total_tokens_in, total_tokens_out, total_cost_nano,"
-    "         consec_failures, last_success_at, last_error_at, synced_at,"
-    "         created_at FROM v59_hold;"
-    "DROP TABLE v59_hold;"
-    "CREATE TABLE agent_models ("
-    "  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,"
-    "  purpose TEXT NOT NULL DEFAULT 'chat' CHECK (purpose IN ('chat','image','audio')),"
-    "  model_id TEXT NOT NULL REFERENCES models(id),"
-    "  pos INTEGER NOT NULL,"
-    "  reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN"
-    "    ('off','minimal','low','medium','high')),"
-    "  PRIMARY KEY (agent_name, purpose, pos));"
-    /* Every list that exists today is a chat list. */
-    "INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort)"
-    "  SELECT agent_name, 'chat', model_id, pos, reasoning_effort FROM v59_am;"
-    "DROP TABLE v59_am;"
-    "CREATE TRIGGER agent_models_capability_bi"
-    " BEFORE INSERT ON agent_models"
-    " WHEN NEW.purpose <> 'chat' AND NOT EXISTS ("
-    "   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)"
-    "                                          THEN m.capabilities ELSE '[]' END) c"
-    "    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)"
-    " BEGIN"
-    "   SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose');"
-    " END;"
-    "CREATE TRIGGER agent_models_capability_bu"
-    " BEFORE UPDATE OF purpose, model_id ON agent_models"
-    " WHEN NEW.purpose <> 'chat' AND NOT EXISTS ("
-    "   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)"
-    "                                          THEN m.capabilities ELSE '[]' END) c"
-    "    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)"
-    " BEGIN"
-    "   SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose');"
-    " END;"
-
-    "CREATE TEMP TABLE v59_hold AS SELECT * FROM agent_extensions;"
-    "DROP TABLE agent_extensions;"
-    "CREATE TABLE agent_extensions ("
-    "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
-    "  extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,"
-    "  config TEXT,"
-    "  enabled INTEGER NOT NULL DEFAULT 1,"
-    "  PRIMARY KEY (agent_name, extension_name));"
-    "INSERT INTO agent_extensions(agent_name, extension_name, config, enabled)"
-    "  SELECT agent_name, extension_name, config, enabled FROM v59_hold;"
-    "DROP TABLE v59_hold;"
-
-    "CREATE TEMP TABLE v59_hold AS SELECT * FROM channel_state;"
-    "DROP TABLE channel_state;"
-    "CREATE TABLE channel_state ("
-    "  channel_name TEXT NOT NULL REFERENCES channels(name) ON UPDATE CASCADE,"
-    "  key TEXT NOT NULL,"
-    "  value TEXT,"
-    "  PRIMARY KEY (channel_name, key));"
-    "INSERT INTO channel_state(channel_name, key, value)"
-    "  SELECT channel_name, key, value FROM v59_hold;"
-    "DROP TABLE v59_hold;"
-
-    "CREATE TEMP TABLE v59_hold AS SELECT * FROM tools;"
-    "DROP TABLE tools;"
-    "CREATE TABLE tools ("
-    "  name TEXT PRIMARY KEY,"
-    "  extension_name TEXT REFERENCES extensions(name) ON UPDATE CASCADE,"
-    "  description TEXT,"
-    "  parameters_json TEXT,"
-    "  path TEXT,"
-    "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
-    "  enabled INTEGER NOT NULL DEFAULT 1,"
-    "  policy TEXT,"
-    "  egress_hosts TEXT);"
-    "INSERT INTO tools(name, extension_name, description, parameters_json, path,"
-    "                  agent_name, enabled, policy, egress_hosts)"
-    "  SELECT name, extension_name, description, parameters_json, path,"
-    "         agent_name, enabled, policy, egress_hosts FROM v59_hold;"
-    "DROP TABLE v59_hold;"
-
-    "CREATE TEMP TABLE v59_hold AS SELECT * FROM hooks;"
-    "DROP TABLE hooks;"
-    "CREATE TABLE hooks ("
-    "  extension_name TEXT NOT NULL REFERENCES extensions(name) ON UPDATE CASCADE,"
-    "  event TEXT NOT NULL,"
-    "  path TEXT NOT NULL,"
-    "  enabled INTEGER NOT NULL DEFAULT 1,"
-    "  PRIMARY KEY (extension_name, event, path));"
-    "INSERT INTO hooks(extension_name, event, path, enabled)"
-    "  SELECT extension_name, event, path, enabled FROM v59_hold;"
-    "DROP TABLE v59_hold;"
-
-    "CREATE TEMP TABLE v59_hold AS SELECT * FROM approval_decisions;"
-    "DROP TABLE approval_decisions;"
-    "CREATE TABLE approval_decisions ("
-    "  approval_id INTEGER PRIMARY KEY REFERENCES approvals(id) ON UPDATE CASCADE,"
-    "  decision    TEXT NOT NULL CHECK (decision IN ('deny','once','always')),"
-    "  decided_via TEXT NOT NULL,"
-    "  created_at  INTEGER NOT NULL DEFAULT (unixepoch()));"
-    "INSERT INTO approval_decisions(approval_id, decision, decided_via, created_at)"
-    "  SELECT approval_id, decision, decided_via, created_at FROM v59_hold;"
-    "DROP TABLE v59_hold;"
-
-    /* Decision 18: history, not a permission. RENAME keeps the FK and the
-     * UNIQUE constraint, now over (created_by, label). */
-    "ALTER TABLE memory_blocks RENAME COLUMN agent_name TO created_by;"
-
-    /* Decision 20: columns nothing reads (re-checked for v59). */
-    "ALTER TABLE providers DROP COLUMN status;"
-    "DROP INDEX IF EXISTS idx_llm_jobs_pending;"
-    "ALTER TABLE llm_jobs DROP COLUMN status;"
-    "ALTER TABLE cron_jobs DROP COLUMN kind;";
-
-static int patch_v59_tidy(sqlite3 *db) {
-    if (patch_v59_orphans(db) != 0) return -1;
-    if (v59_exec(db, V59_REBUILD) != 0) return -1;
-    /* Proof, not hope: nothing in a touched table may point at nothing. */
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db,
-            "SELECT c.\"table\", c.rowid, c.parent FROM pragma_foreign_key_check c"
-            " WHERE c.\"table\" IN ('models','agent_models','extensions','channels',"
-            "   'channel_state','tools','hooks','agent_extensions','approval_decisions',"
-            "   'memory_blocks','providers','llm_jobs','cron_jobs')",
-            -1, &st, NULL) != SQLITE_OK) return -1;
-    int bad = 0;
-    while (sqlite3_step(st) == SQLITE_ROW) {
-        LOG_ERROR_("schema v59: %s rowid %lld points at a missing %s row",
-                   (const char *)sqlite3_column_text(st, 0),
-                   (long long)sqlite3_column_int64(st, 1),
-                   (const char *)sqlite3_column_text(st, 2));
-        bad++;
-    }
-    sqlite3_finalize(st);
-    return bad ? -1 : 0;
-}
-
-/* v60: grant provenance, using a secret is a grant, the change log
- * (plan/projects/v0.8-data-and-explorer.md, decisions 13–17).
- *
- * grants gains source (no default — a writer must say) and approval_id; it is
- * rebuilt because SQLite cannot add a NOT NULL column without a default.
- * Every existing row becomes 'legacy': its origin is not recorded anywhere,
- * and guessing would make the column lie.
- *
- * Secret use becomes a grant, and nothing an agent can use today may stop
- * working, so every agent is granted (source 'migration') every secret it
- * could reach before:
- *  - every scope='agent' secrets row;
- *  - every secret_hosts name with no secrets row — the only trace in the
- *    database of a CCLAW_SECRET_* environment secret;
- *  - every CCLAW_SECRET_* name in this process's environment. An environment
- *    secret with no binding was still usable through $CCLAW_SECRET_<NAME> in
- *    shell_exec (env delivery is not narrowed by bindings), and nothing in
- *    the database names it. The patch runs before the daemon collects and
- *    unsets those variables, so a daemon start sees exactly the set its
- *    tools could use. A patch run by another process (a CLI verb without the
- *    daemon's environment) grants only what the database shows.
- * scope='system' secrets stay daemon-only and get no grant.
- *
- * The change_log triggers are installed before the secret grants are written,
- * so the migration itself is the first thing the log records. */
-static const char V60_SQL[] =
-    "CREATE TABLE change_log ("
-    "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  at          INTEGER NOT NULL DEFAULT (unixepoch()),"
-    "  actor       TEXT NOT NULL,"
-    "  context     TEXT,"
-    "  table_name  TEXT NOT NULL,"
-    "  row_key     TEXT NOT NULL,"
-    "  action      TEXT NOT NULL CHECK (action IN ('insert','update','delete')),"
-    "  old_values  TEXT,"
-    "  new_values  TEXT);"
-    "CREATE TRIGGER change_log_append_only_upd BEFORE UPDATE ON change_log"
-    " BEGIN SELECT RAISE(ABORT, 'change_log is append-only'); END;"
-    "CREATE TRIGGER change_log_append_only_del BEFORE DELETE ON change_log"
-    " BEGIN SELECT RAISE(ABORT, 'change_log is append-only'); END;"
-    "CREATE TEMP TABLE v60_hold AS SELECT * FROM grants;"
-    "DROP TABLE grants;"
-    "CREATE TABLE grants ("
-    "  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,"
-    "  kind TEXT NOT NULL,"
-    "  value TEXT NOT NULL,"
-    "  approval_mode TEXT NOT NULL DEFAULT 'silent',"
-    "  expires_at INTEGER,"
-    "  created_at INTEGER DEFAULT (unixepoch()),"
-    "  source TEXT NOT NULL CHECK (source IN ('approval','operator','agent_create',"
-    "    'extension','seed','capture','migration','legacy')),"
-    "  approval_id INTEGER REFERENCES approvals(id),"
-    "  PRIMARY KEY (agent_name, kind, value));"
-    "INSERT INTO grants(agent_name, kind, value, approval_mode, expires_at,"
-    "                   created_at, source, approval_id)"
-    "  SELECT agent_name, kind, value, approval_mode, expires_at, created_at,"
-    "         'legacy', NULL FROM v60_hold;"
-    "DROP TABLE v60_hold;";
-
-/* Grant secret `name` to every agent (source 'migration'), logging how many
- * agents now hold it and why. */
-static int v60_grant_secret(sqlite3 *db, const char *name, const char *why) {
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db,
-            "INSERT OR IGNORE INTO grants(agent_name, kind, value, source)"
-            " SELECT name, 'secret', ?1, 'migration' FROM agents ORDER BY name",
-            -1, &st, NULL) != SQLITE_OK) {
-        LOG_ERROR_("schema v60: %s", sqlite3_errmsg(db));
-        return -1;
-    }
-    sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(st) == SQLITE_DONE ? 0 : -1;
-    if (rc != 0) LOG_ERROR_("schema v60: grant %s: %s", name, sqlite3_errmsg(db));
-    else LOG_INFO_("schema v60: secret %s granted to %d agent(s) (%s)",
-                   name, sqlite3_changes(db), why);
-    sqlite3_finalize(st);
-    return rc;
-}
-
-/* Names from one query, collected before any write (never write inside an
- * open SELECT). */
-static char **v60_names(sqlite3 *db, const char *sql, size_t *n_out) {
-    *n_out = 0;
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
-    char **names = NULL;
-    size_t n = 0;
-    while (sqlite3_step(st) == SQLITE_ROW) {
-        const char *v = (const char *)sqlite3_column_text(st, 0);
-        char **t = v ? realloc(names, (n + 1) * sizeof(*names)) : NULL;
-        if (!t) continue;
-        names = t;
-        if ((names[n] = strdup(v))) n++;
-    }
-    sqlite3_finalize(st);
-    *n_out = n;
-    return names;
-}
-
-static int patch_v60_authority(sqlite3 *db) {
-    if (v59_exec(db, V60_SQL) != 0) return -1;
-    if (change_log_sync(db) != 0) return -1;
-    db_set_context(db, "schema:v60");
-    int rc = 0;
-    static const struct { const char *sql; const char *why; } SRC[] = {
-        { "SELECT name FROM secrets WHERE scope='agent' ORDER BY name",
-          "stored secret, usable by every agent before v60" },
-        { "SELECT DISTINCT secret_name FROM secret_hosts"
-          " WHERE secret_name NOT IN (SELECT name FROM secrets) ORDER BY secret_name",
-          "bound environment secret, usable by every agent before v60" },
-    };
-    for (size_t s = 0; rc == 0 && s < sizeof(SRC) / sizeof(SRC[0]); s++) {
-        size_t n = 0;
-        char **names = v60_names(db, SRC[s].sql, &n);
-        for (size_t i = 0; i < n; i++) {
-            if (rc == 0) rc = v60_grant_secret(db, names[i], SRC[s].why);
-            free(names[i]);
-        }
-        free(names);
-    }
-    /* This process's own CCLAW_SECRET_* variables (see the comment above). A
-     * name that is a system secret is the daemon's, not an agent's. */
-    extern char **environ;
-    for (char **e = environ; rc == 0 && e && *e; e++) {
-        if (strncmp(*e, "CCLAW_SECRET_", 13) != 0) continue;
-        const char *eq = strchr(*e, '=');
-        if (!eq || eq - *e - 13 <= 0 || eq - *e - 13 >= 128) continue;
-        char name[128];
-        snprintf(name, sizeof(name), "%.*s", (int)(eq - *e - 13), *e + 13);
-        if (!is_valid_secret_name(name)) continue;
-        sqlite3_stmt *st;
-        int system = 0;
-        if (sqlite3_prepare_v2(db, "SELECT 1 FROM secrets WHERE name=?1 AND scope='system'",
-                               -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
-            system = sqlite3_step(st) == SQLITE_ROW;
-            sqlite3_finalize(st);
-        }
-        if (!system)
-            rc = v60_grant_secret(db, name,
-                                  "environment secret of the migrating process");
-    }
-    db_set_context(db, NULL);
-    return rc;
-}
-
-/* v61: channel_chats (plan/projects/v0.8-data-and-explorer.md, decisions
- * 1–10).
- *
- * channel_routes becomes channel_chats: one row per chat, routed or not, and
- * the chat's settings are read live from it from now on. Every channel+chat
- * pair any route, session or cron job names gets a row, so the new composite
- * foreign keys from sessions and cron_jobs hold. Where the values come from:
- *  - a routed chat keeps its route's delivery_mode, tool_filter and prompt
- *    suffix (now guidance). A route with no tool_filter whose pinned session
- *    is a top-level session carrying a frozen filter (a gate-created session's
- *    copy of channels.default_tool_filter, or a route filter later removed)
- *    takes that filter: the pinned session's effective tools do not change,
- *    and a later /new keeps the attenuation the frozen copy gave;
- *  - a chat with no route starts from the defaults a new chat gets
- *    (channels.default_tool_filter; 'explicit' if the id is group-shaped);
- *  - title and admin flag come from the most recently updated session of the
- *    chat that has one; the error-notice time is the MAX over its sessions
- *    (the old per-chat rule). kind, last_message_at and notified_at are
- *    unknown and stay NULL until the next message.
- * Where a chat's live value now differs from what its pinned session ran on
- * (a frozen filter or delivery edge from before a route edit), the route's
- * value wins — it is what the operator last set — and the patch logs it.
- *
- * Data the new constraints refuse is resolved, each change logged:
- *  - a session pinned by several chats keeps the chat it names (its replies
- *    already go there), else the one it last replied to; every other chat
- *    gets a fresh session for the same agent, as /new would do. A pinned
- *    session naming a different chat is re-stamped to its keeper.
- *  - a stamp on a channel that has no channels row is dropped (no runner can
- *    ever serve it): sessions lose the stamp and their channel edge, a cron
- *    job loses it and is disabled, a route is deleted.
- *  - a row with only one of channel_name/chat_id is logged and left alone
- *    (a foreign key with a NULL column is not checked).
- *  - a sessions, cron_jobs or delivery_edges row that already points at a
- *    missing parent (written with foreign keys off) cannot be copied: the
- *    patch names it and refuses, and the database stays at v60.
- *
- * Channel edges lose their policy (NULL): the chat's delivery_mode is the
- * only value. Their target_ref is set to the session's channel. They keep
- * their cursor, except an edge that never posted (frozen 'explicit', or its
- * chat is 'explicit' now): its cursor moves to the session's leaf, as an
- * explicit boundary would leave it today, so no flip of the chat to 'auto'
- * can post an old answer (see the step after the rebuild). sessions, cron_jobs and delivery_edges are rebuilt (SQLite cannot
- * add a foreign key in place); delivery_edges is held aside while sessions,
- * its parent, is dropped, and every AUTOINCREMENT sequence is put back so no
- * id is ever reused. */
-static int v61_note(sqlite3 *db, const char *what, const char *sel) {
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db, sel, -1, &st, NULL) != SQLITE_OK) {
-        LOG_ERROR_("schema v61: %s: %s", what, sqlite3_errmsg(db));
-        return -1;
-    }
-    while (sqlite3_step(st) == SQLITE_ROW) {
-        const char *d = (const char *)sqlite3_column_text(st, 0);
-        LOG_WARN_("schema v61: %s: %s", what, d ? d : "?");
-    }
-    sqlite3_finalize(st);
-    return 0;
-}
-
-#define V61_NO_CHANNEL "(channel_name IS NOT NULL AND channel_name NOT IN (SELECT name FROM channels))"
-#define V61_HALF "((channel_name IS NULL) <> (chat_id IS NULL))"
-#define V61_AUTO(p) "(CASE " p " WHEN 'auto' THEN 'quiescent' ELSE " p " END)"
-/* Over a rebuilt channel edge `e` and its session `s`: frozen 'explicit'
- * under v60 (any channel edge of the session — the held copy), or the chat
- * is 'explicit' now. */
-#define V61_NEVER_POSTED \
-    "EXISTS(SELECT 1 FROM v61_edges o WHERE o.session_id=e.session_id" \
-    "        AND o.target_kind='channel' AND o.policy='explicit')" \
-    " OR EXISTS(SELECT 1 FROM channel_chats c WHERE c.channel_name=s.channel_name" \
-    "        AND c.chat_id=s.chat_id AND c.delivery_mode='explicit')"
-
-static const char V61_PIN[] =
-    /* Which chat keeps a session that several chats pin: the one the session
-     * names, then the one it last replied to, then the lowest id. */
-    "CREATE TEMP TABLE v61_pin AS"
-    " SELECT r.channel_name, r.chat_id, r.session_id, s.agent_name,"
-    "   ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY"
-    "     (s.channel_name IS r.channel_name AND s.chat_id IS r.chat_id) DESC,"
-    "     (SELECT MAX(o.id) FROM channel_outbox o WHERE o.session_id=r.session_id"
-    "        AND o.channel_name=r.channel_name"
-    "        AND CAST(json_extract(o.payload,'$.chat_id') AS TEXT)=r.chat_id)"
-    "       DESC NULLS LAST,"
-    "     r.channel_name, r.chat_id) AS rk"
-    " FROM channel_routes r JOIN sessions s ON s.id=r.session_id;";
-
-static const char V61_CHATS[] =
-    "CREATE TEMP TABLE v61_chats AS"
-    " WITH pairs AS ("
-    "   SELECT channel_name, chat_id FROM channel_routes"
-    "   UNION SELECT channel_name, chat_id FROM sessions"
-    "     WHERE channel_name IS NOT NULL AND chat_id IS NOT NULL"
-    "   UNION SELECT channel_name, chat_id FROM cron_jobs"
-    "     WHERE channel_name IS NOT NULL AND chat_id IS NOT NULL)"
-    " SELECT p.channel_name, p.chat_id,"
-    "   (SELECT k.session_id FROM v61_pin k WHERE k.channel_name=p.channel_name"
-    "      AND k.chat_id=p.chat_id AND k.rk=1) AS session_id,"
-    "   CASE WHEN r.chat_id IS NULL"
-    "          THEN CASE WHEN substr(p.chat_id,1,1)='-' THEN 'explicit' ELSE 'auto' END"
-    "        WHEN r.delivery_mode IN ('auto','iteration','digest','turn','quiescent','explicit')"
-    "          THEN r.delivery_mode"
-    "        ELSE 'auto' END AS delivery_mode,"
-    "   CASE WHEN r.chat_id IS NULL THEN ch.default_tool_filter"
-    "        ELSE COALESCE(r.tool_filter, (SELECT s.tool_filter FROM sessions s"
-    "               WHERE s.id=r.session_id AND COALESCE(s.parent_session_id,-1) <= 0))"
-    "   END AS tool_filter,"
-    "   r.system_prompt_suffix AS guidance,"
-    "   (SELECT s.chat_title FROM sessions s WHERE s.channel_name=p.channel_name"
-    "      AND s.chat_id=p.chat_id AND s.chat_title IS NOT NULL"
-    "      ORDER BY s.updated_at DESC, s.id DESC LIMIT 1) AS title,"
-    "   (SELECT s.chat_is_admin FROM sessions s WHERE s.channel_name=p.channel_name"
-    "      AND s.chat_id=p.chat_id AND s.chat_is_admin IS NOT NULL"
-    "      ORDER BY s.updated_at DESC, s.id DESC LIMIT 1) AS is_admin,"
-    "   (SELECT MAX(s.chat_error_notice_at) FROM sessions s"
-    "      WHERE s.channel_name=p.channel_name AND s.chat_id=p.chat_id) AS error_notice_at,"
-    "   COALESCE((SELECT MIN(t) FROM ("
-    "      SELECT created_at AS t FROM sessions s"
-    "       WHERE s.channel_name=p.channel_name AND s.chat_id=p.chat_id"
-    "      UNION ALL SELECT created_at FROM cron_jobs j"
-    "       WHERE j.channel_name=p.channel_name AND j.chat_id=p.chat_id)),"
-    "     unixepoch()) AS first_seen_at"
-    " FROM pairs p JOIN channels ch ON ch.name=p.channel_name"
-    " LEFT JOIN channel_routes r ON r.channel_name=p.channel_name AND r.chat_id=p.chat_id;";
-
-/* The rebuild. channel_chats and sessions point at each other, and an insert
- * into a child fails while its parent table does not exist (even with a NULL
- * key), so both are created first; then the chats with no pins, the sessions
- * (whose chats now exist), the pins (whose sessions now exist), and
- * delivery_edges, a child of sessions, last. */
-static const char V61_REBUILD[] =
-    "CREATE TEMP TABLE v61_seq AS SELECT name, seq FROM sqlite_sequence"
-    "  WHERE name IN ('sessions','delivery_edges','cron_jobs');"
-    "CREATE TEMP TABLE v61_sessions AS SELECT * FROM sessions;"
-    "CREATE TEMP TABLE v61_edges AS SELECT * FROM delivery_edges;"
-    "CREATE TEMP TABLE v61_cron AS SELECT * FROM cron_jobs;"
-    "DROP TABLE delivery_edges;"
-    "DROP TABLE channel_routes;"
-    "DROP TABLE cron_jobs;"
-    "DROP TABLE sessions;"
-
-    "CREATE TABLE channel_chats ("
-    "  channel_name TEXT NOT NULL REFERENCES channels(name) ON UPDATE CASCADE,"
-    "  chat_id TEXT NOT NULL,"
-    "  session_id INTEGER REFERENCES sessions(id),"
-    "  delivery_mode TEXT NOT NULL DEFAULT 'auto'"
-    "    CHECK (delivery_mode IN ('auto','iteration','digest','turn','quiescent','explicit')),"
-    "  tool_filter TEXT,"
-    "  guidance TEXT,"
-    "  title TEXT,"
-    "  is_admin INTEGER,"
-    "  error_notice_at INTEGER,"
-    "  kind TEXT CHECK (kind IN ('dm','group')),"
-    "  first_seen_at INTEGER NOT NULL DEFAULT (unixepoch()),"
-    "  last_message_at INTEGER,"
-    "  notified_at INTEGER,"
-    "  PRIMARY KEY (channel_name, chat_id));"
-
-    "CREATE TABLE sessions ("
-    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  name TEXT,"
-    "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
-    "  channel_name TEXT,"
-    "  chat_id TEXT,"
-    "  parent_session_id INTEGER DEFAULT -1,"
-    "  parent_tool_call_id TEXT,"
-    "  depth INTEGER NOT NULL DEFAULT 0,"
-    "  tool_filter TEXT,"
-    "  state TEXT NOT NULL DEFAULT 'idle',"
-    "  owner_instance TEXT,"
-    "  turn_iteration INTEGER NOT NULL DEFAULT 0,"
-    "  turn_context TEXT,"
-    "  leaf_id INTEGER DEFAULT -1,"
-    "  compaction_fail_count INTEGER NOT NULL DEFAULT 0,"
-    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
-    "  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),"
-    "  FOREIGN KEY (channel_name, chat_id) REFERENCES channel_chats(channel_name, chat_id)"
-    "    ON UPDATE CASCADE);"
-    "INSERT INTO channel_chats(channel_name, chat_id, delivery_mode, tool_filter, guidance,"
-    "                          title, is_admin, error_notice_at, first_seen_at)"
-    "  SELECT channel_name, chat_id, delivery_mode, tool_filter, guidance,"
-    "         title, is_admin, error_notice_at, first_seen_at FROM v61_chats;"
-    /* chat_title, chat_is_admin, chat_error_notice_at are not carried: they
-     * live on the chat now. */
-    "INSERT INTO sessions(id, name, agent_name, channel_name, chat_id, parent_session_id,"
-    "                     parent_tool_call_id, depth, tool_filter, state, owner_instance,"
-    "                     turn_iteration, turn_context, leaf_id, compaction_fail_count,"
-    "                     created_at, updated_at)"
-    "  SELECT id, name, agent_name, channel_name, chat_id, parent_session_id,"
-    "         parent_tool_call_id, depth, tool_filter, state, owner_instance,"
-    "         turn_iteration, turn_context, leaf_id, compaction_fail_count,"
-    "         created_at, updated_at FROM v61_sessions ORDER BY id;"
-    "CREATE INDEX idx_sessions_owner ON sessions(owner_instance)"
-    "  WHERE owner_instance IS NOT NULL;"
-    "UPDATE channel_chats SET session_id=(SELECT c.session_id FROM v61_chats c"
-    "  WHERE c.channel_name=channel_chats.channel_name AND c.chat_id=channel_chats.chat_id);"
-
-    "CREATE TABLE delivery_edges ("
-    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
-    "  target_kind TEXT NOT NULL,"
-    "  target_ref TEXT NOT NULL,"
-    "  policy TEXT CHECK ((target_kind = 'channel') = (policy IS NULL)),"
-    "  cursor INTEGER NOT NULL DEFAULT 0,"
-    "  one_shot INTEGER NOT NULL DEFAULT 0,"
-    "  UNIQUE(session_id, target_kind, target_ref));"
-    /* A channel edge names the session's channel and carries no policy. A
-     * session that once moved across channels may hold two channel edges;
-     * the one already naming its channel is kept. */
-    "INSERT OR IGNORE INTO delivery_edges(id, session_id, target_kind, target_ref, policy,"
-    "                                     cursor, one_shot)"
-    "  SELECT e.id, e.session_id, e.target_kind,"
-    "         CASE WHEN e.target_kind='channel' THEN s.channel_name ELSE e.target_ref END,"
-    "         CASE WHEN e.target_kind='channel' THEN NULL ELSE e.policy END,"
-    "         e.cursor, e.one_shot"
-    "  FROM v61_edges e JOIN sessions s ON s.id=e.session_id"
-    "  WHERE e.target_kind <> 'channel' OR s.channel_name IS NOT NULL"
-    "  ORDER BY (e.target_kind='channel' AND e.target_ref IS s.channel_name) DESC, e.id;"
-
-    "CREATE TABLE cron_jobs ("
-    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
-    "  name TEXT NOT NULL,"
-    "  cron_expr TEXT NOT NULL,"
-    "  run_at INTEGER,"
-    "  interval_s INTEGER,"
-    "  session_id INTEGER NOT NULL,"
-    "  task TEXT NOT NULL,"
-    "  script TEXT,"
-    "  channel_name TEXT,"
-    "  chat_id TEXT,"
-    "  target TEXT,"
-    "  target_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
-    "  enabled INTEGER NOT NULL DEFAULT 1,"
-    "  next_run_at INTEGER NOT NULL DEFAULT 0,"
-    "  last_run_at INTEGER,"
-    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
-    "  FOREIGN KEY (channel_name, chat_id) REFERENCES channel_chats(channel_name, chat_id)"
-    "    ON UPDATE CASCADE);"
-    "INSERT INTO cron_jobs(id, agent_name, name, cron_expr, run_at, interval_s, session_id,"
-    "                      task, script, channel_name, chat_id, target, target_agent,"
-    "                      enabled, next_run_at, last_run_at, created_at)"
-    "  SELECT id, agent_name, name, cron_expr, run_at, interval_s, session_id,"
-    "         task, script, channel_name, chat_id, target, target_agent,"
-    "         enabled, next_run_at, last_run_at, created_at FROM v61_cron ORDER BY id;"
-    "CREATE UNIQUE INDEX idx_cron_jobs_name ON cron_jobs(agent_name, name);"
-
-    /* DROP TABLE removed each sequence row; the copies re-created them at
-     * MAX(id), which is lower than the old value when the newest rows had
-     * been deleted. Put the old high-water marks back. */
-    "UPDATE sqlite_sequence SET seq=MAX(seq, (SELECT h.seq FROM v61_seq h"
-    "  WHERE h.name=sqlite_sequence.name)) WHERE name IN (SELECT name FROM v61_seq);"
-    "INSERT INTO sqlite_sequence(name, seq) SELECT name, seq FROM v61_seq"
-    "  WHERE name NOT IN (SELECT name FROM sqlite_sequence);";
-
-/* Every chat but the keeper of a session several chats pinned gets a fresh
- * session for the same agent, named the way /new names one. */
-static int v61_unshare(sqlite3 *db) {
-    typedef struct { char *ch, *chat, *agent; int64_t old; } Loser;
-    Loser *l = NULL;
-    size_t n = 0;
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db, "SELECT channel_name, chat_id, agent_name, session_id"
-                               " FROM v61_pin WHERE rk > 1 ORDER BY session_id, rk",
-                           -1, &st, NULL) != SQLITE_OK) return -1;
-    while (sqlite3_step(st) == SQLITE_ROW) {
-        Loser *t = realloc(l, (n + 1) * sizeof(*l));
-        if (!t) break;
-        l = t;
-        const char *a = (const char *)sqlite3_column_text(st, 2);
-        l[n].ch = strdup((const char *)sqlite3_column_text(st, 0));
-        l[n].chat = strdup((const char *)sqlite3_column_text(st, 1));
-        l[n].agent = a ? strdup(a) : NULL;
-        l[n].old = sqlite3_column_int64(st, 3);
-        n++;
-    }
-    sqlite3_finalize(st);
-    int rc = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (rc == 0 && sqlite3_prepare_v2(db,
-                "INSERT INTO sessions(name, agent_name, channel_name, chat_id)"
-                " VALUES(?1, ?2, ?1, ?3)", -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, l[i].ch, -1, SQLITE_STATIC);
-            if (l[i].agent) sqlite3_bind_text(st, 2, l[i].agent, -1, SQLITE_STATIC);
-            sqlite3_bind_text(st, 3, l[i].chat, -1, SQLITE_STATIC);
-            rc = sqlite3_step(st) == SQLITE_DONE ? 0 : -1;
-            sqlite3_finalize(st);
-            int64_t sid = sqlite3_last_insert_rowid(db);
-            if (rc == 0 && sqlite3_prepare_v2(db,
-                    "UPDATE channel_chats SET session_id=?3"
-                    " WHERE channel_name=?1 AND chat_id=?2", -1, &st, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(st, 1, l[i].ch, -1, SQLITE_STATIC);
-                sqlite3_bind_text(st, 2, l[i].chat, -1, SQLITE_STATIC);
-                sqlite3_bind_int64(st, 3, sid);
-                rc = sqlite3_step(st) == SQLITE_DONE ? 0 : -1;
-                sqlite3_finalize(st);
-            } else rc = -1;
-            if (rc == 0)
-                LOG_WARN_("schema v61: chat %s:%s shared session %lld with another chat;"
-                          " it now has its own fresh session %lld (agent %s)",
-                          l[i].ch, l[i].chat, (long long)l[i].old, (long long)sid,
-                          l[i].agent ? l[i].agent : "-");
-        } else if (rc == 0) rc = -1;
-        free(l[i].ch); free(l[i].chat); free(l[i].agent);
-    }
-    free(l);
-    if (rc != 0) LOG_ERROR_("schema v61: unshare: %s", sqlite3_errmsg(db));
-    return rc;
-}
-
-static int patch_v61_chats(sqlite3 *db) {
-    /* The rebuilt tables are copied with foreign keys on. A row that already
-     * points at nothing (written by a handle with them off) would fail the
-     * copy; name it and refuse before anything changes, rather than guess. */
-    int64_t dangling = db_scalar_i64(db,
-        "SELECT COUNT(*) FROM pragma_foreign_key_check c"
-        " WHERE c.\"table\" IN ('sessions','cron_jobs','delivery_edges')", 0, -1);
-    if (dangling != 0) {
-        v61_note(db, "row already points at a missing parent; upgrade refused",
-            "SELECT c.\"table\"||' rowid '||c.rowid||' -> '||c.parent"
-            " FROM pragma_foreign_key_check c"
-            " WHERE c.\"table\" IN ('sessions','cron_jobs','delivery_edges')");
-        LOG_ERROR_("schema v61: %lld row(s) with a dangling reference — fix them"
-                   " (cclaw sqlite3 --write) and restart", (long long)dangling);
-        return -1;
-    }
-    static const struct { const char *what, *sel, *act; } PRE[] = {
-        { "session names a channel that does not exist; stamp dropped",
-          "SELECT 'session '||id||' ('||channel_name||':'||COALESCE(chat_id,'-')||')'"
-          " FROM sessions WHERE " V61_NO_CHANNEL,
-          "DELETE FROM delivery_edges WHERE target_kind='channel' AND session_id IN"
-          "  (SELECT id FROM sessions WHERE " V61_NO_CHANNEL ");"
-          "UPDATE sessions SET channel_name=NULL, chat_id=NULL WHERE " V61_NO_CHANNEL },
-        { "cron job names a channel that does not exist; stamp dropped, job disabled",
-          "SELECT 'job '||id||' '||name||' ('||channel_name||':'||COALESCE(chat_id,'-')||')'"
-          " FROM cron_jobs WHERE " V61_NO_CHANNEL,
-          "UPDATE cron_jobs SET channel_name=NULL, chat_id=NULL, enabled=0"
-          " WHERE " V61_NO_CHANNEL },
-        { "route on a channel that does not exist, or to no session; removed",
-          "SELECT channel_name||':'||chat_id||' -> session '||session_id FROM channel_routes"
-          " WHERE channel_name NOT IN (SELECT name FROM channels)"
-          "    OR session_id NOT IN (SELECT id FROM sessions)",
-          "DELETE FROM channel_routes WHERE channel_name NOT IN (SELECT name FROM channels)"
-          "    OR session_id NOT IN (SELECT id FROM sessions)" },
-        { "session has only one of channel_name/chat_id; left as is",
-          "SELECT 'session '||id FROM sessions WHERE " V61_HALF, NULL },
-        { "cron job has only one of channel_name/chat_id; left as is",
-          "SELECT 'job '||id||' '||name FROM cron_jobs WHERE " V61_HALF, NULL },
-    };
-    for (size_t i = 0; i < sizeof(PRE) / sizeof(*PRE); i++) {
-        if (v61_note(db, PRE[i].what, PRE[i].sel) != 0) return -1;
-        if (PRE[i].act && v59_exec(db, PRE[i].act) != 0) return -1;
-    }
-    if (v59_exec(db, V61_PIN) != 0) return -1;
-
-    /* A pinned session that names another chat is re-stamped to its keeper:
-     * from v61, chat.session_id = S means S names that chat. */
-    if (v61_note(db, "pinned session named another chat; re-stamped to its pin",
-            "SELECT 'session '||s.id||': '||COALESCE(s.channel_name||':'||s.chat_id,'(none)')"
-            "||' -> '||k.channel_name||':'||k.chat_id"
-            " FROM v61_pin k JOIN sessions s ON s.id=k.session_id WHERE k.rk=1"
-            "   AND (s.channel_name IS NOT k.channel_name OR s.chat_id IS NOT k.chat_id)") != 0)
-        return -1;
-    if (v59_exec(db,
-            "UPDATE sessions SET"
-            "  channel_name=(SELECT k.channel_name FROM v61_pin k"
-            "                WHERE k.session_id=sessions.id AND k.rk=1),"
-            "  chat_id=(SELECT k.chat_id FROM v61_pin k"
-            "           WHERE k.session_id=sessions.id AND k.rk=1)"
-            " WHERE id IN (SELECT k.session_id FROM v61_pin k JOIN sessions s"
-            "   ON s.id=k.session_id WHERE k.rk=1"
-            "   AND (s.channel_name IS NOT k.channel_name OR s.chat_id IS NOT k.chat_id))") != 0)
-        return -1;
-
-    /* What changes for a pinned session now that the chat is read live. */
-    static const struct { const char *what, *sel; } LIVE[] = {
-        { "the route's tool filter now applies live to its pinned session",
-          "SELECT r.channel_name||':'||r.chat_id||' session '||s.id||': ran with '"
-          "||COALESCE(s.tool_filter,'no filter')||', now also '||r.tool_filter"
-          " FROM channel_routes r JOIN sessions s ON s.id=r.session_id"
-          " WHERE r.tool_filter IS NOT NULL AND (s.tool_filter IS NULL OR EXISTS("
-          "   SELECT 1 FROM json_each(s.tool_filter) f"
-          "    WHERE f.value NOT IN (SELECT value FROM json_each(r.tool_filter))))" },
-        { "the chat keeps its pinned session's frozen tool filter",
-          "SELECT r.channel_name||':'||r.chat_id||' <- session '||s.id||' '||s.tool_filter"
-          " FROM channel_routes r JOIN sessions s ON s.id=r.session_id"
-          " WHERE r.tool_filter IS NULL AND s.tool_filter IS NOT NULL"
-          "   AND COALESCE(s.parent_session_id,-1) <= 0" },
-        { "the route's delivery mode now applies live to its pinned session",
-          "SELECT r.channel_name||':'||r.chat_id||' session '||s.id||': edge ran '"
-          "||e.policy||', now '||r.delivery_mode"
-          " FROM channel_routes r JOIN sessions s ON s.id=r.session_id"
-          " JOIN delivery_edges e ON e.session_id=s.id AND e.target_kind='channel'"
-          " WHERE e.policy IS NOT " V61_AUTO("r.delivery_mode") },
-        { "route had an unknown delivery mode; the chat is 'auto'",
-          "SELECT channel_name||':'||chat_id||' '||delivery_mode FROM channel_routes"
-          " WHERE delivery_mode NOT IN ('auto','iteration','digest','turn','quiescent','explicit')" },
-    };
-    for (size_t i = 0; i < sizeof(LIVE) / sizeof(*LIVE); i++)
-        if (v61_note(db, LIVE[i].what, LIVE[i].sel) != 0) return -1;
-
-    if (v59_exec(db, V61_CHATS) != 0) return -1;
-    int64_t edges_before = db_scalar_i64(db,
-        "SELECT COUNT(*) FROM delivery_edges e JOIN sessions s ON s.id=e.session_id"
-        " WHERE e.target_kind <> 'channel' OR s.channel_name IS NOT NULL", 0, -1);
-    if (v59_exec(db, V61_REBUILD) != 0) return -1;
-    int64_t edges_after = db_scalar_i64(db, "SELECT COUNT(*) FROM delivery_edges", 0, -1);
-    if (edges_after != edges_before)
-        LOG_WARN_("schema v61: %lld duplicate channel edge(s) of sessions that moved"
-                  " channel dropped", (long long)(edges_before - edges_after));
-    if (v61_unshare(db) != 0) return -1;
-    /* Cursors of edges that never posted. Under v60 an explicit boundary left
-     * the cursor where it was, so an explicit edge sits far behind its leaf.
-     * From v61 the policy is read live and the sweep owes a delivery whenever
-     * cursor < sessions.leaf_id: left alone, such an edge would post an old
-     * answer the moment its chat reads anything but explicit. Rule: a channel
-     * edge whose session's channel edge was frozen 'explicit' under v60
-     * (nothing of it was ever meant to post), or whose chat is 'explicit'
-     * now, gets the cursor an explicit boundary stamps today — the session's
-     * leaf_id (advance_deliver_boundary). An edge that was not explicit and
-     * is not now keeps its cursor: if it is behind, that delivery was owed
-     * under v60 too, and the sweep should still make it. */
-    if (v61_note(db, "channel edge never posted; cursor moved to the session's leaf",
-            "SELECT 'session '||e.session_id||' cursor '||e.cursor||' -> '||s.leaf_id"
-            " FROM delivery_edges e JOIN sessions s ON s.id=e.session_id"
-            " WHERE e.target_kind='channel' AND e.cursor < s.leaf_id AND (" V61_NEVER_POSTED ")") != 0)
-        return -1;
-    if (v59_exec(db,
-            "UPDATE delivery_edges SET cursor=(SELECT s.leaf_id FROM sessions s"
-            "                                  WHERE s.id=delivery_edges.session_id)"
-            " WHERE id IN (SELECT e.id FROM delivery_edges e JOIN sessions s"
-            "   ON s.id=e.session_id WHERE e.target_kind='channel'"
-            "   AND e.cursor < s.leaf_id AND (" V61_NEVER_POSTED "))") != 0)
-        return -1;
-    if (v59_exec(db,
-            "CREATE UNIQUE INDEX idx_channel_chats_session"
-            "  ON channel_chats(session_id) WHERE session_id IS NOT NULL;"
-            "DROP TABLE v61_pin; DROP TABLE v61_chats; DROP TABLE v61_seq;"
-            "DROP TABLE v61_sessions; DROP TABLE v61_edges; DROP TABLE v61_cron;") != 0)
-        return -1;
-    if (change_log_sync(db) != 0) return -1;
-    LOG_INFO_("schema v61: %lld chat(s), %lld routed",
-              (long long)db_scalar_i64(db, "SELECT COUNT(*) FROM channel_chats", 0, -1),
-              (long long)db_scalar_i64(db, "SELECT COUNT(*) FROM channel_chats"
-                                           " WHERE session_id IS NOT NULL", 0, -1));
-
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db,
-            "SELECT c.\"table\", c.rowid, c.parent FROM pragma_foreign_key_check c"
-            " WHERE c.\"table\" IN ('channel_chats','sessions','cron_jobs','delivery_edges')",
-            -1, &st, NULL) != SQLITE_OK) return -1;
-    int bad = 0;
-    while (sqlite3_step(st) == SQLITE_ROW) {
-        LOG_ERROR_("schema v61: %s rowid %lld points at a missing %s row",
-                   (const char *)sqlite3_column_text(st, 0),
-                   (long long)sqlite3_column_int64(st, 1),
-                   (const char *)sqlite3_column_text(st, 2));
-        bad++;
-    }
-    sqlite3_finalize(st);
-    return bad ? -1 : 0;
-}
-
-/* v65: agent_models.purpose gains 'utility' — the list a script's
- * LLM(prompt, {purpose:"utility"}) walks. A CHECK cannot be altered in place,
- * so the table is rebuilt under its own name (it is nobody's parent, so the
- * DROP checks no child rows). The capability triggers go with the table and
- * come back naming the two media purposes instead of "anything but chat": a
- * utility row needs no capability. The generated change_log triggers go with
- * it too; change_log_sync puts them back before the patch commits. */
-static int patch_v65_utility(sqlite3 *db) {
-    static const char sql[] =
-        "CREATE TEMP TABLE v65_am AS SELECT * FROM agent_models;"
-        "DROP TABLE agent_models;"
-        "CREATE TABLE agent_models ("
-        "  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE ON DELETE CASCADE,"
-        "  purpose TEXT NOT NULL DEFAULT 'chat' CHECK (purpose IN ('chat','image','audio','utility')),"
-        "  model_id TEXT NOT NULL REFERENCES models(id),"
-        "  pos INTEGER NOT NULL,"
-        "  reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN"
-        "    ('off','minimal','low','medium','high')),"
-        "  PRIMARY KEY (agent_name, purpose, pos));"
-        "INSERT INTO agent_models(agent_name, purpose, model_id, pos, reasoning_effort)"
-        "  SELECT agent_name, purpose, model_id, pos, reasoning_effort FROM v65_am;"
-        "DROP TABLE v65_am;"
-        "CREATE TRIGGER agent_models_capability_bi"
-        " BEFORE INSERT ON agent_models"
-        " WHEN NEW.purpose IN ('image','audio') AND NOT EXISTS ("
-        "   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)"
-        "                                          THEN m.capabilities ELSE '[]' END) c"
-        "    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)"
-        " BEGIN"
-        "   SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose');"
-        " END;"
-        "CREATE TRIGGER agent_models_capability_bu"
-        " BEFORE UPDATE OF purpose, model_id ON agent_models"
-        " WHEN NEW.purpose IN ('image','audio') AND NOT EXISTS ("
-        "   SELECT 1 FROM models m, json_each(CASE WHEN json_valid(m.capabilities)"
-        "                                          THEN m.capabilities ELSE '[]' END) c"
-        "    WHERE m.id = NEW.model_id AND c.value = NEW.purpose)"
-        " BEGIN"
-        "   SELECT RAISE(ABORT, 'agent_models: the model''s capabilities do not include this purpose');"
-        " END;";
-    char *err = NULL;
-    if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
-        LOG_ERROR_("schema v65: %s", err ? err : "?");
-        sqlite3_free(err);
-        return -1;
-    }
-    return change_log_sync(db);
-}
-
-/* v68: session hooks and compaction (plan/projects/session-hooks-and-
- * compaction.md). v68 is unreleased and the whole project ships as this one
- * schema version: later stages extend this patch rather than adding v69.
- * So far: agent_models.trim_threshold / prune_target — when C trims a
- * session and how far — NULL on every existing row, which is the 50%
- * defaults; agent_models.cache_lifetime (3600 on existing Anthropic chat
- * entries, unknown elsewhere) and sessions.cache_armed_at, for
- * CacheExpiring; sessions.settle_event, the event a held session's hook
- * began with; the global context_threshold / compaction_target keys they
- * replace leave the config table at the next config_registry_sync (as does
- * turn_settled_timeout, now hook_timeout). And hooks.pos / timeout /
- * disabled, for the events of stage 1: an existing hook runs first in its
- * extension, on the default deadline, enabled; hooks.wait becomes hooks.async,
- * its inverse, the manifest's own word. agent_models.reasoning_display
- * (stage R): every existing entry asks for the summary, the default, which
- * also replaces the global save_reasoning key (it leaves the config table
- * the same way).
- *
- * The C compaction is gone (the bundled extension `compaction` replaces it,
- * installed and attached to every agent at startup by
- * extension_install_builtin, which is where the rows come from — this patch
- * runs before the extension row can exist). What it left: a session caught
- * in 'compacting' by the upgrade was at a turn's end with its answer already
- * written, so it goes idle, and the sweep drains whatever its inbox holds; a
- * compaction job row has no worker to finish it; sessions.compaction_fail_count
- * and llm_jobs.job_type (1 was compaction, 0 the only value left) have no
- * reader. The change_log triggers name every logged column, so they are
- * rebuilt.
- *
- * Accounting: entries.token_estimate is recomputed at 2.5 bytes per token,
- * and entries.request_cut records that a report's request had been cut. */
-static int patch_v68_hooks(sqlite3 *db) {
-    static const char sql[] =
-        "ALTER TABLE agent_models ADD COLUMN trim_threshold INTEGER"
-        "  CHECK (trim_threshold IS NULL OR trim_threshold > 0);"
-        "ALTER TABLE agent_models ADD COLUMN prune_target INTEGER"
-        "  CHECK (prune_target IS NULL OR (prune_target > 0"
-        "    AND (trim_threshold IS NULL OR prune_target < trim_threshold)));"
-        "CREATE TRIGGER agent_models_window_bi"
-        " BEFORE INSERT ON agent_models"
-        " WHEN NEW.trim_threshold > (SELECT m.context_window FROM models m WHERE m.id = NEW.model_id)"
-        " BEGIN"
-        "   SELECT RAISE(ABORT, 'agent_models: trim_threshold is larger than the model''s context window');"
-        " END;"
-        "CREATE TRIGGER agent_models_window_bu"
-        " BEFORE UPDATE OF trim_threshold, model_id ON agent_models"
-        " WHEN NEW.trim_threshold > (SELECT m.context_window FROM models m WHERE m.id = NEW.model_id)"
-        " BEGIN"
-        "   SELECT RAISE(ABORT, 'agent_models: trim_threshold is larger than the model''s context window');"
-        " END;"
-        /* cache_lifetime, and the CacheExpiring arm on sessions. Existing
-         * Anthropic chat entries move to the 1-hour marker (decision 25: the
-         * default, with its higher write cost stated in the release notes);
-         * every other entry stays unknown until its operator enters a
-         * figure. No session is armed: the first request after the upgrade
-         * arms it. */
-        "ALTER TABLE agent_models ADD COLUMN cache_lifetime INTEGER"
-        "  CHECK (cache_lifetime IS NULL OR cache_lifetime > 0);"
-        "UPDATE agent_models SET cache_lifetime = 3600"
-        " WHERE purpose = 'chat' AND model_id IN (SELECT m.id FROM models m"
-        "   JOIN providers p ON p.name = m.provider_name WHERE p.endpoint_type = 'anthropic');"
-        "CREATE TRIGGER agent_models_lifetime_bi"
-        " BEFORE INSERT ON agent_models"
-        " WHEN NEW.cache_lifetime NOT IN (300, 3600) AND EXISTS ("
-        "   SELECT 1 FROM models m JOIN providers p ON p.name = m.provider_name"
-        "    WHERE m.id = NEW.model_id AND p.endpoint_type = 'anthropic')"
-        " BEGIN"
-        "   SELECT RAISE(ABORT, 'agent_models: cache_lifetime on an Anthropic model is 300 or 3600');"
-        " END;"
-        "CREATE TRIGGER agent_models_lifetime_bu"
-        " BEFORE UPDATE OF cache_lifetime, model_id ON agent_models"
-        " WHEN NEW.cache_lifetime NOT IN (300, 3600) AND EXISTS ("
-        "   SELECT 1 FROM models m JOIN providers p ON p.name = m.provider_name"
-        "    WHERE m.id = NEW.model_id AND p.endpoint_type = 'anthropic')"
-        " BEGIN"
-        "   SELECT RAISE(ABORT, 'agent_models: cache_lifetime on an Anthropic model is 300 or 3600');"
-        " END;"
-        "CREATE TRIGGER agent_models_lifetime_ai"
-        " AFTER INSERT ON agent_models"
-        " WHEN NEW.cache_lifetime IS NULL AND NEW.purpose = 'chat' AND EXISTS ("
-        "   SELECT 1 FROM models m JOIN providers p ON p.name = m.provider_name"
-        "    WHERE m.id = NEW.model_id AND p.endpoint_type = 'anthropic')"
-        " BEGIN"
-        "   UPDATE agent_models SET cache_lifetime = 3600 WHERE rowid = NEW.rowid;"
-        " END;"
-        "ALTER TABLE agent_models ADD COLUMN reasoning_display TEXT NOT NULL"
-        "  DEFAULT 'summary' CHECK (reasoning_display IN ('summary','none'));"
-        "ALTER TABLE sessions ADD COLUMN cache_armed_at INTEGER;"
-        "ALTER TABLE sessions ADD COLUMN settle_event TEXT;"
-        "CREATE INDEX idx_sessions_cache_armed ON sessions(cache_armed_at)"
-        "  WHERE cache_armed_at IS NOT NULL;"
-        /* Hooks: the manifest's order, its per-hook timeout, and the flag
-         * three failures in a row set. turnSettled is renamed Stop with no
-         * data patch: no deployment has such a row. */
-        "ALTER TABLE hooks ADD COLUMN pos INTEGER NOT NULL DEFAULT 0;"
-        "ALTER TABLE hooks ADD COLUMN timeout INTEGER"
-        "  CHECK (timeout IS NULL OR timeout BETWEEN 1 AND 3600);"
-        "ALTER TABLE hooks ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;"
-        "ALTER TABLE hooks ADD COLUMN async INTEGER NOT NULL DEFAULT 0;"
-        "UPDATE hooks SET async = CASE WHEN wait THEN 0 ELSE 1 END;"
-        "ALTER TABLE hooks DROP COLUMN wait;"
-        /* The C compaction. */
-        "UPDATE sessions SET state='idle', owner_instance=NULL, turn_iteration=0,"
-        "  updated_at=unixepoch() WHERE state='compacting';"
-        "DELETE FROM llm_jobs WHERE job_type <> 0;"
-        "ALTER TABLE llm_jobs DROP COLUMN job_type;"
-        "ALTER TABLE sessions DROP COLUMN compaction_fail_count;"
-        /* Accounting. The estimate is 2.5 bytes per token (types.h): every
-         * stored estimate is recomputed by the rule the write paths now use
-         * — TOKEN_ESTIMATE(content_bytes), and a reasoning entry the
-         * estimate of an entry with no text (its cost is its replay, which
-         * a report measures). A row with no content_bytes cannot be
-         * recomputed and keeps what it has. A report's request_cut is NULL
-         * on every existing row — sent whole as far as anyone recorded. */
-        "UPDATE entries SET token_estimate = CASE type"
-        "  WHEN 'reasoning' THEN " SQL_TOKEN_ESTIMATE("0")
-        "  ELSE " SQL_TOKEN_ESTIMATE("content_bytes") " END"
-        " WHERE content_bytes IS NOT NULL;"
-        "ALTER TABLE entries ADD COLUMN request_cut INTEGER;";
-    char *err = NULL;
-    if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
-        LOG_ERROR_("schema v68: %s", err ? err : "?");
-        sqlite3_free(err);
-        return -1;
-    }
-    return change_log_sync(db);
-}
-
+ * Frozen at v70 (2026-11-24, v0.8.0): the floor is v0.8.0's schema and the
+ * patch history below it is gone. An older DB migrates by a hop — install
+ * v0.8.0, which patches it to v70, then update again. Append the next patch
+ * (v71) above the terminator; C11 has no empty initializer, so version 0
+ * ends the list. */
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
-    /* Frozen at v40 (2026-07-31, D16): entries.turn_id/llm_responses.turn_id
-     * were renamed to iteration_id (they always identified one LLM request) and
-     * a real per-turn entries.turn_id was added, filled by the entries_turn_ai
-     * trigger. Renaming a column every branch walk and the payload SQL read is
-     * not a shim-able migration — shipped as a new floor rather than migration
-     * code (Mark's call), collapsing the v34–v39 patches into it. Pre-v40 DBs
-     * are refused with a delete-and-restart message. */
-
-    /* v41: the Part 4 cron redesign + convergent parent notification. cron_jobs
-     * gains its payload/target columns and the upsert-by-name unique index;
-     * inbox gains source_ref (provenance owned by source); sessions gains
-     * parent_notified_at (NULL on a terminal child = lost push, swept). Only
-     * source_ref has a writer today — the rest land dormant, ahead of the cron
-     * tool and the convergence sweep, so live DBs need one patch, not three. */
-    { 41,
-      "ALTER TABLE cron_jobs ADD COLUMN script TEXT;"
-      "ALTER TABLE cron_jobs ADD COLUMN channel_name TEXT;"
-      "ALTER TABLE cron_jobs ADD COLUMN chat_id TEXT;"
-      "ALTER TABLE cron_jobs ADD COLUMN target TEXT;"
-      "ALTER TABLE cron_jobs ADD COLUMN target_agent TEXT;"
-      "ALTER TABLE inbox ADD COLUMN source_ref TEXT;"
-      "ALTER TABLE sessions ADD COLUMN parent_notified_at INTEGER;"
-      /* A pre-upsert DB may hold duplicate job names; keep the newest row so
-       * the unique index can be built. Ownerless rows are exempt — GROUP BY
-       * folds their NULLs together but the index keeps them distinct, and a
-       * startup migration must never delete a row the constraint allows. */
-      "DELETE FROM cron_jobs WHERE agent_name IS NOT NULL AND id NOT IN"
-      " (SELECT MAX(id) FROM cron_jobs GROUP BY agent_name, name);"
-      "CREATE UNIQUE INDEX IF NOT EXISTS idx_cron_jobs_name"
-      " ON cron_jobs(agent_name, name);"
-      /* kind='heartbeat' is gone: the generalized fire path covers it as an
-       * ordinary bare-wake job (no payload, per-job coalescing, late-resolved
-       * session). Convert the seeded rows in place — enabled as-is, so an
-       * operator who turned the pulse on keeps it. */
-      "UPDATE cron_jobs SET kind='task', task='', cron_expr='*/30 * * * *',"
-      "                     run_at=NULL, interval_s=NULL"
-      " WHERE kind='heartbeat';"
-      /* Backfill: every child that finished before the stamp existed would
-       * otherwise read as a lost push and the sweep would re-notify them all
-       * on the first tick — duplicate results appended to long-idle parents.
-       * Their pushes were delivered by the pre-sweep code; say so. */
-      "UPDATE sessions SET parent_notified_at=updated_at"
-      " WHERE parent_session_id > 0 AND parent_notified_at IS NULL;",
-      NULL },
-
-    /* v42: delivery semantics (specs/delivery.md) — one delivery_edges table
-     * replaces the parent_notified_at stamp. Every existing child gets a
-     * standing parent edge frozen at 'turn', the contract it was launched
-     * under (the quiescent default applies to new launches only); an
-     * in-flight blocking child also gets its one-shot tool_call edge. A
-     * non-NULL stamp (push landed, or the parent polled) becomes cursor at
-     * the current leaf; NULL stays cursor 0 so the sweep still re-derives the
-     * lost push. Channel edges are not migrated — they materialize lazily at
-     * the next delivery boundary from the route template ('auto' → quiescent,
-     * the one deliberate behavior change: chat delivery gains coalescing). */
-    { 42,
-      "CREATE TABLE delivery_edges ("
-      "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-      "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
-      "  target_kind TEXT NOT NULL,"
-      "  target_ref TEXT NOT NULL,"
-      "  policy TEXT NOT NULL,"
-      "  cursor INTEGER NOT NULL DEFAULT 0,"
-      "  one_shot INTEGER NOT NULL DEFAULT 0,"
-      "  UNIQUE(session_id, target_kind, target_ref)"
-      ");"
-      "INSERT INTO delivery_edges(session_id, target_kind, target_ref, policy,"
-      "                           cursor, one_shot)"
-      " SELECT id, 'parent', CAST(parent_session_id AS TEXT), 'turn',"
-      "        CASE WHEN parent_notified_at IS NOT NULL"
-      "             THEN COALESCE(NULLIF(leaf_id, -1), 0) ELSE 0 END, 0"
-      "   FROM sessions WHERE parent_session_id > 0;"
-      "INSERT INTO delivery_edges(session_id, target_kind, target_ref, policy,"
-      "                           cursor, one_shot)"
-      " SELECT s.id, 'tool_call', s.parent_tool_call_id, 'turn', 0, 1"
-      "   FROM sessions s JOIN tool_calls tc"
-      "     ON tc.session_id = s.parent_session_id"
-      "    AND tc.call_id = s.parent_tool_call_id"
-      "  WHERE s.parent_session_id > 0 AND s.parent_tool_call_id IS NOT NULL"
-      "    AND tc.status IN ('pending','running');"
-      "ALTER TABLE sessions DROP COLUMN parent_notified_at;",
-      NULL },
-
-    /* v43: consecutive-compaction-failure counter (C4). Zeroed on every
-     * success; on the transition to 3 the operator — not the agent — is told
-     * once that the session is running on the read-time window. */
-    { 43,
-      "ALTER TABLE sessions ADD COLUMN compaction_fail_count INTEGER NOT NULL"
-      " DEFAULT 0;",
-      NULL },
-
-    /* v44: model ids become canonical. No shape change — a data rewrite, in
-     * C because each rewritten row is logged. */
-    { 44, NULL, patch_v44_canonical_model_ids },
-
-    /* v45: the availability probe's cache (config-ax Phase 3). Lands empty —
-     * nothing probes at startup; the first search_config models query or
-     * `cclaw models` fills it. */
-    { 45,
-      "CREATE TABLE IF NOT EXISTS models_cache ("
-      "  provider_name TEXT NOT NULL,"
-      "  id TEXT NOT NULL,"
-      "  context_length INTEGER,"
-      "  prompt_price TEXT,"
-      "  completion_price TEXT,"
-      "  modality TEXT,"
-      "  synced_at INTEGER NOT NULL,"
-      "  PRIMARY KEY (provider_name, id)"
-      ");",
-      NULL },
-
-    /* v46: per-agent explicit routing (plan/projects/model-routing.md).
-     * agents.primary/secondary_model become agent_models rows (pos 0/1);
-     * a scalar that doesn't resolve to a model row is dropped, not guessed —
-     * that agent was already unroutable and inventing an id would silently
-     * move it. models.priority and the windowed error counters go away with
-     * the machinery that read them (consec_failures replaces the counters). */
-    { 46,
-      "CREATE TABLE IF NOT EXISTS agent_models ("
-      "  agent_name TEXT NOT NULL REFERENCES agents(name)"
-      "    ON UPDATE CASCADE ON DELETE CASCADE,"
-      "  model_id TEXT NOT NULL REFERENCES models(id),"
-      "  pos INTEGER NOT NULL,"
-      "  PRIMARY KEY (agent_name, pos)"
-      ");"
-      "INSERT INTO agent_models(agent_name, model_id, pos)"
-      "  SELECT name, primary_model, 0 FROM agents"
-      "  WHERE primary_model IN (SELECT id FROM models);"
-      "INSERT INTO agent_models(agent_name, model_id, pos)"
-      "  SELECT name, secondary_model, 1 FROM agents"
-      "  WHERE secondary_model IN (SELECT id FROM models)"
-      "    AND secondary_model IS NOT primary_model;"
-      "ALTER TABLE agents DROP COLUMN primary_model;"
-      "ALTER TABLE agents DROP COLUMN secondary_model;"
-      "DROP INDEX IF EXISTS idx_models_routing;"
-      "ALTER TABLE models DROP COLUMN priority;"
-      "ALTER TABLE models DROP COLUMN error_count_5xx;"
-      "ALTER TABLE models DROP COLUMN error_count_429;"
-      "ALTER TABLE models ADD COLUMN consec_failures INTEGER DEFAULT 0;",
-      NULL },
-
-    /* v47: operator rename (plan/projects/config-doc.md M3).
-     *  - agents.hold_until/hold_holder: the quiesce lease `cclaw rename-agent`
-     *    takes so no new turn opens while identity changes underneath.
-     *  - cron_jobs.target_agent becomes a real FK so a rename cascades into it
-     *    like every other agent_name column (D8). SQLite can't add an FK in
-     *    place — rebuild the table. Rows naming a nonexistent agent would fail
-     *    the new constraint; they are already broken (the fire path resolves
-     *    nothing), so NULL them first rather than refusing the upgrade.
-     *  - approvals.action → park_reason: tool_name alone says WHAT parked,
-     *    park_reason says WHY. The old column carried both, so dedup had to
-     *    key on a value that was sometimes the tool name and sometimes
-     *    'sensitive'. Map: 'sensitive' → 'sensitive_target', everything else
-     *    (tool names, 'request_changes', 'cron_set', …) → 'approval_required'.
-     * This patch runs inside BEGIN EXCLUSIVE with foreign_keys=ON: nothing
-     * references cron_jobs, so the drop/rename is FK-safe once the orphans
-     * are gone. */
-    { 47,
-      "ALTER TABLE agents ADD COLUMN hold_until INTEGER;"
-      "ALTER TABLE agents ADD COLUMN hold_holder TEXT;"
-
-      "UPDATE cron_jobs SET target_agent=NULL"
-      " WHERE target_agent IS NOT NULL"
-      "   AND target_agent NOT IN (SELECT name FROM agents);"
-      "CREATE TABLE cron_jobs_new ("
-      "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-      "  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
-      "  name TEXT NOT NULL,"
-      "  cron_expr TEXT NOT NULL,"
-      "  run_at INTEGER,"
-      "  interval_s INTEGER,"
-      "  kind TEXT NOT NULL DEFAULT 'task',"
-      "  session_id INTEGER NOT NULL,"
-      "  task TEXT NOT NULL,"
-      "  script TEXT,"
-      "  channel_name TEXT,"
-      "  chat_id TEXT,"
-      "  target TEXT,"
-      "  target_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,"
-      "  enabled INTEGER NOT NULL DEFAULT 1,"
-      "  next_run_at INTEGER NOT NULL DEFAULT 0,"
-      "  last_run_at INTEGER,"
-      "  created_at INTEGER NOT NULL DEFAULT (unixepoch())"
-      ");"
-      "INSERT INTO cron_jobs_new"
-      " SELECT id, agent_name, name, cron_expr, run_at, interval_s, kind,"
-      "        session_id, task, script, channel_name, chat_id, target,"
-      "        target_agent, enabled, next_run_at, last_run_at, created_at"
-      "   FROM cron_jobs;"
-      "DROP TABLE cron_jobs;"
-      "ALTER TABLE cron_jobs_new RENAME TO cron_jobs;"
-      "CREATE UNIQUE INDEX IF NOT EXISTS idx_cron_jobs_name"
-      " ON cron_jobs(agent_name, name);"
-
-      "ALTER TABLE approvals RENAME COLUMN action TO park_reason;"
-      "UPDATE approvals SET park_reason ="
-      "  CASE WHEN park_reason='sensitive' THEN 'sensitive_target'"
-      "       ELSE 'approval_required' END;",
-      NULL },
-
-    /* v48: reasoning replay (plan/projects/provider-wire-format-refactor.md
-     * M2). One nullable JSON column on entries, written only on
-     * type='reasoning' rows: {provider, model, format, blob}. Lands empty —
-     * pre-existing reasoning entries have no captured blob and are simply
-     * never replayed (do-not-emit-without-a-blob is the replay rule), so no
-     * backfill is possible or needed.
-     * NOTE for the integrator: self-contained single ALTER — renumber the
-     * version freely, nothing else in this patch depends on the number. */
-    { 48,
-      "ALTER TABLE entries ADD COLUMN reasoning_meta TEXT;",
-      NULL },
-
-    /* v49: usage parity (M4 of the provider wire-format project). The response
-     * archive keeps the richer usage fields providers already send —
-     * cached/cache-write prompt tokens, reasoning tokens, real cost — and
-     * entries keeps the cache-read count next to usage_in so rate_limit_check
-     * can discount it. All nullable: absent fields degrade to exactly the
-     * pre-patch behavior (no consumer depends on any usage field). */
-    { 49,
-      "ALTER TABLE entries ADD COLUMN cached_tokens INTEGER;"
-      "ALTER TABLE llm_responses ADD COLUMN cached_tokens INTEGER;"
-      "ALTER TABLE llm_responses ADD COLUMN cache_write_tokens INTEGER;"
-      "ALTER TABLE llm_responses ADD COLUMN reasoning_tokens INTEGER;"
-      "ALTER TABLE llm_responses ADD COLUMN cost REAL;",
-      NULL },
-
-    /* v50: provider wire-format M1 (plan/projects/provider-wire-format-refactor.md).
-     * llm_responses.upstream_provider makes "which OpenRouter backend served
-     * this?" a query instead of a hand-read of every archived body (bug 9),
-     * and providers.request_extra is the config-side escape hatch for
-     * per-provider request options — seeded to route around StreamLake, the
-     * backend behind both DSML-in-reasoning incidents. Only a NULL
-     * request_extra is filled: an operator who already set one keeps it. */
-    { 50,
-      "ALTER TABLE providers ADD COLUMN request_extra TEXT;"
-      "ALTER TABLE llm_responses ADD COLUMN upstream_provider TEXT;"
-      "UPDATE providers SET request_extra='{\"provider\":{\"ignore\":[\"StreamLake\"]}}'"
-      " WHERE name='openrouter' AND request_extra IS NULL;",
-      NULL },
-
-    /* v51: reasoning-effort knob (provider wire-format M5). The level is a
-     * routing decision — how hard THIS agent wants THIS candidate to think —
-     * so it rides on agent_models, next to pos. The wire spelling is a model
-     * property, so it rides on models. Both land NULL, which is exactly the
-     * pre-patch behavior: no effort set means no effort field is sent. */
-    { 51,
-      "ALTER TABLE agent_models ADD COLUMN reasoning_effort TEXT"
-      "  CHECK (reasoning_effort IS NULL OR reasoning_effort IN"
-      "         ('off','minimal','low','medium','high'));"
-      "ALTER TABLE models ADD COLUMN effort_map TEXT;",
-      NULL },
-
-    /* v52: token_estimate divisor 4 → 3 (context-accounting). Stored
-     * estimates are what the cut and the compaction trigger sum, so rows
-     * written at /4 would keep under-measuring every existing session until
-     * they aged out. content_bytes is exactly the length each estimate was
-     * computed from, so this is a rescale, not a re-derivation. */
-    { 52,
-      "UPDATE entries SET token_estimate = content_bytes/3 + 4"
-      " WHERE content_bytes IS NOT NULL;",
-      NULL },
-
-    /* v53: tool_result rows of forked tools (shell_exec, js_eval, web_fetch,
-     * extension tools) were stored with tool_name '' — the reap path passed
-     * an empty string. Only the Gemini wire format reads the column
-     * (functionResponse.name), and it rejects an empty name, so every request
-     * after such a result failed with HTTP 400 and the agent fell back to its
-     * next model. The name is on the call the result answers; a result whose
-     * call is gone gets NULL, which the payload query already covers. */
-    { 53,
-      "UPDATE entries SET tool_name ="
-      "  (SELECT c.tool_name FROM entries c"
-      "    WHERE c.session_id = entries.session_id"
-      "      AND c.iteration_id = entries.iteration_id"
-      "      AND c.type = 'tool_call'"
-      "      AND c.tool_call_id = entries.tool_call_id LIMIT 1)"
-      " WHERE type = 'tool_result' AND tool_name = '';",
-      NULL },
-    /* v54: approval_decisions — the queue a non-loop thread (the dashboard)
-     * writes a decision to, so the event loop is the only thing that ever
-     * resolves an approval. */
-    { 54,
-      "CREATE TABLE IF NOT EXISTS approval_decisions ("
-      "  approval_id INTEGER PRIMARY KEY,"
-      "  decision    TEXT NOT NULL CHECK (decision IN ('deny','once','always')),"
-      "  decided_via TEXT NOT NULL,"
-      "  created_at  INTEGER NOT NULL DEFAULT (unixepoch()));",
-      NULL },
-    /* v55: whether a session's chat is an operator's own, and when the chat
-     * last got the generic "can't respond" line — a failed turn sends the
-     * specific error to the operator and never to a non-admin chat. */
-    { 55,
-      "ALTER TABLE sessions ADD COLUMN chat_is_admin INTEGER;"
-      "ALTER TABLE sessions ADD COLUMN chat_error_notice_at INTEGER;",
-      NULL },
-    /* v56: shares — files an agent has put behind a link (share_file),
-     * served by the web server at /share/<token>. */
-    { 56,
-      "CREATE TABLE IF NOT EXISTS shares ("
-      "  token      TEXT PRIMARY KEY,"
-      "  agent_name TEXT NOT NULL REFERENCES agents(name)"
-      "             ON UPDATE CASCADE ON DELETE CASCADE,"
-      "  path       TEXT NOT NULL,"
-      "  name       TEXT NOT NULL,"
-      "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
-      "  expires_at INTEGER NOT NULL);",
-      NULL },
-    /* v57: memory gets two fixed words and stable handles.
-     *  - memory_entries -> memory_notes, keyed by block_id and addressed by
-     *    row id. The old 1..N position is gone: deleting a note renumbered
-     *    the rest, so a second call in the same batch hit the wrong one.
-     *    Notes are re-inserted in (block, pos) order so id order is display
-     *    order; nothing referenced the old ids.
-     *  - agent_memory_blocks: who sees a block. Every existing block is
-     *    attached read-write to the agent that owned it, so nothing changes
-     *    for anyone until the operator shares one. (The spec's "NULL agent =
-     *    global block" never worked — every query matched agent_name=?.)
-     *  - The tools are renamed to say which thing they act on; grants and the
-     *    stored default toolset follow, and holders of the old create grant
-     *    get the new memory_block_update. Stale tools rows are dropped — the
-     *    registry re-seeds the new names at startup. */
-    { 57,
-      /* No-op on a real v56 database. It exists for the patch tests that
-       * rewind a fresh-schema database (which has no memory_entries) and
-       * replay the patches over it: the statements below then find an empty
-       * table instead of failing. */
-      "CREATE TABLE IF NOT EXISTS memory_entries ("
-      "  id INTEGER PRIMARY KEY AUTOINCREMENT, agent_name TEXT NOT NULL,"
-      "  block_label TEXT NOT NULL, pos INTEGER NOT NULL, text TEXT NOT NULL,"
-      "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
-      "CREATE TABLE IF NOT EXISTS agent_memory_blocks ("
-      "  agent_name TEXT NOT NULL REFERENCES agents(name)"
-      "             ON UPDATE CASCADE ON DELETE CASCADE,"
-      "  block_id   INTEGER NOT NULL REFERENCES memory_blocks(id) ON DELETE CASCADE,"
-      "  read_only  INTEGER NOT NULL DEFAULT 0,"
-      "  PRIMARY KEY (agent_name, block_id));"
-      "INSERT OR IGNORE INTO agent_memory_blocks(agent_name, block_id, read_only)"
-      "  SELECT agent_name, id, 0 FROM memory_blocks WHERE agent_name IS NOT NULL;"
-      "CREATE TABLE IF NOT EXISTS memory_notes ("
-      "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-      "  block_id INTEGER NOT NULL REFERENCES memory_blocks(id) ON DELETE CASCADE,"
-      "  text TEXT NOT NULL,"
-      "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
-      "  updated_at INTEGER NOT NULL DEFAULT (unixepoch()));"
-      /* The old table kept no edit time; creation time is the best there is. */
-      "INSERT INTO memory_notes(block_id, text, created_at, updated_at)"
-      "  SELECT b.id, e.text, e.created_at, e.created_at FROM memory_entries e"
-      "  JOIN memory_blocks b ON b.agent_name=e.agent_name AND b.label=e.block_label"
-      "  ORDER BY b.id, e.pos, e.id;"
-      "DROP INDEX IF EXISTS idx_memory_entries_block;"
-      "DROP TABLE memory_entries;"
-      "CREATE INDEX IF NOT EXISTS idx_memory_notes_block ON memory_notes(block_id, id);"
-      "INSERT OR IGNORE INTO grants(agent_name, kind, value, approval_mode, expires_at, created_at)"
-      "  SELECT agent_name, kind, 'memory_block_update', approval_mode, expires_at, created_at"
-      "  FROM grants WHERE kind='tool' AND value='memory_create';"
-      "UPDATE OR REPLACE grants SET value = CASE value"
-      "    WHEN 'memory_create' THEN 'memory_block_create'"
-      "    WHEN 'memory_add'    THEN 'memory_note_add'"
-      "    WHEN 'memory_edit'   THEN 'memory_note_edit'"
-      "    ELSE 'memory_note_delete' END"
-      "  WHERE kind='tool' AND value IN"
-      "    ('memory_create','memory_add','memory_edit','memory_delete');"
-      "UPDATE config SET value = replace(replace(replace(replace(value,"
-      "    '\"memory_create\"','\"memory_block_create\",\"memory_block_update\"'),"
-      "    '\"memory_add\"','\"memory_note_add\"'),"
-      "    '\"memory_edit\"','\"memory_note_edit\"'),"
-      "    '\"memory_delete\"','\"memory_note_delete\"')"
-      "  WHERE key='agent_default_tools';"
-      "DELETE FROM tools WHERE extension_name IS NULL AND name IN"
-      "  ('memory_create','memory_add','memory_edit','memory_delete');"
-      /* Stored prompts and notes that tell the agent which tool to use: an
-       * agent's system_prompt is its own copy of the default text, so the
-       * old names would otherwise outlive the tools they named. */
-      "UPDATE agents SET system_prompt = replace(replace(replace(replace(system_prompt,'memory_create','memory_block_create'),'memory_add','memory_note_add'),'memory_edit','memory_note_edit'),'memory_delete','memory_note_delete')"
-      "  WHERE system_prompt LIKE '%memory\\_%' ESCAPE '\\';"
-      "UPDATE memory_notes SET text = replace(replace(replace(replace(text,'memory_create','memory_block_create'),'memory_add','memory_note_add'),'memory_edit','memory_note_edit'),'memory_delete','memory_note_delete')"
-      "  WHERE text LIKE '%memory\\_%' ESCAPE '\\';",
-      NULL },
-    /* v58: entries.fence_id — the random id both untrusted-content tags carry
-     * (llm_payload.c). Rows already tagged get one now. */
-    { 58,
-      "ALTER TABLE entries ADD COLUMN fence_id TEXT;"
-      "UPDATE entries SET fence_id = lower(hex(randomblob(8)))"
-      "  WHERE network_hosts IS NOT NULL;",
-      NULL },
-    /* v59: agent_models.purpose, memory_blocks.created_by, declared
-     * configuration-side links, dead columns dropped — see patch_v59_tidy. */
-    { 59, NULL, patch_v59_tidy },
-    /* v60: grants.source/approval_id, secret use is a grant, change_log — see
-     * patch_v60_authority. */
-    { 60, NULL, patch_v60_authority },
-    /* v61: channel_routes -> channel_chats; sessions lose chat_title,
-     * chat_is_admin, chat_error_notice_at; sessions/cron_jobs gain a declared
-     * link to their chat; channel edges lose their policy — see
-     * patch_v61_chats. */
-    { 61, NULL, patch_v61_chats },
-    /* v62: in-process extension hooks are gone. hook_directives carried their
-     * per-request inject/suppress commands; the rows in hooks name events
-     * that no longer exist. The hooks table itself stays. */
-    { 62,
-      "DROP TABLE IF EXISTS hook_directives;"
-      "DELETE FROM hooks;",
-      NULL },
-    /* v63: tools.droppable — whether a turn review may take a call of this
-     * tool out of context. Lands 0 (protected) on every row: built-in tools
-     * get their recipe's value at the next tools_sync_to_db, an extension
-     * tool when its manifest is next promoted with "droppable": true. */
-    { 63,
-      "ALTER TABLE tools ADD COLUMN droppable INTEGER NOT NULL DEFAULT 0;",
-      NULL },
-    /* v64: script hooks. hooks.wait — whether the session is held for the
-     * script; hooks.fail_count — consecutive failed runs. The table has been
-     * empty since v62, so the defaults only matter for the column shape. */
-    { 64,
-      "ALTER TABLE hooks ADD COLUMN wait INTEGER NOT NULL DEFAULT 1;"
-      "ALTER TABLE hooks ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0;",
-      NULL },
-    /* v65: the 'utility' routing purpose — see patch_v65_utility. */
-    { 65, NULL, patch_v65_utility },
-    /* v66: hooks.input — what a turnSettled script asked to be sent. NULL on
-     * every existing row, which is the runtime's defaults: the finished turn
-     * alone, as such a script has always been sent it. */
-    { 66,
-      "ALTER TABLE hooks ADD COLUMN input TEXT;",
-      NULL },
-    /* v67: measured sizes are stored, not re-derived. entries.tokens — the
-     * provider's count for one entry, NULL until a response reports it;
-     * sessions.turn_context_tokens — the same for the user context block.
-     * Existing rows stay NULL and read as their estimate. */
-    { 67,
-      "ALTER TABLE entries ADD COLUMN tokens INTEGER;"
-      "ALTER TABLE sessions ADD COLUMN turn_context_tokens INTEGER;",
-      NULL },
-    /* v68: session hooks and compaction — see patch_v68_hooks. */
-    { 68, NULL, patch_v68_hooks },
-    /* v69: a chat-bound session's channel edge is created when the session is
-     * bound (delivery_edge_bind_channel), no longer lazily at its first
-     * delivery — a crash between a first turn ending and its delivery lost
-     * the reply, because the sweep only sees sessions with an edge. Every
-     * bound session still without one gets it now, cursor at its current
-     * leaf (0 for none), so the upgrade owes nothing already said. Data only:
-     * templates/schema.sql does not change shape. */
-    { 69,
-      "INSERT INTO delivery_edges(session_id, target_kind, target_ref, policy,"
-      "                           cursor, one_shot)"
-      " SELECT s.id, 'channel', s.channel_name, NULL,"
-      "        MAX(COALESCE(s.leaf_id, 0), 0), 0"
-      " FROM sessions s WHERE s.channel_name IS NOT NULL"
-      "   AND NOT EXISTS (SELECT 1 FROM delivery_edges e"
-      "                   WHERE e.session_id=s.id AND e.target_kind='channel');",
-      NULL },
-    /* v70: two indexes a 25-sub-agent run showed SQLite building per query
-     * (automatic index, rc=284): a session's children and a session's jobs. */
-    { 70,
-      "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)"
-      "  WHERE parent_session_id IS NOT NULL;"
-      "CREATE INDEX IF NOT EXISTS idx_llm_jobs_session ON llm_jobs(session_id);",
-      NULL },
+    { 0, NULL, NULL },
 };
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
@@ -2205,8 +519,7 @@ static int db_schema_upgrade(sqlite3 *db) {
 
     if (db_backup_before_upgrade(db, uv) != 0) return 0;
 
-    int n_patches = (int)(sizeof(schema_patches) / sizeof(schema_patches[0]));
-    for (int i = 0; i < n_patches; i++) {
+    for (int i = 0; schema_patches[i].version; i++) {
         if (schema_patches[i].version <= uv) continue;
         if (schema_patches[i].version > CCLAW_SCHEMA_VERSION) break;
 
@@ -2342,13 +655,7 @@ int64_t session_create_filtered(sqlite3 *db, const char *name, const char *agent
         int rc = delivery_edge_create(db, id, "parent", ref, policy, 0);
         free(policy);
         if (rc != 0) {
-            sqlite3_stmt *del;
-            if (sqlite3_prepare_v2(db, "DELETE FROM sessions WHERE id=?;",
-                                   -1, &del, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(del, 1, id);
-                sqlite3_step(del);
-                sqlite3_finalize(del);
-            }
+            db_exec_ids(db, "DELETE FROM sessions WHERE id=?;", id, 0, 0);
             return -1;
         }
     }
@@ -3057,14 +1364,8 @@ int session_set_settling(sqlite3 *db, int64_t session_id, const char *event) {
 /* Turn iteration accessors */
 
 int session_set_iteration(sqlite3 *db, int64_t session_id, int iter) {
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "UPDATE sessions SET turn_iteration=? WHERE id=?",
-                           -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_int(stmt, 1, iter);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
+    return db_exec_ids(db, "UPDATE sessions SET turn_iteration=? WHERE id=?",
+                       iter, session_id, 0);
 }
 
 int session_set_turn_context(sqlite3 *db, int64_t session_id, const char *text) {
@@ -3196,18 +1497,12 @@ int delivery_edge_create(sqlite3 *db, int64_t session_id, const char *kind,
 }
 
 int delivery_edge_bind_channel(sqlite3 *db, int64_t session_id) {
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db,
-            "INSERT OR IGNORE INTO delivery_edges"
-            " (session_id, target_kind, target_ref, policy, cursor, one_shot)"
-            " SELECT id, 'channel', channel_name, NULL, MAX(COALESCE(leaf_id, 0), 0), 0"
-            " FROM sessions WHERE id=?1 AND channel_name IS NOT NULL;",
-            -1, &st, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(st, 1, session_id);
-    int rc = sqlite3_step(st);
-    sqlite3_finalize(st);
-    return (rc == SQLITE_DONE) ? 0 : -1;
+    return db_exec_ids(db,
+        "INSERT OR IGNORE INTO delivery_edges"
+        " (session_id, target_kind, target_ref, policy, cursor, one_shot)"
+        " SELECT id, 'channel', channel_name, NULL, MAX(COALESCE(leaf_id, 0), 0), 0"
+        " FROM sessions WHERE id=?1 AND channel_name IS NOT NULL;",
+        session_id, 0, 0);
 }
 
 int delivery_edge_set_policy(sqlite3 *db, int64_t session_id, const char *kind,
@@ -3446,16 +1741,8 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
         parent_id = sqlite3_last_insert_rowid(db);
 
         /* Mark consumed */
-        sqlite3_stmt *upd;
-        if (sqlite3_prepare_v2(db,
-            "UPDATE inbox SET consumed = 1 WHERE id = ?", -1, &upd, NULL) != SQLITE_OK) {
-            sqlite3_finalize(sel);
-            return -1;
-        }
-        sqlite3_bind_int64(upd, 1, inbox_id);
-        rc = sqlite3_step(upd);
-        sqlite3_finalize(upd);
-        if (rc != SQLITE_DONE) {
+        if (db_exec_ids(db, "UPDATE inbox SET consumed = 1 WHERE id = ?",
+                        inbox_id, 0, 0) != 0) {
             sqlite3_finalize(sel);
             return -1;
         }
@@ -3464,21 +1751,10 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
     sqlite3_finalize(sel);
 
     /* Update session leaf_id to last inserted entry */
-    if (consumed > 0) {
-        sqlite3_stmt *lf;
-        if (sqlite3_prepare_v2(db,
-            "UPDATE sessions SET leaf_id=?, updated_at=unixepoch() WHERE id=?",
-            -1, &lf, NULL) != SQLITE_OK) {
-            return -1;
-        }
-        sqlite3_bind_int64(lf, 1, parent_id);
-        sqlite3_bind_int64(lf, 2, session_id);
-        int rc = sqlite3_step(lf);
-        sqlite3_finalize(lf);
-        if (rc != SQLITE_DONE) {
-            return -1;
-        }
-    }
+    if (consumed > 0 &&
+        db_exec_ids(db, "UPDATE sessions SET leaf_id=?, updated_at=unixepoch() WHERE id=?",
+                    parent_id, session_id, 0) != 0)
+        return -1;
 
     return consumed;
 }
@@ -3524,71 +1800,53 @@ AgentRow *db_agent_get(sqlite3 *db, const char *name) {
     return row;
 }
 
-/* List all agent names from agents table */
-char **db_agent_list(sqlite3 *db, int *count) {
+/* The first column of every row `sql` returns (NULL values skipped), as a
+ * heap array of heap strings; NULL with *count 0 when there are none. `arg`,
+ * when set, binds ?1. */
+static char **db_text_column(sqlite3 *db, const char *sql, const char *arg, int *count) {
     *count = 0;
-    if (!db) return NULL;
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "SELECT name FROM agents ORDER BY name", -1, &stmt, NULL) != SQLITE_OK)
-        return NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    if (arg) sqlite3_bind_text(stmt, 1, arg, -1, SQLITE_STATIC);
     int cap = 8;
-    char **names = malloc((size_t)cap * sizeof(char *));
-    if (!names) { sqlite3_finalize(stmt); return NULL; }
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *n = (const char *)sqlite3_column_text(stmt, 0);
-        if (!n) continue;
-        if (*count >= cap) {
-            cap *= 2;
-            char **tmp = realloc(names, (size_t)cap * sizeof(char *));
-            if (!tmp) {
-                for (int i = 0; i < *count; i++) free(names[i]);
-                free(names);
-                *count = 0;
-                sqlite3_finalize(stmt);
-                return NULL;
-            }
-            names = tmp;
-        }
-        names[*count] = strdup(n);
-        (*count)++;
-    }
-    sqlite3_finalize(stmt);
-    if (*count == 0) { free(names); return NULL; }
-    return names;
-}
-
-char **db_sensitive_hosts(sqlite3 *db, int *count) {
-    *count = 0;
-    if (!db) return NULL;
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db,
-            "SELECT value FROM sensitive_targets WHERE kind='host' ORDER BY value",
-            -1, &stmt, NULL) != SQLITE_OK)
-        return NULL;
-    int cap = 8;
-    char **hosts = malloc((size_t)cap * sizeof(char *));
-    if (!hosts) { sqlite3_finalize(stmt); return NULL; }
+    char **out = malloc((size_t)cap * sizeof(char *));
+    if (!out) { sqlite3_finalize(stmt); return NULL; }
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *v = (const char *)sqlite3_column_text(stmt, 0);
         if (!v) continue;
         if (*count >= cap) {
             cap *= 2;
-            char **tmp = realloc(hosts, (size_t)cap * sizeof(char *));
+            char **tmp = realloc(out, (size_t)cap * sizeof(char *));
             if (!tmp) {
-                for (int i = 0; i < *count; i++) free(hosts[i]);
-                free(hosts);
+                for (int i = 0; i < *count; i++) free(out[i]);
+                free(out);
                 *count = 0;
                 sqlite3_finalize(stmt);
                 return NULL;
             }
-            hosts = tmp;
+            out = tmp;
         }
-        hosts[*count] = strdup(v);
+        out[*count] = strdup(v);
         (*count)++;
     }
     sqlite3_finalize(stmt);
-    if (*count == 0) { free(hosts); return NULL; }
-    return hosts;
+    if (*count == 0) { free(out); return NULL; }
+    return out;
+}
+
+/* List all agent names from agents table */
+char **db_agent_list(sqlite3 *db, int *count) {
+    *count = 0;
+    if (!db) return NULL;
+    return db_text_column(db, "SELECT name FROM agents ORDER BY name", NULL, count);
+}
+
+char **db_sensitive_hosts(sqlite3 *db, int *count) {
+    *count = 0;
+    if (!db) return NULL;
+    return db_text_column(db,
+        "SELECT value FROM sensitive_targets WHERE kind='host' ORDER BY value",
+        NULL, count);
 }
 
 static int sensitive_host_write(sqlite3 *db, const char *sql, const char *host) {
@@ -3614,36 +1872,9 @@ int db_sensitive_host_rm(sqlite3 *db, const char *host) {
 char **db_secret_hosts(sqlite3 *db, const char *secret_name, int *count) {
     *count = 0;
     if (!db || !secret_name) return NULL;
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db,
-            "SELECT host FROM secret_hosts WHERE secret_name=?1 ORDER BY host",
-            -1, &stmt, NULL) != SQLITE_OK)
-        return NULL;
-    sqlite3_bind_text(stmt, 1, secret_name, -1, SQLITE_STATIC);
-    int cap = 8;
-    char **hosts = malloc((size_t)cap * sizeof(char *));
-    if (!hosts) { sqlite3_finalize(stmt); return NULL; }
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *v = (const char *)sqlite3_column_text(stmt, 0);
-        if (!v) continue;
-        if (*count >= cap) {
-            cap *= 2;
-            char **tmp = realloc(hosts, (size_t)cap * sizeof(char *));
-            if (!tmp) {
-                for (int i = 0; i < *count; i++) free(hosts[i]);
-                free(hosts);
-                *count = 0;
-                sqlite3_finalize(stmt);
-                return NULL;
-            }
-            hosts = tmp;
-        }
-        hosts[*count] = strdup(v);
-        (*count)++;
-    }
-    sqlite3_finalize(stmt);
-    if (*count == 0) { free(hosts); return NULL; }
-    return hosts;
+    return db_text_column(db,
+        "SELECT host FROM secret_hosts WHERE secret_name=?1 ORDER BY host",
+        secret_name, count);
 }
 
 char **db_tool_declared_hosts(sqlite3 *db, const char *tool_name, int *count) {
@@ -3869,8 +2100,6 @@ int db_agent_upsert(sqlite3 *db, const char *name, const char *description,
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-static int exec_i64(sqlite3 *db, const char *sql, int64_t id);
-
 void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str) {
     if (!agent_json_str || !agent_name) return;
     const char *sql =
@@ -3922,7 +2151,7 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
          * bootstrap content has to arrive as a note to be visible at all. */
         if (id > 0 && val && val[0]) memory_note_add(db, id, val);
         if (id > 0 && ro)
-            exec_i64(db, "UPDATE memory_blocks SET read_only=1 WHERE id=?1", id);
+            db_exec_ids(db, "UPDATE memory_blocks SET read_only=1 WHERE id=?1", id, 0, 0);
     }
     sqlite3_finalize(stmt);
 }
@@ -4324,10 +2553,12 @@ static int agent_has_label(sqlite3 *db, const char *agent_name, const char *labe
     return has;
 }
 
-static int exec_i64(sqlite3 *db, const char *sql, int64_t id) {
+int db_exec_ids(sqlite3 *db, const char *sql, int64_t a, int64_t b, int64_t c) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_int64(st, 1, id);
+    sqlite3_bind_int64(st, 1, a);
+    sqlite3_bind_int64(st, 2, b);
+    sqlite3_bind_int64(st, 3, c);
     int rc = sqlite3_step(st);
     sqlite3_finalize(st);
     return rc == SQLITE_DONE ? 0 : -1;
@@ -4354,7 +2585,7 @@ int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *lab
     /* The owner sees its own block, read-write. Not wrapped in a transaction
      * (callers may already hold one): a failed attach takes the block back. */
     if (agent_name && memory_block_attach(db, agent_name, id, 0) != 0) {
-        exec_i64(db, "DELETE FROM memory_blocks WHERE id=?1", id);
+        db_exec_ids(db, "DELETE FROM memory_blocks WHERE id=?1", id, 0, 0);
         return -1;
     }
     return id;
@@ -4453,7 +2684,7 @@ int memory_block_detach(sqlite3 *db, const char *agent_name, int64_t block_id) {
 
 int memory_block_delete(sqlite3 *db, int64_t block_id) {
     /* Notes and attachments go with it (ON DELETE CASCADE). */
-    if (exec_i64(db, "DELETE FROM memory_blocks WHERE id=?1", block_id) != 0) return -1;
+    if (db_exec_ids(db, "DELETE FROM memory_blocks WHERE id=?1", block_id, 0, 0) != 0) return -1;
     return sqlite3_changes(db) == 1 ? 0 : -1;
 }
 
@@ -4903,11 +3134,7 @@ void db_prune_inbox(sqlite3 *db) {
     const char *sql =
         "DELETE FROM inbox WHERE consumed=1"
         " AND created_at < (unixepoch() - ?1);";
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return;
-    sqlite3_bind_int64(s, 1, (int64_t)ret);
-    sqlite3_step(s);
-    sqlite3_finalize(s);
+    db_exec_ids(db, sql, ret, 0, 0);
 }
 
 /* ── Periodic pruning: channel_outbox ─────────────────────────────────── */
@@ -4918,11 +3145,7 @@ void db_prune_outbox(sqlite3 *db) {
         "DELETE FROM channel_outbox"
         " WHERE (status='delivered' OR status LIKE 'failed%')"
         " AND COALESCE(acked_at, created_at) < (unixepoch() - ?1);";
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return;
-    sqlite3_bind_int64(s, 1, (int64_t)ret);
-    sqlite3_step(s);
-    sqlite3_finalize(s);
+    db_exec_ids(db, sql, ret, 0, 0);
 }
 
 /* ── WAL checkpoint ──────────────────────────────────────────────────── */

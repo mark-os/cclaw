@@ -85,7 +85,6 @@ static void test_under_cap_untouched(void) {
 
     free(got); free(msg);
     db_close(db);
-    printf("  PASS test_under_cap_untouched\n");
 }
 
 static void test_over_cap_spilled(void) {
@@ -124,7 +123,6 @@ static void test_over_cap_spilled(void) {
 
     free(file); free(got); free(msg);
     db_close(db);
-    printf("  PASS test_over_cap_spilled\n");
 }
 
 static void test_multibyte_boundary(void) {
@@ -151,7 +149,6 @@ static void test_multibyte_boundary(void) {
 
     free(got); free(msg);
     db_close(db);
-    printf("  PASS test_multibyte_boundary\n");
 }
 
 static void test_spill_failure_degrades(void) {
@@ -183,18 +180,16 @@ static void test_spill_failure_degrades(void) {
     free(got); free(msg);
     db_close(db);
     unsetenv("CCLAW_WORKSPACE");
-    printf("  PASS test_spill_failure_degrades\n");
 }
 
 int main(void) {
     TEST_INIT();
     clean_all();
     printf("test_inbox_cap:\n");
-    test_under_cap_untouched();
-    test_over_cap_spilled();
-    test_multibyte_boundary();
-    test_spill_failure_degrades();
+    RUN(test_under_cap_untouched);
+    RUN(test_over_cap_spilled);
+    RUN(test_multibyte_boundary);
+    RUN(test_spill_failure_degrades);
     clean_all();
-    printf("All inbox cap tests passed.\n");
     return 0;
 }

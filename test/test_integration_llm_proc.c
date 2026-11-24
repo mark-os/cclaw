@@ -17,12 +17,9 @@
 #include "mock_server.h"
 
 static int s_port;
-static int tests_run = 0;
-static int tests_passed = 0;
 
-#define TEST(name) do { tests_run++; printf("  %s... ", #name); } while(0)
-#define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while(0)
+/* A failed check ends the run: the mock server is in-process threads. */
+#define FAIL(msg) do { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } while (0)
 
 static const char *STOP_RESPONSE =
     "{\"id\":\"chatcmpl-1\",\"choices\":[{\"message\":{\"role\":\"assistant\","
@@ -50,7 +47,6 @@ static void set_test_env(const char *db_path) {
 
 /* Test: llm_req returns 0 and writes assistant entry on stop response */
 static void test_llm_req_stop(void) {
-    TEST(llm_req_stop);
 
     const char *db_path = "/tmp/cclaw_llm_req_test.db";
     test_db_clean(db_path);
@@ -87,7 +83,6 @@ static void test_llm_req_stop(void) {
     }
     entry_branch_free(branch, count);
     db_close(db); test_db_clean(db_path);
-    PASS();
 }
 
 /* Routing skips a model whose provider key resolves nowhere.
@@ -101,7 +96,6 @@ static void test_llm_req_stop(void) {
  * chose cfg->provider, which routing only consults for its synthetic fallback
  * candidate. */
 static void test_llm_req_skips_keyless_provider(void) {
-    TEST(llm_req_skips_keyless_provider);
 
     const char *db_path = "/tmp/cclaw_llm_req_keyless.db";
     test_db_clean(db_path);
@@ -165,7 +159,6 @@ static void test_llm_req_skips_keyless_provider(void) {
     if (reqs != 1) { char m[64]; snprintf(m, sizeof(m), "expected 1 request, got %d", reqs); FAIL(m); }
     if (used_keyless) FAIL("routed to the keyless model");
     if (!used_keyed) FAIL("did not route to the keyed model");
-    PASS();
 }
 
 /* A8: a dropped candidate leaves a trace, through the machinery that already
@@ -178,7 +171,6 @@ static void test_llm_req_skips_keyless_provider(void) {
  * and un-marks it when the key resolves again. The operator-visible signal is
  * the serving-model-change notice (R6), asserted separately. */
 static void test_dropped_candidate_degrades_and_recovers(void) {
-    TEST(dropped_candidate_degrades_and_recovers);
 
     const char *db_path = "/tmp/cclaw_llm_req_a8.db";
     test_db_clean(db_path);
@@ -268,12 +260,10 @@ static void test_dropped_candidate_degrades_and_recovers(void) {
     unsetenv("CCLAW_TEST_ABSENT_KEY");
     db_close(db); test_db_clean(db_path);
     if (!healthy) FAIL("candidate did not recover");
-    PASS();
 }
 
 /* Test: llm_req returns 0 and writes tool_calls on tool_calls response */
 static void test_llm_req_tool_calls(void) {
-    TEST(llm_req_tool_calls);
 
     const char *db_path = "/tmp/cclaw_llm_req_tc_test.db";
     test_db_clean(db_path);
@@ -310,12 +300,10 @@ static void test_llm_req_tool_calls(void) {
         char msg[64]; snprintf(msg, sizeof(msg), "expected 1 tool_call, got %d", tc_count);
         FAIL(msg);
     }
-    PASS();
 }
 
 /* Test: llm_req returns -1 on server error */
 static void test_llm_req_error(void) {
-    TEST(llm_req_error);
 
     const char *db_path = "/tmp/cclaw_llm_req_err_test.db";
     test_db_clean(db_path);
@@ -341,14 +329,12 @@ static void test_llm_req_error(void) {
     }
 
     db_close(db); test_db_clean(db_path);
-    PASS();
 }
 
 /* A report whose request had been cut says so (entries.request_cut): its
  * usage_in was not sent the entries the head measure would subtract. A
  * request sent whole leaves the column NULL. */
 static void test_llm_req_stamps_cut(void) {
-    TEST(llm_req_stamps_cut);
 
     const char *db_path = "/tmp/cclaw_llm_req_cut_test.db";
     test_db_clean(db_path);
@@ -389,7 +375,6 @@ static void test_llm_req_stamps_cut(void) {
     if (rc != 0 || rc2 != 0) FAIL("expected rc==0");
     if (cut != 1) FAIL("a cut request's report should carry request_cut=1");
     if (whole != 1) FAIL("a request sent whole should leave request_cut NULL");
-    PASS();
 }
 
 int main(void) {
@@ -401,14 +386,13 @@ int main(void) {
     }
 
     printf("test_integration_llm_proc:\n");
-    test_llm_req_stop();
-    test_llm_req_skips_keyless_provider();
-    test_dropped_candidate_degrades_and_recovers();
-    test_llm_req_tool_calls();
-    test_llm_req_error();
-    test_llm_req_stamps_cut();
+    RUN(test_llm_req_stop);
+    RUN(test_llm_req_skips_keyless_provider);
+    RUN(test_dropped_candidate_degrades_and_recovers);
+    RUN(test_llm_req_tool_calls);
+    RUN(test_llm_req_error);
+    RUN(test_llm_req_stamps_cut);
 
     mock_server_stop();
-    printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    return 0;
 }

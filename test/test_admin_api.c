@@ -38,7 +38,6 @@ static void test_key_env_name(void) {
     assert(admin_key_env_name(NULL, "openrouter") == NULL);
     db_close(db);
     test_db_clean(DB_PATH);
-    printf("  PASS: test_key_env_name\n");
 }
 
 static void test_set_key_known_provider(void) {
@@ -60,7 +59,6 @@ static void test_set_key_known_provider(void) {
 
     db_close(db);
     test_db_clean(DB_PATH);
-    printf("  PASS: test_set_key_known_provider\n");
 }
 
 /* A provider row with a blank api_key_env — the schema default, and what the
@@ -100,7 +98,6 @@ static void test_set_key_adopts_blank_env_name(void) {
 
     db_close(db);
     test_db_clean(DB_PATH);
-    printf("  PASS: test_set_key_adopts_blank_env_name\n");
 }
 
 static void test_set_key_custom(void) {
@@ -117,7 +114,6 @@ static void test_set_key_custom(void) {
 
     db_close(db);
     test_db_clean(DB_PATH);
-    printf("  PASS: test_set_key_custom\n");
 }
 
 static void test_grant_from_history_provenance(void) {
@@ -152,7 +148,6 @@ static void test_grant_from_history_provenance(void) {
     assert(now[0] == '\0');
     db_close(db);
     test_db_clean(DB_PATH);
-    printf("  PASS: test_grant_from_history_provenance\n");
 }
 
 static int64_t insert_approval(sqlite3 *db, int64_t sid, const char *tool_name,
@@ -206,7 +201,6 @@ static void test_list_pending_approvals(void) {
 
     db_close(db);
     test_db_clean(DB_PATH);
-    printf("  PASS: test_list_pending_approvals\n");
 }
 
 static void test_grant_from_history(void) {
@@ -248,19 +242,18 @@ static void test_grant_from_history(void) {
 
     db_close(db);
     test_db_clean(DB_PATH);
-    printf("  PASS: test_grant_from_history\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_admin_api:\n");
-    test_key_env_name();
-    test_set_key_known_provider();
-    test_set_key_adopts_blank_env_name();
-    test_set_key_custom();
-    test_grant_from_history_provenance();
-    test_list_pending_approvals();
-    test_grant_from_history();
+    RUN(test_key_env_name);
+    RUN(test_set_key_known_provider);
+    RUN(test_set_key_adopts_blank_env_name);
+    RUN(test_set_key_custom);
+    RUN(test_grant_from_history_provenance);
+    RUN(test_list_pending_approvals);
+    RUN(test_grant_from_history);
     printf("all admin_api tests passed\n");
     return 0;
 }

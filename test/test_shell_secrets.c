@@ -14,53 +14,29 @@
  * values (raw + base64 + URL-encoded) with the re-referenceable {{SECRET:name}}
  * placeholder. The shell handler no longer masks; the parent does. */
 
-static void test_mask_multiple_secrets(void) {
-    ShellSecret secrets[] = {{"A", "aaa"}, {"B", "bbb"}};
-    char *out = secret_deinterpolate("aaa then bbb", secrets, 2);
-    assert(strstr(out, "{{SECRET:A}}") != NULL);
-    assert(strstr(out, "{{SECRET:B}}") != NULL);
-    assert(strstr(out, "aaa") == NULL);
-    assert(strstr(out, "bbb") == NULL);
-    free(out);
-}
+/* Every encoding of a value (raw, base64, URL) becomes the placeholder.
+ * "secret123" b64 = "c2VjcmV0MTIz"; "a+b" b64 = "YSti", url = "a%2Bb". */
+static const struct {
+    int n; ShellSecret secrets[2]; const char *in; const char *out;
+} masks[] = {
+    {2, {{"A", "aaa"}, {"B", "bbb"}}, "aaa then bbb", "{{SECRET:A}} then {{SECRET:B}}"},
+    {0, {{NULL, NULL}}, "safe", "safe"},
+    {1, {{"TOK", "secret123"}}, "encoded: c2VjcmV0MTIz end", "encoded: {{SECRET:TOK}} end"},
+    {1, {{"API", "key=val&x"}}, "param: key%3Dval%26x done", "param: {{SECRET:API}} done"},
+    {1, {{"S", "a+b"}}, "raw:a+b b64:YSti url:a%2Bb",
+     "raw:{{SECRET:S}} b64:{{SECRET:S}} url:{{SECRET:S}}"},
+};
 
-static void test_mask_null_secrets(void) {
-    char *out = secret_deinterpolate("safe", NULL, 0);
-    assert(strcmp(out, "safe") == 0);
-    free(out);
-}
-
-static void test_mask_base64_encoded(void) {
-    /* "secret123" base64 = "c2VjcmV0MTIz" */
-    ShellSecret secrets[] = {{"TOK", "secret123"}};
-    char *out = secret_deinterpolate("encoded: c2VjcmV0MTIz end", secrets, 1);
-    assert(strstr(out, "c2VjcmV0MTIz") == NULL);
-    assert(strstr(out, "{{SECRET:TOK}}") != NULL);
-    free(out);
-}
-
-static void test_mask_url_encoded(void) {
-    /* "key=val&x" url-encoded = "key%3Dval%26x" */
-    ShellSecret secrets[] = {{"API", "key=val&x"}};
-    char *out = secret_deinterpolate("param: key%3Dval%26x done", secrets, 1);
-    assert(strstr(out, "key%3Dval%26x") == NULL);
-    assert(strstr(out, "{{SECRET:API}}") != NULL);
-    free(out);
-}
-
-static void test_mask_all_variants(void) {
-    /* exact + base64 + url-encoded all get masked.
-     * "a+b" base64 = "YSti", url-encoded = "a%2Bb" */
-    ShellSecret secrets[] = {{"S", "a+b"}};
-    char *out = secret_deinterpolate("raw:a+b b64:YSti url:a%2Bb", secrets, 1);
-    assert(strstr(out, "a+b") == NULL);
-    assert(strstr(out, "YSti") == NULL);
-    assert(strstr(out, "a%2Bb") == NULL);
-    int count = 0;
-    char *p = out;
-    while ((p = strstr(p, "{{SECRET:S}}")) != NULL) { count++; p++; }
-    assert(count == 3);
-    free(out);
+static void test_mask_table(void) {
+    for (size_t i = 0; i < sizeof(masks) / sizeof(masks[0]); i++) {
+        char *out = secret_deinterpolate(masks[i].in, masks[i].n ? masks[i].secrets : NULL,
+                                         (size_t)masks[i].n);
+        if (strcmp(out, masks[i].out) != 0) {
+            printf("    row %zu: \"%s\"\n", i, out);
+            assert(0);
+        }
+        free(out);
+    }
 }
 
 static void test_collect_and_free(void) {
@@ -88,57 +64,31 @@ static void test_collect_and_free(void) {
     shell_secrets_free(s, count);
 }
 
-/* --- shell_filter_secrets(): word-boundary minimal-set filter --- */
+/* shell_filter_secrets(): only a word-bounded $CCLAW_SECRET_<NAME>
+ * reference ships that secret to the child. want NULL = none ships. */
+static const struct { const char *cmd; int n; const char *want; } filters[] = {
+    {"curl -H \"Bearer: $CCLAW_SECRET_FOO\"", 2, "FOO"},
+    {"echo $MY_CCLAW_SECRET_FOO", 2, NULL},      /* ident char before */
+    {"echo $CCLAW_SECRET_FOOBAR", 2, NULL},      /* ident char after */
+    {"echo hello", 2, NULL},
+    {NULL, 2, NULL},
+    {"", 2, NULL},
+    {"echo $CCLAW_SECRET_FOO", 0, NULL},
+};
 
-static void test_filter_referenced_included(void) {
+static void test_filter_table(void) {
     ShellSecret all[] = {{"FOO", "v1"}, {"BAR", "v2"}};
-    size_t count = 0;
-    RunToolSecret *min = shell_filter_secrets(
-        "curl -H \"Bearer: $CCLAW_SECRET_FOO\"", all, 2, &count);
-    assert(count == 1);
-    assert(min != NULL);
-    assert(strcmp(min[0].name, "FOO") == 0);
-    assert(strcmp(min[0].value, "v1") == 0);   /* borrowed pointer */
-    assert(min[0].value == all[0].value);
-    free(min);
-}
-
-static void test_filter_ident_char_before_excluded(void) {
-    /* MY_CCLAW_SECRET_FOO is not a reference to CCLAW_SECRET_FOO */
-    ShellSecret all[] = {{"FOO", "v1"}};
-    size_t count = 99;
-    RunToolSecret *min = shell_filter_secrets("echo $MY_CCLAW_SECRET_FOO", all, 1, &count);
-    assert(count == 0);
-    assert(min == NULL);
-}
-
-static void test_filter_ident_char_after_excluded(void) {
-    /* CCLAW_SECRET_FOOBAR is not a reference to CCLAW_SECRET_FOO */
-    ShellSecret all[] = {{"FOO", "v1"}};
-    size_t count = 99;
-    RunToolSecret *min = shell_filter_secrets("echo $CCLAW_SECRET_FOOBAR", all, 1, &count);
-    assert(count == 0);
-    assert(min == NULL);
-}
-
-static void test_filter_unreferenced_excluded(void) {
-    ShellSecret all[] = {{"FOO", "v1"}};
-    size_t count = 99;
-    RunToolSecret *min = shell_filter_secrets("echo hello", all, 1, &count);
-    assert(count == 0);
-    assert(min == NULL);
-}
-
-static void test_filter_empty_inputs(void) {
-    ShellSecret all[] = {{"FOO", "v1"}};
-    size_t count = 99;
-    assert(shell_filter_secrets(NULL, all, 1, &count) == NULL && count == 0);
-    count = 99;
-    assert(shell_filter_secrets("", all, 1, &count) == NULL && count == 0);
-    count = 99;
-    assert(shell_filter_secrets("echo $CCLAW_SECRET_FOO", NULL, 0, &count) == NULL && count == 0);
-    count = 99;
-    assert(shell_filter_secrets("echo $CCLAW_SECRET_FOO", all, 0, &count) == NULL && count == 0);
+    for (size_t i = 0; i < sizeof(filters) / sizeof(filters[0]); i++) {
+        size_t count = 99;
+        RunToolSecret *min = shell_filter_secrets(filters[i].cmd, all,
+                                                  (size_t)filters[i].n, &count);
+        int ok = filters[i].want
+            ? (min && count == 1 && strcmp(min[0].name, filters[i].want) == 0 &&
+               min[0].value == all[0].value)   /* borrowed, not copied */
+            : (min == NULL && count == 0);
+        if (!ok) { printf("    row %zu: count %zu\n", i, count); assert(0); }
+        free(min);
+    }
 }
 
 /* --- Tests using --run-tool broker path --- */
@@ -197,25 +147,13 @@ static void test_env_injection_scoped(void) {
 int main(void) {
     TEST_INIT();
     alarm(10);
+    printf("test_shell_secrets:\n");
+    RUN(test_mask_table);
+    RUN(test_collect_and_free);
+    RUN(test_filter_table);
 
-    /* Pure unit tests (no broker) */
-    test_mask_multiple_secrets();
-    test_mask_null_secrets();
-    test_mask_base64_encoded();
-    test_mask_url_encoded();
-    test_mask_all_variants();
-    test_collect_and_free();
-    test_filter_referenced_included();
-    test_filter_ident_char_before_excluded();
-    test_filter_ident_char_after_excluded();
-    test_filter_unreferenced_excluded();
-    test_filter_empty_inputs();
-
-    /* Broker-path tests */
     setup_workspace();
-    test_env_injection_scoped();
+    RUN(test_env_injection_scoped);
     cleanup_workspace();
-
-    printf("test_shell_secrets: all tests passed\n");
     return 0;
 }

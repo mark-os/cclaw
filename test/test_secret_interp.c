@@ -8,7 +8,6 @@
 #include "secret_interp.h"
 #include "test_util.h"
 
-#define PASS(name) printf("  PASS: %s\n", name)
 
 /* Finding 7: value is substring of own placeholder — must terminate */
 static void test_deinterp_self_referential(void) {
@@ -17,7 +16,6 @@ static void test_deinterp_self_referential(void) {
     assert(r != NULL);
     assert(strcmp(r, "found {{SECRET:SECRET}} here") == 0);
     free(r);
-    PASS("deinterp_self_referential");
 }
 
 /* Finding 7: value containing {{ — must not infinite loop */
@@ -27,7 +25,6 @@ static void test_deinterp_value_contains_braces(void) {
     assert(r != NULL);
     assert(strcmp(r, "see {{SECRET:X}} here") == 0);
     free(r);
-    PASS("deinterp_value_contains_braces");
 }
 
 /* Multiple occurrences replaced in one pass */
@@ -37,7 +34,6 @@ static void test_deinterp_multiple_occurrences(void) {
     assert(r != NULL);
     assert(strcmp(r, "{{SECRET:TOK}} and {{SECRET:TOK}} and {{SECRET:TOK}}") == 0);
     free(r);
-    PASS("deinterp_multiple_occurrences");
 }
 
 /* Empty value skipped (no crash on strstr empty) */
@@ -47,7 +43,6 @@ static void test_deinterp_empty_value(void) {
     assert(r != NULL);
     assert(strcmp(r, "unchanged text") == 0);
     free(r);
-    PASS("deinterp_empty_value");
 }
 
 /* Normal case */
@@ -57,7 +52,6 @@ static void test_deinterp_normal(void) {
     assert(r != NULL);
     assert(strcmp(r, "token is {{SECRET:GH}} ok") == 0);
     free(r);
-    PASS("deinterp_normal");
 }
 
 /* Longest-first ordering: longer secret replaced before shorter */
@@ -68,7 +62,6 @@ static void test_deinterp_longest_first(void) {
     /* "abcdef" should match LONG (longest first), not be split */
     assert(strstr(r, "{{SECRET:LONG}}") != NULL);
     free(r);
-    PASS("deinterp_longest_first");
 }
 
 /* tool_result_postprocess: deinterpolates secret values */
@@ -79,7 +72,6 @@ static void test_postprocess_deinterpolates(void) {
     assert(strstr(r, "s3cr3t") == NULL);
     assert(strstr(r, "{{SECRET:KEY}}") != NULL);
     free(r);
-    PASS("postprocess_deinterpolates");
 }
 
 /* tool_result_postprocess: returns NULL when nothing to do */
@@ -87,7 +79,6 @@ static void test_postprocess_noop(void) {
     ShellSecret secrets[] = {{"X", "notpresent"}};
     char *r = tool_result_postprocess("clean output", secrets, 1);
     assert(r == NULL);
-    PASS("postprocess_noop");
 }
 
 /* tool_result_postprocess: AC scan must run even with zero secrets loaded
@@ -101,7 +92,6 @@ static void test_postprocess_scans_without_secrets(void) {
     /* expanding tag must not drop the trailing text (headroom is allocated) */
     assert(strstr(r, "leaked here") != NULL);
     free(r);
-    PASS("postprocess_scans_without_secrets");
 }
 
 /* interpolate + deinterpolate roundtrip */
@@ -116,7 +106,6 @@ static void test_interpolate_roundtrip(void) {
     assert(strcmp(back, input) == 0);
     free(interpolated);
     free(back);
-    PASS("interpolate_roundtrip");
 }
 
 static void test_placeholder_names_basic(void) {
@@ -128,7 +117,6 @@ static void test_placeholder_names_basic(void) {
     assert(strcmp(names[0], "GH_TOKEN") == 0);
     assert(strcmp(names[1], "NPM_TOKEN") == 0);
     secret_names_free(names, n);
-    PASS("placeholder_names_basic");
 }
 
 static void test_placeholder_names_dedup_and_none(void) {
@@ -146,25 +134,22 @@ static void test_placeholder_names_dedup_and_none(void) {
     names = secret_placeholder_names("{{SECRET:}} {{SECRET:B}}", &n);
     assert(n == 1 && names && strcmp(names[0], "B") == 0);
     secret_names_free(names, n);
-    PASS("placeholder_names_dedup_and_none");
 }
 
 int main(void) {
     TEST_INIT();
     alarm(5);  /* Hard kill if anything infinite-loops */
-    printf("test_secret_interp:\n");
-    test_deinterp_self_referential();
-    test_deinterp_value_contains_braces();
-    test_deinterp_multiple_occurrences();
-    test_deinterp_empty_value();
-    test_deinterp_normal();
-    test_deinterp_longest_first();
-    test_postprocess_deinterpolates();
-    test_postprocess_noop();
-    test_postprocess_scans_without_secrets();
-    test_interpolate_roundtrip();
-    test_placeholder_names_basic();
-    test_placeholder_names_dedup_and_none();
-    printf("  all tests passed\n");
+    RUN(test_deinterp_self_referential);
+    RUN(test_deinterp_value_contains_braces);
+    RUN(test_deinterp_multiple_occurrences);
+    RUN(test_deinterp_empty_value);
+    RUN(test_deinterp_normal);
+    RUN(test_deinterp_longest_first);
+    RUN(test_postprocess_deinterpolates);
+    RUN(test_postprocess_noop);
+    RUN(test_postprocess_scans_without_secrets);
+    RUN(test_interpolate_roundtrip);
+    RUN(test_placeholder_names_basic);
+    RUN(test_placeholder_names_dedup_and_none);
     return 0;
 }

@@ -315,8 +315,6 @@ int main(void) {
         goto done;
     }
 
-    printf("  PASS stray_line_reasks_via_pty\n");
-    printf("  PASS approve_grant_path_via_pty\n");
     printf("All request_config PTY tests passed.\n");
     rc = 0;
 

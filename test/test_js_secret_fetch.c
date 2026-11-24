@@ -6,6 +6,7 @@
  * the success paths talk to a loopback server, never a real host. */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
+#include <assert.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -15,13 +16,6 @@
 #include <unistd.h>
 #include "qjs_helpers.h"
 #include "test_util.h"
-
-static int tests_run = 0;
-static int tests_passed = 0;
-
-#define TEST(name) do { tests_run++; printf("  " name "... "); } while(0)
-#define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); } while(0)
 
 /* ── one-shot loopback HTTP server ── */
 
@@ -75,101 +69,83 @@ static const JsHostSecret SEC_UNBOUND = {
 static const JsHostSecret SEC_OTHER_HOST = {
     .name = "TOK", .value = "sk-test-value-123", .hosts = "api.example.com .example.org" };
 
-static void expect_js_error(const char *name, const JsHostSecret *sec,
-                            const char *code, const char *needle) {
-    tests_run++; printf("  %s... ", name);
-    qjs_host_set_secrets(sec, sec ? 1 : 0);
-    char args[1024];
-    snprintf(args, sizeof(args), "{\"code\":%s}", code);
-    char *r = test_js_eval_run_json(args);
-    qjs_host_set_secrets(NULL, 0);
-    if (!r || !strstr(r, needle)) { FAIL(r ? r : "NULL"); free(r); return; }
-    free(r);
-    PASS();
-}
-
-static void test_unknown_name(void) {
-    expect_js_error("unknown_name", &SEC_BOUND,
-        "\"http_request('http://127.0.0.1:1/x', {headers:{Authorization:'Bearer {{SECRET:TYPO}}'}})\"",
-        "{{SECRET:TYPO}} names no secret granted to this agent");
-}
-
-static void test_unbound_secret(void) {
-    expect_js_error("unbound_secret", &SEC_UNBOUND,
-        "\"http_request('http://127.0.0.1:1/x', {headers:{Authorization:'Bearer {{SECRET:TOK}}'}})\"",
-        "secret TOK has no bound hosts");
-}
-
-static void test_wrong_host(void) {
-    expect_js_error("wrong_host", &SEC_OTHER_HOST,
-        "\"http_request('http://127.0.0.1:1/x', {headers:{Authorization:'Bearer {{SECRET:TOK}}'}})\"",
-        "secret TOK is not bound to host 127.0.0.1");
-}
-
-static void test_no_secrets_loaded(void) {
-    expect_js_error("no_secrets_loaded", NULL,
-        "\"http_request('http://127.0.0.1:1/x', {headers:{Authorization:'Bearer {{SECRET:TOK}}'}})\"",
-        "{{SECRET:TOK}} names no secret granted to this agent");
+/* Each refusal names the secret and why; the keyword is enough. */
+static void test_error_paths(void) {
+    static const struct {
+        const char *name;
+        const JsHostSecret *sec;
+        const char *placeholder;
+        const char *needle;
+    } cases[] = {
+        { "unknown_name",      &SEC_BOUND,      "TYPO", "{{SECRET:TYPO}} names no secret" },
+        { "unbound_secret",    &SEC_UNBOUND,    "TOK",  "no bound hosts" },
+        { "wrong_host",        &SEC_OTHER_HOST, "TOK",  "not bound to host 127.0.0.1" },
+        { "no_secrets_loaded", NULL,            "TOK",  "{{SECRET:TOK}} names no secret" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("    %s\n", cases[i].name);
+        qjs_host_set_secrets(cases[i].sec, cases[i].sec ? 1 : 0);
+        char args[1024];
+        snprintf(args, sizeof(args),
+                 "{\"code\":\"http_request('http://127.0.0.1:1/x', {headers:"
+                 "{Authorization:'Bearer {{SECRET:%s}}'}})\"}", cases[i].placeholder);
+        char *r = test_js_eval_run_json(args);
+        qjs_host_set_secrets(NULL, 0);
+        if (!r || !strstr(r, cases[i].needle))
+            printf("    row %s got: %s\n", cases[i].name, r ? r : "NULL");
+        assert(r && strstr(r, cases[i].needle));
+        free(r);
+    }
 }
 
 /* ── success paths: placeholder resolves; server sees plaintext ── */
 
-/* `where` builds the http_request call given host:port. */
-static void expect_resolved(const char *name, const char *code_fmt,
-                            const char *want_in_request) {
-    tests_run++; printf("  %s... ", name);
-    MockHttp m; pthread_t tid;
-    if (mock_http_start(&m, &tid) != 0) { FAIL("mock server"); return; }
-    char code[2048];
-    snprintf(code, sizeof(code), code_fmt, m.port);
-    char args[4096];
-    snprintf(args, sizeof(args), "{\"code\":\"%s\"}", code);
-    qjs_host_set_secrets(&SEC_BOUND, 1);
-    char *r = test_js_eval_run_json(args);
-    qjs_host_set_secrets(NULL, 0);
-    mock_http_stop(&m, tid);
-    if (!r || strstr(r, "error")) { FAIL(r ? r : "NULL"); free(r); return; }
-    if (!strstr(m.captured, want_in_request)) {
-        FAIL("server did not receive the resolved value");
-        printf("    got: %.300s\n", m.captured);
-        free(r); return;
+/* Each code_fmt builds the http_request call given the mock port. */
+static void test_resolve_paths(void) {
+    static const struct {
+        const char *name;
+        const char *code_fmt;
+        const char *want_in_request;
+    } cases[] = {
+        { "resolve_header",
+          "var r = http_request('http://127.0.0.1:%d/h', "
+          "{headers:{Authorization:'Bearer {{SECRET:TOK}}'}}); r.status",
+          "Bearer sk-test-value-123" },
+        { "resolve_body",
+          "var r = http_request('http://127.0.0.1:%d/b', "
+          "{method:'POST', body:'key={{SECRET:TOK}}'}); r.status",
+          "key=sk-test-value-123" },
+        { "resolve_url",
+          "var r = http_request('http://127.0.0.1:%d/q?token={{SECRET:TOK}}'); r.status",
+          "token=sk-test-value-123" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("    %s\n", cases[i].name);
+        MockHttp m; pthread_t tid;
+        assert(mock_http_start(&m, &tid) == 0);
+        char code[2048];
+        snprintf(code, sizeof(code), cases[i].code_fmt, m.port);
+        char args[4096];
+        snprintf(args, sizeof(args), "{\"code\":\"%s\"}", code);
+        qjs_host_set_secrets(&SEC_BOUND, 1);
+        char *r = test_js_eval_run_json(args);
+        qjs_host_set_secrets(NULL, 0);
+        mock_http_stop(&m, tid);
+        assert(r && !strstr(r, "error"));
+        assert(strstr(m.captured, cases[i].want_in_request));
+        assert(!strstr(m.captured, "{{SECRET:"));
+        free(r);
     }
-    if (strstr(m.captured, "{{SECRET:")) {
-        FAIL("literal placeholder reached the wire"); free(r); return;
-    }
-    free(r);
-    PASS();
-}
-
-static void test_resolve_header(void) {
-    expect_resolved("resolve_header",
-        "var r = http_request('http://127.0.0.1:%d/h', "
-        "{headers:{Authorization:'Bearer {{SECRET:TOK}}'}}); r.status",
-        "Bearer sk-test-value-123");
-}
-
-static void test_resolve_body(void) {
-    expect_resolved("resolve_body",
-        "var r = http_request('http://127.0.0.1:%d/b', "
-        "{method:'POST', body:'key={{SECRET:TOK}}'}); r.status",
-        "key=sk-test-value-123");
-}
-
-static void test_resolve_url(void) {
-    expect_resolved("resolve_url",
-        "var r = http_request('http://127.0.0.1:%d/q?token={{SECRET:TOK}}'); r.status",
-        "token=sk-test-value-123");
 }
 
 /* The originating case: the placeholder lives in a .qjs FILE body, invisible
  * to the parent's arg interpolation, and must still resolve at the fetch. */
 static void test_resolve_from_file(void) {
-    tests_run++; printf("  resolve_from_file... ");
     MockHttp m; pthread_t tid;
-    if (mock_http_start(&m, &tid) != 0) { FAIL("mock server"); return; }
+    assert(mock_http_start(&m, &tid) == 0);
     const char *path = "/tmp/test_js_secret_fetch_script.qjs";
     FILE *f = fopen(path, "w");
-    if (!f) { FAIL("script write"); mock_http_stop(&m, tid); return; }
+    assert(f);
     fprintf(f,
         "var r = http_request('http://127.0.0.1:' + args.port + '/f', "
         "{headers:{'X-Api-Key':'{{SECRET:TOK}}'}}); r.status;\n");
@@ -182,22 +158,16 @@ static void test_resolve_from_file(void) {
     qjs_host_set_secrets(NULL, 0);
     mock_http_stop(&m, tid);
     unlink(path);
-    if (!r || strstr(r, "error")) { FAIL(r ? r : "NULL"); free(r); return; }
-    if (!strstr(m.captured, "X-Api-Key: sk-test-value-123")) {
-        FAIL("file-body placeholder did not resolve");
-        printf("    got: %.300s\n", m.captured);
-        free(r); return;
-    }
+    assert(r && !strstr(r, "error"));
+    assert(strstr(m.captured, "X-Api-Key: sk-test-value-123"));
     free(r);
-    PASS();
 }
 
 /* No placeholder anywhere → nothing resolves, nothing throws, no binding
  * check (a loaded-but-unused secret must not constrain the request host). */
 static void test_no_placeholder_no_gate(void) {
-    tests_run++; printf("  no_placeholder_no_gate... ");
     MockHttp m; pthread_t tid;
-    if (mock_http_start(&m, &tid) != 0) { FAIL("mock server"); return; }
+    assert(mock_http_start(&m, &tid) == 0);
     char args[512];
     /* SEC_OTHER_HOST is loaded but unused — 127.0.0.1 must still be legal. */
     snprintf(args, sizeof(args),
@@ -207,27 +177,16 @@ static void test_no_placeholder_no_gate(void) {
     char *r = test_js_eval_run_json(args);
     qjs_host_set_secrets(NULL, 0);
     mock_http_stop(&m, tid);
-    if (!r || strstr(r, "error") || strcmp(r, "200") != 0) {
-        FAIL(r ? r : "NULL"); free(r); return;
-    }
+    assert(r && strcmp(r, "200") == 0);
     free(r);
-    PASS();
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_js_secret_fetch:\n");
-
-    test_unknown_name();
-    test_unbound_secret();
-    test_wrong_host();
-    test_no_secrets_loaded();
-    test_resolve_header();
-    test_resolve_body();
-    test_resolve_url();
-    test_resolve_from_file();
-    test_no_placeholder_no_gate();
-
-    printf("%d/%d passed\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    RUN(test_error_paths);
+    RUN(test_resolve_paths);
+    RUN(test_resolve_from_file);
+    RUN(test_no_placeholder_no_gate);
+    return 0;
 }

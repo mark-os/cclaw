@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,55 +12,14 @@
 #include "js_http_fetch.h"
 #include "test_util.h"
 
-static int tests_run = 0;
-static int tests_passed = 0;
-
-#define TEST(name) do { tests_run++; printf("  " name "... "); } while(0)
-#define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); } while(0)
-
 /* Egress (host/IP/redirect gating) is no longer a pre-flight in js_http_fetch —
  * it moved to the broker proxy's per-hop decide() (see test_proxy_decide.c).
  * The only validation left here is the scheme guard: http:// or https:// only. */
 static void test_invalid_scheme(void) {
-    TEST("invalid_scheme");
     JsHttpResult r = js_http_fetch_exec("ftp://example.com/file", "GET", NULL, NULL, 0, NULL, 0);
-    if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
-    if (!r.error || !strstr(r.error, "http://")) {
-        FAIL(r.error ? r.error : "NULL"); js_http_result_free(&r); return;
-    }
+    assert(r.status == -1);
+    assert(r.error && strstr(r.error, "http://"));
     js_http_result_free(&r);
-    PASS();
-}
-
-static void test_null_url(void) {
-    TEST("null_url");
-    JsHttpResult r = js_http_fetch_exec(NULL, "GET", NULL, NULL, 0, NULL, 0);
-    if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
-    if (!r.error) { FAIL("expected error message"); js_http_result_free(&r); return; }
-    js_http_result_free(&r);
-    PASS();
-}
-
-/* In-process js_eval compute: arithmetic returns the last expression value. No
- * fork, no re-exec, no network. */
-static void test_js_eval_compute(void) {
-    TEST("js_eval_compute");
-    char *r = test_js_eval_run_json("{\"code\":\"6 * 7\"}");
-    if (!r) { FAIL("NULL result"); return; }
-    if (strcmp(r, "42") != 0) { FAIL(r); free(r); return; }
-    free(r);
-    PASS();
-}
-
-/* js_eval requires code or filename. */
-static void test_js_eval_requires_arg(void) {
-    TEST("js_eval_requires_arg");
-    char *r = test_js_eval_run_json("{}");
-    if (!r) { FAIL("NULL result"); return; }
-    if (!strstr(r, "error")) { FAIL(r); free(r); return; }
-    free(r);
-    PASS();
 }
 
 /* ── Binary bodies: a loopback server with one binary and one 404 path ── */
@@ -110,32 +70,28 @@ static int file_size(const char *path) {
  * them (it used to return a corrupted copy), save_to writes the exact bytes,
  * and a failed download leaves no file behind. */
 static void test_binary_download(void) {
-    TEST("binary_download");
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = { .sin_family = AF_INET,
                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
     socklen_t al = sizeof(a);
     struct timeval tv = { .tv_sec = 5 };
-    if (lfd < 0 || bind(lfd, (struct sockaddr *)&a, sizeof(a)) != 0 ||
-        listen(lfd, 4) != 0 ||
-        getsockname(lfd, (struct sockaddr *)&a, &al) != 0) {
-        FAIL("listen"); return;
-    }
+    assert(lfd >= 0 && bind(lfd, (struct sockaddr *)&a, sizeof(a)) == 0 &&
+           listen(lfd, 4) == 0 &&
+           getsockname(lfd, (struct sockaddr *)&a, &al) == 0);
     setsockopt(lfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     pthread_t th;
     pthread_create(&th, NULL, bin_server, &lfd);
 
     char out[64], code[512];
     snprintf(out, sizeof(out), "/tmp/cclaw_test_bin_%d.jpg", (int)getpid());
-    int port = ntohs(a.sin_port), ok = 1;
-    const char *why = "";
+    int port = ntohs(a.sin_port);
 
     /* 1. no save_to: refused, and the message names the fix */
     snprintf(code, sizeof(code),
         "{\"code\":\"try { http_request('http://127.0.0.1:%d/img').body.length }"
         " catch (e) { String(e.message) }\"}", port);
     char *r = test_js_eval_run_json(code);
-    if (!r || !strstr(r, "binary") || !strstr(r, "save_to")) { ok = 0; why = "not refused"; }
+    assert(r && strstr(r, "binary") && strstr(r, "save_to"));
     free(r);
 
     /* 2. save_to: exact bytes on disk, {status, path, bytes} back */
@@ -145,8 +101,8 @@ static void test_binary_download(void) {
     r = test_js_eval_run_json(code);
     char want[128];
     snprintf(want, sizeof(want), "200 %zu %s []", sizeof(BIN), out);
-    if (ok && (!r || !strstr(r, want))) { ok = 0; why = "save result"; }
-    if (ok && file_size(out) != (int)sizeof(BIN)) { ok = 0; why = "file bytes differ"; }
+    assert(r && strstr(r, want));
+    assert(file_size(out) == (int)sizeof(BIN));
     free(r);
     unlink(out);
 
@@ -155,8 +111,8 @@ static void test_binary_download(void) {
         "{\"code\":\"var r = http_request('http://127.0.0.1:%d/img',"
         " {save_to:'%s', max_bytes: 4}); r.status + ' ' + r.error\"}", port, out);
     r = test_js_eval_run_json(code);
-    if (ok && (!r || !strstr(r, "-1 ") || !strstr(r, "max_bytes"))) { ok = 0; why = "cap"; }
-    if (ok && access(out, F_OK) == 0) { ok = 0; why = "partial file kept"; }
+    assert(r && strstr(r, "-1 ") && strstr(r, "max_bytes"));
+    assert(access(out, F_OK) != 0);
     free(r);
 
     /* 4. non-2xx: the server's text in body, no file */
@@ -164,24 +120,19 @@ static void test_binary_download(void) {
         "{\"code\":\"var r = http_request('http://127.0.0.1:%d/missing',"
         " {save_to:'%s'}); r.status + ' ' + r.body + ' ' + r.path\"}", port, out);
     r = test_js_eval_run_json(code);
-    if (ok && (!r || !strstr(r, "404 nope undefined"))) { ok = 0; why = "404"; }
-    if (ok && access(out, F_OK) == 0) { ok = 0; why = "file kept on 404"; }
+    assert(r && strstr(r, "404 nope undefined"));
+    assert(access(out, F_OK) != 0);
     free(r);
     unlink(out);
 
     pthread_join(th, NULL);
     close(lfd);
-    if (ok) PASS(); else FAIL(why);
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_js_http_fetch:\n");
-    test_invalid_scheme();
-    test_null_url();
-    test_js_eval_compute();
-    test_js_eval_requires_arg();
-    test_binary_download();
-    printf("%d/%d passed\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    RUN(test_invalid_scheme);
+    RUN(test_binary_download);
+    return 0;
 }

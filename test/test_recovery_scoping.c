@@ -149,13 +149,11 @@ static void test_recovery_scoping(void) {
     db_set_instance_id(NULL);
     db_close(db);
     clean_db();
-    printf("  PASS test_recovery_scoping\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_recovery_scoping:\n");
-    test_recovery_scoping();
-    printf("all recovery scoping tests passed\n");
+    RUN(test_recovery_scoping);
     return 0;
 }

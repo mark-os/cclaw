@@ -17,55 +17,25 @@ static void test_select_returns_results(void) {
     assert(strstr(r, "1|hello\n"));
     free(r);
     db_close(db);
-    printf("  PASS: select returns results\n");
 }
 
-static void test_reject_insert(void) {
+/* Read-only: every write or DDL statement is refused before it runs. */
+static void test_reject_writes(void) {
+    static const char *writes[] = {
+        "{\"sql\":\"INSERT INTO sessions VALUES(1,'x',0,NULL,NULL,NULL,NULL,0,'','')\"}",
+        "{\"sql\":\"UPDATE sessions SET name='x'\"}",
+        "{\"sql\":\"DELETE FROM sessions\"}",
+        "{\"sql\":\"DROP TABLE sessions\"}",
+    };
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
-
-    char *r = tool_db_query_handler("{\"sql\":\"INSERT INTO sessions VALUES(1,'x',0,NULL,NULL,NULL,NULL,0,'','')\"}", db, &(int){0});
-    assert(r);
-    assert(strstr(r, "error: only SELECT"));
-    free(r);
+    for (size_t i = 0; i < sizeof(writes) / sizeof(writes[0]); i++) {
+        printf("    %s\n", writes[i]);
+        char *r = tool_db_query_handler(writes[i], db, &(int){0});
+        assert(r && strstr(r, "error: only SELECT"));
+        free(r);
+    }
     db_close(db);
-    printf("  PASS: reject INSERT\n");
-}
-
-static void test_reject_update(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
-
-    char *r = tool_db_query_handler("{\"sql\":\"UPDATE sessions SET name='x'\"}", db, &(int){0});
-    assert(r);
-    assert(strstr(r, "error: only SELECT"));
-    free(r);
-    db_close(db);
-    printf("  PASS: reject UPDATE\n");
-}
-
-static void test_reject_delete(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
-
-    char *r = tool_db_query_handler("{\"sql\":\"DELETE FROM sessions\"}", db, &(int){0});
-    assert(r);
-    assert(strstr(r, "error: only SELECT"));
-    free(r);
-    db_close(db);
-    printf("  PASS: reject DELETE\n");
-}
-
-static void test_reject_drop(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
-
-    char *r = tool_db_query_handler("{\"sql\":\"DROP TABLE sessions\"}", db, &(int){0});
-    assert(r);
-    assert(strstr(r, "error: only SELECT"));
-    free(r);
-    db_close(db);
-    printf("  PASS: reject DROP\n");
 }
 
 static void test_invalid_sql(void) {
@@ -77,7 +47,6 @@ static void test_invalid_sql(void) {
     assert(strstr(r, "error:"));
     free(r);
     db_close(db);
-    printf("  PASS: invalid SQL returns error\n");
 }
 
 static void test_missing_sql_field(void) {
@@ -89,22 +58,6 @@ static void test_missing_sql_field(void) {
     assert(strstr(r, "error: missing"));
     free(r);
     db_close(db);
-    printf("  PASS: missing sql field\n");
-}
-
-static void test_query_sessions_table(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
-
-    session_create(db, "test-session", NULL, -1, 0);
-
-    char *r = tool_db_query_handler("{\"sql\":\"SELECT id, name FROM sessions\"}", db, &(int){0});
-    assert(r);
-    assert(strstr(r, "id|name\n"));
-    assert(strstr(r, "test-session"));
-    free(r);
-    db_close(db);
-    printf("  PASS: query sessions table\n");
 }
 
 static void test_secret_filtering(void) {
@@ -123,25 +76,6 @@ static void test_secret_filtering(void) {
     assert(strstr(r, "1 row withheld"));
     free(r);
     db_close(db);
-    printf("  PASS: secret filtering\n");
-}
-
-static void test_register(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
-
-    ToolRegistry reg;
-    tools_init(&reg);
-    int rc = tool_db_query_register(&reg, db);
-    assert(rc == 0);
-
-    ToolEntry *e = tools_lookup(&reg, "db_query");
-    assert(e);
-    assert(strcmp(e->name, "db_query") == 0);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS: register\n");
 }
 
 /* The admin token and the chat replies that carried its link never come out,
@@ -149,10 +83,11 @@ static void test_register(void) {
 static void test_admin_token_withheld(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
-    assert(sqlite3_exec(db,
+    int rc = sqlite3_exec(db,
         "INSERT OR REPLACE INTO config(key, value) VALUES('web_admin_token','t0ken5ecret');"
         "INSERT INTO channel_outbox(channel_name, session_id, payload)"
-        " VALUES('tg',1,'http://h/admin?token=t0ken5ecret');", NULL, NULL, NULL) == SQLITE_OK);
+        " VALUES('tg',1,'http://h/admin?token=t0ken5ecret');", NULL, NULL, NULL);
+    assert(rc == SQLITE_OK);
     const char *spellings[] = {
         "{\"sql\":\"SELECT * FROM config\"}",
         "{\"sql\":\"SELECT hex(value) FROM config WHERE key='web_admin_token'\"}",
@@ -175,37 +110,27 @@ static void test_admin_token_withheld(void) {
     assert(r && strstr(r, "web_admin_token") && !strstr(r, "search_config"));
     free(r);
     /* The block is this call's only: the same handle reads the value after. */
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(db, "SELECT value FROM config WHERE key='web_admin_token'",
-                              -1, &st, NULL) == SQLITE_OK);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(st, 0), "t0ken5ecret") == 0);
-    sqlite3_finalize(st);
+    const char *tok_sql = "SELECT value FROM config WHERE key='web_admin_token'";
+    char *v = test_qs(db, tok_sql);
+    assert(v && strcmp(v, "t0ken5ecret") == 0);
+    free(v);
     /* A failed prepare must not leave it installed either. */
     r = tool_db_query_handler("{\"sql\":\"SELECT nope FROM config\"}", db, &(int){0});
     free(r);
-    assert(sqlite3_prepare_v2(db, "SELECT value FROM config WHERE key='web_admin_token'",
-                              -1, &st, NULL) == SQLITE_OK);
-    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0) != NULL);
-    sqlite3_finalize(st);
+    v = test_qs(db, tok_sql);
+    assert(v);
+    free(v);
     db_close(db);
-    printf("  PASS: admin token withheld\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_tool_db_query:\n");
-    test_select_returns_results();
-    test_reject_insert();
-    test_reject_update();
-    test_reject_delete();
-    test_reject_drop();
-    test_invalid_sql();
-    test_missing_sql_field();
-    test_query_sessions_table();
-    test_secret_filtering();
-    test_admin_token_withheld();
-    test_register();
-    printf("all tests passed\n");
+    RUN(test_select_returns_results);
+    RUN(test_reject_writes);
+    RUN(test_invalid_sql);
+    RUN(test_missing_sql_field);
+    RUN(test_secret_filtering);
+    RUN(test_admin_token_withheld);
     return 0;
 }

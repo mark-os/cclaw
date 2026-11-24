@@ -89,7 +89,6 @@ static void test_install_lands_in_draft(void) {
     free(status);
 
     db_close(db);
-    printf("  PASS test_install_lands_in_draft\n");
 }
 
 static void test_check_then_activate(void) {
@@ -141,7 +140,6 @@ static void test_check_then_activate(void) {
     assert(channel_activate(db, "echo") == -1);
 
     db_close(db);
-    printf("  PASS test_check_then_activate\n");
 }
 
 static void test_check_reports_js_error(void) {
@@ -171,7 +169,6 @@ static void test_check_reports_js_error(void) {
     assert(status && strcmp(status, "draft") == 0);
     free(status);
     db_close(db);
-    printf("  PASS test_check_reports_js_error\n");
 }
 
 static char *chan_col(sqlite3 *db, const char *col, const char *name) {
@@ -230,7 +227,6 @@ static void test_swap_and_revert(void) {
     assert(channel_revert(db, "echo") == -1);
 
     db_close(db);
-    printf("  PASS test_swap_and_revert\n");
 }
 
 /* Admin notices land one outbox row per admin id from channel_state. */
@@ -265,7 +261,6 @@ static void test_notify_admins(void) {
     channel_notify_admins(db, "ghost", "x");
 
     db_close(db);
-    printf("  PASS test_notify_admins\n");
 }
 
 /* A channel that never stays healthy is retried forever, so restart_count
@@ -276,18 +271,16 @@ static void test_backoff_is_capped(void) {
     assert(channel_backoff_delay(8) == 256);
     for (int n = 9; n < 200; n++)
         assert(channel_backoff_delay(n) == CHANNEL_MAX_BACKOFF);
-    printf("  PASS test_backoff_is_capped\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_channel_lifecycle:\n");
-    test_install_lands_in_draft();
-    test_check_then_activate();
-    test_check_reports_js_error();
-    test_swap_and_revert();
-    test_notify_admins();
-    test_backoff_is_capped();
-    printf("all channel lifecycle tests passed\n");
+    RUN(test_install_lands_in_draft);
+    RUN(test_check_then_activate);
+    RUN(test_check_reports_js_error);
+    RUN(test_swap_and_revert);
+    RUN(test_notify_admins);
+    RUN(test_backoff_is_capped);
     return 0;
 }

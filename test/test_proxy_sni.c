@@ -238,7 +238,6 @@ static void test_sni_mismatch_blocked(void) {
 
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: SNI mismatch blocked (shared-IP CDN vhost hop refused)\n");
 }
 
 static void test_sni_match_allowed(void) {
@@ -278,7 +277,6 @@ static void test_sni_match_allowed(void) {
     close(fd);
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: SNI match allowed (relay proceeds)\n");
 }
 
 static void test_sni_absent_failopen(void) {
@@ -317,7 +315,6 @@ static void test_sni_absent_failopen(void) {
     close(fd);
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: non-TLS bytes fail open (relay proceeds)\n");
 }
 
 /* Send a numeric CONNECT preamble; returns the fd with the first response
@@ -373,7 +370,6 @@ static void sni_sensitive_host_denied(char *allow, const char *sni) {
 
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: SNI %s refused despite allow rule %s\n", sni, allow);
 }
 
 static void test_sni_sensitive_host_denied(void) {
@@ -411,7 +407,6 @@ static void test_numeric_needs_its_own_grant(void) {
 
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: numeric CONNECT needs its own grant; RESOLVE is gone\n");
 }
 
 static void test_sni_numeric_exact_grant_exempt(void) {
@@ -444,7 +439,6 @@ static void test_sni_numeric_exact_grant_exempt(void) {
     close(fd);
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: exact-IP grant exempt from the SNI gate\n");
 }
 
 static void test_no_sni_hello_denied_on_strict_port(void) {
@@ -490,7 +484,6 @@ static void test_no_sni_hello_denied_on_strict_port(void) {
 
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: no-SNI ClientHello denied on strict port (D7)\n");
 }
 
 static void test_no_sni_hello_failopen_off_strict_port(void) {
@@ -531,7 +524,6 @@ static void test_no_sni_hello_failopen_off_strict_port(void) {
     close(fd);
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: no-SNI ClientHello fails open off the strict port\n");
 }
 
 static void test_non_tls_failopen_on_strict_port(void) {
@@ -571,7 +563,6 @@ static void test_non_tls_failopen_on_strict_port(void) {
     close(fd);
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: non-TLS bytes fail open even on the strict port\n");
 }
 
 int main(void) {
@@ -579,18 +570,16 @@ int main(void) {
     alarm(15);   /* below make test's 20 s wrapper, so it can fire first */
     setup_tmpdir();
 
-    printf("test_proxy_sni:\n");
-    test_sni_mismatch_blocked();
-    test_sni_match_allowed();
-    test_sni_absent_failopen();
-    test_sni_sensitive_host_denied();
-    test_numeric_needs_its_own_grant();
-    test_sni_numeric_exact_grant_exempt();
-    test_no_sni_hello_denied_on_strict_port();
-    test_no_sni_hello_failopen_off_strict_port();
-    test_non_tls_failopen_on_strict_port();
+    RUN(test_sni_mismatch_blocked);
+    RUN(test_sni_match_allowed);
+    RUN(test_sni_absent_failopen);
+    RUN(test_sni_sensitive_host_denied);
+    RUN(test_numeric_needs_its_own_grant);
+    RUN(test_sni_numeric_exact_grant_exempt);
+    RUN(test_no_sni_hello_denied_on_strict_port);
+    RUN(test_no_sni_hello_failopen_off_strict_port);
+    RUN(test_non_tls_failopen_on_strict_port);
 
     cleanup_tmpdir();
-    printf("All proxy SNI tests passed.\n");
     return 0;
 }

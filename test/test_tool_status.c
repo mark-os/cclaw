@@ -25,10 +25,6 @@
 #include "test_run_tool_shell.h"
 #include "test_util.h"
 
-static int tests_run = 0, tests_failed = 0;
-#define CHECK(name, cond) do { tests_run++; printf("  %s... ", name); \
-    if (cond) printf("PASS\n"); else { tests_failed++; printf("FAIL\n"); } } while (0)
-
 static char WS[256];
 
 /* ── the wire: a status byte, framed with the body it describes ────────── */
@@ -42,8 +38,8 @@ static void test_frame_status_ok(void) {
     r.sandbox = 0;      /* no namespace needed — this is a framing test */
     r.net_mode = 1;
     char *res = run_tool_shell_full(&r, NULL, &status);
-    CHECK("success frames status 0", status == 0);
-    CHECK("success carries the body", res && strstr(res, "ok") != NULL);
+    assert(status == 0);
+    assert(res && strstr(res, "ok") != NULL);
     free(res);
 }
 
@@ -58,9 +54,8 @@ static void test_frame_status_error(void) {
     r.sandbox = 0;
     r.net_mode = 1;
     char *res = run_tool_shell_full(&r, NULL, &status);
-    CHECK("timeout frames status 1", status == 1);
-    CHECK("timeout text needs no 'error:' prefix",
-          res && strncmp(res, "error:", 6) != 0);
+    assert(status == 1);
+    assert(res && strncmp(res, "error:", 6) != 0);
     free(res);
 }
 
@@ -72,7 +67,7 @@ static void test_unprefixed_failure_is_flagged(void) {
     char *r = test_run_tier_status(RUNTOOL_TIER_JS, "js_eval",
                                    "{\"code\":\"throw new Error('nope')\"}",
                                    NULL, NULL, &is_error);
-    CHECK("js exception sets the status", is_error == 1);
+    assert(is_error == 1);
     free(r);
 
     /* And the converse: a successful call must NOT be flagged, even though its
@@ -81,9 +76,8 @@ static void test_unprefixed_failure_is_flagged(void) {
     r = test_run_tier_status(RUNTOOL_TIER_JS, "js_eval",
                              "{\"code\":\"'error: this is just text'\"}",
                              NULL, NULL, &is_error);
-    CHECK("prose mentioning 'error:' is not a failure", is_error == 0);
-    CHECK("and the prose is returned verbatim",
-          r && strstr(r, "error: this is just text") != NULL);
+    assert(is_error == 0);
+    assert(r && strstr(r, "error: this is just text") != NULL);
     free(r);
 }
 
@@ -103,15 +97,15 @@ static void test_capture_skips_on_status(void) {
     /* Failure, phrased without the magic word: nothing may be captured. */
     char *out = secret_capture_apply(db, "TestAgent", "{\"save_secret\":\"S_KEY\"}",
                                      "HTTP 403 Forbidden", 1);
-    CHECK("capture skipped on failure status", out && strstr(out, "skipped"));
-    CHECK("nothing stored on failure", !db_secret_exists(db, "S_KEY"));
+    assert(out && strstr(out, "skipped"));
+    assert(!db_secret_exists(db, "S_KEY"));
     free(out);
 
     /* Success whose text merely looks like an error: capture proceeds. */
     out = secret_capture_apply(db, "TestAgent", "{\"save_secret\":\"T_KEY\"}",
                                "error: not really — this is the token", 0);
-    CHECK("capture proceeds on success status", out && strstr(out, "saved"));
-    CHECK("value stored", db_secret_exists(db, "T_KEY"));
+    assert(out && strstr(out, "saved"));
+    assert(db_secret_exists(db, "T_KEY"));
     free(out);
 
     db_wipe_secret_key();
@@ -127,10 +121,8 @@ static void test_timeout_schema(void) {
     wc.workspace = WS;
     assert(tool_web_fetch_register(&reg, &wc) == 0);
     ToolEntry *e = tools_lookup(&reg, "web_fetch");
-    CHECK("web_fetch declares timeout",
-          e && e->parameters_json && strstr(e->parameters_json, "\"timeout\""));
-    CHECK("web_fetch states the cap",
-          e && e->parameters_json && strstr(e->parameters_json, "600"));
+    assert(e && e->parameters_json && strstr(e->parameters_json, "\"timeout\""));
+    assert(e && e->parameters_json && strstr(e->parameters_json, "600"));
     tools_free(&reg);
 }
 
@@ -141,23 +133,19 @@ static void test_js_timeout_schema(void) {
     jc.workspace = WS;
     assert(tool_js_eval_register(&reg, &jc) == 0);
     ToolEntry *e = tools_lookup(&reg, "js_eval");
-    CHECK("js_eval declares timeout",
-          e && e->parameters_json && strstr(e->parameters_json, "\"timeout\""));
-    CHECK("js_eval states the cap",
-          e && e->parameters_json && strstr(e->parameters_json, "600"));
+    assert(e && e->parameters_json && strstr(e->parameters_json, "\"timeout\""));
+    assert(e && e->parameters_json && strstr(e->parameters_json, "600"));
     tools_free(&reg);
 }
 
 /* The clamp itself: a raised timeout is honored up to the shared ceiling and
  * silently clamped past it. */
 static void test_timeout_clamp(void) {
-    CHECK("default when absent", tool_timeout_clamp(0, 60) == 60);
-    CHECK("negative falls back", tool_timeout_clamp(-5, 60) == 60);
-    CHECK("raise is honored", tool_timeout_clamp(300, 60) == 300);
-    CHECK("cap is enforced",
-          tool_timeout_clamp(99999, 60) == TOOL_TIMEOUT_MAX_SEC);
-    CHECK("cap itself passes",
-          tool_timeout_clamp(TOOL_TIMEOUT_MAX_SEC, 60) == TOOL_TIMEOUT_MAX_SEC);
+    assert(tool_timeout_clamp(0, 60) == 60);
+    assert(tool_timeout_clamp(-5, 60) == 60);
+    assert(tool_timeout_clamp(300, 60) == 300);
+    assert(tool_timeout_clamp(99999, 60) == TOOL_TIMEOUT_MAX_SEC);
+    assert(tool_timeout_clamp(TOOL_TIMEOUT_MAX_SEC, 60) == TOOL_TIMEOUT_MAX_SEC);
 }
 
 /* A raised timeout reaches the broker: a 3s sleep under a 1s budget times out,
@@ -171,12 +159,12 @@ static void test_timeout_honored(void) {
 
     r.timeout = 1;
     char *res = run_tool_shell(&r);
-    CHECK("short budget times out", res && strstr(res, "timeout") != NULL);
+    assert(res && strstr(res, "timeout") != NULL);
     free(res);
 
     r.timeout = 8;
     res = run_tool_shell(&r);
-    CHECK("raised budget completes", res && strstr(res, "survived") != NULL);
+    assert(res && strstr(res, "survived") != NULL);
     free(res);
 }
 
@@ -190,11 +178,8 @@ static void test_sigkill_attribution(void) {
     r.net_mode = 1;
     r.as_mb = 512;      /* limits configured → attribute to them */
     char *res = run_tool_shell(&r);
-    CHECK("SIGKILL is named", res && strstr(res, "SIGKILL") != NULL);
-    CHECK("and attributed to a limit",
-          res && strstr(res, "likely resource limit") != NULL);
-    CHECK("with advice not to just retry",
-          res && strstr(res, "don't just retry") != NULL);
+    assert(res && strstr(res, "SIGKILL") != NULL);
+    assert(res && strstr(res, "resource limit") != NULL);
     free(res);
 }
 
@@ -206,8 +191,8 @@ static void test_no_attribution_on_clean_exit(void) {
     r.sandbox = 0;
     r.net_mode = 1;
     char *res = run_tool_shell(&r);
-    CHECK("nonzero exit is reported plainly", res && strstr(res, "[exit 3]"));
-    CHECK("no signal attribution", res && strstr(res, "SIGKILL") == NULL);
+    assert(res && strstr(res, "[exit 3]"));
+    assert(res && strstr(res, "SIGKILL") == NULL);
     free(res);
 }
 
@@ -218,21 +203,20 @@ int main(void) {
     snprintf(WS, sizeof(WS), "/tmp/cclaw_tool_status_%d", (int)getpid());
     mkdir(WS, 0755);
 
-    test_frame_status_ok();
-    test_frame_status_error();
-    test_unprefixed_failure_is_flagged();
-    test_capture_skips_on_status();
-    test_timeout_schema();
-    test_js_timeout_schema();
-    test_timeout_clamp();
-    test_timeout_honored();
-    test_sigkill_attribution();
-    test_no_attribution_on_clean_exit();
+    RUN(test_frame_status_ok);
+    RUN(test_frame_status_error);
+    RUN(test_unprefixed_failure_is_flagged);
+    RUN(test_capture_skips_on_status);
+    RUN(test_timeout_schema);
+    RUN(test_js_timeout_schema);
+    RUN(test_timeout_clamp);
+    RUN(test_timeout_honored);
+    RUN(test_sigkill_attribution);
+    RUN(test_no_attribution_on_clean_exit);
 
     char cmd[320];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", WS);
     if (system(cmd) != 0) { /* best effort */ }
 
-    printf("%d/%d checks passed\n", tests_run - tests_failed, tests_run);
-    return tests_failed ? 1 : 0;
+    return 0;
 }

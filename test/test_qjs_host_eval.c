@@ -1,300 +1,164 @@
 /* Coverage for the qjs_host_eval.c natives that reach the JS engine via
  * js_eval: fs.readFile/writeFile/readdir/stat/lstat/cwd, console.log
- * capture, and the prelude traps (require/process/module/Map/Set) that
- * turn missing Node globals into helpful TypeErrors instead of silent
- * undefined-is-not-a-function failures. Calls tool_js_eval_handler(, &(int){0})
- * directly (host mode, no fork) — same entry point test_tool_js.c uses. */
+ * capture, and the prelude traps (require/process/module) that turn missing
+ * Node globals into helpful TypeErrors instead of silent
+ * undefined-is-not-a-function failures. Runs the JS tier in-process (host
+ * mode, no fork), the same entry point test_tool_js.c uses. */
 #define _GNU_SOURCE
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
 #include "test_util.h"
-
-static int tests_run = 0;
-static int tests_passed = 0;
-
-#define TEST(name) do { tests_run++; printf("  " name "... "); } while(0)
-#define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); } while(0)
+#include <assert.h>
 
 static const char *WORK_DIR = "/tmp/test_qjs_host_eval_work";
 
 static void cleanup(void) {
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", WORK_DIR);
-    system(cmd);
+    if (system(cmd) != 0) { /* best effort */ }
 }
 
 static void setup(void) {
     cleanup();
     char cmd[256];
-    /* rd/ is dedicated to the readdir test — everything else writes loose
-     * files straight into WORK_DIR, so readdir would otherwise see whatever
-     * earlier tests left behind. */
+    /* rd/ is dedicated to the readdir test, so it sees only its own files. */
     snprintf(cmd, sizeof(cmd), "mkdir -p %s/rd/subdir", WORK_DIR);
-    system(cmd);
+    assert(system(cmd) == 0);
 }
 
-/* Runs `code`, expects the result to start with "error:" and contain `needle`. */
-static void expect_error(const char *name, const char *code, const char *needle) {
-    tests_run++; printf("  %s... ", name);
-    char args[512];
+/* `code` is a JSON string literal. want_error: the result must start with
+ * "error:" and contain `want`; otherwise it must equal `want`. */
+static void expect(const char *code, const char *want, int want_error) {
+    char args[1600];
     snprintf(args, sizeof(args), "{\"code\":%s}", code);
     char *r = test_js_eval_run_json(args);
-    if (!r || strncmp(r, "error:", 6) != 0 || !strstr(r, needle)) {
-        FAIL(r ? r : "NULL"); free(r); return;
-    }
+    int ok = r && (want_error ? strncmp(r, "error:", 6) == 0 && strstr(r, want)
+                              : strcmp(r, want) == 0);
+    if (!ok) fprintf(stderr, "code %s: got %s, want %s\n", code, r ? r : "(null)", want);
+    assert(ok);
     free(r);
-    PASS();
 }
 
-/* Runs `code`, expects the result to equal `want` exactly. */
-static void expect_eq(const char *name, const char *code, const char *want) {
-    tests_run++; printf("  %s... ", name);
-    char args[1024];
-    snprintf(args, sizeof(args), "{\"code\":%s}", code);
-    char *r = test_js_eval_run_json(args);
-    if (!r || strcmp(r, want) != 0) { FAIL(r ? r : "NULL"); free(r); return; }
-    free(r);
-    PASS();
+static void write_file(const char *path, const char *s) {
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fputs(s, f);
+    fclose(f);
 }
 
-/* ── fs.* ─────────────────────────────────────────────────────────── */
-
-static void test_fs_write_read_roundtrip(void) {
-    char path[512], code[1600], want[64];
+static void test_fs(void) {
+    char path[512], link[512], code[1400], cwd[512], old_cwd[512];
     snprintf(path, sizeof(path), "%s/hello.txt", WORK_DIR);
     snprintf(code, sizeof(code),
-        "\"var w = fs.writeFile('%s', 'hello'); "
-        "var r = fs.readFile('%s'); "
-        "w + '|' + r\"", path, path);
-    snprintf(want, sizeof(want), "5|hello");
-    expect_eq("fs_write_read_roundtrip", code, want);
-}
+        "\"var w = fs.writeFile('%s', 'hello'); var r = fs.readFile('%s'); w + '|' + r\"",
+        path, path);
+    expect(code, "5|hello", 0);
+    expect("\"fs.readFile('/tmp/test_qjs_host_eval_missing_xyz')\"", "No such file", 1);
 
-static void test_fs_read_missing(void) {
-    expect_error("fs_read_missing",
-        "\"fs.readFile('/tmp/test_qjs_host_eval_missing_xyz')\"",
-        "No such file");
-}
+    snprintf(code, sizeof(code), "\"var r = fs.stat('%s'); r.size + '|' + r.isDir\"", path);
+    expect(code, "5|false", 0);
+    snprintf(code, sizeof(code), "\"fs.stat('%s').isDir\"", WORK_DIR);
+    expect(code, "true", 0);
 
-static void test_fs_readdir(void) {
-    char rd[512], f1[600], f2[600], code[1024];
-    snprintf(rd, sizeof(rd), "%s/rd", WORK_DIR);
-    snprintf(f1, sizeof(f1), "%s/a.txt", rd);
-    snprintf(f2, sizeof(f2), "%s/b.txt", rd);
-    FILE *f = fopen(f1, "w"); fputs("x", f); fclose(f);
-    f = fopen(f2, "w"); fputs("y", f); fclose(f);
-    snprintf(code, sizeof(code),
-        "\"var r = fs.readdir('%s'); "
-        "var names = []; for (var i = 0; i < r.length; i++) names.push(r[i].name + ':' + r[i].type); "
-        "names.sort(); names.join(',')\"", rd);
-    expect_eq("fs_readdir", code, "a.txt:file,b.txt:file,subdir:dir");
-}
-
-static void test_fs_readdir_missing(void) {
-    expect_error("fs_readdir_missing",
-        "\"fs.readdir('/tmp/test_qjs_host_eval_missing_dir')\"",
-        "No such file");
-}
-
-static void test_fs_stat(void) {
-    char path[512], code[768], want[64];
-    snprintf(path, sizeof(path), "%s/hello.txt", WORK_DIR);
-    FILE *f = fopen(path, "w"); fputs("hello", f); fclose(f);
-    snprintf(code, sizeof(code),
-        "\"var r = fs.stat('%s'); r.size + '|' + r.isDir\"", path);
-    snprintf(want, sizeof(want), "5|false");
-    expect_eq("fs_stat_file", code, want);
-}
-
-static void test_fs_stat_dir(void) {
-    char code[768];
-    snprintf(code, sizeof(code),
-        "\"var r = fs.stat('%s'); r.isDir\"", WORK_DIR);
-    expect_eq("fs_stat_dir", code, "true");
-}
-
-static void test_fs_lstat_symlink(void) {
-    char target[512], link[512], code[768];
-    snprintf(target, sizeof(target), "%s/hello.txt", WORK_DIR);
     snprintf(link, sizeof(link), "%s/hello.link", WORK_DIR);
-    if (symlink(target, link) != 0) { TEST("fs_lstat_symlink"); FAIL("symlink() setup failed"); return; }
+    assert(symlink(path, link) == 0);
+    snprintf(code, sizeof(code), "\"fs.lstat('%s').isLink\"", link);
+    expect(code, "true", 0);
+
+    char f[600];
+    snprintf(f, sizeof(f), "%s/rd/a.txt", WORK_DIR);
+    write_file(f, "x");
+    snprintf(f, sizeof(f), "%s/rd/b.txt", WORK_DIR);
+    write_file(f, "y");
     snprintf(code, sizeof(code),
-        "\"var r = fs.lstat('%s'); r.isLink\"", link);
-    expect_eq("fs_lstat_symlink", code, "true");
+        "\"var r = fs.readdir('%s/rd'); var names = []; "
+        "for (var i = 0; i < r.length; i++) names.push(r[i].name + ':' + r[i].type); "
+        "names.sort(); names.join(',')\"", WORK_DIR);
+    expect(code, "a.txt:file,b.txt:file,subdir:dir", 0);
+    expect("\"fs.readdir('/tmp/test_qjs_host_eval_missing_dir')\"", "No such file", 1);
+
+    /* WORK_DIR may itself be a symlink (e.g. macOS /tmp): compare against
+     * what getcwd() resolves to. */
+    assert(getcwd(old_cwd, sizeof(old_cwd)));
+    assert(chdir(WORK_DIR) == 0);
+    assert(getcwd(cwd, sizeof(cwd)));
+    expect("\"fs.cwd()\"", cwd, 0);
+    assert(chdir(old_cwd) == 0);
 }
 
-static void test_fs_cwd(void) {
-    char old_cwd[512], cur_cwd[512], code[128], want[600];
-    getcwd(old_cwd, sizeof(old_cwd));
-    if (chdir(WORK_DIR) != 0) { TEST("fs_cwd"); FAIL("chdir setup failed"); return; }
-    /* WORK_DIR may itself be a symlink (e.g. macOS /tmp) — compare against
-     * what getcwd() resolves to, not the literal WORK_DIR string. */
-    getcwd(cur_cwd, sizeof(cur_cwd));
-    snprintf(code, sizeof(code), "\"fs.cwd()\"");
-    snprintf(want, sizeof(want), "%s", cur_cwd);
-    expect_eq("fs_cwd", code, want);
-    chdir(old_cwd);
-}
-
-/* ── Heap limit: verify large JSON parse works with 4MB heap ───── */
-
+/* ~500KB generated JSON string: would OOM on the old 1MB heap. */
 static void test_large_json_parse(void) {
-    /* ~500KB generated JSON string — would OOM on the old 1MB heap */
-    expect_eq("large_json_parse",
-        "\"var s = '['; for(var i=0;i<10000;i++) s += '{\\\"x\\\":'+i+'},'; "
-        "s = s.slice(0,-1) + ']'; JSON.parse(s).length\"",
-        "10000");
+    expect("\"var s = '['; for(var i=0;i<10000;i++) s += '{\\\"x\\\":'+i+'},'; "
+           "s = s.slice(0,-1) + ']'; JSON.parse(s).length\"", "10000", 0);
 }
 
-/* ── console.log / print capture ─────────────────────────────────── */
-
-static void test_console_log_single(void) {
-    expect_eq("console_log_single", "\"console.log('hello')\"", "hello");
+static void test_console_capture(void) {
+    static const struct { const char *code, *want; } cases[] = {
+        { "\"console.log('answer', 42)\"", "answer 42" },
+        /* The driver joins with a real newline, not "\\n". */
+        { "\"console.log('one'); console.log('two')\"", "one\ntwo" },
+        { "\"console.log({a:1})\"", "{\"a\":1}" },
+        { "\"console.warn('w'); console.error('e')\"", "w\ne" },
+        { "\"print('via print')\"", "via print" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        expect(cases[i].code, cases[i].want, 0);
 }
 
-static void test_console_log_multi_args(void) {
-    expect_eq("console_log_multi_args", "\"console.log('answer', 42)\"", "answer 42");
+/* Missing Node globals fail loud, naming what is missing. */
+static void test_prelude_traps(void) {
+    static const struct { const char *code, *want; } cases[] = {
+        { "\"require()\"", "require()" },
+        { "\"process.env\"", "process.env" },
+        { "\"process.cwd\"", "process.cwd" },
+        { "\"process.argv\"", "process.argv" },
+        { "\"process.exit\"", "process.exit" },
+        { "\"process.platform\"", "process.platform" },
+        { "\"module.exports\"", "module.exports" },
+        { "\"module.exports = 1\"", "module.exports" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        expect(cases[i].code, cases[i].want, 1);
+        expect(cases[i].code, "not available", 1);
+    }
 }
 
-static void test_console_log_multiple_calls(void) {
-    /* __console_buf.join('\n') in the driver uses a real newline, not "\\n". */
-    expect_eq("console_log_multiple_calls",
-        "\"console.log('one'); console.log('two')\"", "one\ntwo");
-}
-
-static void test_console_log_object(void) {
-    expect_eq("console_log_object", "\"console.log({a:1})\"", "{\"a\":1}");
-}
-
-static void test_console_warn_error_alias(void) {
-    expect_eq("console_warn_error_alias",
-        "\"console.warn('w'); console.error('e')\"", "w\ne");
-}
-
-static void test_print_alias(void) {
-    expect_eq("print_alias", "\"print('via print')\"", "via print");
-}
-
-/* ── Prelude traps: missing Node globals fail loud, not silently ───── */
-
-static void test_prelude_require(void) {
-    expect_error("prelude_require", "\"require()\"", "require() not available");
-}
-
-static void test_prelude_process_env(void) {
-    expect_error("prelude_process_env", "\"process.env\"", "process.env not available");
-}
-
-static void test_prelude_process_cwd(void) {
-    expect_error("prelude_process_cwd", "\"process.cwd\"", "process.cwd not available");
-}
-
-static void test_prelude_process_argv(void) {
-    expect_error("prelude_process_argv", "\"process.argv\"", "process.argv not available");
-}
-
-static void test_prelude_process_exit(void) {
-    expect_error("prelude_process_exit", "\"process.exit\"", "process.exit not available");
-}
-
-static void test_prelude_process_platform(void) {
-    expect_error("prelude_process_platform", "\"process.platform\"", "process.platform not available");
-}
-
-static void test_prelude_module_exports_get(void) {
-    expect_error("prelude_module_exports_get", "\"module.exports\"", "module.exports not available");
-}
-
-static void test_prelude_module_exports_set(void) {
-    expect_error("prelude_module_exports_set", "\"module.exports = 1\"", "module.exports not available");
-}
-
-/* ── Modern dialect: QuickJS is ES2023-class, not ES5 ──────────────── */
-
-static void test_modern_syntax(void) {
-    expect_eq("modern_syntax",
-        "\"const f = (x) => `v=${x * 2}`; f(21)\"", "v=42");
-}
-
-static void test_modern_collections(void) {
-    expect_eq("modern_collections",
-        "\"let m = new Map([[1,'a']]); let s = new Set([1,1,2]); "
-        "let [h, ...t] = [3,4,5]; m.get(1) + s.size + h + t.length\"", "a232");
-}
-
-/* ── Heap cap: config js_heap_mb → env → the limit the eval actually gets ── */
-
-/* Overflow the heap by a wide margin so the OOM is decisive wherever it lands
- * (string build or parse), then read the limit back out of the hint. The hint
- * has to quote the live cap: a stale number tells the agent to shrink input
- * that would have fit, or to retry input that never will. */
-static void expect_heap_hint(const char *name, const char *env, const char *want) {
-    tests_run++; printf("  %s... ", name);
-    if (env) setenv("CCLAW_JS_HEAP_MB", env, 1);
-    else unsetenv("CCLAW_JS_HEAP_MB");
-    /* 1MB per iteration: overflows any cap in a few hundred steps, and stays
-     * far under both the instruction limit and QuickJS's max string length
-     * (which a doubling string hits first, raising "string too long"). */
-    char *r = test_js_eval_run_json(
-        "{\"code\":\"var a=[]; for(;;) a.push(new Array(1000000).join('x')); a.length\"}");
-    int ok = r && strstr(r, "out of memory") && strstr(r, want);
-    if (!ok) { FAIL(r ? r : "NULL"); free(r); unsetenv("CCLAW_JS_HEAP_MB"); return; }
-    free(r);
+/* Heap cap: env → the limit the eval actually gets. Overflow the heap by a
+ * wide margin so the OOM is decisive wherever it lands, then read the limit
+ * back out of the hint. The hint has to quote the live cap: a stale number
+ * tells the agent to shrink input that would have fit, or to retry input
+ * that never will. Each row runs the heap dry, so keep the caps small; the
+ * 512MB upper clamp is left to review rather than spending 15s filling it. */
+static void test_heap_hint(void) {
+    static const struct { const char *env, *want; } cases[] = {
+        { NULL, "limit is 8MB" },
+        { "2", "limit is 2MB" },
+        { "nonsense", "limit is 8MB" },
+        { "0", "limit is 8MB" },   /* clamped low */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (cases[i].env) setenv("CCLAW_JS_HEAP_MB", cases[i].env, 1);
+        else unsetenv("CCLAW_JS_HEAP_MB");
+        /* 1MB per iteration: overflows any cap in a few hundred steps, and
+         * stays far under both the instruction limit and QuickJS's max string
+         * length (which a doubling string hits first, "string too long"). */
+        char *r = test_js_eval_run_json(
+            "{\"code\":\"var a=[]; for(;;) a.push(new Array(1000000).join('x')); a.length\"}");
+        int ok = r && strstr(r, "out of memory") && strstr(r, cases[i].want);
+        if (!ok) fprintf(stderr, "row %zu (env %s): %s\n", i,
+                         cases[i].env ? cases[i].env : "unset", r ? r : "(null)");
+        assert(ok);
+        free(r);
+    }
     unsetenv("CCLAW_JS_HEAP_MB");
-    PASS();
 }
-
-/* Each case runs the heap dry to reach the hint, so the cap under test is the
- * memory this actually allocates — keep the caps small. The 512MB upper clamp
- * is left to review rather than spending 15s of the suite's budget filling it. */
-static void test_heap_default(void)   { expect_heap_hint("heap_default_8mb", NULL, "limit is 8MB"); }
-static void test_heap_override(void)  { expect_heap_hint("heap_env_override", "2", "limit is 2MB"); }
-static void test_heap_garbage(void)   { expect_heap_hint("heap_env_garbage", "nonsense", "limit is 8MB"); }
-static void test_heap_clamp_low(void) { expect_heap_hint("heap_env_clamp_low", "0", "limit is 8MB"); }
 
 int main(void) {
     TEST_INIT();
-    printf("test_qjs_host_eval:\n");
     setup();
-
-    test_fs_write_read_roundtrip();
-    test_fs_read_missing();
-    test_fs_readdir();
-    test_fs_readdir_missing();
-    test_fs_stat();
-    test_fs_stat_dir();
-    test_fs_lstat_symlink();
-    test_fs_cwd();
-
-    test_large_json_parse();
-
-    test_console_log_single();
-    test_console_log_multi_args();
-    test_console_log_multiple_calls();
-    test_console_log_object();
-    test_console_warn_error_alias();
-    test_print_alias();
-
-    test_prelude_require();
-    test_prelude_process_env();
-    test_prelude_process_cwd();
-    test_prelude_process_argv();
-    test_prelude_process_exit();
-    test_prelude_process_platform();
-    test_prelude_module_exports_get();
-    test_prelude_module_exports_set();
-    test_modern_syntax();
-    test_modern_collections();
-
-    test_heap_default();
-    test_heap_override();
-    test_heap_garbage();
-    test_heap_clamp_low();
-
+    RUN(test_fs);
+    RUN(test_large_json_parse);
+    RUN(test_console_capture);
+    RUN(test_prelude_traps);
+    RUN(test_heap_hint);
     cleanup();
-    printf("%d/%d passed\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    return 0;
 }

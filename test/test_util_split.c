@@ -24,14 +24,11 @@ static void expect(const char *name, const char *input, int max,
         for (int i = 0; i < n; i++) printf("    got[%d]=\"%s\"\n", i, out[i]);
         exit(1);
     }
-    printf("  %s... PASS\n", name);
     free(buf);
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_util_split\n");
-
     expect("null", NULL, 32, NULL, 0);
     expect("empty", "", 32, NULL, 0);
     expect("just_delims", " ,  ,\t, ", 32, NULL, 0);

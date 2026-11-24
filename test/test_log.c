@@ -63,7 +63,6 @@ static void test_level_gating(void) {
     assert(!strstr(all, "gated_warn_marker"));
     assert(!strstr(all, "gated_info_marker"));
     free(all);
-    printf("  level_gating... PASS\n");
 }
 
 static void test_trace_marking(void) {
@@ -76,7 +75,6 @@ static void test_trace_marking(void) {
     line = find_line("debug_marker");
     assert(line && !strstr(line, "trace=1"));
     free(line);
-    printf("  trace_marking... PASS\n");
 }
 
 static void test_ctx_suffix(void) {
@@ -95,7 +93,6 @@ static void test_ctx_suffix(void) {
     line = find_line("noctx_marker");
     assert(line && !strstr(line, "session="));
     free(line);
-    printf("  ctx_suffix... PASS\n");
 }
 
 static void test_heap_promote(void) {
@@ -116,7 +113,6 @@ static void test_heap_promote(void) {
     assert(strstr(line, "end_marker"));
     free(line);
     free(big);
-    printf("  heap_promote... PASS\n");
 }
 
 static void test_parse_and_name(void) {
@@ -132,13 +128,10 @@ static void test_parse_and_name(void) {
     /* Round-trip every level through name → parse. */
     for (LogLevel l = LOG_LEVEL_ERROR; l <= LOG_LEVEL_TRACE; l++)
         assert(log_level_parse(log_level_name(l)) == l);
-    printf("  parse_and_name... PASS\n");
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_log:\n");
-
     int fd = mkstemp(g_logfile);
     assert(fd >= 0);
     assert(dup2(fd, STDERR_FILENO) == STDERR_FILENO);
@@ -146,11 +139,11 @@ int main(void) {
 
     cclaw_log_init(1);  /* tees every write to (captured) stderr */
 
-    test_level_gating();
-    test_trace_marking();
-    test_ctx_suffix();
-    test_heap_promote();
-    test_parse_and_name();
+    RUN(test_level_gating);
+    RUN(test_trace_marking);
+    RUN(test_ctx_suffix);
+    RUN(test_heap_promote);
+    RUN(test_parse_and_name);
 
     unlink(g_logfile);
     printf("all log tests passed\n");

@@ -15,6 +15,8 @@
 #define DB_PATH "/tmp/test_skills.db"
 #define ROOT "/tmp/test_skills_dirs"
 
+static sqlite3 *db;
+
 static void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
     assert(f);
@@ -71,10 +73,9 @@ static void test_frontmatter(void) {
     assert(name == NULL);
     assert(desc && strcmp(desc, "Take structured notes") == 0);
     free(desc);
-    printf("  PASS test_frontmatter\n");
 }
 
-static void test_dirs_resolve(sqlite3 *db) {
+static void test_dirs_resolve(void) {
     size_t n = 0;
     char **dirs = skills_dirs_resolve(db, ROOT "/agents", "Ag", &n);
     assert(dirs && n == 2);  /* configured global dir + per-agent dir */
@@ -87,10 +88,9 @@ static void test_dirs_resolve(sqlite3 *db) {
     dirs = skills_dirs_resolve(db, ROOT "/agents", "NoSuchAgent", &n);
     assert(dirs == NULL && n == 0);
     config_set(db, "skills_dirs", "[\"" ROOT "/global\"]");
-    printf("  PASS test_dirs_resolve\n");
 }
 
-static void test_index(sqlite3 *db) {
+static void test_index(void) {
     char *ix = skills_index_build(db, ROOT "/agents", "Ag");
     assert(ix != NULL);
     /* index entries present with name/description/location */
@@ -108,12 +108,11 @@ static void test_index(sqlite3 *db) {
     /* progressive disclosure: body text never enters the prompt */
     assert(strstr(ix, "SECRET-BODY-MARKER") == NULL);
     free(ix);
-    printf("  PASS test_index\n");
 }
 
 /* Skills declared by an attached extension's manifest ($.skills[]) appear in
  * the index; scanned dirs shadow them (first name wins). */
-static void test_extension_skills(sqlite3 *db) {
+static void test_extension_skills(void) {
     mkdir(ROOT "/store", 0755);
     mkdir(ROOT "/store/pack", 0755);
     mkdir(ROOT "/store/pack/skills", 0755);
@@ -149,36 +148,33 @@ static void test_extension_skills(sqlite3 *db) {
     free(ix);
     sqlite3_exec(db, "UPDATE agent_extensions SET enabled=1 WHERE extension_name='pack'",
                  NULL, NULL, NULL);
-    printf("  PASS test_extension_skills\n");
 }
 
-static void test_no_skills(sqlite3 *db) {
+static void test_no_skills(void) {
     config_set(db, "skills_dirs", "[]");
     char *ix = skills_index_build(db, ROOT "/agents", "NoSuchAgent");
     assert(ix == NULL);
     config_set(db, "skills_dirs", "[\"" ROOT "/global\"]");
-    printf("  PASS test_no_skills\n");
 }
 
 int main(void) {
     TEST_INIT();
     alarm(10);
-    printf("test_skills:\n");
     test_db_clean(DB_PATH);
     setup_tree();
 
-    sqlite3 *db = test_db_open(DB_PATH);
+    db = test_db_open(DB_PATH);
     assert(db);
     test_seed_agent(db, "Ag");  /* agent_extensions.agent_name FK parent */
     assert(config_registry_sync(db) == 0);
     /* point discovery at the test tree, not the real ~ dirs */
     assert(config_set(db, "skills_dirs", "[\"" ROOT "/global\"]") == 0);
 
-    test_frontmatter();
-    test_dirs_resolve(db);
-    test_index(db);
-    test_extension_skills(db);
-    test_no_skills(db);
+    RUN(test_frontmatter);
+    RUN(test_dirs_resolve);
+    RUN(test_index);
+    RUN(test_extension_skills);
+    RUN(test_no_skills);
 
     db_close(db);
     test_db_clean(DB_PATH);

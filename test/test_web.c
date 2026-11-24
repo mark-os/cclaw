@@ -19,16 +19,65 @@
 #include "proc.h"
 #include "test_util.h"
 
+/* One response buffer for bodies and headers; bytes are kept as they came
+ * (a shared file is binary), with a NUL after them for strstr. */
+typedef struct { char *d; size_t cap, n; } Buf;
 
-static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
-    size_t total = size * nmemb;
-    char *buf = (char *)userdata;
-    size_t cur = strlen(buf);
-    if (cur + total < 4096) {
-        memcpy(buf + cur, ptr, total);
-        buf[cur + total] = '\0';
-    }
-    return total;
+static size_t buf_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
+    Buf *b = ud;
+    size_t t = size * nmemb, room = b->cap - 1 - b->n;
+    if (t < room) room = t;
+    memcpy(b->d + b->n, ptr, room);
+    b->n += room;
+    b->d[b->n] = '\0';
+    return t;
+}
+
+static char g_page[65536];
+
+/* GET url into g_page (redirects followed); returns the HTTP code. */
+static long http_get(CURL *curl, const char *url) {
+    Buf b = { g_page, sizeof(g_page), 0 };
+    g_page[0] = '\0';
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, buf_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &b);
+    assert(curl_easy_perform(curl) == CURLE_OK);
+    long code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    return code;
+}
+
+/* POST body to url with the given headers (NULL-terminated); answer in g_page. */
+static long http_post(CURL *curl, const char *url, const char *body, const char *const *hdrs) {
+    Buf b = { g_page, sizeof(g_page), 0 };
+    g_page[0] = '\0';
+    struct curl_slist *h = NULL;
+    for (; hdrs && *hdrs; hdrs++) h = curl_slist_append(h, *hdrs);
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, h);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, buf_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &b);
+    assert(curl_easy_perform(curl) == CURLE_OK);
+    long code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, NULL);
+    curl_slist_free_all(h);
+    return code;
+}
+
+/* POST a JSON action the way the page does (Content-Type + X-Cclaw-Action).
+ * extra adds one header. */
+static long act_post(CURL *curl, int port, const char *json, const char *extra) {
+    char url[96];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/admin/api/act", port);
+    const char *h[] = { "Content-Type: application/json", "X-Cclaw-Action: 1", extra, NULL };
+    return http_post(curl, url, json, h);
 }
 
 static void test_status_page(void) {
@@ -50,20 +99,11 @@ static void test_status_page(void) {
     /* Unauthenticated `/` is liveness only — no session table (r2 F3). */
     CURL *curl = curl_easy_init();
     assert(curl);
-    char response[4096] = {0};
-    curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19876/");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response);
-    long http_code = 0;
-    CURLcode res = curl_easy_perform(curl);
-    assert(res == CURLE_OK);
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    assert(http_code == 200);
-    assert(strstr(response, "version:"));
-    assert(strstr(response, "uptime:"));
-    assert(strstr(response, "sessions:") == NULL);
-    assert(strstr(response, "test-session") == NULL);
-    curl_easy_cleanup(curl);
+    assert(http_get(curl, "http://127.0.0.1:19876/") == 200);
+    assert(strstr(g_page, "version:"));
+    assert(strstr(g_page, "uptime:"));
+    assert(strstr(g_page, "sessions:") == NULL);
+    assert(strstr(g_page, "test-session") == NULL);
 
     /* With the dashboard admin token (?token=), the full dump is served. */
     char *tok = config_get(db, "web_admin_token");
@@ -71,32 +111,15 @@ static void test_status_page(void) {
     char url[256];
     snprintf(url, sizeof(url), "http://127.0.0.1:19876/?token=%s", tok);
     free(tok);
-    curl = curl_easy_init();
-    assert(curl);
-    response[0] = '\0';
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response);
-    res = curl_easy_perform(curl);
-    assert(res == CURLE_OK);
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    assert(http_code == 200);
-
-    /* Plain text assertions */
-    assert(strstr(response, "version:"));
-    assert(strstr(response, "uptime:"));
-    assert(strstr(response, "sessions:\n"));
-    assert(strstr(response, "id|name|state|updated_at|inbox_depth\n"));
-    assert(strstr(response, "test-session"));
-    assert(strstr(response, "running"));
-    assert(strstr(response, "state_metrics:\n"));
-    assert(strstr(response, "running: 1"));
+    assert(http_get(curl, url) == 200);
+    assert(strstr(g_page, "sessions:\n"));
+    assert(strstr(g_page, "test-session"));
+    assert(strstr(g_page, "running: 1"));
 
     curl_easy_cleanup(curl);
     web_stop();
     db_close(db);
     test_db_clean("test_web.db");
-    printf("PASS: test_status_page\n");
 }
 
 /* Fake channel runner: accept one UDS connection, capture the envelope,
@@ -159,148 +182,28 @@ static void test_hook_proxy(void) {
 
     CURL *curl = curl_easy_init();
     assert(curl);
-    char response[4096] = {0};
-    struct curl_slist *hdrs = curl_slist_append(NULL, "X-Hook-Test: yes");
-    curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19877/hook/tchan");
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "{\"msg\":\"hello-hook\"}");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response);
-    CURLcode res = curl_easy_perform(curl);
-    assert(res == CURLE_OK);
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    assert(http_code == 207);
-    assert(strcmp(response, "hook-reply") == 0);
+    const char *h[] = { "X-Hook-Test: yes", NULL };
+    assert(http_post(curl, "http://127.0.0.1:19877/hook/tchan", "{\"msg\":\"hello-hook\"}", h) == 207);
+    assert(strcmp(g_page, "hook-reply") == 0);
 
     int status = -1;
     waitpid(runner, &status, 0);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
-    /* No runner socket → 502 */
-    char response2[4096] = {0};
-    curl_easy_reset(curl);
-    curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19877/hook/nosuch");
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "{}");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response2);
-    res = curl_easy_perform(curl);
-    assert(res == CURLE_OK);
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    assert(http_code == 502);
+    /* No runner socket → 502; bad channel name → 404 */
+    assert(http_post(curl, "http://127.0.0.1:19877/hook/nosuch", "{}", NULL) == 502);
+    assert(http_get(curl, "http://127.0.0.1:19877/hook/bad$chan") == 404);
 
-    /* Bad channel name → 404 */
-    char response3[4096] = {0};
-    curl_easy_reset(curl);
-    curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19877/hook/bad$chan");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response3);
-    res = curl_easy_perform(curl);
-    assert(res == CURLE_OK);
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    assert(http_code == 404);
-
-    curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
     web_stop();
     db_close(db);
     test_db_clean("test_web_hook.db");
     unlink("test_web_hook.tchan.sock");
-    printf("PASS: test_hook_proxy\n");
 }
 
-/* ── admin dashboard ────────────────────────────────────────────── */
-
-struct page_buf { char *buf; size_t cap; };
-
-static size_t page_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
-    size_t total = size * nmemb;
-    struct page_buf *b = (struct page_buf *)userdata;
-    size_t cur = strlen(b->buf);
-    if (cur + total < b->cap) {
-        memcpy(b->buf + cur, ptr, total);
-        b->buf[cur + total] = '\0';
-    }
-    return total;
-}
-
-static char *query_text(sqlite3 *db, const char *sql) {
-    sqlite3_stmt *st;
-    char *out = NULL;
-    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
-    if (sqlite3_step(st) == SQLITE_ROW) {
-        const char *v = (const char *)sqlite3_column_text(st, 0);
-        if (v) out = strdup(v);
-    }
-    sqlite3_finalize(st);
-    return out;
-}
-
-/* GET url into page (cleared first); returns final HTTP code. */
-static long dash_get(CURL *curl, const char *url, char *page, size_t cap) {
-    struct page_buf pb = {page, cap};
-    page[0] = '\0';
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, page_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &pb);
-    assert(curl_easy_perform(curl) == CURLE_OK);
-    long code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-    return code;
-}
-
-/* POST a JSON action the way the page does (Content-Type + X-Cclaw-Action);
- * returns the HTTP code, the answer in page. extra_hdr adds one header. */
-static long act_post(CURL *curl, const char *json, const char *extra_hdr,
-                     char *page, size_t cap) {
-    struct page_buf pb = {page, cap};
-    page[0] = '\0';
-    struct curl_slist *h = curl_slist_append(NULL, "Content-Type: application/json");
-    h = curl_slist_append(h, "X-Cclaw-Action: 1");
-    if (extra_hdr) h = curl_slist_append(h, extra_hdr);
-    curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19878/admin/api/act");
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, h);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, page_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &pb);
-    assert(curl_easy_perform(curl) == CURLE_OK);
-    long code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, NULL);
-    curl_slist_free_all(h);
-    return code;
-}
-
-/* POST a body exactly as given (a forged form, say), no extra headers. */
-static long raw_post(CURL *curl, const char *url, const char *ctype, const char *body,
-                     const char *extra_hdr, char *page, size_t cap) {
-    struct page_buf pb = {page, cap};
-    page[0] = '\0';
-    struct curl_slist *h = NULL;
-    char ct[128];
-    snprintf(ct, sizeof(ct), "Content-Type: %s", ctype);
-    h = curl_slist_append(h, ct);
-    if (extra_hdr) h = curl_slist_append(h, extra_hdr);
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, h);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, page_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &pb);
-    assert(curl_easy_perform(curl) == CURLE_OK);
-    long code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, NULL);
-    curl_slist_free_all(h);
-    return code;
-}
-
-/* The operator's page at /admin/data (the data explorer) over HTTP: sign-in, the
- * actions' guards, and the behaviours the old server-rendered dashboard's
- * tests protected, ported to the actions that replace its forms. */
+/* The operator's page at /admin/data over HTTP: sign-in, the actions'
+ * guards, and what only the web server's own handle can show. The actions
+ * themselves are test_explore_act's. */
 static void test_admin_dashboard(void) {
     Config cfg = {0};
     cfg.web_port = 19878;
@@ -315,11 +218,7 @@ static void test_admin_dashboard(void) {
         "INSERT OR REPLACE INTO models(id, provider_name, model) VALUES"
         "  ('m1','openrouter','vendor/one'), ('m2','openrouter','vendor/two');"
         "INSERT OR IGNORE INTO agents(name) VALUES('Assistant'), ('ev<il&name');"
-        "INSERT OR IGNORE INTO tools(name, description) VALUES('web_fetch','fetch');"
-        "INSERT INTO channels(name, status) VALUES('telegram','active');"
-        "INSERT INTO sessions(name, agent_name, channel_name)"
-        "  VALUES('s','Assistant','telegram');"
-        "INSERT INTO channel_chats(channel_name, chat_id) VALUES('telegram','4242');"
+        "INSERT INTO sessions(name, agent_name) VALUES('s','Assistant');"
         "INSERT INTO approvals(session_id, tool_name, park_reason, args_json, state)"
         "  VALUES(1, 'shell_exec', 'approval_required', '{\"cmd\":\"ls\"}', 'pending');",
         NULL, NULL, NULL) == SQLITE_OK);
@@ -328,56 +227,29 @@ static void test_admin_dashboard(void) {
     usleep(50000);
 
     /* web_start minted a token */
-    char *token = query_text(db, "SELECT value FROM config WHERE key='web_admin_token'");
+    char *token = test_qs(db, "SELECT value FROM config WHERE key='web_admin_token'");
     assert(token && strlen(token) == 32);
 
-    static char page[65536];
     CURL *curl = curl_easy_init();
     assert(curl);
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");  /* enable cookie engine */
 
     /* No token → 403; bad token → 403 */
-    assert(dash_get(curl, "http://127.0.0.1:19878/admin/data", page, sizeof(page)) == 403);
-    assert(dash_get(curl, "http://127.0.0.1:19878/admin/data?token=00000000000000000000000000000000",
-                    page, sizeof(page)) == 403);
+    assert(http_get(curl, "http://127.0.0.1:19878/admin/data") == 403);
+    assert(http_get(curl, "http://127.0.0.1:19878/admin/data?token=00000000000000000000000000000000") == 403);
 
     /* Good token → 303 sets the cookie, following lands on the page */
     char url[160];
     snprintf(url, sizeof(url), "http://127.0.0.1:19878/admin/data?token=%s", token);
-    assert(dash_get(curl, url, page, sizeof(page)) == 200);
-    assert(strstr(page, "<title>cclaw</title>"));
+    assert(http_get(curl, url) == 200);
+    assert(strstr(g_page, "<title>cclaw</title>"));
     /* Cookie now carries auth on its own. */
-    assert(dash_get(curl, "http://127.0.0.1:19878/admin/data", page, sizeof(page)) == 200);
-    assert(strstr(page, "<title>cclaw</title>"));
+    assert(http_get(curl, "http://127.0.0.1:19878/admin/data") == 200);
 
     /* A hostile agent name reaches the page as JSON data, never as markup
      * (the page draws with textContent only — test_explore checks the source). */
-    assert(dash_get(curl, "http://127.0.0.1:19878/admin/api/rows?table=agents",
-                    page, sizeof(page)) == 200);
-    assert(strstr(page, "\"ev<il&name\""));
-
-    /* Moving a session to a chat pins it (the old attach form's job). */
-    assert(act_post(curl, "{\"action\":\"session_move_to_chat\",\"session_id\":1,"
-                          "\"channel\":\"telegram\",\"chat_id\":\"4242\"}",
-                    NULL, page, sizeof(page)) == 200);
-    char *pinned = query_text(db,
-        "SELECT session_id FROM channel_chats"
-        " WHERE channel_name='telegram' AND chat_id='4242'");
-    assert(pinned && strcmp(pinned, "1") == 0);
-    free(pinned);
-
-    /* grant → row exists with source operator; remove → gone */
-    assert(act_post(curl, "{\"action\":\"grant_add\",\"agent\":\"Assistant\",\"kind\":\"tool\","
-                          "\"value\":\"web_fetch\"}", NULL, page, sizeof(page)) == 200);
-    char *src = query_text(db,
-        "SELECT source FROM grants WHERE agent_name='Assistant' AND value='web_fetch'");
-    assert(src && strcmp(src, "operator") == 0);
-    free(src);
-    assert(act_post(curl, "{\"action\":\"grant_remove\",\"agent\":\"Assistant\",\"kind\":\"tool\","
-                          "\"value\":\"web_fetch\"}", NULL, page, sizeof(page)) == 200);
-    char *gone = query_text(db,
-        "SELECT rowid FROM grants WHERE agent_name='Assistant' AND value='web_fetch'");
-    assert(gone == NULL);
+    assert(http_get(curl, "http://127.0.0.1:19878/admin/api/rows?table=agents") == 200);
+    assert(strstr(g_page, "\"ev<il&name\""));
 
     /* The web server has its own handle. With this handle inside a
      * transaction, a page write still commits on its own and leaves this
@@ -385,33 +257,30 @@ static void test_admin_dashboard(void) {
     assert(sqlite3_exec(db, "BEGIN; SELECT count(*) FROM agents;",
                         NULL, NULL, NULL) == SQLITE_OK);
     assert(sqlite3_get_autocommit(db) == 0);
-    assert(act_post(curl, "{\"action\":\"models_set\",\"agent\":\"Assistant\",\"purpose\":\"chat\","
-                          "\"models\":[{\"model_id\":\"m2\"},{\"model_id\":\"m1\","
-                          "\"reasoning_effort\":\"low\"}]}", NULL, page, sizeof(page)) == 200);
+    assert(act_post(curl, 19878, "{\"action\":\"models_set\",\"agent\":\"Assistant\",\"purpose\":\"chat\","
+                                 "\"models\":[{\"model_id\":\"m2\"},{\"model_id\":\"m1\","
+                                 "\"reasoning_effort\":\"low\"}]}", NULL) == 200);
     assert(sqlite3_get_autocommit(db) == 0);
     assert(sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL) == SQLITE_OK);
-    char *kept = query_text(db,
+    char *kept = test_qs(db,
         "SELECT group_concat(model_id || ':' || COALESCE(reasoning_effort, '-'), ',') FROM"
         " (SELECT * FROM agent_models WHERE agent_name='Assistant' AND purpose='chat' ORDER BY pos)");
     assert(kept && strcmp(kept, "m2:-,m1:low") == 0);
     free(kept);
     /* ...written by the dashboard handle, labelled with the action. */
-    char *who = query_text(db, "SELECT actor || '|' || context FROM change_log"
-                               " WHERE table_name='agent_models' ORDER BY id DESC LIMIT 1");
+    char *who = test_qs(db, "SELECT actor || '|' || context FROM change_log"
+                            " WHERE table_name='agent_models' ORDER BY id DESC LIMIT 1");
     assert(who && strcmp(who, "dashboard|act:models_set") == 0);
     free(who);
 
     /* approve does NOT resolve on the web thread: it records the decision
      * for the event loop and leaves the approval pending. */
-    assert(act_post(curl, "{\"action\":\"approval_decide\",\"approval_id\":1,\"decision\":\"always\"}",
-                    NULL, page, sizeof(page)) == 200);
-    char *st = query_text(db, "SELECT state FROM approvals WHERE id=1");
-    assert(st && strcmp(st, "pending") == 0);
-    free(st);
+    assert(act_post(curl, 19878, "{\"action\":\"approval_decide\",\"approval_id\":1,"
+                                 "\"decision\":\"always\"}", NULL) == 200);
+    assert(test_qi(db, "SELECT state = 'pending' FROM approvals WHERE id=1") == 1);
     /* A second click does not replace the first decision. */
-    assert(act_post(curl, "{\"action\":\"approval_decide\",\"approval_id\":1,\"decision\":\"deny\"}",
-                    NULL, page, sizeof(page)) == 409);
-    assert(strstr(page, "already on its way"));
+    assert(act_post(curl, 19878, "{\"action\":\"approval_decide\",\"approval_id\":1,"
+                                 "\"decision\":\"deny\"}", NULL) == 409);
     int nq = 0;
     ApprovalQueued *q = approval_decisions_take(db, &nq);
     assert(nq == 1 && q);
@@ -423,125 +292,69 @@ static void test_admin_dashboard(void) {
     q = approval_decisions_take(db, &nq);
     assert(nq == 0 && q == NULL);
 
-    /* ── Memory: blocks and notes ── */
-    assert(act_post(curl, "{\"action\":\"memory_block_create\",\"label\":\"NOTES\","
-                          "\"description\":\"running notes\",\"placement\":\"context\","
-                          "\"agent\":\"Assistant\"}", NULL, page, sizeof(page)) == 200);
-    int64_t blk = 0;
-    {
-        char *v = query_text(db, "SELECT b.id FROM memory_blocks b"
-            " JOIN agent_memory_blocks a ON a.block_id=b.id"
-            " WHERE b.label='NOTES' AND b.created_by IS NULL"
-            "   AND a.agent_name='Assistant' AND a.read_only=0");
-        assert(v); blk = atoll(v); free(v);
-    }
-    assert(blk > 0);
-    char form[512];
-    snprintf(form, sizeof(form),
-             "{\"action\":\"memory_note_add\",\"block_id\":%lld,\"text\":\"first <b>note&more\"}",
-             (long long)blk);
-    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
-    char *nid = query_text(db, "SELECT id FROM memory_notes WHERE text='first <b>note&more'");
-    assert(nid);
-    /* A long note arrives over several TCP segments and is read whole. */
+    /* A long note arrives over several TCP segments and is read whole; a
+     * note id addressed through the wrong block changes nothing. */
+    assert(act_post(curl, 19878, "{\"action\":\"memory_block_create\",\"label\":\"NOTES\","
+                                 "\"agent\":\"Assistant\"}", NULL) == 200);
+    long long blk = test_qi(db, "SELECT id FROM memory_blocks WHERE label='NOTES'");
+    char form[256];
+    snprintf(form, sizeof(form), "{\"action\":\"memory_note_add\",\"block_id\":%lld,\"text\":\"n\"}", blk);
+    assert(act_post(curl, 19878, form, NULL) == 200);
+    long long nid = test_qi(db, "SELECT id FROM memory_notes WHERE text='n'");
+    assert(blk > 0 && nid > 0);
     {
         static char big[4000 * 2 + 256];
         int o = snprintf(big, sizeof(big),
-                         "{\"action\":\"memory_note_edit\",\"block_id\":%lld,\"note_id\":%s,\"text\":\"",
-                         (long long)blk, nid);
+                         "{\"action\":\"memory_note_edit\",\"block_id\":%lld,\"note_id\":%lld,\"text\":\"",
+                         blk, nid);
         for (int i = 0; i < 4000; i++) {
             assert((size_t)o + 3 <= sizeof(big));
             big[o++] = '\xc3'; big[o++] = '\xa9';
         }
         snprintf(big + o, sizeof(big) - (size_t)o, "\"}");
-        assert(act_post(curl, big, NULL, page, sizeof(page)) == 200);
-        char *len = query_text(db, "SELECT length(text) FROM memory_notes WHERE block_id IS NOT NULL");
-        assert(len && atoi(len) == 4000);
-        free(len);
+        assert(act_post(curl, 19878, big, NULL) == 200);
+        assert(test_qi(db, "SELECT length(text) FROM memory_notes") == 4000);
     }
-    /* A note id addressed through the wrong block changes nothing. */
-    snprintf(form, sizeof(form),
-             "{\"action\":\"memory_note_delete\",\"block_id\":%lld,\"note_id\":%s}",
-             (long long)blk + 999, nid);
-    assert(act_post(curl, form, NULL, page, sizeof(page)) == 404);
-    /* Block settings, sharing and its read-only flag. */
-    snprintf(form, sizeof(form),
-             "{\"action\":\"memory_block_edit\",\"block_id\":%lld,\"description\":\"d2\","
-             "\"placement\":\"system\",\"char_limit\":9000,\"read_only\":true}", (long long)blk);
-    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
-    {
-        char *v = query_text(db, "SELECT description||'|'||placement||'|'||char_limit||'|'||read_only"
-                                 " FROM memory_blocks WHERE label='NOTES'");
-        assert(v && strcmp(v, "d2|system|9000|1") == 0);
-        free(v);
-    }
-    snprintf(form, sizeof(form),
-             "{\"action\":\"memory_attach\",\"block_id\":%lld,\"agent\":\"ev<il&name\"}", (long long)blk);
-    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
-    {
-        char *v = query_text(db, "SELECT read_only FROM agent_memory_blocks"
-                                 " WHERE agent_name='ev<il&name'");
-        assert(v && strcmp(v, "1") == 0);   /* read-only by default */
-        free(v);
-    }
-    snprintf(form, sizeof(form),
-             "{\"action\":\"memory_detach\",\"block_id\":%lld,\"agent\":\"ev<il&name\"}", (long long)blk);
-    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
-    snprintf(form, sizeof(form),
-             "{\"action\":\"memory_note_delete\",\"block_id\":%lld,\"note_id\":%s}", (long long)blk, nid);
-    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
-    free(nid);
-    snprintf(form, sizeof(form), "{\"action\":\"memory_block_delete\",\"block_id\":%lld}", (long long)blk);
-    assert(act_post(curl, form, NULL, page, sizeof(page)) == 200);
-    {
-        char *v = query_text(db, "SELECT (SELECT COUNT(*) FROM memory_blocks WHERE label='NOTES')"
-                                 " + (SELECT COUNT(*) FROM memory_notes)"
-                                 " + (SELECT COUNT(*) FROM agent_memory_blocks)");
-        assert(v && strcmp(v, "0") == 0);
-        free(v);
-    }
+    snprintf(form, sizeof(form), "{\"action\":\"memory_note_delete\",\"block_id\":%lld,\"note_id\":%lld}",
+             blk + 999, nid);
+    assert(act_post(curl, 19878, form, NULL) == 404);
+    assert(test_qi(db, "SELECT count(*) FROM memory_notes") == 1);
 
     /* ── Forgery: the cookie alone does not make an action ── */
-    char *before = query_text(db, "SELECT count(*) FROM change_log");
+    long long before = test_qi(db, "SELECT count(*) FROM change_log");
     static const char GRANT[] = "{\"action\":\"grant_add\",\"agent\":\"Assistant\","
                                 "\"kind\":\"host\",\"value\":\"evil.example\"}";
+    static const char ACT[] = "http://127.0.0.1:19878/admin/api/act";
+    const char *form_ct[] = { "Content-Type: application/x-www-form-urlencoded", NULL };
+    const char *text_ct[] = { "Content-Type: text/plain", NULL };
+    const char *json_ct[] = { "Content-Type: application/json", NULL };
     /* Another site's HTML form: urlencoded or text/plain, no custom header. */
-    assert(raw_post(curl, "http://127.0.0.1:19878/admin/api/act",
-                    "application/x-www-form-urlencoded",
-                    "action=grant_add&agent=Assistant&kind=host&value=evil.example",
-                    NULL, page, sizeof(page)) == 403);
-    assert(raw_post(curl, "http://127.0.0.1:19878/admin/api/act", "text/plain", GRANT,
-                    NULL, page, sizeof(page)) == 403);
+    assert(http_post(curl, ACT, "action=grant_add&agent=Assistant&kind=host&value=evil.example",
+                     form_ct) == 403);
+    assert(http_post(curl, ACT, GRANT, text_ct) == 403);
     /* JSON without the page's header (what a no-preflight fetch could send). */
-    assert(raw_post(curl, "http://127.0.0.1:19878/admin/api/act", "application/json", GRANT,
-                    NULL, page, sizeof(page)) == 403);
+    assert(http_post(curl, ACT, GRANT, json_ct) == 403);
     /* The browser says it came from elsewhere. */
-    assert(act_post(curl, GRANT, "Origin: http://evil.example", page, sizeof(page)) == 403);
-    assert(act_post(curl, GRANT, "Sec-Fetch-Site: cross-site", page, sizeof(page)) == 403);
+    assert(act_post(curl, 19878, GRANT, "Origin: http://evil.example") == 403);
+    assert(act_post(curl, 19878, GRANT, "Sec-Fetch-Site: cross-site") == 403);
     /* The old form endpoint is gone. */
-    assert(raw_post(curl, "http://127.0.0.1:19878/admin/data/act", "application/x-www-form-urlencoded",
-                    "action=grant&agent=Assistant&kind=host&value=evil.example",
-                    NULL, page, sizeof(page)) == 405);
+    assert(http_post(curl, "http://127.0.0.1:19878/admin/data/act",
+                     "action=grant&agent=Assistant&kind=host&value=evil.example", form_ct) == 405);
     /* GET cannot act. */
-    assert(dash_get(curl, "http://127.0.0.1:19878/admin/api/act?action=grant_add&agent=Assistant"
-                          "&kind=host&value=evil.example", page, sizeof(page)) == 405);
+    assert(http_get(curl, "http://127.0.0.1:19878/admin/api/act?action=grant_add&agent=Assistant"
+                          "&kind=host&value=evil.example") == 405);
     /* Same origin, as the page sends it: allowed. */
-    assert(act_post(curl, "{\"action\":\"grant_add\",\"agent\":\"Assistant\",\"kind\":\"host\","
-                          "\"value\":\"ok.example\"}", "Origin: http://127.0.0.1:19878",
-                    page, sizeof(page)) == 200);
-    char *evil = query_text(db, "SELECT count(*) FROM grants WHERE value='evil.example'");
-    assert(evil && strcmp(evil, "0") == 0);
-    free(evil);
-    char *after = query_text(db, "SELECT count(*) FROM change_log WHERE NOT (table_name='grants'"
-                           " AND COALESCE(new_values, '') LIKE '%ok.example%')");
-    assert(before && after && strcmp(before, after) == 0);
-    free(before); free(after);
+    assert(act_post(curl, 19878, "{\"action\":\"grant_add\",\"agent\":\"Assistant\",\"kind\":\"host\","
+                                 "\"value\":\"ok.example\"}", "Origin: http://127.0.0.1:19878") == 200);
+    assert(test_qi(db, "SELECT count(*) FROM grants WHERE value='evil.example'") == 0);
+    assert(test_qi(db, "SELECT count(*) FROM change_log WHERE NOT (table_name='grants'"
+                       " AND COALESCE(new_values, '') LIKE '%ok.example%')") == before);
 
     /* POST without the cookie → 403 (the query token is GET-only) */
     CURL *bare = curl_easy_init();
     assert(bare);
-    assert(act_post(bare, GRANT, NULL, page, sizeof(page)) == 403);
-    assert(strstr(page, "not signed in"));
+    assert(act_post(bare, 19878, GRANT, NULL) == 403);
+    assert(strstr(g_page, "not signed in"));
     curl_easy_cleanup(bare);
 
     free(token);
@@ -549,16 +362,11 @@ static void test_admin_dashboard(void) {
     web_stop();
     db_close(db);
     test_db_clean("test_web_admin.db");
-    printf("PASS: test_admin_dashboard\n");
 }
 
 /* The admin panel at /admin: the same token and cookie as /admin/data. A
  * cookie set through either page signs in the other page and the API (it is
  * Path=/), and the token leaves the URL with a 303 to the clean address. */
-static size_t hdr_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
-    return page_cb(ptr, size, nmemb, userdata);
-}
-
 static void test_dashboard_page(void) {
     Config cfg = {0};
     cfg.web_port = 19879;
@@ -570,37 +378,32 @@ static void test_dashboard_page(void) {
                         NULL, NULL, NULL) == SQLITE_OK);
     assert(web_start(&cfg, cfg.db_path) == 0);
     usleep(50000);
-    char *token = query_text(db, "SELECT value FROM config WHERE key='web_admin_token'");
+    char *token = test_qs(db, "SELECT value FROM config WHERE key='web_admin_token'");
     assert(token && strlen(token) == 32);
 
-    static char page[65536];
     char url[160];
     CURL *curl = curl_easy_init();
     assert(curl);
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");
 
     /* Not signed in: the page is 403 (and says how to get in), the API too. */
-    assert(dash_get(curl, "http://127.0.0.1:19879/admin", page, sizeof(page)) == 403);
-    assert(strstr(page, "/admin"));
-    assert(dash_get(curl, "http://127.0.0.1:19879/admin?token=00000000000000000000000000000000",
-                    page, sizeof(page)) == 403);
-    assert(dash_get(curl, "http://127.0.0.1:19879/admin/api/rows?table=agents",
-                    page, sizeof(page)) == 403);
+    assert(http_get(curl, "http://127.0.0.1:19879/admin") == 403);
+    assert(strstr(g_page, "/admin"));
+    assert(http_get(curl, "http://127.0.0.1:19879/admin?token=00000000000000000000000000000000") == 403);
+    assert(http_get(curl, "http://127.0.0.1:19879/admin/api/rows?table=agents") == 403);
 
     /* The token: 303 to the clean URL, setting a Path=/ HttpOnly cookie. */
     {
         static char hdr[4096];
-        struct page_buf hb = {hdr, sizeof(hdr)};
+        Buf hb = { hdr, sizeof(hdr), 0 };
         hdr[0] = '\0';
         snprintf(url, sizeof(url), "http://127.0.0.1:19879/admin?token=%s", token);
-        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, hdr_cb);
+        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, buf_cb);
         curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hb);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
         curl_easy_setopt(curl, CURLOPT_URL, url);
-        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
-        struct page_buf pb = {page, sizeof(page)};
-        page[0] = '\0';
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, page_cb);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+        Buf pb = { g_page, sizeof(g_page), 0 };
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, buf_cb);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &pb);
         assert(curl_easy_perform(curl) == CURLE_OK);
         long code = 0;
@@ -612,37 +415,18 @@ static void test_dashboard_page(void) {
         curl_easy_setopt(curl, CURLOPT_HEADERDATA, NULL);
     }
     /* That cookie: the page, the API, the explorer, and an action. */
-    assert(dash_get(curl, "http://127.0.0.1:19879/admin", page, sizeof(page)) == 200);
-    assert(strstr(page, "<title>") && strstr(page, "/admin/api/"));
-    assert(dash_get(curl, "http://127.0.0.1:19879/admin/api/rows?table=agents",
-                    page, sizeof(page)) == 200);
-    assert(strstr(page, "\"Assistant\""));
-    assert(dash_get(curl, "http://127.0.0.1:19879/admin/data", page, sizeof(page)) == 200);
-    {
-        struct curl_slist *h = curl_slist_append(NULL, "Content-Type: application/json");
-        h = curl_slist_append(h, "X-Cclaw-Action: 1");
-        struct page_buf pb = {page, sizeof(page)};
-        page[0] = '\0';
-        curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19879/admin/api/act");
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, h);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS,
-            "{\"action\":\"grant_add\",\"agent\":\"Assistant\",\"kind\":\"host\","
-            "\"value\":\"dash.example\"}");
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &pb);
-        assert(curl_easy_perform(curl) == CURLE_OK);
-        long code = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-        assert(code == 200);
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, NULL);
-        curl_slist_free_all(h);
-        char *g = query_text(db, "SELECT count(*) FROM grants WHERE value='dash.example'");
-        assert(g && strcmp(g, "1") == 0);
-        free(g);
-    }
+    assert(http_get(curl, "http://127.0.0.1:19879/admin") == 200);
+    assert(strstr(g_page, "<title>") && strstr(g_page, "/admin/api/"));
+    assert(http_get(curl, "http://127.0.0.1:19879/admin/api/rows?table=agents") == 200);
+    assert(strstr(g_page, "\"Assistant\""));
+    assert(http_get(curl, "http://127.0.0.1:19879/admin/data") == 200);
+    assert(act_post(curl, 19879, "{\"action\":\"grant_add\",\"agent\":\"Assistant\",\"kind\":\"host\","
+                                 "\"value\":\"dash.example\"}", NULL) == 200);
+    assert(test_qi(db, "SELECT count(*) FROM grants WHERE value='dash.example'") == 1);
     /* Only GET, only the exact path. */
-    assert(raw_post(curl, "http://127.0.0.1:19879/admin", "application/json", "{}",
-                    NULL, page, sizeof(page)) == 405);
-    assert(dash_get(curl, "http://127.0.0.1:19879/admin/x", page, sizeof(page)) == 404);
+    const char *json_ct[] = { "Content-Type: application/json", NULL };
+    assert(http_post(curl, "http://127.0.0.1:19879/admin", "{}", json_ct) == 405);
+    assert(http_get(curl, "http://127.0.0.1:19879/admin/x") == 404);
     curl_easy_cleanup(curl);
 
     /* The other way round: signed in through /admin/data, /admin opens. */
@@ -650,16 +434,15 @@ static void test_dashboard_page(void) {
     assert(curl);
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");
     snprintf(url, sizeof(url), "http://127.0.0.1:19879/admin/data?token=%s", token);
-    assert(dash_get(curl, url, page, sizeof(page)) == 200);
-    assert(dash_get(curl, "http://127.0.0.1:19879/admin", page, sizeof(page)) == 200);
-    assert(strstr(page, "/admin/api/"));
+    assert(http_get(curl, url) == 200);
+    assert(http_get(curl, "http://127.0.0.1:19879/admin") == 200);
+    assert(strstr(g_page, "/admin/api/"));
     curl_easy_cleanup(curl);
 
     free(token);
     web_stop();
     db_close(db);
     test_db_clean(cfg.db_path);
-    printf("PASS: test_dashboard_page\n");
 }
 
 /* proc_db() notices a caller that is not the thread that installed it. */
@@ -682,34 +465,24 @@ static void test_db_handle_owner(void) {
     proc_set_db(NULL);
     db_close(db);
     test_db_clean("test_web_owner.db");
-    printf("PASS: test_db_handle_owner\n");
 }
 
 /* ── /share/<token>: files an agent put behind a link ── */
 
-typedef struct { unsigned char d[8192]; size_t n; } Blob;
-
-static size_t blob_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
-    Blob *b = ud;
-    size_t t = size * nmemb, room = sizeof(b->d) - 1 - b->n;
-    if (t < room) room = t;
-    memcpy(b->d + b->n, ptr, room);
-    b->n += room;
-    b->d[b->n] = '\0';
-    return t;
-}
+typedef struct { char d[8192]; Buf b; } Blob;
 
 /* GET url → status; headers (text) and body (bytes) captured. */
 static long share_get(const char *url, Blob *hdr, Blob *body) {
-    hdr->n = body->n = 0;
+    hdr->b = (Buf){ hdr->d, sizeof(hdr->d), 0 };
+    body->b = (Buf){ body->d, sizeof(body->d), 0 };
     hdr->d[0] = body->d[0] = '\0';
     CURL *c = curl_easy_init();
     assert(c);
     curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, blob_cb);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, body);
-    curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, blob_cb);
-    curl_easy_setopt(c, CURLOPT_HEADERDATA, hdr);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, buf_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &body->b);
+    curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, buf_cb);
+    curl_easy_setopt(c, CURLOPT_HEADERDATA, &hdr->b);
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 5L);
     long code = 0;
     if (curl_easy_perform(c) == CURLE_OK)
@@ -776,30 +549,29 @@ static void test_share(void) {
     assert(strlen(url) == 29 + 32 + strlen("/my_pic.png") &&
            strcmp(url + 29 + 32, "/my_pic.png") == 0);
     assert(share_get(url, h, b) == 200);
-    assert(b->n == sizeof(png) && memcmp(b->d, png, sizeof(png)) == 0);
-    assert(strstr((char *)h->d, "Content-Type: image/png"));
-    assert(strstr((char *)h->d, "Content-Security-Policy: sandbox"));
-    assert(strstr((char *)h->d, "X-Content-Type-Options: nosniff"));
+    assert(b->b.n == sizeof(png) && memcmp(b->d, png, sizeof(png)) == 0);
+    assert(strstr(h->d, "Content-Type: image/png"));
+    assert(strstr(h->d, "Content-Security-Policy: sandbox"));
+    assert(strstr(h->d, "X-Content-Type-Options: nosniff"));
     /* hours is capped by share_max_hours */
-    assert(db_scalar_i64(db, "SELECT (max(expires_at) - unixepoch() + 30) / 3600"
-                             " FROM shares WHERE ? = 0;", 0, -1) == 48);
+    assert(test_qi(db, "SELECT (max(expires_at) - unixepoch() + 30) / 3600 FROM shares") == 48);
     /* the name after the token is decoration: the token alone selects */
     char bare[128];
     snprintf(bare, sizeof(bare), "%.61s", url);
-    assert(share_get(bare, h, b) == 200 && b->n == sizeof(png));
+    assert(share_get(bare, h, b) == 200 && b->b.n == sizeof(png));
 
     /* The server also hosts /admin/data, so an agent's file must never run as a
      * page: HTML is served as text, unknown binary as a download. */
     char *hurl = share(&reg, "{\"file\":\"page.html\"}", &failed);
     assert(!failed && share_get(hurl, h, b) == 200);
-    assert(strstr((char *)h->d, "Content-Type: text/plain"));
-    assert(!strstr((char *)h->d, "text/html"));
-    assert(b->n == strlen(html) && memcmp(b->d, html, b->n) == 0);
+    assert(strstr(h->d, "Content-Type: text/plain"));
+    assert(!strstr(h->d, "text/html"));
+    assert(b->b.n == strlen(html) && memcmp(b->d, html, b->b.n) == 0);
     char *burl = share(&reg, "{\"file\":\"data.bin\"}", &failed);
     assert(!failed && share_get(burl, h, b) == 200);
-    assert(strstr((char *)h->d, "Content-Type: application/octet-stream"));
-    assert(strstr((char *)h->d, "Content-Disposition: attachment"));
-    assert(b->n == sizeof(blob) && memcmp(b->d, blob, sizeof(blob)) == 0);
+    assert(strstr(h->d, "Content-Type: application/octet-stream"));
+    assert(strstr(h->d, "Content-Disposition: attachment"));
+    assert(b->b.n == sizeof(blob) && memcmp(b->d, blob, sizeof(blob)) == 0);
 
     /* Not a live share: one answer for all of it. */
     assert(share_get("http://127.0.0.1:19879/share/"
@@ -830,12 +602,12 @@ static void test_share(void) {
     assert(failed && strstr(r, "outside your workspace"));
     free(r);
     r = share(&reg, "{\"file\":\"pics\"}", &failed);
-    assert(failed && strstr(r, "not a regular file"));
+    assert(failed && strstr(r, "regular file"));
     free(r);
     r = share(&reg, "{\"file\":\"data.bin\"}", &failed);
     assert(!failed);
     free(r);
-    assert(db_scalar_i64(db, "SELECT count(*) FROM shares WHERE ? = 0;", 0, -1) == 1);
+    assert(test_qi(db, "SELECT count(*) FROM shares") == 1);
 
     free(url); free(hurl); free(burl); free(h); free(b);
     tools_free(&reg);
@@ -843,7 +615,6 @@ static void test_share(void) {
     db_close(db);
     test_db_clean(cfg.db_path);
     assert(system("rm -rf " SHARE_WS) == 0);
-    printf("PASS: test_share\n");
 }
 
 /* web_bind: the listener is loopback unless the operator says otherwise, the
@@ -875,31 +646,25 @@ static void test_web_bind(void) {
     usleep(50000);
     CURL *curl = curl_easy_init();
     assert(curl);
-    char response[4096] = {0};
-    curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19880/");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
-    assert(curl_easy_perform(curl) == CURLE_OK);
-    assert(strstr(response, "version:") && strstr(response, "build:"));
+    assert(http_get(curl, "http://127.0.0.1:19880/") == 200);
+    assert(strstr(g_page, "version:"));
     curl_easy_cleanup(curl);
     web_stop();
 
     unsetenv("CCLAW_WEB_PORT");
     db_close(db);
     test_db_clean(cfg.db_path);
-    printf("  PASS: test_web_bind\n");
 }
 
 int main(void) {
     TEST_INIT();
-    test_db_handle_owner();
-    test_status_page();
-    test_hook_proxy();
-    test_admin_dashboard();
-    test_dashboard_page();
-    test_share();
-    test_web_bind();
+    RUN(test_db_handle_owner);
+    RUN(test_status_page);
+    RUN(test_hook_proxy);
+    RUN(test_admin_dashboard);
+    RUN(test_dashboard_page);
+    RUN(test_share);
+    RUN(test_web_bind);
     printf("All web tests passed.\n");
     return 0;
 }

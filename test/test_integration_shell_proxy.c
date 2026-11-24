@@ -147,11 +147,10 @@ static void test_shell_curl_through_proxy(void) {
 
     assert(result != NULL);
     if (strstr(result, "PROXY_WORKS!")) {
-        printf("  PASS test_shell_curl_through_proxy\n");
+        /* passed */
     } else if (strstr(result, "curl") && strstr(result, "not found")) {
-        printf("  SKIP test_shell_curl_through_proxy (curl unavailable in sandbox)\n");
+        printf("    SKIP (curl unavailable in sandbox)\n");
     } else {
-        printf("  FAIL test_shell_curl_through_proxy\n");
         printf("  output: %s\n", result);
         free(result);
         assert(0 && "proxy relay failed");
@@ -204,11 +203,10 @@ static void test_proxy_relay_integrity(void) {
     assert(result != NULL);
     if (strstr(result, "line1:ABCDEF") && strstr(result, "line2:123456") &&
         strstr(result, "line3:DONE")) {
-        printf("  PASS test_proxy_relay_integrity\n");
+        /* passed */
     } else if (strstr(result, "curl") && strstr(result, "not found")) {
-        printf("  SKIP test_proxy_relay_integrity (curl unavailable in sandbox)\n");
+        printf("    SKIP (curl unavailable in sandbox)\n");
     } else {
-        printf("  FAIL test_proxy_relay_integrity\n");
         printf("  output: %s\n", result);
         free(result);
         assert(0 && "integrity check failed");
@@ -222,8 +220,8 @@ int main(void) {
 
     setup_workspace();
     check_prerequisites();
-    test_shell_curl_through_proxy();
-    test_proxy_relay_integrity();
+    RUN(test_shell_curl_through_proxy);
+    RUN(test_proxy_relay_integrity);
     cleanup_workspace();
 
     printf("All shell proxy integration tests passed.\n");

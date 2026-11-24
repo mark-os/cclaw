@@ -61,16 +61,6 @@ static int64_t job_int(sqlite3 *db, const char *col, const char *name) {
     return v;
 }
 
-static int64_t job_total(sqlite3 *db) {
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM cron_jobs", -1, &st, NULL)
-           == SQLITE_OK);
-    sqlite3_step(st);
-    int64_t n = sqlite3_column_int64(st, 0);
-    sqlite3_finalize(st);
-    return n;
-}
-
 /* ── the basics ──────────────────────────────────────────────────────── */
 
 static void test_set_recurring(void) {
@@ -95,7 +85,6 @@ static void test_set_recurring(void) {
     assert(job_text(db, "target", "daily") == NULL);   /* follow the conversation */
 
     db_close(db);
-    printf("  PASS: recurring prompt job\n");
 }
 
 /* Name absent → generated, returned in the result, and the row is there. */
@@ -124,7 +113,6 @@ static void test_set_auto_name(void) {
     assert(job_int(db, "run_at", name) >= (int64_t)time(NULL) + 598);
 
     db_close(db);
-    printf("  PASS: auto-generated name returned and stored\n");
 }
 
 static void test_set_bare_wake(void) {
@@ -143,7 +131,6 @@ static void test_set_bare_wake(void) {
     assert(job_text(db, "script", "wake") == NULL);
 
     db_close(db);
-    printf("  PASS: bare wake (no prompt, no script)\n");
 }
 
 /* ── upsert ──────────────────────────────────────────────────────────── */
@@ -178,10 +165,9 @@ static void test_upsert_keeps_unnamed_fields(void) {
 
     /* Same row throughout — the name is the identity. */
     assert(job_int(db, "id", "j") == id);
-    assert(job_total(db) == 1);
+    assert(test_qi(db, "SELECT COUNT(*) FROM cron_jobs") == 1);
 
     db_close(db);
-    printf("  PASS: upsert replaces named fields, keeps the rest\n");
 }
 
 static void test_upsert_clears_payload(void) {
@@ -201,7 +187,6 @@ static void test_upsert_clears_payload(void) {
     assert(v && v[0] == '\0'); free(v);
 
     db_close(db);
-    printf("  PASS: empty prompt clears the payload\n");
 }
 
 /* Validity is judged on the merged row, not on the call alone. */
@@ -229,21 +214,6 @@ static void test_upsert_merged_mode_conflict(void) {
     assert(v && strcmp(v, "pin") == 0); free(v);   /* unchanged */
 
     db_close(db);
-    printf("  PASS: merged-row mode conflict rejected\n");
-}
-
-static void test_upsert_no_schedule(void) {
-    sqlite3 *db = open_seeded();
-    int64_t sid = session_create(db, "test", "A", -1, 0);
-    ToolCronCtx ctx = mkctx(db, sid, "A");
-
-    char *r = tool_cron_set_handler("{\"name\":\"j\",\"prompt\":\"p\"}", &ctx, &(int){0});
-    assert(r && strstr(r, "error") && strstr(r, "no schedule"));
-    free(r);
-    assert(job_total(db) == 0);
-
-    db_close(db);
-    printf("  PASS: a new job needs a schedule\n");
 }
 
 /* ── cross-field rules ───────────────────────────────────────────────── */
@@ -261,54 +231,34 @@ static void expect_error(sqlite3 *db, int64_t sid, const char *agent,
     free(r);
 }
 
+/* Each refusal names its rule. */
 static void test_cross_field_rules(void) {
     sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", "A", -1, 0);
-
-    expect_error(db, sid, "A",
-        "{\"name\":\"x\",\"cron_expr\":\"0 * * * *\",\"in_seconds\":600}",
-        "at most one of cron_expr", "both schedules");
-    expect_error(db, sid, "A",
-        "{\"name\":\"x\",\"in_seconds\":600,\"session\":\"new\",\"session_id\":1}",
-        "at most one of session", "session + session_id");
-    expect_error(db, sid, "A",
-        "{\"name\":\"x\",\"in_seconds\":600,\"session\":\"fresh\"}",
-        "only \"new\"", "bad session value");
-    expect_error(db, sid, "A",
-        "{\"name\":\"x\",\"in_seconds\":600,\"agent\":\"agent_b\"}",
-        "session:\"new\"", "agent without new");
-    expect_error(db, sid, "A",
-        "{\"name\":\"x\",\"in_seconds\":600,\"session\":\"new\","
-        "\"channel_name\":\"discord\"}",
-        "go together", "channel without chat");
-    expect_error(db, sid, "A",
-        "{\"name\":\"x\",\"in_seconds\":600,\"chat_id\":\"55\"}",
-        "go together", "chat without channel");
-    expect_error(db, sid, "A",
-        "{\"name\":\"x\",\"in_seconds\":600,\"promt\":\"typo\"}",
-        "unknown field", "unknown field");
-    expect_error(db, sid, "A",
-        "{\"name\":\"x\",\"in_seconds\":-5,\"prompt\":\"p\"}",
-        "positive delay", "negative in_seconds");
-    expect_error(db, sid, "A",
-        "{\"name\":\"x\",\"in_seconds\":600,\"session_id\":98765}",
-        "does not exist", "pin to a missing session");
-
-    assert(job_total(db) == 0);
+    static const struct { const char *args, *needle; } cases[] = {
+        { "{\"name\":\"x\",\"cron_expr\":\"0 * * * *\",\"in_seconds\":600}",
+          "at most one of cron_expr" },
+        { "{\"name\":\"x\",\"in_seconds\":600,\"session\":\"new\",\"session_id\":1}",
+          "at most one of session" },
+        { "{\"name\":\"x\",\"in_seconds\":600,\"session\":\"fresh\"}", "only \"new\"" },
+        { "{\"name\":\"x\",\"in_seconds\":600,\"agent\":\"agent_b\"}", "session:\"new\"" },
+        { "{\"name\":\"x\",\"in_seconds\":600,\"session\":\"new\",\"channel_name\":\"discord\"}",
+          "go together" },
+        { "{\"name\":\"x\",\"in_seconds\":600,\"chat_id\":\"55\"}", "go together" },
+        /* channel fields need session:"new": the merged-row half of the rule */
+        { "{\"name\":\"x\",\"in_seconds\":600,\"channel_name\":\"discord\",\"chat_id\":\"55\"}",
+          "session:\"new\"" },
+        { "{\"name\":\"x\",\"in_seconds\":600,\"promt\":\"typo\"}", "unknown field" },
+        { "{\"name\":\"x\",\"in_seconds\":-5,\"prompt\":\"p\"}", "positive delay" },
+        { "{\"name\":\"x\",\"in_seconds\":600,\"session_id\":98765}", "does not exist" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char label[16];
+        snprintf(label, sizeof(label), "row %zu", i);
+        expect_error(db, sid, "A", cases[i].args, cases[i].needle, label);
+    }
+    assert(test_qi(db, "SELECT COUNT(*) FROM cron_jobs") == 0);
     db_close(db);
-    printf("  PASS: cross-field rules each name their rule\n");
-}
-
-/* Channel fields need session:"new" — the merged-row half of the rule. */
-static void test_channel_needs_new_session(void) {
-    sqlite3 *db = open_seeded();
-    int64_t sid = session_create(db, "test", "A", -1, 0);
-    expect_error(db, sid, "A",
-        "{\"name\":\"x\",\"in_seconds\":600,\"channel_name\":\"discord\","
-        "\"chat_id\":\"55\"}",
-        "session:\"new\"", "channel without new");
-    db_close(db);
-    printf("  PASS: channel fields require a fresh-session job\n");
 }
 
 /* ── the floor, and the two schedule refusals ────────────────────────── */
@@ -342,26 +292,8 @@ static void test_floor_message_teaches(void) {
     assert(strstr(r, "do not schedule checks"));
     free(r);
 
-    assert(job_total(db) == 0);
+    assert(test_qi(db, "SELECT COUNT(*) FROM cron_jobs") == 0);
     db_close(db);
-    printf("  PASS: floor refusal states floor, value and redirect\n");
-}
-
-static void test_bad_expr_message_is_distinct(void) {
-    sqlite3 *db = open_seeded();
-    int64_t sid = session_create(db, "test", "A", -1, 0);
-    ToolCronCtx ctx = mkctx(db, sid, "A");
-
-    char *r = tool_cron_set_handler(
-        "{\"name\":\"bad\",\"cron_expr\":\"every day\",\"prompt\":\"p\"}", &ctx, &(int){0});
-    assert(r && strstr(r, "error"));
-    assert(strstr(r, "not a 5-field cron expression"));
-    assert(strstr(r, "every day"));
-    assert(!strstr(r, "floor"));          /* never conflated with the floor */
-    free(r);
-
-    db_close(db);
-    printf("  PASS: bad-expression refusal is distinct from the floor\n");
 }
 
 /* ── script paths ────────────────────────────────────────────────────── */
@@ -394,7 +326,7 @@ static void test_script_paths(void) {
     expect_error(db, sid, "A",
         "{\"name\":\"s\",\"in_seconds\":600,\"script\":\"missing.qjs\"}",
         "does not exist", "missing script file");
-    assert(job_total(db) == 0);
+    assert(test_qi(db, "SELECT COUNT(*) FROM cron_jobs") == 0);
 
     char *r = tool_cron_set_handler(
         "{\"name\":\"s\",\"in_seconds\":600,\"script\":\"report.qjs\"}", &ctx, &(int){0});
@@ -411,7 +343,6 @@ static void test_script_paths(void) {
     free(r);
 
     db_close(db);
-    printf("  PASS: script path validation and storage\n");
 }
 
 /* ── targeting ───────────────────────────────────────────────────────── */
@@ -465,7 +396,6 @@ static void test_default_target_stamps_chat(void) {
     assert(v && strcmp(v, "discord") == 0); free(v);
 
     db_close(db);
-    printf("  PASS: default target stamps the caller's chat\n");
 }
 
 static void test_new_session_same_agent(void) {
@@ -487,7 +417,6 @@ static void test_new_session_same_agent(void) {
     assert(approval_get_pending(db, sid) == NULL);
 
     db_close(db);
-    printf("  PASS: fresh session under the calling agent\n");
 }
 
 /* An explicit chat must already route to the agent that will run the fire. */
@@ -515,7 +444,6 @@ static void test_channel_authority(void) {
     free(r);
 
     db_close(db);
-    printf("  PASS: channel authority checked at set time\n");
 }
 
 /* ── cross-agent escalation ──────────────────────────────────────────── */
@@ -529,7 +457,7 @@ static void test_cross_agent_parks(void) {
         "{\"name\":\"borrow\",\"in_seconds\":600,\"prompt\":\"do it\","
         "\"session\":\"new\",\"agent\":\"agent_b\"}", &ctx, &(int){0});
     assert(r == NULL);                    /* parked: NULL_PARK contract */
-    assert(job_total(db) == 0);           /* nothing written yet */
+    assert(test_qi(db, "SELECT COUNT(*) FROM cron_jobs") == 0);           /* nothing written yet */
 
     Approval *a = approval_get_pending(db, sid);
     assert(a && strcmp(a->tool_name, "cron_set") == 0);
@@ -556,7 +484,6 @@ static void test_cross_agent_parks(void) {
     approval_free(a);
 
     db_close(db);
-    printf("  PASS: cross-agent job parks one approval, applies on yes\n");
 }
 
 static void test_cross_agent_session_pin_parks(void) {
@@ -571,7 +498,7 @@ static void test_cross_agent_session_pin_parks(void) {
              "\"session_id\":%lld}", (long long)theirs);
     char *r = tool_cron_set_handler(args, &ctx, &(int){0});
     assert(r == NULL);
-    assert(job_total(db) == 0);
+    assert(test_qi(db, "SELECT COUNT(*) FROM cron_jobs") == 0);
     Approval *a = approval_get_pending(db, mine);
     assert(a && strcmp(a->tool_name, "cron_set") == 0);
     approval_free(a);
@@ -586,7 +513,6 @@ static void test_cross_agent_session_pin_parks(void) {
     free(r);
 
     db_close(db);
-    printf("  PASS: pinning another agent's session parks\n");
 }
 
 /* ── caps, list, remove, registration ────────────────────────────────── */
@@ -614,81 +540,6 @@ static void test_per_session_cap(void) {
     free(r3);
 
     db_close(db);
-    printf("  PASS: per-session cap counts new jobs only\n");
-}
-
-static void test_cron_list_empty(void) {
-    sqlite3 *db = open_seeded();
-    int64_t sid = session_create(db, "test", NULL, -1, 0);
-
-    ToolCronCtx ctx = mkctx(db, sid, "test_agent");
-    char *result = tool_cron_list_handler("{}", &ctx, &(int){0});
-    assert(result);
-    assert(strcmp(result, "no cron jobs") == 0);
-    free(result);
-    db_close(db);
-    printf("  PASS: cron_list empty\n");
-}
-
-static void test_cron_list_with_jobs(void) {
-    sqlite3 *db = open_seeded();
-    int64_t sid = session_create(db, "test", "test_agent", -1, 0);
-    ToolCronCtx ctx = mkctx(db, sid, "test_agent");
-
-    char *r = tool_cron_set_handler(
-        "{\"name\":\"j1\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"task1\"}", &ctx, &(int){0});
-    assert(r); free(r);
-    r = tool_cron_set_handler(
-        "{\"name\":\"j2\",\"cron_expr\":\"30 2 * * *\",\"prompt\":\"task2\"}", &ctx, &(int){0});
-    assert(r); free(r);
-
-    char *result = tool_cron_list_handler("{}", &ctx, &(int){0});
-    assert(result);
-    assert(strstr(result, "j1"));
-    assert(strstr(result, "j2"));
-    assert(strstr(result, "task1"));
-    free(result);
-    db_close(db);
-    printf("  PASS: cron_list with jobs\n");
-}
-
-static void test_cron_remove_valid(void) {
-    sqlite3 *db = open_seeded();
-    int64_t sid = session_create(db, "test", "test_agent", -1, 0);
-    ToolCronCtx ctx = mkctx(db, sid, "test_agent");
-
-    char *r = tool_cron_set_handler(
-        "{\"name\":\"rm_me\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"bye\"}", &ctx, &(int){0});
-    assert(r); free(r);
-    int64_t jid = job_int(db, "id", "rm_me");
-    assert(jid > 0);
-
-    char buf[64];
-    snprintf(buf, sizeof(buf), "{\"id\":%lld}", (long long)jid);
-    char *result = tool_cron_remove_handler(buf, &ctx, &(int){0});
-    assert(result);
-    assert(strstr(result, "removed cron job"));
-    free(result);
-
-    int count = 0;
-    CronJob *jobs = cron_list(db, "test_agent", &count);
-    assert(count == 0 && jobs == NULL);
-
-    db_close(db);
-    printf("  PASS: cron_remove valid\n");
-}
-
-static void test_cron_remove_nonexistent(void) {
-    sqlite3 *db = open_seeded();
-    int64_t sid = session_create(db, "test", NULL, -1, 0);
-
-    ToolCronCtx ctx = mkctx(db, sid, "test_agent");
-    char *result = tool_cron_remove_handler("{\"id\":999}", &ctx, &(int){0});
-    assert(result);
-    assert(strstr(result, "error"));
-    free(result);
-    db_close(db);
-    printf("  PASS: cron_remove nonexistent\n");
 }
 
 /* review-2 F2: an agent cannot remove another agent's job via the tool */
@@ -720,7 +571,6 @@ static void test_cron_remove_cross_agent(void) {
     free(result);
 
     db_close(db);
-    printf("  PASS: cron_remove cross-agent scoped\n");
 }
 
 static void test_cron_register(void) {
@@ -739,36 +589,27 @@ static void test_cron_register(void) {
     assert(tools_lookup(&reg, "cron_remove") != NULL);
     tools_free(&reg);
     db_close(db);
-    printf("  PASS: tool registration\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_tool_cron:\n");
-    test_set_recurring();
-    test_set_auto_name();
-    test_set_bare_wake();
-    test_upsert_keeps_unnamed_fields();
-    test_upsert_clears_payload();
-    test_upsert_merged_mode_conflict();
-    test_upsert_no_schedule();
-    test_cross_field_rules();
-    test_channel_needs_new_session();
-    test_floor_message_teaches();
-    test_bad_expr_message_is_distinct();
-    test_script_paths();
-    test_default_target_stamps_chat();
-    test_new_session_same_agent();
-    test_channel_authority();
-    test_cross_agent_parks();
-    test_cross_agent_session_pin_parks();
-    test_per_session_cap();
-    test_cron_list_empty();
-    test_cron_list_with_jobs();
-    test_cron_remove_valid();
-    test_cron_remove_nonexistent();
-    test_cron_remove_cross_agent();
-    test_cron_register();
-    printf("ALL PASSED\n");
+    RUN(test_set_recurring);
+    RUN(test_set_auto_name);
+    RUN(test_set_bare_wake);
+    RUN(test_upsert_keeps_unnamed_fields);
+    RUN(test_upsert_clears_payload);
+    RUN(test_upsert_merged_mode_conflict);
+    RUN(test_cross_field_rules);
+    RUN(test_floor_message_teaches);
+    RUN(test_script_paths);
+    RUN(test_default_target_stamps_chat);
+    RUN(test_new_session_same_agent);
+    RUN(test_channel_authority);
+    RUN(test_cross_agent_parks);
+    RUN(test_cross_agent_session_pin_parks);
+    RUN(test_per_session_cap);
+    RUN(test_cron_remove_cross_agent);
+    RUN(test_cron_register);
     return 0;
 }

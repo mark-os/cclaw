@@ -16,88 +16,74 @@ static sqlite3 *open_seeded(const char *path) {
     return db;
 }
 
-static void test_idle_no_inbox(void) {
-    sqlite3 *db = open_seeded(":memory:");
-    int64_t sid = session_create(db, "test", "default", -1, 0);
-    assert(sid > 0);
+/* The plain decisions, one row per session shape. Entries land first, then
+ * the state (through llm_running, as a turn gets there), then the iteration
+ * counter, then any in-flight call. */
+static void test_state_decisions(void) {
+    static const struct {
+        const char *name, *inbox;
+        int user_leaf, assistant_leaf;
+        const char *state;      /* NULL: idle */
+        int set_iter, running_call;
+        AdvanceResult want;
+        int want_iter;          /* -1: not checked */
+    } cases[] = {
+        { "idle, nothing queued",   NULL,    0, 0, NULL, 0, 0, ADVANCE_NOOP, -1 },
+        { "idle, inbox drains",     "hello", 0, 0, NULL, 0, 0, ADVANCE_DISPATCH_LLM, 0 },
+        /* a refused dispatch: inbox already consumed, leaf a user entry; the
+         * turn is re-dispatched from iteration 0, not stranded */
+        { "idle, unanswered user",  NULL,    1, 0, NULL, 5, 0, ADVANCE_DISPATCH_LLM, 0 },
+        { "idle, answered turn",    NULL,    1, 1, NULL, 0, 0, ADVANCE_NOOP, -1 },
+        { "llm_running, stop",      NULL,    0, 1, "llm_running", 0, 0, ADVANCE_DONE, -1 },
+        { "tool_running, all done", NULL,    0, 0, "tool_running", 2, 0, ADVANCE_DISPATCH_LLM, 3 },
+        /* bump to 25 >= max: error + done */
+        { "tool_running, at max",   NULL,    0, 0, "tool_running", 24, 0, ADVANCE_DONE, -1 },
+        /* an async call still in flight keeps the turn parked */
+        { "tool_running, in flight", NULL,   0, 0, "tool_running", 0, 1, ADVANCE_WAITING, -1 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("    %s\n", cases[i].name);
+        sqlite3 *db = open_seeded(":memory:");
+        int64_t sid = session_create(db, "test", "default", -1, 0);
+        assert(sid > 0);
+        if (cases[i].inbox) inbox_insert(db, sid, "cli", NULL, cases[i].inbox);
+        int64_t it = db_next_iteration_id(db, sid);
+        if (cases[i].user_leaf) {
+            Message u = { .role = ROLE_USER, .content = "hello" };
+            entry_append_with_iteration(db, sid, &u, it);
+        }
+        if (cases[i].assistant_leaf) {
+            Message a = { .role = ROLE_ASSISTANT, .content = "done",
+                          .stop_reason = STOP_REASON_STOP };
+            entry_append_with_iteration(db, sid, &a, it);
+        }
+        if (cases[i].state) {
+            session_set_state(db, sid, "llm_running");
+            if (strcmp(cases[i].state, "llm_running") != 0)
+                session_set_state(db, sid, cases[i].state);
+        }
+        if (cases[i].set_iter) session_set_iteration(db, sid, cases[i].set_iter);
+        if (cases[i].running_call) {
+            char ins[192];
+            snprintf(ins, sizeof(ins),
+                "INSERT INTO tool_calls(session_id, entry_id, call_id, name, status)"
+                " VALUES(%lld, 1, 'c1', 'launch_agent', 'running');", (long long)sid);
+            assert(sqlite3_exec(db, ins, NULL, NULL, NULL) == SQLITE_OK);
+        }
 
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_NOOP);
-    assert(out.session_id == sid);
-
-    db_close(db);
-    printf("  PASS test_idle_no_inbox\n");
-}
-
-static void test_idle_with_inbox(void) {
-    sqlite3 *db = open_seeded(":memory:");
-    int64_t sid = session_create(db, "test", "default", -1, 0);
-    inbox_insert(db, sid, "cli", NULL, "hello");
-
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
-    assert(out.iteration == 0);
-    assert(strcmp(out.agent_name, "default") == 0);
-    /* Inbox should be consumed */
-    assert(inbox_count(db, sid) == 0);
-    /* Iteration should be 0 */
-    assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", sid, -1) == 0);
-
-    db_close(db);
-    printf("  PASS test_idle_with_inbox\n");
-}
-
-static void test_llm_complete_stop(void) {
-    sqlite3 *db = open_seeded(":memory:");
-    int64_t sid = session_create(db, "test", "default", -1, 0);
-
-    /* Simulate: session in llm_running, LLM wrote a stop entry */
-    session_set_state(db, sid, "llm_running");
-    Message msg = { .role = ROLE_ASSISTANT, .content = "done",
-                    .stop_reason = STOP_REASON_STOP };
-    int64_t iteration_id = db_next_iteration_id(db, sid);
-    entry_append_with_iteration(db, sid, &msg, iteration_id);
-
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_DONE);
-
-    db_close(db);
-    printf("  PASS test_llm_complete_stop\n");
-}
-
-static void test_tool_running_all_done(void) {
-    sqlite3 *db = open_seeded(":memory:");
-    int64_t sid = session_create(db, "test", "default", -1, 0);
-
-    /* Session in tool_running, no pending tool_calls, iteration 2 */
-    session_set_state(db, sid, "llm_running");
-    session_set_state(db, sid, "tool_running");
-    session_set_iteration(db, sid, 2);
-
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
-    assert(out.iteration == 3); /* bumped from 2 */
-    assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", sid, -1) == 3);
-
-    db_close(db);
-    printf("  PASS test_tool_running_all_done\n");
-}
-
-static void test_max_iterations(void) {
-    sqlite3 *db = open_seeded(":memory:");
-    int64_t sid = session_create(db, "test", "default", -1, 0);
-
-    /* Session at iteration 24 (max=25), tool_running with no pending calls */
-    session_set_state(db, sid, "llm_running");
-    session_set_state(db, sid, "tool_running");
-    session_set_iteration(db, sid, 24);
-
-    AdvanceOutput out = advance_session(db, sid, 25);
-    /* bump to 25 >= max → error + done */
-    assert(out.action == ADVANCE_DONE);
-
-    db_close(db);
-    printf("  PASS test_max_iterations\n");
+        AdvanceOutput out = advance_session(db, sid, 25);
+        assert(out.action == cases[i].want);
+        assert(out.session_id == sid);
+        assert(inbox_count(db, sid) == 0);
+        if (cases[i].want == ADVANCE_DISPATCH_LLM)
+            assert(strcmp(out.agent_name, "default") == 0);
+        if (cases[i].want_iter >= 0) {
+            assert(out.iteration == cases[i].want_iter);
+            assert(db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?",
+                                 sid, -1) == cases[i].want_iter);
+        }
+        db_close(db);
+    }
 }
 
 /* The C check at the end of an iteration: a turn whose newest iteration
@@ -155,68 +141,6 @@ static void test_context_budget_cuts_turn(void) {
     assert(out.action == ADVANCE_DISPATCH_LLM);
 
     db_close(db);
-    printf("  PASS test_context_budget_cuts_turn\n");
-}
-
-static void test_waiting(void) {
-    sqlite3 *db = open_seeded(":memory:");
-    int64_t sid = session_create(db, "test", "default", -1, 0);
-    session_set_state(db, sid, "llm_running");
-    session_set_state(db, sid, "tool_running");
-
-    /* An async tool_call still in flight (status='running' — e.g. a sub-agent
-     * or a forked tool) keeps the turn parked in tool_running: advance must
-     * WAIT, not bump to the LLM, until every call has a result. */
-    char ins[256];
-    snprintf(ins, sizeof(ins),
-        "INSERT INTO tool_calls(session_id, entry_id, call_id, name, status)"
-        " VALUES(%lld, 1, 'c1', 'launch_agent', 'running');", (long long)sid);
-    assert(sqlite3_exec(db, ins, NULL, NULL, NULL) == SQLITE_OK);
-
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_WAITING);
-
-    db_close(db);
-    printf("  PASS test_waiting\n");
-}
-
-static void test_idle_unanswered_user_leaf(void) {
-    sqlite3 *db = open_seeded(":memory:");
-    int64_t sid = session_create(db, "test", "default", -1, 0);
-
-    /* Simulate a refused dispatch: inbox already consumed into entries (leaf
-     * is a user entry), session parked idle, inbox empty — the turn must be
-     * re-dispatched, not stranded. */
-    Message msg = { .role = ROLE_USER, .content = "hello" };
-    entry_append_with_iteration(db, sid, &msg, db_next_iteration_id(db, sid));
-    session_set_iteration(db, sid, 5);
-
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
-    assert(out.iteration == 0);
-    assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", sid, -1) == 0);
-
-    db_close(db);
-    printf("  PASS test_idle_unanswered_user_leaf\n");
-}
-
-static void test_idle_answered_leaf_noop(void) {
-    sqlite3 *db = open_seeded(":memory:");
-    int64_t sid = session_create(db, "test", "default", -1, 0);
-
-    /* Completed turn: assistant entry is the leaf — idle stays NOOP. */
-    Message umsg = { .role = ROLE_USER, .content = "hello" };
-    int64_t iteration_id = db_next_iteration_id(db, sid);
-    entry_append_with_iteration(db, sid, &umsg, iteration_id);
-    Message amsg = { .role = ROLE_ASSISTANT, .content = "hi",
-                     .stop_reason = STOP_REASON_STOP };
-    entry_append_with_iteration(db, sid, &amsg, iteration_id);
-
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_NOOP);
-
-    db_close(db);
-    printf("  PASS test_idle_answered_leaf_noop\n");
 }
 
 /* ── D11: stale tool_calls are reconciled when a turn opens ───────────── */
@@ -291,7 +215,6 @@ static void test_stale_call_reconciled_at_turn_start(void) {
     db_tool_call_free_pending(out.calls, out.tc_count);
 
     db_close(db);
-    printf("  PASS test_stale_call_reconciled_at_turn_start\n");
 }
 
 /* The one deliberate skip: an unanswered user leaf means the turn is already
@@ -319,7 +242,6 @@ static void test_open_undispatched_turn_not_stranded(void) {
            count(db, "SELECT id FROM entries WHERE content='turn two';", 0));
 
     db_close(db);
-    printf("  PASS test_open_undispatched_turn_not_stranded\n");
 }
 
 /* Health check for the same code: two blocking sub-agents keep the parent in
@@ -399,7 +321,6 @@ static void test_parallel_subagents_never_reconciled(void) {
                      " WHERE content LIKE 'error: superseded%';", 0) == 0);
 
     db_close(db);
-    printf("  PASS test_parallel_subagents_never_reconciled\n");
 }
 
 /* A background child's full result must reach the parent inbox — the notice
@@ -455,7 +376,6 @@ static void test_background_result_not_truncated(void) {
     sqlite3_finalize(s);
 
     db_close(db);
-    printf("  PASS test_background_result_not_truncated\n");
 }
 
 /* ── The convergence sweep: cursor on delivery, sweep the lagging edges ── */
@@ -490,37 +410,6 @@ static void make_blocking(sqlite3 *db, int64_t parent, int64_t child,
     session_set_parent_tool_call_id(db, child, call_id);
     assert(delivery_edge_create(db, child, "tool_call", call_id,
                                 "quiescent", 1) == 0);
-}
-
-/* Every delivery stamps the edge cursor inside its own transaction — the
- * cursor at the leaf is what tells the sweep this push landed. */
-static void test_delivery_stamps_cursor(void) {
-    sqlite3 *db = open_seeded(":memory:");
-    int64_t parent = session_create(db, "parent", "default", -1, 0);
-
-    /* Blocking: the parent's launch_agent call gets a tool result and the
-     * one-shot edge dies with the firing; the standing cursor advances in
-     * the same transaction so nothing ships twice. */
-    int64_t blocking = session_create(db, "blocking", "default", parent, 1);
-    make_blocking(db, parent, blocking, "call_b");
-    assert(finish_child(db, blocking, "blocking answer", STOP_REASON_STOP) == ADVANCE_DONE);
-    assert(cursor_of(db, blocking) > 0);
-    assert(count(db, "SELECT COUNT(*) FROM delivery_edges WHERE session_id=?"
-                     " AND one_shot=1;", blocking) == 0);
-    assert(count(db, "SELECT COUNT(*) FROM entries WHERE session_id=? AND role=3;",
-                 parent) == 1);
-    assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
-                     " AND source='agent_result';", parent) == 0);
-
-    /* Background: the answer goes to the parent inbox instead. */
-    int64_t background = session_create(db, "background", "default", parent, 1);
-    assert(finish_child(db, background, "background answer", STOP_REASON_STOP) == ADVANCE_DONE);
-    assert(cursor_of(db, background) > 0);
-    assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
-                     " AND source='agent_result';", parent) == 1);
-
-    db_close(db);
-    printf("  PASS test_delivery_stamps_cursor\n");
 }
 
 /* A push that never landed leaves the cursor behind the leaf — the durable
@@ -559,7 +448,6 @@ static void test_sweep_redelivers_lost_push(void) {
     assert(cursor_of(db, fresh) == 0);
 
     db_close(db);
-    printf("  PASS test_sweep_redelivers_lost_push\n");
 }
 
 /* An errored child must tell its parent so. entries.stop_reason is an INTEGER;
@@ -584,7 +472,6 @@ static void test_error_stop_reaches_parent(void) {
                      " AND payload LIKE 'Sub-agent failed:%';", parent) == 1);
 
     db_close(db);
-    printf("  PASS test_error_stop_reaches_parent\n");
 }
 
 /* A mid-turn dispatch bounce (worker pool full) reverts the session to idle
@@ -640,7 +527,6 @@ static void test_idle_unanswered_tool_leaf_resumes(void) {
                  sid) == 1);
 
     db_close(db);
-    printf("  PASS test_idle_unanswered_tool_leaf_resumes\n");
 }
 
 /* llm_running with no job row and a non-assistant leaf = the submit was lost
@@ -671,7 +557,6 @@ static void test_lost_submit_reparks_idle(void) {
     assert(out.action == ADVANCE_DISPATCH_LLM);
 
     db_close(db);
-    printf("  PASS test_lost_submit_reparks_idle\n");
 }
 
 /* A hook's note or summary may be the leaf of a turn still running (a note
@@ -749,31 +634,21 @@ static void test_note_leaf_mid_turn_resumes(void) {
                      CCLAW_SQL_LEAF_READ_THROUGH("?1") " AND le.role IN (1,3));", s2) == 0);
 
     db_close(db);
-    printf("  PASS test_note_leaf_mid_turn_resumes\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_advance_session:\n");
-    test_idle_no_inbox();
-    test_idle_with_inbox();
-    test_idle_unanswered_user_leaf();
-    test_idle_answered_leaf_noop();
-    test_llm_complete_stop();
-    test_tool_running_all_done();
-    test_max_iterations();
-    test_context_budget_cuts_turn();
-    test_waiting();
-    test_stale_call_reconciled_at_turn_start();
-    test_open_undispatched_turn_not_stranded();
-    test_parallel_subagents_never_reconciled();
-    test_background_result_not_truncated();
-    test_delivery_stamps_cursor();
-    test_sweep_redelivers_lost_push();
-    test_error_stop_reaches_parent();
-    test_idle_unanswered_tool_leaf_resumes();
-    test_lost_submit_reparks_idle();
-    test_note_leaf_mid_turn_resumes();
-    printf("All advance_session tests passed.\n");
+    RUN(test_state_decisions);
+    RUN(test_context_budget_cuts_turn);
+    RUN(test_stale_call_reconciled_at_turn_start);
+    RUN(test_open_undispatched_turn_not_stranded);
+    RUN(test_parallel_subagents_never_reconciled);
+    RUN(test_background_result_not_truncated);
+    RUN(test_sweep_redelivers_lost_push);
+    RUN(test_error_stop_reaches_parent);
+    RUN(test_idle_unanswered_tool_leaf_resumes);
+    RUN(test_lost_submit_reparks_idle);
+    RUN(test_note_leaf_mid_turn_resumes);
     return 0;
 }

@@ -11,13 +11,9 @@
 #include <curl/curl.h>
 
 static sqlite3 *g_db;
-static int tests_run = 0;
-static int tests_passed = 0;
 
-#define TEST(name) do { tests_run++; printf("  %s... ", #name); } while(0)
-#define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while(0)
-#define SKIP(msg) do { tests_passed++; printf("SKIP: %s\n", msg); return; } while(0)
+#define FAIL(msg) do { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } while (0)
+#define SKIP(msg) do { printf("    SKIP: %s\n", msg); return; } while (0)
 
 static const char *get_api_key(void) {
     return getenv("OPENROUTER_API_KEY");
@@ -159,7 +155,6 @@ static char *asst_content(int64_t sid) {
 
 /* live call with simple prompt, verify content response */
 static void test_live_content_response(void) {
-    TEST(live_content_response);
     const char *key = get_api_key();
     if (!key) SKIP("OPENROUTER_API_KEY not set");
 
@@ -179,13 +174,10 @@ static void test_live_content_response(void) {
     if (!c || strlen(c) == 0) { free(c); FAIL("empty content"); }
     free(c);
     if (ir.prompt_tokens == 0 && ir.completion_tokens == 0) FAIL("no usage reported");
-
-    PASS();
 }
 
 /* live call with tool, verify tool_calls round-trip */
 static void test_live_tool_call_roundtrip(void) {
-    TEST(live_tool_call_roundtrip);
     const char *key = get_api_key();
     if (!key) SKIP("OPENROUTER_API_KEY not set");
 
@@ -225,19 +217,16 @@ static void test_live_tool_call_roundtrip(void) {
     if (!name || strcmp(name, "get_weather") != 0) { sqlite3_finalize(s); FAIL("wrong tool name"); }
     if (!args || strlen(args) == 0) { sqlite3_finalize(s); FAIL("empty arguments"); }
     sqlite3_finalize(s);
-
-    PASS();
 }
 
 int main(void) {
     TEST_INIT();
     curl_global_init(CURL_GLOBAL_DEFAULT);
     g_db = test_db_open(":memory:");
-    printf("--- test_integration_llm ---\n");
-    test_live_content_response();
-    test_live_tool_call_roundtrip();
-    printf("%d/%d passed\n", tests_passed, tests_run);
+    printf("test_e2e_llm:\n");
+    RUN(test_live_content_response);
+    RUN(test_live_tool_call_roundtrip);
     sqlite3_close(g_db);
     curl_global_cleanup();
-    return tests_passed == tests_run ? 0 : 1;
+    return 0;
 }

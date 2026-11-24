@@ -30,7 +30,6 @@ static void test_rollback_missing_session(void) {
     inbox_items_free(items, count);
 
     db_close(db);
-    printf("  PASS test_rollback_missing_session\n");
 }
 
 /* Counter for progress handler abort */
@@ -106,7 +105,6 @@ static void test_rollback_mid_consumption(void) {
     assert(ecount == 0);
 
     db_close(db);
-    printf("  PASS test_rollback_mid_consumption\n");
 }
 
 /* successful consume then verify no double-consume on retry */
@@ -133,17 +131,15 @@ static void test_no_double_consume_after_success(void) {
     entry_branch_free(entries, ecount);
 
     db_close(db);
-    printf("  PASS test_no_double_consume_after_success\n");
 }
 
 int main(void) {
     TEST_INIT();
     test_db_clean(DB_PATH);
     printf("test_inbox_rollback:\n");
-    test_rollback_missing_session();
-    test_rollback_mid_consumption();
-    test_no_double_consume_after_success();
+    RUN(test_rollback_missing_session);
+    RUN(test_rollback_mid_consumption);
+    RUN(test_no_double_consume_after_success);
     test_db_clean(DB_PATH);
-    printf("All inbox rollback tests passed.\n");
     return 0;
 }

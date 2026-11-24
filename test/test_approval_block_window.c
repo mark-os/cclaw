@@ -11,12 +11,8 @@
 
 #define DB_PATH "/tmp/cclaw_test_approval_block_window.db"
 
-static void clean_db(void) {
-    test_db_clean(DB_PATH);
-}
-
 static sqlite3 *fresh_db(void) {
-    clean_db();
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db != NULL);
     return db;
@@ -64,8 +60,7 @@ static void test_block_window_timing(void) {
     process_unregister(db, my_id);
     db_set_instance_id(NULL);
     db_close(db);
-    clean_db();
-    printf("  PASS test_block_window_timing\n");
+    test_db_clean(DB_PATH);
 }
 
 static void test_block_window_owner_filter(void) {
@@ -114,15 +109,14 @@ static void test_block_window_owner_filter(void) {
     process_unregister(db, id_b);
     db_set_instance_id(NULL);
     db_close(db);
-    clean_db();
-    printf("  PASS test_block_window_owner_filter\n");
+    test_db_clean(DB_PATH);
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_approval_block_window:\n");
-    test_block_window_timing();
-    test_block_window_owner_filter();
+    RUN(test_block_window_timing);
+    RUN(test_block_window_owner_filter);
     printf("all approval block window tests passed\n");
     return 0;
 }

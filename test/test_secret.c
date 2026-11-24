@@ -8,7 +8,6 @@
 #include "db.h"
 #include "test_util.h"
 
-#define FAIL(msg) do { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } while(0)
 
 static const uint8_t TEST_KEY[32] = {
     0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
@@ -30,7 +29,6 @@ static void test_encrypt_decrypt_roundtrip(void) {
 
     free(enc);
     free(dec);
-    printf("  PASS: encrypt/decrypt roundtrip\n");
 }
 
 static void test_empty_string(void) {
@@ -44,7 +42,6 @@ static void test_empty_string(void) {
 
     free(enc);
     free(dec);
-    printf("  PASS: empty string roundtrip\n");
 }
 
 static void test_wrong_key_fails(void) {
@@ -56,7 +53,6 @@ static void test_wrong_key_fails(void) {
     assert(dec == NULL); /* auth failure */
 
     free(enc);
-    printf("  PASS: wrong key returns NULL\n");
 }
 
 static void test_tampered_ciphertext_fails(void) {
@@ -71,7 +67,6 @@ static void test_tampered_ciphertext_fails(void) {
     assert(dec == NULL);
 
     free(enc);
-    printf("  PASS: tampered ciphertext returns NULL\n");
 }
 
 static void test_invalid_input(void) {
@@ -80,7 +75,6 @@ static void test_invalid_input(void) {
     assert(secret_decrypt(TEST_KEY, "enc:zz") == NULL); /* too short for nonce+tag */
     assert(secret_encrypt(TEST_KEY, NULL) == NULL);
     assert(secret_decrypt(TEST_KEY, NULL) == NULL);
-    printf("  PASS: invalid input handled\n");
 }
 
 static void test_different_encryptions_differ(void) {
@@ -98,7 +92,6 @@ static void test_different_encryptions_differ(void) {
     assert(strcmp(dec2, "same-value") == 0);
 
     free(enc1); free(enc2); free(dec1); free(dec2);
-    printf("  PASS: different encryptions differ (random nonce)\n");
 }
 
 static void test_db_secret_roundtrip(void) {
@@ -126,7 +119,6 @@ static void test_db_secret_roundtrip(void) {
     free(dec);
 
     db_close(db);
-    printf("  PASS: db_secret roundtrip\n");
 }
 
 static void test_key_file_create_and_load(void) {
@@ -148,7 +140,6 @@ static void test_key_file_create_and_load(void) {
     snprintf(key_path, sizeof(key_path), "%s/.cclaw_key", tmpdir);
     unlink(key_path);
     rmdir(tmpdir);
-    printf("  PASS: key file create and load\n");
 }
 
 /* Verify startup integration — load_or_create + set_key → secrets work */
@@ -198,7 +189,6 @@ static void test_startup_integration(void) {
     unlink(key_path);
     test_db_clean(db_path);
     rmdir(tmpdir);
-    printf("  PASS: startup integration (load_or_create + set_key + persist)\n");
 }
 
 /* Delete key file → next load creates a NEW key; decrypt of old secrets
@@ -235,22 +225,19 @@ static void test_deleted_key_file(void) {
     unlink(key_path);
     test_db_clean(db_path);
     rmdir(tmpdir);
-    printf("  PASS: deleted key file fails gracefully\n");
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_secret:\n");
-    test_encrypt_decrypt_roundtrip();
-    test_empty_string();
-    test_wrong_key_fails();
-    test_tampered_ciphertext_fails();
-    test_invalid_input();
-    test_different_encryptions_differ();
-    test_db_secret_roundtrip();
-    test_key_file_create_and_load();
-    test_startup_integration();
-    test_deleted_key_file();
-    printf("All secret tests passed.\n");
+    RUN(test_encrypt_decrypt_roundtrip);
+    RUN(test_empty_string);
+    RUN(test_wrong_key_fails);
+    RUN(test_tampered_ciphertext_fails);
+    RUN(test_invalid_input);
+    RUN(test_different_encryptions_differ);
+    RUN(test_db_secret_roundtrip);
+    RUN(test_key_file_create_and_load);
+    RUN(test_startup_integration);
+    RUN(test_deleted_key_file);
     return 0;
 }

@@ -184,8 +184,6 @@ int main(void) {
     }
     close(lfd);  /* the shim owns the listener now */
 
-    printf("test_net_shim:\n");
-
     /* 1. Allowed CONNECT → 200 + bidirectional splice. */
     {
         int c = shim_connect(port);
@@ -203,7 +201,6 @@ int main(void) {
         relayed[n] = '\0';
         assert(strstr(relayed, "UP:ping") != NULL);
         close(c);
-        printf("  PASS allowed CONNECT tunnels + splices\n");
     }
 
     /* 2. Denied CONNECT → 403 with the reason; a failure that is not policy
@@ -227,7 +224,6 @@ int main(void) {
         assert(strstr(buf, "HTTP/1.1 502") != NULL);
         assert(strstr(buf, "denied") == NULL);
         close(c);
-        printf("  PASS denied CONNECT → 403, unreachable → 502\n");
     }
 
     /* 3. Plain HTTP: the absolute-form request reaches the origin in origin
@@ -265,7 +261,6 @@ int main(void) {
         read_some(c, buf, sizeof(buf));
         assert(strstr(buf, "HTTP/1.1 400") != NULL);
         close(c);
-        printf("  PASS plain HTTP forwarded in origin form\n");
     }
 
     /* Teardown */
@@ -275,6 +270,5 @@ int main(void) {
     pthread_join(broker_thr, NULL);
     unlink(uds_path);
 
-    printf("All net_shim tests passed.\n");
     return 0;
 }

@@ -126,11 +126,11 @@ static void test_static_tunnel_allowed(void) {
 
     assert(result != NULL);
     if (strstr(result, "SHIM_WORKS!")) {
-        printf("  PASS test_static_tunnel_allowed\n");
+        /* passed */
     } else if (strstr(result, "curl") && strstr(result, "not found")) {
-        printf("  SKIP test_static_tunnel_allowed (curl unavailable in sandbox)\n");
+        printf("    SKIP (curl unavailable in sandbox)\n");
     } else {
-        printf("  FAIL test_static_tunnel_allowed\n  output: %s\n", result);
+        printf("  output: %s\n", result);
         free(result);
         assert(0 && "static tunnel failed");
     }
@@ -192,7 +192,6 @@ static void test_plain_http_forwarded(void) {
     assert(strstr(ma.seen, "Connection: close\r\n"));
     assert(!strstr(ma.seen, "Proxy-Connection"));
     assert(!strstr(ma.seen, "keep-alive"));
-    printf("  PASS test_plain_http_forwarded\n");
     free(result);
 }
 
@@ -218,7 +217,6 @@ static void test_denial_is_readable(void) {
     result = run_cmd("curl -sS --max-time 5 https://denied.test/x");
     assert(strstr(result, "403"));
     assert(strstr(result, "proxy blocked host(s) not in allowlist: denied.test"));
-    printf("  PASS test_denial_is_readable\n");
     free(result);
 }
 
@@ -237,7 +235,6 @@ static void test_env_is_proxy_only(void) {
         printf("  FAIL test_env_is_proxy_only\n  output: %s\n", result);
         assert(0 && "sandbox env wrong");
     }
-    printf("  PASS test_env_is_proxy_only\n");
     free(result);
 }
 
@@ -273,7 +270,6 @@ static void test_connect_mode(void) {
         printf("  FAIL test_connect_mode (denied)\n  output: %s\n", result);
         assert(0 && "connect mode denial not reported");
     }
-    printf("  PASS test_connect_mode\n");
     free(result);
 }
 
@@ -283,11 +279,11 @@ int main(void) {
     printf("test_integration_shell_static:\n");
     setup_workspace();
     check_prerequisites();
-    test_static_tunnel_allowed();
-    test_plain_http_forwarded();
-    test_denial_is_readable();
-    test_env_is_proxy_only();
-    test_connect_mode();
+    RUN(test_static_tunnel_allowed);
+    RUN(test_plain_http_forwarded);
+    RUN(test_denial_is_readable);
+    RUN(test_env_is_proxy_only);
+    RUN(test_connect_mode);
     cleanup_workspace();
     printf("All shell proxy-variable tests passed.\n");
     return 0;

@@ -14,24 +14,18 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
-#include <assert.h>
-#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
-#include <curl/curl.h>
 #include "db.h"
-#include "util.h"          /* base64_encode, curl_ws_available */
+#include "util.h"          /* curl_ws_available */
 #include "test_util.h"
+#include "test_ws.h"
 
 /* The channel.conn.* WS transport needs a libcurl whose runtime protocol set
  * includes ws/wss. Amazon Linux's default `libcurl-minimal` strips it (the
@@ -44,105 +38,7 @@
 #define JS_PATH EXT_DIR "/channel.qjs"
 #define FAIL(m) do { fprintf(stderr, "FAIL: %s\n", m); goto fail; } while (0)
 
-/* ── Minimal SHA-1 (public domain, for the WS handshake accept key) ── */
-typedef struct { uint32_t h[5]; uint64_t len; unsigned char buf[64]; size_t n; } Sha1;
-
-static uint32_t rol(uint32_t v, int b) { return (v << b) | (v >> (32 - b)); }
-
-static void sha1_block(Sha1 *s, const unsigned char *p) {
-    uint32_t w[80];
-    for (int i = 0; i < 16; i++)
-        w[i] = (uint32_t)p[i*4] << 24 | (uint32_t)p[i*4+1] << 16 |
-               (uint32_t)p[i*4+2] << 8 | (uint32_t)p[i*4+3];
-    for (int i = 16; i < 80; i++) w[i] = rol(w[i-3]^w[i-8]^w[i-14]^w[i-16], 1);
-    uint32_t a=s->h[0],b=s->h[1],c=s->h[2],d=s->h[3],e=s->h[4];
-    for (int i = 0; i < 80; i++) {
-        uint32_t f, k;
-        if (i < 20)      { f = (b & c) | (~b & d);            k = 0x5A827999; }
-        else if (i < 40) { f = b ^ c ^ d;                     k = 0x6ED9EBA1; }
-        else if (i < 60) { f = (b & c) | (b & d) | (c & d);   k = 0x8F1BBCDC; }
-        else             { f = b ^ c ^ d;                     k = 0xCA62C1D6; }
-        uint32_t t = rol(a,5) + f + e + k + w[i];
-        e = d; d = c; c = rol(b,30); b = a; a = t;
-    }
-    s->h[0]+=a; s->h[1]+=b; s->h[2]+=c; s->h[3]+=d; s->h[4]+=e;
-}
-
-static void sha1_init(Sha1 *s) {
-    s->h[0]=0x67452301; s->h[1]=0xEFCDAB89; s->h[2]=0x98BADCFE;
-    s->h[3]=0x10325476; s->h[4]=0xC3D2E1F0; s->len=0; s->n=0;
-}
-
-static void sha1_update(Sha1 *s, const void *data, size_t len) {
-    const unsigned char *p = data;
-    s->len += len;
-    while (len) {
-        size_t take = 64 - s->n; if (take > len) take = len;
-        memcpy(s->buf + s->n, p, take); s->n += take; p += take; len -= take;
-        if (s->n == 64) { sha1_block(s, s->buf); s->n = 0; }
-    }
-}
-
-static void sha1_final(Sha1 *s, unsigned char out[20]) {
-    uint64_t bits = s->len * 8;
-    unsigned char pad = 0x80;
-    sha1_update(s, &pad, 1);
-    unsigned char zero = 0;
-    while (s->n != 56) sha1_update(s, &zero, 1);
-    unsigned char lenbuf[8];
-    for (int i = 0; i < 8; i++) lenbuf[i] = (unsigned char)(bits >> (56 - i*8));
-    sha1_update(s, lenbuf, 8);
-    for (int i = 0; i < 5; i++) {
-        out[i*4]   = (unsigned char)(s->h[i] >> 24);
-        out[i*4+1] = (unsigned char)(s->h[i] >> 16);
-        out[i*4+2] = (unsigned char)(s->h[i] >> 8);
-        out[i*4+3] = (unsigned char)(s->h[i]);
-    }
-}
-
-/* ── WS framing helpers (server side) ─────────────────────────────── */
-
-static int read_n(int fd, void *buf, size_t n) {
-    unsigned char *p = buf;
-    size_t got = 0;
-    while (got < n) {
-        ssize_t r = read(fd, p + got, n - got);
-        if (r <= 0) return -1;
-        got += (size_t)r;
-    }
-    return 0;
-}
-
-static int write_all(int fd, const void *buf, size_t n) {
-    const unsigned char *p = buf;
-    size_t off = 0;
-    while (off < n) {
-        ssize_t w = write(fd, p + off, n - off);
-        if (w <= 0) { if (w < 0 && errno == EINTR) continue; return -1; }
-        off += (size_t)w;
-    }
-    return 0;
-}
-
-/* Send an unmasked text frame (server->client). */
-static int ws_send_text(int fd, const char *s) {
-    size_t len = strlen(s);
-    unsigned char hdr[10];
-    size_t hn = 0;
-    hdr[hn++] = 0x81;                       /* FIN + text */
-    if (len < 126) {
-        hdr[hn++] = (unsigned char)len;
-    } else if (len < 65536) {
-        hdr[hn++] = 126;
-        hdr[hn++] = (unsigned char)(len >> 8);
-        hdr[hn++] = (unsigned char)(len & 0xff);
-    } else {
-        hdr[hn++] = 127;
-        for (int i = 7; i >= 0; i--) hdr[hn++] = (unsigned char)((uint64_t)len >> (i*8));
-    }
-    if (write_all(fd, hdr, hn) != 0) return -1;
-    return write_all(fd, s, len);
-}
+/* ── Fragmented text frames (server side) ── */
 
 /* Send one text message split across `parts` WS fragments (RFC 6455: first
  * frame carries the TEXT opcode with FIN clear, the rest opcode 0, only the
@@ -162,8 +58,8 @@ static int ws_send_text_fragmented(int fd, const char *s, int parts) {
         unsigned char hdr[2];
         hdr[0] = (unsigned char)((last ? 0x80 : 0x00) | (i == 0 ? 0x1 : 0x0));
         hdr[1] = (unsigned char)n;              /* n < 126 by construction */
-        if (write_all(fd, hdr, 2) != 0) return -1;
-        if (write_all(fd, s + off, n) != 0) return -1;
+        if (ws_write_all(fd, hdr, 2) != 0) return -1;
+        if (ws_write_all(fd, s + off, n) != 0) return -1;
         off += n;
     }
     return 0;
@@ -179,37 +75,11 @@ static int ws_send_text_empty_first(int fd, const char *s) {
     size_t len = strlen(s);
     if (len >= 126) return -1;
     unsigned char hdr[2] = { 0x01, 0x00 };          /* TEXT, FIN clear, len 0 */
-    if (write_all(fd, hdr, 2) != 0) return -1;
+    if (ws_write_all(fd, hdr, 2) != 0) return -1;
     hdr[0] = 0x80;                                  /* CONT with FIN set */
     hdr[1] = (unsigned char)len;
-    if (write_all(fd, hdr, 2) != 0) return -1;
-    return write_all(fd, s, len);
-}
-
-/* Read one client frame (masked). Returns opcode, fills payload (NUL-term).
- * -1 on error/close of the socket. */
-static int ws_read_frame(int fd, char *payload, size_t cap, size_t *out_len) {
-    unsigned char b[2];
-    if (read_n(fd, b, 2) != 0) return -1;
-    int opcode = b[0] & 0x0f;
-    int masked = b[1] & 0x80;
-    uint64_t len = b[1] & 0x7f;
-    if (len == 126) {
-        unsigned char e[2]; if (read_n(fd, e, 2) != 0) return -1;
-        len = (uint64_t)e[0] << 8 | e[1];
-    } else if (len == 127) {
-        unsigned char e[8]; if (read_n(fd, e, 8) != 0) return -1;
-        len = 0; for (int i = 0; i < 8; i++) len = (len << 8) | e[i];
-    }
-    unsigned char mask[4] = {0};
-    if (masked && read_n(fd, mask, 4) != 0) return -1;
-    if (len >= cap) return -1;              /* test frames are small */
-    if (len && read_n(fd, payload, (size_t)len) != 0) return -1;
-    if (masked) for (uint64_t i = 0; i < len; i++)
-        payload[i] = (char)((unsigned char)payload[i] ^ mask[i % 4]);
-    payload[len] = '\0';
-    if (out_len) *out_len = (size_t)len;
-    return opcode;
+    if (ws_write_all(fd, hdr, 2) != 0) return -1;
+    return ws_write_all(fd, s, len);
 }
 
 /* ── Mock server state (asserted directly by main) ────────────────── */
@@ -218,50 +88,10 @@ static volatile int g_identify_seen = 0;
 static volatile int g_heartbeat_seen = 0;
 static volatile int g_handshaked = 0;
 
-static int extract_ws_key(const char *req, char *out, size_t cap) {
-    const char *h = strcasestr(req, "Sec-WebSocket-Key:");
-    if (!h) return -1;
-    h += strlen("Sec-WebSocket-Key:");
-    while (*h == ' ' || *h == '\t') h++;
-    size_t n = 0;
-    while (*h && *h != '\r' && *h != '\n' && n < cap - 1) out[n++] = *h++;
-    out[n] = '\0';
-    return 0;
-}
-
 static void *mock_ws_server(void *arg) {
     (void)arg;
-    int cfd = accept(g_listen_fd, NULL, NULL);
+    int cfd = ws_accept_upgrade(g_listen_fd);
     if (cfd < 0) return NULL;
-    struct timeval tv = {10, 0};
-    setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    /* Read the HTTP upgrade request (until CRLFCRLF). */
-    char req[2048]; size_t rn = 0;
-    while (rn < sizeof(req) - 1) {
-        ssize_t r = read(cfd, req + rn, sizeof(req) - 1 - rn);
-        if (r <= 0) { close(cfd); return NULL; }
-        rn += (size_t)r; req[rn] = '\0';
-        if (strstr(req, "\r\n\r\n")) break;
-    }
-    char key[128];
-    if (extract_ws_key(req, key, sizeof(key)) != 0) { close(cfd); return NULL; }
-
-    /* accept = base64(sha1(key + magic-GUID)) */
-    char concat[256];
-    snprintf(concat, sizeof(concat), "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
-    Sha1 s; sha1_init(&s); sha1_update(&s, concat, strlen(concat));
-    unsigned char digest[20]; sha1_final(&s, digest);
-    char *accept = base64_encode(digest, 20);
-    if (!accept) { close(cfd); return NULL; }
-
-    char resp[256];
-    int rl = snprintf(resp, sizeof(resp),
-        "HTTP/1.1 101 Switching Protocols\r\n"
-        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-        "Sec-WebSocket-Accept: %s\r\n\r\n", accept);
-    free(accept);
-    if (write_all(cfd, resp, (size_t)rl) != 0) { close(cfd); return NULL; }
     g_handshaked = 1;
 
     /* HELLO */
@@ -372,6 +202,24 @@ static char *state_value(sqlite3 *db, const char *key) {
     return val;
 }
 
+/* Poll up to ~6s for a channel_events payload containing `needle`. */
+static int wait_event(sqlite3 *db, const char *needle) {
+    for (int i = 0; i < 60; i++) {
+        usleep(100000);
+        sqlite3_stmt *st;
+        int n = 0;
+        if (sqlite3_prepare_v2(db,
+                "SELECT COUNT(*) FROM channel_events WHERE channel_name='discx'"
+                " AND payload LIKE '%' || ?1 || '%';", -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, needle, -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int(st, 0);
+            sqlite3_finalize(st);
+        }
+        if (n > 0) return 1;
+    }
+    return 0;
+}
+
 /* Poll up to ~6s for channel_state key == want. */
 static int wait_state(sqlite3 *db, const char *key, const char *want) {
     for (int i = 0; i < 60; i++) {
@@ -396,22 +244,9 @@ int main(void) {
 
     (void)!system("rm -f /tmp/test_integ_conn.db* /tmp/test_integ_conn.discx.*");
 
-    /* Loopback listener on an OS-assigned port. */
-    g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (g_listen_fd < 0) { fprintf(stderr, "FAIL: socket\n"); return 1; }
-    int one = 1;
-    setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sa.sin_port = 0;
-    if (bind(g_listen_fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) { fprintf(stderr, "FAIL: bind\n"); return 1; }
-    if (listen(g_listen_fd, 4) != 0) { fprintf(stderr, "FAIL: listen\n"); return 1; }
-    socklen_t sl = sizeof(sa);
-    getsockname(g_listen_fd, (struct sockaddr *)&sa, &sl);
-    int port = ntohs(sa.sin_port);
-    struct timeval atv = {10, 0};
-    setsockopt(g_listen_fd, SOL_SOCKET, SO_RCVTIMEO, &atv, sizeof(atv));
+    int port = 0;
+    g_listen_fd = ws_listen_loopback(4, 10, &port);
+    if (g_listen_fd < 0) { fprintf(stderr, "FAIL: listen\n"); return 1; }
 
     pthread_t th;
     if (pthread_create(&th, NULL, mock_ws_server, NULL) != 0) { fprintf(stderr, "FAIL: thread\n"); return 1; }
@@ -433,73 +268,30 @@ int main(void) {
 
     /* 1. onConnOpen fired with the id conn.open returned. */
     if (!wait_state(db, "onopen", "1")) FAIL("onConnOpen(1) did not fire");
-    printf("  PASS: conn.open handshake -> onConnOpen\n");
 
     /* 2. Egress: off-host conn.open threw (refused before any connect). */
     if (!wait_state(db, "egress", "BLOCKED")) FAIL("off-host conn.open was not refused");
-    printf("  PASS: egress pin refuses off-host conn.open\n");
 
     /* 3. Inbound MESSAGE_CREATE -> channel.emit -> channel_events. */
-    int found = 0;
-    for (int i = 0; i < 60 && !found; i++) {
-        usleep(100000);
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
-                "SELECT payload FROM channel_events WHERE channel_name='discx' LIMIT 1;",
-                -1, &st, NULL) == SQLITE_OK) {
-            if (sqlite3_step(st) == SQLITE_ROW) {
-                const char *p = (const char *)sqlite3_column_text(st, 0);
-                if (p && strstr(p, "hi from gateway")) found = 1;
-            }
-            sqlite3_finalize(st);
-        }
-    }
-    if (!found) FAIL("MESSAGE_CREATE did not reach channel_events");
-    printf("  PASS: HELLO->IDENTIFY->ACK->MESSAGE_CREATE->emit\n");
+    if (!wait_event(db, "hi from gateway")) FAIL("MESSAGE_CREATE did not reach channel_events");
 
     /* 3b. A fragmented message must arrive whole. Before the CURLWS_CONT fix
      * the first fragment was dispatched as a complete message (truncated JSON
      * -> JSON.parse throws) and the remainder was silently dropped. */
-    int frag = 0;
-    for (int i = 0; i < 60 && !frag; i++) {
-        usleep(100000);
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
-                "SELECT COUNT(*) FROM channel_events WHERE channel_name='discx'"
-                " AND payload LIKE '%fragment-joined%';", -1, &st, NULL) == SQLITE_OK) {
-            if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) > 0) frag = 1;
-            sqlite3_finalize(st);
-        }
-    }
-    if (!frag) FAIL("fragmented MESSAGE_CREATE was not reassembled");
-    printf("  PASS: fragmented message reassembled across CONT frames\n");
+    if (!wait_event(db, "fragment-joined")) FAIL("fragmented MESSAGE_CREATE was not reassembled");
 
     /* 3c. Same, but the message opens with a zero-length TEXT fragment. Latching
      * the message type on an empty buffer instead of on "message started" reads
      * the type off the typeless CONT frame and drops the message as binary. */
-    int empty_first = 0;
-    for (int i = 0; i < 60 && !empty_first; i++) {
-        usleep(100000);
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
-                "SELECT COUNT(*) FROM channel_events WHERE channel_name='discx'"
-                " AND payload LIKE '%empty-first-joined%';", -1, &st, NULL) == SQLITE_OK) {
-            if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) > 0) empty_first = 1;
-            sqlite3_finalize(st);
-        }
-    }
-    if (!empty_first) FAIL("message opening with a zero-length fragment was dropped");
-    printf("  PASS: zero-length opening fragment still dispatches as text\n");
+    if (!wait_event(db, "empty-first-joined")) FAIL("message opening with a zero-length fragment was dropped");
 
     /* 4. Bidirectional proof: server saw IDENTIFY + heartbeat; handler saw ACK. */
     if (!g_identify_seen) FAIL("server never received IDENTIFY");
     if (!g_heartbeat_seen) FAIL("server never received heartbeat");
     if (!wait_state(db, "acked", "1")) FAIL("handler never received heartbeat ACK");
-    printf("  PASS: bidirectional send/recv + control frames\n");
 
     /* 5. onTimer ticked. */
     if (!wait_state(db, "ticked", "1")) FAIL("onTimer never fired");
-    printf("  PASS: onTimer tick\n");
 
     rc = 0;
 fail:
@@ -531,7 +323,6 @@ fail:
                 fprintf(stderr, "  runner exited with status %d\n", WEXITSTATUS(wstatus));
             rc = 1;
         } else {
-            printf("  PASS: clean shutdown after SIGTERM (exit 0)\n");
         }
     }
 

@@ -251,7 +251,6 @@ int main(void) {
         db_close(db); mock_server_stop();
         FAIL("channel_events not populated");
     }
-    printf("  PASS: incoming message -> channel_events\n");
 
     /* The runner records outbox capability at load: the test JS defines
      * onOutbox, so channel_state.has_outbox must be '1'. */
@@ -264,7 +263,6 @@ int main(void) {
             FAIL("has_outbox not recorded as '1'");
         }
         free(cap);
-        printf("  PASS: has_outbox capability recorded\n");
     }
 
     /* 2. Outbox mode 0 → one formatted sendMessage → auto-ack */
@@ -293,7 +291,6 @@ int main(void) {
             FAIL("mode-0 delivery did not arrive formatted");
         }
     }
-    printf("  PASS: outbox wake -> formatted sendMessage -> auto-ack\n");
 
     /* 2a. Terminal 400 on a formatted row → re-delivered plain
      * (deliver_mode=1). The C loop must not care WHY the 400 happened —
@@ -325,7 +322,6 @@ int main(void) {
             FAIL("formatted-400 re-delivery did not arrive plain");
         }
     }
-    printf("  PASS: formatted 400 -> re-delivered plain\n");
 
     /* 2b. Terminal 400 on the plain re-delivery → row fails (ladder floor:
      * a second format bump is impossible, and 400 is not transient). */
@@ -349,7 +345,6 @@ int main(void) {
         db_close(db); mock_server_stop();
         FAIL("400-at-plain row should have failed at deliver_mode=1");
     }
-    printf("  PASS: 400 at plain -> terminal fail (no loop)\n");
 
     /* 2c. base_url pin: an outbox item whose send URL points at a DIFFERENT
      * host than the channel's configured base_url must be refused before any
@@ -388,7 +383,6 @@ int main(void) {
         db_close(db); mock_server_stop();
         FAIL("off-host outbox send reached the mock server");
     }
-    printf("  PASS: base_url pin refuses off-host outbox send\n");
 
     /* 2c. Transient failure → retry (not permanent fail). A send to the pinned
      * host but an unreachable port (127.0.0.1:1, connection refused) is a
@@ -429,7 +423,6 @@ int main(void) {
         db_close(db); mock_server_stop();
         FAIL("retry-path outbox send reached the mock server");
     }
-    printf("  PASS: transient outbox failure is retried with backoff\n");
 
     /* 3. Proxied request over UDS → onRequest → reply + emit */
     char *reply = uds_request(
@@ -476,7 +469,6 @@ int main(void) {
         FAIL("expected 401 from JS verification");
     }
     free(reply);
-    printf("  PASS: UDS request -> onRequest -> reply + emit + JS auth\n");
 
     kill(pid, SIGTERM);
     int wstatus = 0;
@@ -493,7 +485,6 @@ int main(void) {
             fprintf(stderr, "  runner exited with status %d\n", WEXITSTATUS(wstatus));
         FAIL("channel runner did not exit 0 after SIGTERM");
     }
-    printf("  PASS: clean shutdown after SIGTERM (exit 0)\n");
 
     test_db_clean(DB_PATH);
     unlink(JS_PATH);

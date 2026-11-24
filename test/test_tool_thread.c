@@ -81,7 +81,6 @@ static void test_spawn_before_start_fails(void) {
     ToolThreadJob job;
     job_init(&job, 1, 1, "c0", ok_run);
     assert(tool_thread_spawn(&job) == -1);   /* also frees job.args */
-    printf("  PASS test_spawn_before_start_fails\n");
 }
 
 static void test_completion_notifies_and_writes(void) {
@@ -100,20 +99,14 @@ static void test_completion_notifies_and_writes(void) {
     assert(g_seen_db != NULL && g_seen_db != db);
 
     /* tool_call completed with a result entry that carries the output. */
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT tc.status, e.content FROM tool_calls tc"
+    char *row = test_qs(db,
+        "SELECT tc.status || '|' || e.content FROM tool_calls tc"
         " JOIN entries e ON e.id = tc.result_entry_id"
-        " WHERE tc.call_id='c1';", -1, &st, NULL) == SQLITE_OK);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    const char *status = (const char *)sqlite3_column_text(st, 0);
-    const char *content = (const char *)sqlite3_column_text(st, 1);
-    assert(status && strcmp(status, "done") == 0);
-    assert(content && strstr(content, "thread says hi"));
-    sqlite3_finalize(st);
+        " WHERE tc.call_id='c1';");
+    assert(row && strncmp(row, "done|", 5) == 0 && strstr(row, "thread says hi"));
+    free(row);
 
     db_close(db);
-    printf("  PASS test_completion_notifies_and_writes\n");
 }
 
 static void test_null_result_still_completes(void) {
@@ -131,20 +124,14 @@ static void test_null_result_still_completes(void) {
 
     assert(wait_notify() == sid);
 
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT tc.status, e.content FROM tool_calls tc"
+    char *row = test_qs(db,
+        "SELECT tc.status || '|' || e.content FROM tool_calls tc"
         " JOIN entries e ON e.id = tc.result_entry_id"
-        " WHERE tc.call_id='c2';", -1, &st, NULL) == SQLITE_OK);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    const char *status = (const char *)sqlite3_column_text(st, 0);
-    const char *content = (const char *)sqlite3_column_text(st, 1);
-    assert(status && strcmp(status, "done") == 0);
-    assert(content && strncmp(content, "error:", 6) == 0);
-    sqlite3_finalize(st);
+        " WHERE tc.call_id='c2';");
+    assert(row && strncmp(row, "done|error:", 11) == 0);
+    free(row);
 
     db_close(db);
-    printf("  PASS test_null_result_still_completes\n");
 }
 
 static void test_stop_drains_in_flight(void) {
@@ -162,20 +149,15 @@ static void test_stop_drains_in_flight(void) {
 
     /* Post-stop, the work is durably in the DB even if the notify pipe is
      * gone. */
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT status FROM tool_calls WHERE call_id='c3';", -1, &st, NULL) == SQLITE_OK);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    const char *status = (const char *)sqlite3_column_text(st, 0);
+    char *status = test_qs(db, "SELECT status FROM tool_calls WHERE call_id='c3';");
     assert(status && strcmp(status, "done") == 0);
-    sqlite3_finalize(st);
+    free(status);
 
     /* Spawning after stop must refuse, not crash. */
     job_init(&job, sid, eid, "c4", ok_run);
     assert(tool_thread_spawn(&job) == -1);
 
     db_close(db);
-    printf("  PASS test_stop_drains_in_flight\n");
 }
 
 int main(void) {
@@ -184,14 +166,13 @@ int main(void) {
     printf("test_tool_thread:\n");
     test_db_clean(TEST_DB);
 
-    test_spawn_before_start_fails();
+    RUN(test_spawn_before_start_fails);
 
     assert(tool_thread_start(TEST_DB, 0) == 0);
-    test_completion_notifies_and_writes();
-    test_null_result_still_completes();
-    test_stop_drains_in_flight();
+    RUN(test_completion_notifies_and_writes);
+    RUN(test_null_result_still_completes);
+    RUN(test_stop_drains_in_flight);
 
     test_db_clean(TEST_DB);
-    printf("All tool_thread tests passed.\n");
     return 0;
 }

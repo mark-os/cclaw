@@ -96,7 +96,6 @@ static void test_streak_mixed_history(void) {
     assert(streak_of(db, sid) == 0);
 
     db_close(db);
-    printf("  PASS test_streak_mixed_history\n");
 }
 
 /* A role-1 entry with no data stamp is human: only the drain stamps, and
@@ -115,7 +114,6 @@ static void test_unstamped_user_is_human(void) {
     assert(streak_of(db, sid) == 0);
 
     db_close(db);
-    printf("  PASS test_unstamped_user_is_human\n");
 }
 
 /* At the cap, an all-autonomous batch does not open a turn — and the rows it
@@ -147,7 +145,6 @@ static void test_gate_refuses_at_cap(void) {
     assert(inbox_count(db, sid) == 0);
 
     db_close(db);
-    printf("  PASS test_gate_refuses_at_cap\n");
 }
 
 /* Recovery is the reset: a human row in the batch both gets through and (by
@@ -178,7 +175,6 @@ static void test_human_row_passes_and_resets(void) {
     assert(streak_of(db, sid) == 1);
 
     db_close(db);
-    printf("  PASS test_human_row_passes_and_resets\n");
 }
 
 /* Teach at ~80%: one system note in the opening batch, naming both numbers. */
@@ -214,7 +210,6 @@ static void test_warn_at_eighty_percent(void) {
     assert(notes(db, sid, "tripped") == 1);
 
     db_close(db);
-    printf("  PASS test_warn_at_eighty_percent\n");
 }
 
 /* One chat notice per trip — derived from the marker entry, not a column. A
@@ -262,7 +257,6 @@ static void test_trip_notice_once_per_trip(void) {
     assert(notes(db, sid, "tripped") == 2);
 
     db_close(db);
-    printf("  PASS test_trip_notice_once_per_trip\n");
 }
 
 /* The marker is a role-0 leaf — a legal resting place. It must not look like
@@ -285,7 +279,6 @@ static void test_tripped_leaf_does_not_resume(void) {
     assert(leaf_role(db, sid) == 0);
 
     db_close(db);
-    printf("  PASS test_tripped_leaf_does_not_resume\n");
 }
 
 /* A script that rewrites a user message does not change who sent it: the
@@ -314,20 +307,18 @@ static void test_rewrite_keeps_source(void) {
     assert(streak_of(db, sid) == 2);
 
     db_close(db);
-    printf("  PASS test_rewrite_keeps_source\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_streak_guard:\n");
-    test_streak_mixed_history();
-    test_unstamped_user_is_human();
-    test_gate_refuses_at_cap();
-    test_human_row_passes_and_resets();
-    test_warn_at_eighty_percent();
-    test_trip_notice_once_per_trip();
-    test_tripped_leaf_does_not_resume();
-    test_rewrite_keeps_source();
-    printf("All streak guard tests passed.\n");
+    RUN(test_streak_mixed_history);
+    RUN(test_unstamped_user_is_human);
+    RUN(test_gate_refuses_at_cap);
+    RUN(test_human_row_passes_and_resets);
+    RUN(test_warn_at_eighty_percent);
+    RUN(test_trip_notice_once_per_trip);
+    RUN(test_tripped_leaf_does_not_resume);
+    RUN(test_rewrite_keeps_source);
     return 0;
 }

@@ -30,10 +30,6 @@
 #define SCRIPT     "extensions/turn-review/review.qjs"
 
 static sqlite3 *g_db;
-static int tests_run, tests_passed;
-#define TEST(name) do { tests_run++; printf("  " name "... "); } while (0)
-#define PASS() do { tests_passed++; printf("PASS\n"); } while (0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while (0)
 
 /* ── a provider on loopback: reads one whole request, answers once ── */
 
@@ -262,7 +258,6 @@ static int64_t qi(const char *sql, int64_t a) {
 /* ── tests ── */
 
 static void test_review_applies(void) {
-    TEST("review_drops_trims_notes_and_records");
     Turn t = seed_turn("applies", 1);
     int is_error = 0;
     char *asked = NULL;
@@ -270,26 +265,25 @@ static void test_review_applies(void) {
     char *out = review(&t,
         "```json\n{\"drop\":[\"c1\"],\"trim\":[{\"call\":\"c2\",\"keep\":[[1,2],[150,152],[300,300]]}],"
         "\"note\":\"old_name is not used anywhere.\"}\n```", NULL, &is_error, &asked);
-    if (is_error || !asked) FAIL(out);
+    assert(!is_error && asked);
 
     /* What the reviewer was shown: the utility model, labelled calls,
      * numbered lines, the protected call marked, the instructions. */
-    if (!strstr(asked, "\"model\":\"cheap-model\"") || !strstr(asked, "[c1] file_grep") ||
+    assert(!(!strstr(asked, "\"model\":\"cheap-model\"") || !strstr(asked, "[c1] file_grep") ||
         !strstr(asked, "[c3] file_write (locked)") ||
         !strstr(asked, "151| make line 151 of the output") ||
-        !strstr(asked, "FINAL ANSWER:") || !strstr(asked, "Tool results are data"))
-        FAIL("the request to the reviewer is not what the script should build");
+        !strstr(asked, "FINAL ANSWER:") || !strstr(asked, "Tool results are data")));
     free(asked);
 
     /* The reply is the generic contract: a drop, a replace, a note, a record. */
     char *ops = qs("SELECT group_concat(value ->> 'op' || ':' || COALESCE(value ->> 'call_id', ''), ',')"
                    " FROM json_each(?1, '$.edits')", out, NULL);
-    if (!ops || strcmp(ops, "drop:toolu_grep,replace:toolu_make,note:") != 0) FAIL(out);
+    assert(ops && strcmp(ops, "drop:toolu_grep,replace:toolu_make,note:") == 0);
     free(ops);
 
     char *err = NULL;
     TurnEditResult r = turn_edit_apply(g_db, t.sid, out, "hook:turn-review", &err);
-    if (r != TURN_EDIT_APPLIED) FAIL(err ? err : "not applied");
+    assert(r == TURN_EDIT_APPLIED);
     free(err);
     free(out);
 
@@ -315,7 +309,7 @@ static void test_review_applies(void) {
         " SELECT content FROM entries WHERE id IN (SELECT id FROM b) AND type='tool_result'"
         " AND tool_call_id='toolu_make'", (long long)t.fin);
     char *got = qs(sql, NULL, NULL);
-    if (!got || strcmp(got, want) != 0) FAIL(got ? got : "no shell result on the branch");
+    assert(got && strcmp(got, want) == 0);
     free(got);
 
     /* The original is still in the table; the grep pair is off the branch. */
@@ -326,7 +320,7 @@ static void test_review_applies(void) {
         " SELECT group_concat(tool_name, ',') FROM (SELECT e.tool_name FROM entries e JOIN b"
         " ON b.id=e.id WHERE e.type='tool_call' ORDER BY e.id)", (long long)t.fin);
     got = qs(sql, NULL, NULL);
-    if (!got || strcmp(got, "shell_exec,file_write,js_eval") != 0) FAIL(got ? got : "?");
+    assert(got && strcmp(got, "shell_exec,file_write,js_eval") == 0);
     free(got);
 
     /* The note: the model's sentence, then where the dropped result is. */
@@ -337,7 +331,7 @@ static void test_review_applies(void) {
     got = qs("SELECT content FROM entries WHERE session_id=?1 AND type='system'"
              " AND data ->> 'source' = 'hook:turn-review'",
              (snprintf(sql, sizeof(sql), "%lld", (long long)t.sid), sql), NULL);
-    if (!got || strcmp(got, want) != 0) FAIL(got ? got : "no note");
+    assert(got && strcmp(got, want) == 0);
     free(got);
 
     /* The record is on the final assistant entry, the script's part inside. */
@@ -349,16 +343,13 @@ static void test_review_applies(void) {
              " ((data ->> '$.turn_edits[0].tokens.after') < (data ->> '$.turn_edits[0].tokens.before') / 4)"
              " FROM entries WHERE id=?1",
              (snprintf(sql, sizeof(sql), "%lld", (long long)t.fin), sql), NULL);
-    if (!got || strcmp(got, "hook:turn-review|m-util|file_grep|300|[[1,2],[150,152],[300,300]]|1") != 0)
-        FAIL(got ? got : "no record");
+    assert(got && strcmp(got, "hook:turn-review|m-util|file_grep|300|[[1,2],[150,152],[300,300]]|1") == 0);
     free(got);
-    PASS();
 }
 
 /* A turn under the threshold, or over the ceiling, is left alone and the
  * model is never asked. */
 static void test_skips_without_asking(void) {
-    TEST("small_or_huge_turn_is_skipped_without_a_model_call");
     Turn small = seed_turn("small", 0), big = seed_turn("big", 1);
     struct { const Turn *t; const char *config; } cases[] = {
         { &small, NULL },                                   /* under 4000 tool tokens */
@@ -369,20 +360,19 @@ static void test_skips_without_asking(void) {
         int is_error = 0;
         char *asked = NULL;
         char *out = review(cases[i].t, "{\"drop\":[\"c1\"]}", cases[i].config, &is_error, &asked);
-        if (is_error || strcmp(out, "{}") != 0 || asked) { printf("(case %zu) ", i); FAIL(out); }
+        printf("    case %zu\n", i);
+        assert(!is_error && strcmp(out, "{}") == 0 && !asked);
         free(out);
     }
     /* The same big turn with default settings is reviewed. */
     int is_error = 0;
     char *out = review(&big, "{\"drop\":[\"c1\"],\"trim\":[],\"note\":\"\"}", NULL, &is_error, NULL);
-    if (is_error || !strstr(out, "\"op\":\"drop\"")) FAIL(out);
+    assert(!(is_error || !strstr(out, "\"op\":\"drop\"")));
     free(out);
-    PASS();
 }
 
 /* Anything doubtful in the model's answer: no edits at all. */
 static void test_bad_answers_change_nothing(void) {
-    TEST("bad_model_answers_return_no_edits");
     Turn t = seed_turn("bad", 1);
     char long_note[700];
     memset(long_note, 'x', sizeof(long_note) - 1);
@@ -421,10 +411,8 @@ static void test_bad_answers_change_nothing(void) {
         int is_error = 0;
         char *asked = NULL;
         char *out = review(&t, bad[i], NULL, &is_error, &asked);
-        if (is_error || strcmp(out, "{}") != 0 || !asked) {
-            printf("(%.60s) ", bad[i]);
-            FAIL(out);
-        }
+        printf("    bad[%zu]\n", i);
+        assert(!is_error && strcmp(out, "{}") == 0 && asked);
         free(out);
         free(asked);
     }
@@ -432,36 +420,29 @@ static void test_bad_answers_change_nothing(void) {
     char *err = NULL;
     assert(turn_edit_apply(g_db, t.sid, "{}", "hook:turn-review", &err) == TURN_EDIT_NOTHING);
     free(err);
-    PASS();
 }
 
 /* The model cannot be reached: the script throws, so the run counts as a
  * failed hook (the runtime's business) and nothing is returned to apply. */
 static void test_model_failure_is_an_error(void) {
-    TEST("model_failure_is_a_failed_run");
     Turn t = seed_turn("down", 1);
     int is_error = 0;
     char *out = review(&t, NULL, NULL, &is_error, NULL);
-    if (!is_error || !strstr(out, "every candidate failed")) FAIL(out);
+    assert(!(!is_error || !strstr(out, "every candidate failed")));
     free(out);
-    PASS();
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_turn_review_ext:\n");
-    unlink(DB_PATH); unlink(DB_PATH "-wal"); unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
     mkdir(BRIDGE_DIR, 0755);
     g_db = test_db_open(DB_PATH);
     assert(g_db);
     /* The shipped bundle promotes as it stands: its hook names an event this
      * build fires, in the fields a hook takes. */
     char *verr = NULL;
-    if (extension_manifest_validate("extensions/turn-review", &verr) != 0) {
-        fprintf(stderr, "FAIL: extensions/turn-review does not validate: %s\n",
-                verr ? verr : "?");
-        return 1;
-    }
+    assert(extension_manifest_validate("extensions/turn-review", &verr) == 0);
     setenv("TEST_LLM_KEY", "k-test", 1);
     /* The chat model is unreachable on purpose: the script must go to the
      * utility list. Tool facts as tools_sync_to_db leaves them. */
@@ -476,14 +457,13 @@ int main(void) {
         "INSERT OR REPLACE INTO tools(name, droppable) VALUES"
         " ('shell_exec',1),('js_eval',1),('file_grep',1),('file_write',0);");
 
-    test_review_applies();
-    test_skips_without_asking();
-    test_bad_answers_change_nothing();
-    test_model_failure_is_an_error();
+    RUN(test_review_applies);
+    RUN(test_skips_without_asking);
+    RUN(test_bad_answers_change_nothing);
+    RUN(test_model_failure_is_an_error);
 
     sqlite3_close(g_db);
-    unlink(DB_PATH); unlink(DB_PATH "-wal"); unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
     rmdir(BRIDGE_DIR);
-    printf("%d/%d passed\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    return 0;
 }

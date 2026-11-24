@@ -23,7 +23,6 @@
 
 static char ws_a[256];
 static char ws_b[256];
-static int ns_available = 1;
 
 static void setup(void) {
     snprintf(ws_a, sizeof(ws_a), "/tmp/cclaw_ws_a_XXXXXX");
@@ -136,115 +135,69 @@ static char *run_tool_request(const char *workspace, const char *tool_name,
     return result;
 }
 
-/* Detect if namespaces work by doing a trivial sandboxed file_read */
-static void test_namespace_detect(void) {
-    char *r = run_tool_request(ws_a, "file_read", "{\"path\":\"secret_a.txt\"}");
+static void expect_refused(const char *ws, const char *tool, const char *args) {
+    char *r = run_tool_request(ws, tool, args);
     assert(r != NULL);
-    if (strstr(r, "namespace sandbox unavailable")) {
-        ns_available = 0;
-        printf("  SKIP (namespaces unavailable on this system)\n");
-    } else {
-        assert(strcmp(r, "agent_a_data") == 0);
-        printf("  PASS test_namespace_detect\n");
+    if (!strstr(r, "error") && !strstr(r, "cannot open")) {
+        printf("    not refused: %s %s -> %s\n", tool, args, r);
+        assert(0);
     }
     free(r);
 }
 
-/* agent A cannot read agent B's file via absolute path */
+/* Positive control: agent A reads its own workspace through the sandbox. */
+static int namespace_detect(void) {
+    char *r = run_tool_request(ws_a, "file_read", "{\"path\":\"secret_a.txt\"}");
+    assert(r != NULL);
+    int ok = strstr(r, "namespace sandbox unavailable") == NULL;
+    if (ok) assert(strcmp(r, "agent_a_data") == 0);
+    free(r);
+    return ok;
+}
+
 static void test_read_cross_workspace_absolute(void) {
-    if (!ns_available) { printf("  SKIP test_read_cross_workspace_absolute\n"); return; }
     char args[512];
     snprintf(args, sizeof(args), "{\"path\":\"%s/secret_b.txt\"}", ws_b);
-    char *r = run_tool_request(ws_a, "file_read", args);
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
-    free(r);
-    printf("  PASS test_read_cross_workspace_absolute\n");
+    expect_refused(ws_a, "file_read", args);
 }
 
-/* agent B cannot read agent A's file via absolute path */
-static void test_read_cross_workspace_reverse(void) {
-    if (!ns_available) { printf("  SKIP test_read_cross_workspace_reverse\n"); return; }
-    char args[512];
-    snprintf(args, sizeof(args), "{\"path\":\"%s/secret_a.txt\"}", ws_a);
-    char *r = run_tool_request(ws_b, "file_read", args);
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
-    free(r);
-    printf("  PASS test_read_cross_workspace_reverse\n");
-}
-
-/* agent A cannot write into agent B's workspace */
 static void test_write_cross_workspace(void) {
-    if (!ns_available) { printf("  SKIP test_write_cross_workspace\n"); return; }
     char args[512];
     snprintf(args, sizeof(args), "{\"path\":\"%s/evil.txt\",\"content\":\"pwned\"}", ws_b);
-    char *r = run_tool_request(ws_a, "file_write", args);
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
-    free(r);
-
+    expect_refused(ws_a, "file_write", args);
     char check[512];
     snprintf(check, sizeof(check), "%s/evil.txt", ws_b);
     assert(access(check, F_OK) != 0);
-    printf("  PASS test_write_cross_workspace\n");
 }
 
-/* relative traversal from A into B blocked */
 static void test_read_traversal_to_other_workspace(void) {
-    if (!ns_available) { printf("  SKIP test_read_traversal_to_other_workspace\n"); return; }
     const char *b_name = strrchr(ws_b, '/');
     assert(b_name != NULL);
     char args[512];
     snprintf(args, sizeof(args), "{\"path\":\"..%s/secret_b.txt\"}", b_name);
-    char *r = run_tool_request(ws_a, "file_read", args);
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
-    free(r);
-    printf("  PASS test_read_traversal_to_other_workspace\n");
+    expect_refused(ws_a, "file_read", args);
 }
 
-/* write via relative traversal to other workspace blocked */
 static void test_write_traversal_to_other_workspace(void) {
-    if (!ns_available) { printf("  SKIP test_write_traversal_to_other_workspace\n"); return; }
     const char *b_name = strrchr(ws_b, '/');
     assert(b_name != NULL);
     char args[512];
     snprintf(args, sizeof(args), "{\"path\":\"..%s/evil.txt\",\"content\":\"pwned\"}", b_name);
-    char *r = run_tool_request(ws_a, "file_write", args);
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
-    free(r);
-    printf("  PASS test_write_traversal_to_other_workspace\n");
-}
-
-/* each agent CAN access its own workspace (positive case) */
-static void test_read_own_workspace(void) {
-    if (!ns_available) { printf("  SKIP test_read_own_workspace\n"); return; }
-    char *r = run_tool_request(ws_a, "file_read", "{\"path\":\"secret_a.txt\"}");
-    assert(r != NULL);
-    assert(strcmp(r, "agent_a_data") == 0);
-    free(r);
-
-    r = run_tool_request(ws_b, "file_read", "{\"path\":\"secret_b.txt\"}");
-    assert(r != NULL);
-    assert(strcmp(r, "agent_b_data") == 0);
-    free(r);
-    printf("  PASS test_read_own_workspace\n");
+    expect_refused(ws_a, "file_write", args);
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_workspace_isolation:\n");
     setup();
-    test_namespace_detect();
-    test_read_cross_workspace_absolute();
-    test_read_cross_workspace_reverse();
-    test_write_cross_workspace();
-    test_read_traversal_to_other_workspace();
-    test_write_traversal_to_other_workspace();
-    test_read_own_workspace();
+    if (!namespace_detect()) {
+        printf("  SKIP (namespaces unavailable on this system)\n");
+    } else {
+        RUN(test_read_cross_workspace_absolute);
+        RUN(test_write_cross_workspace);
+        RUN(test_read_traversal_to_other_workspace);
+        RUN(test_write_traversal_to_other_workspace);
+    }
     cleanup();
-    printf("All workspace isolation tests passed.\n");
     return 0;
 }

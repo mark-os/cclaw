@@ -59,7 +59,6 @@ static void test_no_filter_no_line(void) {
 
     tools_free(&reg);
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_no_filter_no_line\n");
 }
 
 /* A filtered session shows the filter next to the grants, so a worker can
@@ -86,7 +85,6 @@ static void test_filter_line_present(void) {
 
     tools_free(&reg);
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_filter_line_present\n");
 }
 
 /* An empty filter is a real state (nothing callable), not "unfiltered" —
@@ -108,7 +106,6 @@ static void test_empty_filter_is_explicit(void) {
 
     tools_free(&reg);
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_empty_filter_is_explicit\n");
 }
 
 /* The 2026-08-10 incident pin: "what model am I / what can I switch to" must
@@ -165,7 +162,6 @@ static void test_settings_models_providers(void) {
 
     tools_free(&reg);
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_settings_models_providers\n");
 }
 
 /* json_extract over the tool's own output: the shape claim is checked by the
@@ -271,7 +267,6 @@ static void test_format_json(void) {
 
     tools_free(&reg);
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_format_json\n");
 }
 
 /* Secrets (v60): an agent sees the secrets it may use — in its grants and,
@@ -303,7 +298,6 @@ static void test_only_granted_secrets_shown(void) {
     free(doc);
     tools_free(&reg);
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_only_granted_secrets_shown\n");
 }
 
 /* Pending approvals surface in BOTH formats — id, age, one-line summary. */
@@ -346,19 +340,18 @@ static void test_pending_approvals_section(void) {
 
     tools_free(&reg);
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_pending_approvals_section\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_tool_search_config:\n");
-    test_no_filter_no_line();
-    test_filter_line_present();
-    test_empty_filter_is_explicit();
-    test_settings_models_providers();
-    test_format_json();
-    test_pending_approvals_section();
-    test_only_granted_secrets_shown();
+    RUN(test_no_filter_no_line);
+    RUN(test_filter_line_present);
+    RUN(test_empty_filter_is_explicit);
+    RUN(test_settings_models_providers);
+    RUN(test_format_json);
+    RUN(test_pending_approvals_section);
+    RUN(test_only_granted_secrets_shown);
     printf("All search_config tests passed.\n");
     return 0;
 }

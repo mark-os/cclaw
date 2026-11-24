@@ -4,97 +4,42 @@
 #include <string.h>
 #include "test_util.h"
 
-static void test_is_valid_agent_name(void) {
-    /* Accept: single uppercase letter */
-    assert(is_valid_agent_name("A"));
+/* Names reach paths (workspaces, channel pipes) and SQL identifiers, so
+ * every rejected shape stays a row. */
+static void test_names(void) {
+    char n63[64], n64[65], a63[64], a64[65];
+    memset(n63, 'a', 63); n63[63] = '\0';
+    memset(n64, 'a', 64); n64[64] = '\0';
+    a63[0] = 'Z'; memset(a63 + 1, 'a', 62); a63[63] = '\0';
+    a64[0] = 'A'; memset(a64 + 1, 'b', 63); a64[64] = '\0';
 
-    /* Accept: PascalCase word */
-    assert(is_valid_agent_name("Assistant"));
-
-    /* Accept: PascalCase with trailing digits */
-    assert(is_valid_agent_name("CodeReviewer2"));
-
-    /* Accept: exactly 63 chars starting uppercase */
-    char name63[64];
-    name63[0] = 'Z';
-    for (int i = 1; i < 63; i++) name63[i] = 'a';
-    name63[63] = '\0';
-    assert(is_valid_agent_name(name63));
-
-    printf("  PASS: valid agent names accepted\n");
-
-    /* Reject: NULL */
-    assert(!is_valid_agent_name(NULL));
-
-    /* Reject: empty string */
-    assert(!is_valid_agent_name(""));
-
-    /* Reject: lowercase start */
-    assert(!is_valid_agent_name("assistant"));
-
-    /* Reject: contains hyphen */
-    assert(!is_valid_agent_name("code-reviewer"));
-
-    /* Reject: contains underscore */
-    assert(!is_valid_agent_name("Code_Reviewer"));
-
-    /* Reject: starts with digit */
-    assert(!is_valid_agent_name("1Agent"));
-
-    /* Reject: contains space */
-    assert(!is_valid_agent_name("Agent Name"));
-
-    /* Reject: 64 chars (too long) */
-    char name64[65];
-    name64[0] = 'A';
-    for (int i = 1; i < 64; i++) name64[i] = 'b';
-    name64[64] = '\0';
-    assert(!is_valid_agent_name(name64));
-
-    printf("  PASS: invalid agent names rejected\n");
+    /* agent: 1 = is_valid_agent_name, 0 = is_valid_name */
+    const struct { int agent; const char *name; int ok; } cases[] = {
+        {0, "hello", 1}, {0, "Hello", 1}, {0, "AGENT", 1}, {0, "my-agent", 1},
+        {0, "my_agent", 1}, {0, "Agent123", 1}, {0, "a", 1}, {0, "A-B_c-9", 1},
+        {0, n63, 1},
+        {0, NULL, 0}, {0, "", 0}, {0, "has space", 0}, {0, "has.dot", 0},
+        {0, "path/sep", 0}, {0, "back\\slash", 0}, {0, "tab\there", 0},
+        {0, "new\nline", 0}, {0, "@special", 0}, {0, "no!bang", 0}, {0, n64, 0},
+        /* agent names are PascalCase, letters and digits only */
+        {1, "A", 1}, {1, "Assistant", 1}, {1, "CodeReviewer2", 1}, {1, a63, 1},
+        {1, NULL, 0}, {1, "", 0}, {1, "assistant", 0}, {1, "code-reviewer", 0},
+        {1, "Code_Reviewer", 0}, {1, "1Agent", 0}, {1, "Agent Name", 0}, {1, a64, 0},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int got = cases[i].agent ? is_valid_agent_name(cases[i].name)
+                                 : is_valid_name(cases[i].name);
+        if (!!got != cases[i].ok)
+            fprintf(stderr, "row %zu: '%s' -> %d\n", i,
+                    cases[i].name ? cases[i].name : "(null)", got);
+        assert(!!got == cases[i].ok);
+    }
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_validate:\n");
-
-    /* Valid names */
-    assert(is_valid_name("hello"));
-    assert(is_valid_name("Hello"));
-    assert(is_valid_name("AGENT"));
-    assert(is_valid_name("my-agent"));
-    assert(is_valid_name("my_agent"));
-    assert(is_valid_name("Agent123"));
-    assert(is_valid_name("a"));
-    assert(is_valid_name("A-B_c-9"));
-    printf("  PASS: valid names accepted\n");
-
-    /* Invalid names */
-    assert(!is_valid_name(NULL));
-    assert(!is_valid_name(""));
-    assert(!is_valid_name("has space"));
-    assert(!is_valid_name("has.dot"));
-    assert(!is_valid_name("path/sep"));
-    assert(!is_valid_name("back\\slash"));
-    assert(!is_valid_name("tab\there"));
-    assert(!is_valid_name("new\nline"));
-    assert(!is_valid_name("@special"));
-    assert(!is_valid_name("no!bang"));
-    printf("  PASS: invalid names rejected\n");
-
-    /* Too long (64 chars) */
-    char long_name[65];
-    memset(long_name, 'a', 64);
-    long_name[64] = '\0';
-    assert(!is_valid_name(long_name));
-
-    /* Exactly 63 chars is ok */
-    long_name[63] = '\0';
-    assert(is_valid_name(long_name));
-    printf("  PASS: length limits enforced\n");
-
-    test_is_valid_agent_name();
-
+    RUN(test_names);
     printf("all validate tests passed\n");
     return 0;
 }

@@ -10,19 +10,9 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 600
-#include "db.h"
 #include "mock_server.h"
-#include "test_util.h"
-#include <fcntl.h>
+#include "test_integ.h"
 #include <limits.h>
-#include <signal.h>
-#include <sqlite3.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
 
 #define DB_PATH "/tmp/cclaw_integ_cli_interim.db"
 #define LOG1    "/tmp/cclaw_integ_cli_interim_run1.log"
@@ -39,102 +29,13 @@
     "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"" text "\"}," \
     "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}"
 
+static IntegEnv g_env = {.db = DB_PATH};
+#define db_count(sql) integ_db_int(DB_PATH, (sql), NULL)
+#define db_exec(sql) integ_db_exec(DB_PATH, (sql))
+
 static const char *RESP_FINAL = SAY("acknowledged");
 
 /* ── helpers ─────────────────────────────────────────────────────── */
-
-static void dump_log(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-    char line[512];
-    fprintf(stderr, "--- %s ---\n", path);
-    while (fgets(line, sizeof(line), f)) fputs(line, stderr);
-    fprintf(stderr, "--- end %s ---\n", path);
-    fclose(f);
-}
-
-/* Run `cclaw -p <prompt>` (optionally pinned to a session), stdin /dev/null. */
-static int run_cli_p(const char *exe, const char *url, const char *prompt,
-                     int64_t sid, const char *logpath) {
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        int nfd = open("/dev/null", O_RDONLY);
-        int lfd = open(logpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (nfd < 0 || lfd < 0) _exit(110);
-        dup2(nfd, 0); dup2(lfd, 1); dup2(lfd, 2);
-        if (nfd > 2) close(nfd);
-        if (lfd > 2) close(lfd);
-        setenv("CCLAW_DB_PATH", DB_PATH, 1);
-        setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
-        setenv("OPENROUTER_API_KEY", "test-key", 1);
-        setenv("CCLAW_MODEL", "test-model", 1);
-        unsetenv("CCLAW_SANDBOX_PROFILE");
-        if (sid > 0) {
-            char sbuf[32];
-            snprintf(sbuf, sizeof(sbuf), "%lld", (long long)sid);
-            execl(exe, exe, "-p", prompt, "-s", sbuf, (char *)NULL);
-        } else {
-            execl(exe, exe, "-p", prompt, (char *)NULL);
-        }
-        _exit(111);
-    }
-    for (int i = 0; i < 200; i++) {   /* 20s deadline */
-        int st = 0;
-        pid_t w = waitpid(pid, &st, WNOHANG);
-        if (w == pid) return 0;
-        struct timespec ts = {0, 100 * 1000 * 1000};
-        nanosleep(&ts, NULL);
-    }
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
-    return -1;
-}
-
-static int64_t db_count(const char *sql) {
-    sqlite3 *db;
-    if ((db = db_open(DB_PATH)) == NULL) return -1;
-    sqlite3_stmt *s;
-    int64_t v = -1;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
-        if (sqlite3_step(s) == SQLITE_ROW) v = sqlite3_column_int64(s, 0);
-        sqlite3_finalize(s);
-    }
-    sqlite3_close(db);
-    return v;
-}
-
-static int db_exec(const char *sql) {
-    sqlite3 *db;
-    if ((db = db_open(DB_PATH)) == NULL) return -1;
-    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-    sqlite3_close(db);
-    return (rc == SQLITE_OK) ? 0 : -1;
-}
-
-/* Point providers/models at the mock (same shape as the approval-park test). */
-static int seed_mock_provider(const char *url) {
-    sqlite3 *seed = test_db_open(DB_PATH);
-    if (!seed) return -1;
-    if (db_seed_defaults(seed) != 0) { sqlite3_close(seed); return -1; }
-    sqlite3_exec(seed, "DELETE FROM models; DELETE FROM providers;", NULL, NULL, NULL);
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(seed,
-            "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, default_model)"
-            " VALUES('openrouter', ?1, 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4.1-flash')",
-            -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(s, 1, url, -1, SQLITE_STATIC);
-        sqlite3_step(s);
-        sqlite3_finalize(s);
-    }
-    sqlite3_exec(seed,
-        "INSERT INTO models(id, provider_name, model, status)"
-        " VALUES('openrouter/deepseek/deepseek-v4.1-flash', 'openrouter',"
-        "        'deepseek/deepseek-v4.1-flash', 'healthy')",
-        NULL, NULL, NULL);
-    sqlite3_close(seed);
-    return 0;
-}
 
 /* ── assertions ──────────────────────────────────────────────────── */
 
@@ -173,16 +74,17 @@ int main(void) {
     if (port < 0) FAIL("mock_server_start");
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
+    g_env.url = url;
 
     int rc = 1;
-    if (seed_mock_provider(url) != 0) { fprintf(stderr, "FAIL: seed\n"); goto done; }
+    if (integ_seed_provider(DB_PATH, url, 0, 0) != 0) { fprintf(stderr, "FAIL: seed\n"); goto done; }
 
     /* ── setup run: create the session, agent and tool rows ───────── */
     mock_server_reset();
     mock_server_enqueue(200, RESP_FINAL);
     mock_server_enqueue(200, RESP_FINAL);
-    if (run_cli_p(exe, url, "hello", 0, LOG1) != 0) {
-        fprintf(stderr, "FAIL: setup run did not exit\n"); dump_log(LOG1); goto done;
+    if (integ_run_cli_p(&g_env, exe, "hello", 0, LOG1, 200) < 0) {
+        fprintf(stderr, "FAIL: setup run did not exit\n"); integ_dump_log(LOG1); goto done;
     }
     int64_t sid = db_count("SELECT MAX(id) FROM sessions;");
     if (sid <= 0) { fprintf(stderr, "FAIL: no session\n"); goto done; }
@@ -196,8 +98,8 @@ int main(void) {
     mock_server_enqueue(200, CALL("call_1", "INTERIM-ANSWER-391"));
     mock_server_enqueue(200, SAY("FINAL-WORD"));
     mock_server_enqueue(200, RESP_FINAL);
-    if (run_cli_p(exe, url, "question", sid, LOG1) != 0) {
-        fprintf(stderr, "FAIL: run 1 did not exit\n"); dump_log(LOG1); goto done;
+    if (integ_run_cli_p(&g_env, exe, "question", sid, LOG1, 200) < 0) {
+        fprintf(stderr, "FAIL: run 1 did not exit\n"); integ_dump_log(LOG1); goto done;
     }
     long at_i, at_f, at_tool;
     int ni = count_in_file(LOG1, "INTERIM-ANSWER-391", &at_i);
@@ -205,13 +107,12 @@ int main(void) {
     count_in_file(LOG1, "[file_list", &at_tool);
     if (ni != 1 || nf != 1) {
         fprintf(stderr, "FAIL: interim shown %d time(s), final %d (want 1 and 1)\n", ni, nf);
-        dump_log(LOG1); goto done;
+        integ_dump_log(LOG1); goto done;
     }
     if (!(at_i < at_tool && at_tool < at_f)) {
         fprintf(stderr, "FAIL: order is not interim text, tool line, final text\n");
-        dump_log(LOG1); goto done;
+        integ_dump_log(LOG1); goto done;
     }
-    printf("  PASS interim_text_is_shown_before_its_tool_call\n");
 
     /* ── text with a tool call, then an empty final ───────────────── */
     mock_server_reset();
@@ -219,15 +120,14 @@ int main(void) {
     mock_server_enqueue(200, SAY(""));
     mock_server_enqueue(200, SAY(""));
     mock_server_enqueue(200, RESP_FINAL);
-    if (run_cli_p(exe, url, "another", sid, LOG2) != 0) {
-        fprintf(stderr, "FAIL: run 2 did not exit\n"); dump_log(LOG2); goto done;
+    if (integ_run_cli_p(&g_env, exe, "another", sid, LOG2, 200) < 0) {
+        fprintf(stderr, "FAIL: run 2 did not exit\n"); integ_dump_log(LOG2); goto done;
     }
     int no = count_in_file(LOG2, "ONLY-THING-SAID", NULL);
     if (no != 1) {
         fprintf(stderr, "FAIL: the only message was shown %d time(s), want 1\n", no);
-        dump_log(LOG2); goto done;
+        integ_dump_log(LOG2); goto done;
     }
-    printf("  PASS empty_final_does_not_repeat_the_earlier_text\n");
 
     printf("All CLI interim-text integration tests passed.\n");
     rc = 0;

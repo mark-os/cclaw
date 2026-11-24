@@ -56,15 +56,22 @@ static void claim_call(sqlite3 *db, int64_t parent, const char *call_id) {
     assert(sqlite3_exec(db, ins, NULL, NULL, NULL) == SQLITE_OK);
 }
 
-/* One full turn the way the daemon runs it: drain the inbox (idle →
- * llm_running), land the assistant answer, advance to the boundary. */
-static AdvanceResult run_turn(sqlite3 *db, int64_t sid, const char *answer) {
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
-    Message m = { .role = ROLE_ASSISTANT, .content = (char *)answer,
-                  .stop_reason = STOP_REASON_STOP };
+/* The two halves of a turn the way the daemon runs it: drain the inbox
+ * (idle -> llm_running), then land the assistant answer and advance to the
+ * boundary. A test that acts mid-turn (launching, queueing) goes between. */
+static void open_turn(sqlite3 *db, int64_t sid) {
+    assert(advance_session(db, sid, 25).action == ADVANCE_DISPATCH_LLM);
+}
+
+static AdvanceResult end_turn(sqlite3 *db, int64_t sid, const char *answer, int stop) {
+    Message m = { .role = ROLE_ASSISTANT, .content = (char *)answer, .stop_reason = stop };
     entry_append_with_iteration(db, sid, &m, db_next_iteration_id(db, sid));
     return advance_session(db, sid, 25).action;
+}
+
+static AdvanceResult run_turn(sqlite3 *db, int64_t sid, const char *answer) {
+    open_turn(db, sid);
+    return end_turn(db, sid, answer, STOP_REASON_STOP);
 }
 
 /* Stamp a session onto discord chat `chat` (creating the chat's row, as the
@@ -135,7 +142,6 @@ static void test_quiescence_deep_tree(void) {
     assert(session_subtree_quiescent(db, root) == 1);
 
     db_close(db);
-    printf("  PASS test_quiescence_deep_tree\n");
 }
 
 /* ── The session-5 regression: a 2×2 background tree, one notice per child ── */
@@ -152,16 +158,11 @@ static void test_session5_one_notice_per_child(void) {
     for (int i = 0; i < 2; i++) {
         /* Child turn 1: drain the spawn task, launch two background
          * grandchildren mid-turn, close with interim prose. */
-        AdvanceOutput out = advance_session(db, kid[i], 25);
-        assert(out.action == ADVANCE_DISPATCH_LLM);
+        open_turn(db, kid[i]);
         for (int j = 0; j < 2; j++)
             gkid[i][j] = launch(db, kid[i],
                                 "{\"task\":\"dig\",\"background\":true}", NULL);
-        Message m = { .role = ROLE_ASSISTANT,
-                      .content = "delegated to two grandchildren",
-                      .stop_reason = STOP_REASON_STOP };
-        entry_append_with_iteration(db, kid[i], &m, db_next_iteration_id(db, kid[i]));
-        assert(advance_session(db, kid[i], 25).action == ADVANCE_DONE);
+        assert(end_turn(db, kid[i], "delegated to two grandchildren", STOP_REASON_STOP) == ADVANCE_DONE);
     }
 
     /* THE regression: prod session 5 pushed "completed" here. Under the
@@ -187,7 +188,6 @@ static void test_session5_one_notice_per_child(void) {
                   root) == 2);
 
     db_close(db);
-    printf("  PASS test_session5_one_notice_per_child\n");
 }
 
 /* ── Blocking: one-shot fires once, standing edge ships later work ────── */
@@ -227,7 +227,6 @@ static void test_blocking_standing_no_duplicate(void) {
                   parent) == 1);
 
     db_close(db);
-    printf("  PASS test_blocking_standing_no_duplicate\n");
 }
 
 /* ── Blocking refuses multi-payload policies, with feedback ───────────── */
@@ -264,7 +263,6 @@ static void test_blocking_policy_refusal(void) {
     free(pol);
 
     db_close(db);
-    printf("  PASS test_blocking_policy_refusal\n");
 }
 
 /* ── Inheritance: the launcher's policy seeds the child; explicit doesn't ── */
@@ -308,7 +306,6 @@ static void test_policy_inheritance(void) {
     free(pol);
 
     db_close(db);
-    printf("  PASS test_policy_inheritance\n");
 }
 
 /* ── digest: prose since the cursor, concatenated, windowed per delivery ── */
@@ -320,8 +317,7 @@ static void test_digest_window(void) {
         "{\"task\":\"t\",\"background\":true,\"delivery\":\"digest\"}", NULL);
 
     /* Turn 1: interim prose (tool_use commentary) plus the final message. */
-    AdvanceOutput out = advance_session(db, child, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
+    open_turn(db, child);
     entry_append_typed(db, child, 1, "assistant_message", 0, "step one",
                        NULL, NULL, 0, STOP_REASON_TOOL_USE, NULL, 0, 0, 0);
     Message m = { .role = ROLE_ASSISTANT, .content = "done one",
@@ -340,7 +336,6 @@ static void test_digest_window(void) {
                   parent) == 1);
 
     db_close(db);
-    printf("  PASS test_digest_window\n");
 }
 
 /* ── turn: the old standard ships every boundary, labeled truthfully ───── */
@@ -353,13 +348,9 @@ static void test_turn_policy_truthful_labels(void) {
 
     /* Turn 1 launches a background grandchild and ends while it runs: the
      * push happens (turn semantics) but says update, not completed. */
-    AdvanceOutput out = advance_session(db, child, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
+    open_turn(db, child);
     int64_t gchild = launch(db, child, "{\"task\":\"dig\",\"background\":true}", NULL);
-    Message m = { .role = ROLE_ASSISTANT, .content = "delegated",
-                  .stop_reason = STOP_REASON_STOP };
-    entry_append_with_iteration(db, child, &m, db_next_iteration_id(db, child));
-    assert(advance_session(db, child, 25).action == ADVANCE_DONE);
+    assert(end_turn(db, child, "delegated", STOP_REASON_STOP) == ADVANCE_DONE);
     assert(scalar(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
                       " AND payload = 'Sub-agent update: delegated';", parent) == 1);
 
@@ -370,7 +361,6 @@ static void test_turn_policy_truthful_labels(void) {
                       " AND payload = 'Sub-agent completed: final';", parent) == 1);
 
     db_close(db);
-    printf("  PASS test_turn_policy_truthful_labels\n");
 }
 
 /* ── F2: the tag comes from the child's stop_reason, not its prose ─────── */
@@ -381,12 +371,8 @@ static void test_child_outcome_truncated(void) {
     int64_t child = launch(db, parent, "{\"task\":\"t\",\"background\":true}", NULL);
 
     /* The child claims success in prose but stopped at the output cap. */
-    AdvanceOutput out = advance_session(db, child, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
-    Message m = { .role = ROLE_ASSISTANT, .content = "all done, task complete",
-                  .stop_reason = STOP_REASON_LENGTH };
-    entry_append_with_iteration(db, child, &m, db_next_iteration_id(db, child));
-    assert(advance_session(db, child, 25).action == ADVANCE_DONE);
+    open_turn(db, child);
+    assert(end_turn(db, child, "all done, task complete", STOP_REASON_LENGTH) == ADVANCE_DONE);
 
     assert(session_final_truncated(db, child) == 1);
     assert(scalar(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
@@ -395,7 +381,6 @@ static void test_child_outcome_truncated(void) {
                       " AND payload LIKE 'Sub-agent completed: %';", parent) == 0);
 
     db_close(db);
-    printf("  PASS test_child_outcome_truncated\n");
 }
 
 /* ── The sweep delivers a quiescent hold that settled silently ─────────── */
@@ -406,15 +391,11 @@ static void test_sweep_delivers_silent_settle(void) {
     int64_t child = launch(db, root, "{\"task\":\"t\",\"background\":true}", NULL);
 
     /* Child's turn launches an 'explicit' grandchild and ends: held. */
-    AdvanceOutput out = advance_session(db, child, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
+    open_turn(db, child);
     int64_t gchild = launch(db, child,
         "{\"task\":\"quiet work\",\"background\":true,\"delivery\":\"explicit\"}",
         NULL);
-    Message m = { .role = ROLE_ASSISTANT, .content = "the answer",
-                  .stop_reason = STOP_REASON_STOP };
-    entry_append_with_iteration(db, child, &m, db_next_iteration_id(db, child));
-    assert(advance_session(db, child, 25).action == ADVANCE_DONE);
+    assert(end_turn(db, child, "the answer", STOP_REASON_STOP) == ADVANCE_DONE);
     assert(notices(db, root) == 0);
 
     /* The explicit grandchild finishes without a sound — no boundary ever
@@ -430,7 +411,6 @@ static void test_sweep_delivers_silent_settle(void) {
     assert(advance_sweep_undelivered(db) == 0);   /* idempotent by the cursor */
 
     db_close(db);
-    printf("  PASS test_sweep_delivers_silent_settle\n");
 }
 
 /* ── Streak pause fail-notifies a parked blocking waiter ──────────────── */
@@ -446,13 +426,9 @@ static void test_streak_pause_fail_notify(void) {
 
     /* Turn 1 (spawn = autonomous) launches a grandchild that never finishes,
      * so the one-shot stays parked on a subtree that will not settle. */
-    AdvanceOutput out = advance_session(db, child, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
+    open_turn(db, child);
     launch(db, child, "{\"task\":\"forever\",\"background\":true}", NULL);
-    Message m = { .role = ROLE_ASSISTANT, .content = "working",
-                  .stop_reason = STOP_REASON_STOP };
-    entry_append_with_iteration(db, child, &m, db_next_iteration_id(db, child));
-    assert(advance_session(db, child, 25).action == ADVANCE_DONE);
+    assert(end_turn(db, child, "working", STOP_REASON_STOP) == ADVANCE_DONE);
     assert(scalar(db, "SELECT COUNT(*) FROM entries WHERE session_id=? AND role=3;",
                   parent) == 0);   /* held, parent still parked */
 
@@ -469,7 +445,6 @@ static void test_streak_pause_fail_notify(void) {
                       " AND one_shot=1;", child) == 0);
 
     db_close(db);
-    printf("  PASS test_streak_pause_fail_notify\n");
 }
 
 /* ── Channel edge: lazy, cursor only, policy read live from the chat ─── */
@@ -483,13 +458,9 @@ static void test_channel_edge_semantics(void) {
     int64_t sid = session_create(db, "chat", "default", -1, 0);
     bind_chat(db, sid, "42", -1);
     inbox_insert(db, sid, "discord", NULL, "q1");
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
+    open_turn(db, sid);
     inbox_insert(db, sid, "discord", NULL, "q2");   /* queued mid-turn */
-    Message m = { .role = ROLE_ASSISTANT, .content = "a1",
-                  .stop_reason = STOP_REASON_STOP };
-    entry_append_with_iteration(db, sid, &m, db_next_iteration_id(db, sid));
-    assert(advance_session(db, sid, 25).action == ADVANCE_DONE);
+    assert(end_turn(db, sid, "a1", STOP_REASON_STOP) == ADVANCE_DONE);
     assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
                   sid) == 1);                       /* a1 posted, q2 pending */
     /* The edge row holds no policy; the chat's 'auto' reads as turn. */
@@ -518,12 +489,9 @@ static void test_channel_edge_semantics(void) {
     bind_chat(db, held, "44", -1);
     set_mode(db, "44", "quiescent");
     inbox_insert(db, held, "discord", NULL, "h1");
-    assert(advance_session(db, held, 25).action == ADVANCE_DISPATCH_LLM);
+    open_turn(db, held);
     inbox_insert(db, held, "discord", NULL, "h2");  /* queued mid-turn */
-    Message hm = { .role = ROLE_ASSISTANT, .content = "started",
-                   .stop_reason = STOP_REASON_STOP };
-    entry_append_with_iteration(db, held, &hm, db_next_iteration_id(db, held));
-    assert(advance_session(db, held, 25).action == ADVANCE_DONE);
+    assert(end_turn(db, held, "started", STOP_REASON_STOP) == ADVANCE_DONE);
     assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?;",
                   held) == 0);                      /* held: h2 pending */
     assert(run_turn(db, held, "finished") == ADVANCE_DONE);
@@ -575,7 +543,6 @@ static void test_channel_edge_semantics(void) {
                   quiet) == 1);
 
     db_close(db);
-    printf("  PASS test_channel_edge_semantics\n");
 }
 
 /* ── Channel edge at bind: the first reply survives a crash before delivery ── */
@@ -614,8 +581,7 @@ static void test_channel_edge_at_bind(void) {
      * process dies before advance_deliver_boundary commits. Nothing was
      * posted; the sweep finds the reply and posts it exactly once. */
     inbox_insert(db, sid, "discord", NULL, "hello");
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
+    open_turn(db, sid);
     Message m = { .role = ROLE_ASSISTANT, .content = "first reply",
                   .stop_reason = STOP_REASON_STOP };
     entry_append_with_iteration(db, sid, &m, db_next_iteration_id(db, sid));
@@ -634,17 +600,11 @@ static void test_channel_edge_at_bind(void) {
            scalar(db, "SELECT leaf_id FROM sessions WHERE id=?;", sid));
 
     db_close(db);
-    printf("  PASS test_channel_edge_at_bind\n");
 }
 
-/* One failed turn: drain, land an error answer, advance to the boundary. */
 static void run_failed_turn(sqlite3 *db, int64_t sid, const char *err) {
-    AdvanceOutput out = advance_session(db, sid, 25);
-    assert(out.action == ADVANCE_DISPATCH_LLM);
-    Message m = { .role = ROLE_ASSISTANT, .content = (char *)err,
-                  .stop_reason = STOP_REASON_ERROR };
-    entry_append_with_iteration(db, sid, &m, db_next_iteration_id(db, sid));
-    advance_session(db, sid, 25);
+    open_turn(db, sid);
+    end_turn(db, sid, err, STOP_REASON_ERROR);
 }
 
 /* A failed turn: the error text goes to the operator (the channel's admins)
@@ -673,14 +633,45 @@ static void test_error_goes_to_operator(void) {
         " AND json_extract(payload,'$.to_user') IS NULL"
         " AND json_extract(payload,'$.text') LIKE 'error:%';";
 
-    /* A group: not an admin chat, even when an admin is in it. */
-    int64_t g = session_create(db, "grp", "default", -1, 0);
-    bind_chat(db, g, "g1", 0);
-    inbox_insert(db, g, "discord", NULL, "alice: hi");
-    run_failed_turn(db, g, "error: all models failed [resp #1]");
-    assert(scalar(db, to_admin, g) == 1);        /* operator: the real error */
-    assert(scalar(db, to_chat, g) == 1);         /* chat: the generic line */
-    assert(scalar(db, leaks, g) == 0);           /* never the error text */
+    /* One failed turn per kind of chat: the operator always gets the real
+     * error (an admin's DM is the operator's own), the chat at most the
+     * generic line, and the error text never leaks anywhere else. */
+    static const struct {
+        const char *name, *chat;
+        int is_admin;           /* -1: not recorded yet */
+        int explicit_mode;
+        int64_t want_admin, want_chat;
+    } cases[] = {
+        /* a group: not an admin chat, even when an admin is in it */
+        { "grp",      "g1",      0, 0, 1, 1 },
+        /* explicit never auto-ships an answer, but a failure still notifies */
+        { "xgrp",     "g2",      0, 1, 1, 1 },
+        /* a DM with someone who is not an admin is treated like the group */
+        { "userdm",   "d-user",  0, 0, 1, 1 },
+        /* an admin's own DM: the error as a direct message, no generic line */
+        { "admindm",  "d-admin", 1, 0, 1, 0 },
+        /* not recorded yet: a chat whose id is an admin id is an admin chat */
+        { "tg-admin", "777",    -1, 0, 1, 0 },
+        { "tg-other", "555",    -1, 0, 1, 1 },
+    };
+    int64_t sids[sizeof(cases) / sizeof(cases[0])];
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("    chat %s\n", cases[i].name);
+        int64_t sid = sids[i] = session_create(db, cases[i].name, "default", -1, 0);
+        bind_chat(db, sid, cases[i].chat, cases[i].is_admin);
+        if (cases[i].explicit_mode) {
+            assert(channel_pin_session(db, "discord", cases[i].chat, sid) == 0);
+            set_mode(db, cases[i].chat, "explicit");
+        }
+        inbox_insert(db, sid, "discord", NULL, "alice: hi");
+        char err[64];
+        snprintf(err, sizeof(err), "error: all models failed [resp #%zu]", i + 1);
+        run_failed_turn(db, sid, err);
+        assert(scalar(db, to_admin, sid) == cases[i].want_admin);
+        assert(scalar(db, to_chat, sid) == cases[i].want_chat);
+        assert(scalar(db, leaks, sid) == 0);
+    }
+    int64_t g = sids[0], d = sids[3];
     char *line = db_scalar_text(db,
         "SELECT json_extract(payload,'$.text') FROM channel_outbox"
         " WHERE session_id=?1 AND json_extract(payload,'$.chat_id')='g1';", g);
@@ -719,35 +710,6 @@ static void test_error_goes_to_operator(void) {
     assert(scalar(db, to_chat, g2) == 1);
     assert(scalar(db, leaks, g2) == 0);
 
-    /* An explicit chat never auto-ships an answer, but a failure still
-     * reaches the operator and the chat still gets its line. */
-    int64_t x = session_create(db, "xgrp", "default", -1, 0);
-    bind_chat(db, x, "g2", 0);
-    assert(channel_pin_session(db, "discord", "g2", x) == 0);
-    set_mode(db, "g2", "explicit");
-    inbox_insert(db, x, "discord", NULL, "dave: hi");
-    run_failed_turn(db, x, "error: all models failed [resp #6]");
-    assert(scalar(db, to_admin, x) == 1);
-    assert(scalar(db, to_chat, x) == 1);
-    assert(scalar(db, leaks, x) == 0);
-
-    /* A DM with someone who is not an admin is treated like the group. */
-    int64_t u = session_create(db, "userdm", "default", -1, 0);
-    bind_chat(db, u, "d-user", 0);
-    inbox_insert(db, u, "discord", NULL, "hi");
-    run_failed_turn(db, u, "error: all models failed [resp #7]");
-    assert(scalar(db, to_admin, u) == 1);
-    assert(scalar(db, to_chat, u) == 1);
-    assert(scalar(db, leaks, u) == 0);
-
-    /* An admin's own DM: the error as a direct message, no generic line. */
-    int64_t d = session_create(db, "admindm", "default", -1, 0);
-    bind_chat(db, d, "d-admin", 1);
-    inbox_insert(db, d, "discord", NULL, "hi");
-    run_failed_turn(db, d, "error: all models failed [resp #8]");
-    assert(scalar(db, to_admin, d) == 1);
-    assert(scalar(db, to_chat, d) == 0);
-
     /* A retired model: the operator's copy points at the dashboard, and the
      * hint does not defeat the repeat check. */
     const char *hinted =
@@ -765,22 +727,6 @@ static void test_error_goes_to_operator(void) {
     run_failed_turn(db, d, "error: model not available [resp #21]");
     assert(scalar(db, hinted, d) == 1);
     assert(scalar(db, to_chat, d) == 0);
-
-    /* Not recorded yet (no message since the column existed): a chat whose
-     * id is an admin id is an admin chat; any other is not. */
-    int64_t t1 = session_create(db, "tg-admin", "default", -1, 0);
-    int64_t t2 = session_create(db, "tg-other", "default", -1, 0);
-    bind_chat(db, t1, "777", -1);
-    bind_chat(db, t2, "555", -1);
-    inbox_insert(db, t1, "discord", NULL, "hi");
-    run_failed_turn(db, t1, "error: all models failed [resp #9]");
-    assert(scalar(db,
-        "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1;", t1) == 1);
-    assert(scalar(db, to_admin, t1) == 1);
-    inbox_insert(db, t2, "discord", NULL, "hi");
-    run_failed_turn(db, t2, "error: all models failed [resp #10]");
-    assert(scalar(db, to_admin, t2) == 1);
-    assert(scalar(db, to_chat, t2) == 1);
 
     /* A designated admin chat (admin_chats): operator messages are posted
      * there, not sent to each admin. A failure in another chat lands in it;
@@ -820,25 +766,23 @@ static void test_error_goes_to_operator(void) {
     assert(scalar(db, leaks, g) == 0);
 
     db_close(db);
-    printf("  PASS test_error_goes_to_operator\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_delivery:\n");
-    test_quiescence_deep_tree();
-    test_session5_one_notice_per_child();
-    test_blocking_standing_no_duplicate();
-    test_blocking_policy_refusal();
-    test_policy_inheritance();
-    test_digest_window();
-    test_turn_policy_truthful_labels();
-    test_child_outcome_truncated();
-    test_sweep_delivers_silent_settle();
-    test_streak_pause_fail_notify();
-    test_channel_edge_semantics();
-    test_channel_edge_at_bind();
-    test_error_goes_to_operator();
-    printf("All delivery tests passed.\n");
+    RUN(test_quiescence_deep_tree);
+    RUN(test_session5_one_notice_per_child);
+    RUN(test_blocking_standing_no_duplicate);
+    RUN(test_blocking_policy_refusal);
+    RUN(test_policy_inheritance);
+    RUN(test_digest_window);
+    RUN(test_turn_policy_truthful_labels);
+    RUN(test_child_outcome_truncated);
+    RUN(test_sweep_delivers_silent_settle);
+    RUN(test_streak_pause_fail_notify);
+    RUN(test_channel_edge_semantics);
+    RUN(test_channel_edge_at_bind);
+    RUN(test_error_goes_to_operator);
     return 0;
 }

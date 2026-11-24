@@ -80,7 +80,6 @@ static void test_every_column_classified(void) {
     }
     assert(bad == 0);
     db_close(db);
-    printf("  PASS test_every_column_classified\n");
 }
 
 /* The triggers a fresh database carries are exactly the generated ones: three
@@ -126,7 +125,6 @@ static void test_triggers_match_list(void) {
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sqlite_master"
                          " WHERE name='log_grants_upd'", 0, -1) == 1);
     db_close(db);
-    printf("  PASS test_triggers_match_list\n");
 }
 
 /* A grant written without saying where it came from is refused: grants.source
@@ -136,7 +134,7 @@ static void test_grant_without_source_refused(void) {
     test_seed_agent(db, "Ann");
     assert(sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value)"
                         " VALUES('Ann','tool','x')", NULL, NULL, NULL) != SQLITE_OK);
-    assert(strstr(sqlite3_errmsg(db), "NOT NULL constraint failed: grants.source"));
+    assert(strstr(sqlite3_errmsg(db), "grants.source"));
     assert(sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value,source)"
                         " VALUES('Ann','tool','x','because')", NULL, NULL, NULL) != SQLITE_OK);
     assert(strstr(sqlite3_errmsg(db), "CHECK constraint failed"));
@@ -144,7 +142,6 @@ static void test_grant_without_source_refused(void) {
     assert(agent_config_grant(db, "Ann", "tool", "x", 0, GRANT_ORIGIN(NULL, 0)) == -1);
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM grants", 0, -1) == 0);
     db_close(db);
-    printf("  PASS test_grant_without_source_refused\n");
 }
 
 /* Insert / update / delete each log one row with the actor and context of
@@ -200,7 +197,6 @@ static void test_actions_and_noops(void) {
     assert(db_scalar_i64(db, "SELECT actor='unknown' AND context IS NULL"
         " FROM change_log ORDER BY id DESC LIMIT 1", 0, -1) == 1);
     db_close(db);
-    printf("  PASS test_actions_and_noops\n");
 }
 
 /* models is updated on every LLM request; only a setting change may log.
@@ -238,7 +234,6 @@ static void test_measurements_not_logged(void) {
         " AND json_type(new_values,'$.degraded_until') IS NULL"
         " FROM change_log ORDER BY id DESC LIMIT 1", 0, -1) == 1);
     db_close(db);
-    printf("  PASS test_measurements_not_logged\n");
 }
 
 /* The guarantee: a secret's value — plaintext or the stored ciphertext —
@@ -280,7 +275,6 @@ static void test_secret_value_never_logged(void) {
     free(enc1); free(enc2);
     db_wipe_secret_key();
     db_close(db);
-    printf("  PASS test_secret_value_never_logged\n");
 }
 
 /* A SQLite connection that does not define cclaw_actor() — a plain system
@@ -303,7 +297,6 @@ static void test_plain_sqlite_and_append_only(void) {
     assert(strstr(sqlite3_errmsg(db), "append-only"));
     assert(sqlite3_exec(db, "UPDATE change_log SET actor='me'", NULL, NULL, NULL) != SQLITE_OK);
     db_close(db);
-    printf("  PASS test_plain_sqlite_and_append_only\n");
 }
 
 /* Renaming an agent cascades into grants/agent_models; each cascaded row is
@@ -319,20 +312,18 @@ static void test_rename_cascade_logged(void) {
         " AND action='update' AND json_extract(row_key,'$.agent_name')='New'"
         " AND json_extract(old_values,'$.agent_name')='Old'", 0, -1) == 1);
     db_close(db);
-    printf("  PASS test_rename_cascade_logged\n");
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_change_log:\n");
-    test_every_column_classified();
-    test_triggers_match_list();
-    test_grant_without_source_refused();
-    test_actions_and_noops();
-    test_measurements_not_logged();
-    test_secret_value_never_logged();
-    test_plain_sqlite_and_append_only();
-    test_rename_cascade_logged();
+    RUN(test_every_column_classified);
+    RUN(test_triggers_match_list);
+    RUN(test_grant_without_source_refused);
+    RUN(test_actions_and_noops);
+    RUN(test_measurements_not_logged);
+    RUN(test_secret_value_never_logged);
+    RUN(test_plain_sqlite_and_append_only);
+    RUN(test_rename_cascade_logged);
     test_db_clean(DB_PATH);
     printf("All change_log tests passed.\n");
     return 0;

@@ -13,17 +13,14 @@
 
 #define TEST_DB "/tmp/cclaw_test_media_transcribe.db"
 
-static int tests_run = 0, tests_passed = 0;
-#define TEST(name) do { tests_run++; printf("  %s... ", #name); } while (0)
-#define PASS() do { tests_passed++; printf("PASS\n"); } while (0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while (0)
+static sqlite3 *g_db;
 
 /* Spool file path template — pid-tagged to avoid collisions */
 static char spool_path[256];
 
-static void exec_sql(sqlite3 *db, const char *sql) {
+static void exec_sql(const char *sql) {
     char *err = NULL;
-    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
+    int rc = sqlite3_exec(g_db, sql, NULL, NULL, &err);
     if (rc != SQLITE_OK) { fprintf(stderr, "sql failed: %s\n", err ? err : "?"); exit(1); }
 }
 
@@ -35,8 +32,8 @@ static void write_spool(const char *path, const unsigned char *data, size_t len)
     fclose(f);
 }
 
-static void seed_models(sqlite3 *db) {
-    exec_sql(db,
+static void seed_models(void) {
+    exec_sql(
         "DELETE FROM models; DELETE FROM providers;"
         "INSERT INTO providers(name, base_url, endpoint_type, api_key_env) VALUES"
         " ('oai', 'https://oai.example/v1', 'openai', 'OAI_KEY'),"
@@ -50,109 +47,95 @@ static void seed_models(sqlite3 *db) {
         " ('oai/caps-null', 'oai', 'caps-null', NULL, 'healthy', NULL);");
 }
 
-static void test_picker_filters(sqlite3 *db) {
-    TEST(picker_filters);
+static void test_picker_filters(void) {
     ModelCandidate out[8];
-    int n = model_pick_by_capability(db, "audio", out, 8);
-    if (n != 2) { printf("FAIL: expected 2 candidates, got %d\n", n); return; }
+    int n = model_pick_by_capability(g_db, "audio", out, 8);
+    assert(n == 2);
     /* catalog order (created_at, id): gem/audio before oai/audio2; the
      * degraded, disabled, missing-cap and NULL-cap models are all excluded */
-    if (strcmp(out[0].id, "gem/audio") != 0) FAIL("wrong first candidate");
-    if (out[0].endpoint_type != ENDPOINT_GEMINI) FAIL("gemini endpoint expected");
-    if (strcmp(out[0].api_key_env, "GEM_KEY") != 0) FAIL("wrong key env");
-    if (strcmp(out[1].id, "oai/audio2") != 0) FAIL("wrong second candidate");
-    if (out[1].endpoint_type != ENDPOINT_OPENAI) FAIL("openai endpoint expected");
-    PASS();
+    assert(strcmp(out[0].id, "gem/audio") == 0);
+    assert(out[0].endpoint_type == ENDPOINT_GEMINI);
+    assert(strcmp(out[0].api_key_env, "GEM_KEY") == 0);
+    assert(strcmp(out[1].id, "oai/audio2") == 0);
+    assert(out[1].endpoint_type == ENDPOINT_OPENAI);
 }
 
-static void test_picker_no_match(sqlite3 *db) {
-    TEST(picker_no_match);
+static void test_picker_no_match(void) {
     ModelCandidate out[8];
-    int n = model_pick_by_capability(db, "video", out, 8);
-    if (n != 0) FAIL("expected no candidates");
-    PASS();
+    int n = model_pick_by_capability(g_db, "video", out, 8);
+    assert(n == 0);
 }
 
-static void test_picker_degraded_expired(sqlite3 *db) {
-    TEST(picker_degraded_expired);
+static void test_picker_degraded_expired(void) {
     /* An expired degradation window makes the model eligible again. */
-    exec_sql(db, "UPDATE models SET degraded_until=unixepoch()-10 WHERE id='oai/audio-degraded';");
+    exec_sql("UPDATE models SET degraded_until=unixepoch()-10 WHERE id='oai/audio-degraded';");
     ModelCandidate out[8];
-    int n = model_pick_by_capability(db, "audio", out, 8);
-    if (n != 3) { printf("FAIL: expected 3 candidates, got %d\n", n); return; }
+    int n = model_pick_by_capability(g_db, "audio", out, 8);
+    assert(n == 3);
     int seen = 0;
     for (int i = 0; i < n; i++)
         if (strcmp(out[i].id, "oai/audio-degraded") == 0) seen = 1;
-    if (!seen) FAIL("expired-degraded should be eligible again");
-    exec_sql(db, "UPDATE models SET degraded_until=unixepoch()+600 WHERE id='oai/audio-degraded';");
-    PASS();
+    assert(seen);
+    exec_sql("UPDATE models SET degraded_until=unixepoch()+600 WHERE id='oai/audio-degraded';");
 }
 
 /* agent_models.purpose (v59): an agent's audio/image list is the whole policy
  * for that purpose — pos order, models in their cooldown sunk below healthy
  * ones, 'disabled' dropped, and nothing from the global pick appended. */
-static void test_media_pick_agent_list(sqlite3 *db) {
-    TEST(media_pick_agent_list);
-    exec_sql(db,
+static void test_media_pick_agent_list(void) {
+    exec_sql(
         "INSERT OR IGNORE INTO agents(name) VALUES('Ears');"
         "INSERT INTO agent_models(agent_name, purpose, model_id, pos) VALUES"
         " ('Ears','audio','oai/audio-degraded',0),"
         " ('Ears','audio','oai/audio2',1),"
         " ('Ears','audio','oai/audio-disabled',2);");
     ModelCandidate out[8];
-    int n = model_pick_for_media(db, "Ears", "audio", out, 8);
-    if (n != 2) { printf("FAIL: expected 2 candidates, got %d\n", n); return; }
-    if (strcmp(out[0].id, "oai/audio2") != 0) FAIL("healthy row should lead");
-    if (strcmp(out[1].id, "oai/audio-degraded") != 0) FAIL("degraded row should sink, not vanish");
+    int n = model_pick_for_media(g_db, "Ears", "audio", out, 8);
+    assert(n == 2);
+    assert(strcmp(out[0].id, "oai/audio2") == 0);   /* healthy leads */
+    assert(strcmp(out[1].id, "oai/audio-degraded") == 0);   /* sinks, not vanishes */
     for (int i = 0; i < n; i++)
-        if (strcmp(out[i].id, "gem/audio") == 0) FAIL("global pick must not be appended");
-    PASS();
+        assert(strcmp(out[i].id, "gem/audio") != 0);   /* no global append */
 }
 
 /* Rows present but every one in its cooldown: the agent's choice still
  * stands (health reorders, never empties) — the media is not rerouted to a
  * model nobody picked for this agent. */
-static void test_media_pick_agent_all_unhealthy(sqlite3 *db) {
-    TEST(media_pick_agent_all_unhealthy);
-    exec_sql(db,
+static void test_media_pick_agent_all_unhealthy(void) {
+    exec_sql(
         "INSERT OR IGNORE INTO agents(name) VALUES('Sick');"
         "INSERT INTO agent_models(agent_name, purpose, model_id, pos) VALUES"
         " ('Sick','audio','oai/audio-degraded',0);");
     ModelCandidate out[8];
-    int n = model_pick_for_media(db, "Sick", "audio", out, 8);
-    if (n != 1 || strcmp(out[0].id, "oai/audio-degraded") != 0)
-        FAIL("expected only the agent's own (degraded) model");
+    int n = model_pick_for_media(g_db, "Sick", "audio", out, 8);
+    assert(n == 1 && strcmp(out[0].id, "oai/audio-degraded") == 0);
     /* Only disabled rows: the agent chose, and chose nothing usable. */
-    exec_sql(db,
+    exec_sql(
         "INSERT OR IGNORE INTO agents(name) VALUES('Off');"
         "INSERT INTO agent_models(agent_name, purpose, model_id, pos) VALUES"
         " ('Off','audio','oai/audio-disabled',0);");
-    if (model_pick_for_media(db, "Off", "audio", out, 8) != 0)
-        FAIL("disabled-only list should yield no candidate, not the global pick");
-    PASS();
+    assert(model_pick_for_media(g_db, "Off", "audio", out, 8) == 0);
 }
 
 /* No rows for the purpose (chat rows don't count), or no agent at all:
  * exactly today's global capability pick. One purpose never leaks into the
  * other. */
-static void test_media_pick_fallback(sqlite3 *db) {
-    TEST(media_pick_fallback);
-    exec_sql(db,
+static void test_media_pick_fallback(void) {
+    exec_sql(
         "INSERT OR IGNORE INTO agents(name) VALUES('Plain');"
         "INSERT INTO agent_models(agent_name, purpose, model_id, pos) VALUES"
         " ('Plain','chat','oai/chat',0),"
         " ('Plain','image','gem/audio',0);");
     ModelCandidate a[8], b[8];
-    int na = model_pick_for_media(db, "Plain", "audio", a, 8);
-    int nb = model_pick_by_capability(db, "audio", b, 8);
-    if (na != nb || na != 2) { printf("FAIL: %d vs %d\n", na, nb); return; }
+    int na = model_pick_for_media(g_db, "Plain", "audio", a, 8);
+    int nb = model_pick_by_capability(g_db, "audio", b, 8);
+    assert(na == nb && na == 2);
     for (int i = 0; i < na; i++)
-        if (strcmp(a[i].id, b[i].id) != 0) FAIL("fallback differs from global pick");
-    if (model_pick_for_media(db, NULL, "audio", a, 8) != 2) FAIL("NULL agent → global");
-    if (model_pick_for_media(db, "Ghost", "audio", a, 8) != 2) FAIL("unknown agent → global");
-    int ni = model_pick_for_media(db, "Plain", "image", a, 8);
-    if (ni != 1 || strcmp(a[0].id, "gem/audio") != 0) FAIL("image list ignored");
-    PASS();
+        assert(strcmp(a[i].id, b[i].id) == 0);
+    assert(model_pick_for_media(g_db, NULL, "audio", a, 8) == 2);
+    assert(model_pick_for_media(g_db, "Ghost", "audio", a, 8) == 2);
+    int ni = model_pick_for_media(g_db, "Plain", "image", a, 8);
+    assert(ni == 1 && strcmp(a[0].id, "gem/audio") == 0);
 }
 
 /* Insert a media_job with a spool file path (new contract: no data_b64) */
@@ -163,7 +146,7 @@ static int64_t insert_media_job_file(sqlite3 *db, const char *kind,
         "INSERT INTO media_jobs(session_id, source, payload) VALUES(7, 'telegram',"
         " json_object('chat_id','42','from','Mark','text','the caption',"
         "   'media', json_object('kind',?1,'mime',?2,'path',?3)));";
-    assert(sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) == SQLITE_OK);
     sqlite3_bind_text(s, 1, kind, -1, SQLITE_STATIC);
     sqlite3_bind_text(s, 2, mime, -1, SQLITE_STATIC);
     sqlite3_bind_text(s, 3, path, -1, SQLITE_STATIC);
@@ -172,108 +155,53 @@ static int64_t insert_media_job_file(sqlite3 *db, const char *kind,
     return sqlite3_last_insert_rowid(db);
 }
 
-static void test_body_gemini_audio(sqlite3 *db) {
-    TEST(body_gemini_audio);
-    /* Write "OggS" (4 bytes) → base64 "T2dnUw==" */
-    const unsigned char ogg_hdr[] = {0x4F, 0x67, 0x67, 0x53};
-    write_spool(spool_path, ogg_hdr, sizeof(ogg_hdr));
+/* Provider wire bodies for one spooled media file. path NULL = no job row;
+ * want NULL = the builder must refuse. "OggS" encodes as "T2dnUw==". */
+static const struct {
+    int endpoint; const char *model; const char *kind; const char *mime;
+    unsigned char bytes[4]; const char *path; int want_null;
+    const char *must[5]; const char *must_not;
+} bodies[] = {
+    {ENDPOINT_GEMINI, "gemini-lite", "audio", "audio/ogg", {0x4F, 0x67, 0x67, 0x53}, "", 0,
+     {"\"contents\"", "\"inlineData\"", "\"mimeType\":\"audio/ogg\"", "\"data\":\"T2dnUw==\"",
+      "Transcribe"},
+     "gemini-lite"},                    /* gemini puts the model in the URL */
+    {ENDPOINT_OPENAI, "audio-two", "audio", "audio/ogg", {0x4F, 0x67, 0x67, 0x53}, "", 0,
+     {"\"model\":\"audio-two\"", "\"input_audio\"", "\"format\":\"ogg\"",
+      "\"data\":\"T2dnUw==\"", "Transcribe"}, NULL},
+    {ENDPOINT_GEMINI, "gemini-lite", "image", "image/png", {0x89, 0x50, 0x4E, 0x47}, "", 0,
+     {"\"inlineData\"", "\"mimeType\":\"image/png\"", "Describe"}, NULL},
+    {ENDPOINT_OPENAI, "gpt-vision", "image", "image/png", {0x89, 0x50, 0x4E, 0x47}, "", 0,
+     {"\"image_url\"", "data:image/png;base64,", "Describe"}, NULL},
+    {ENDPOINT_OPENAI, "audio-two", "audio", "audio/mpeg", {0xFF, 0xFB, 0x90, 0x00}, "", 0,
+     {"\"format\":\"mp3\"", "\"input_audio\""}, NULL},
+    {ENDPOINT_GEMINI, "m", NULL, NULL, {0}, NULL, 1, {NULL}, NULL},
+    {ENDPOINT_GEMINI, "gemini-lite", "audio", "audio/ogg", {0},
+     "/tmp/cclaw_test_NO_SUCH_FILE.ogg", 1, {NULL}, NULL},
+};
 
-    int64_t jid = insert_media_job_file(db, "audio", "audio/ogg", spool_path);
-    char *body = transcribe_build_body(db, ENDPOINT_GEMINI, "gemini-lite", jid);
-    if (!body) FAIL("no body");
-    int ok = strstr(body, "\"contents\"") &&
-             strstr(body, "\"inlineData\"") &&
-             strstr(body, "\"mimeType\":\"audio/ogg\"") &&
-             strstr(body, "\"data\":\"T2dnUw==\"") &&
-             strstr(body, "Transcribe") &&
-             !strstr(body, "gemini-lite");   /* gemini puts the model in the URL */
-    if (!ok) { printf("FAIL: bad body: %s\n", body); free(body); return; }
-    free(body);
-    PASS();
-}
-
-static void test_body_openai_audio(sqlite3 *db) {
-    TEST(body_openai_audio);
-    const unsigned char ogg_hdr[] = {0x4F, 0x67, 0x67, 0x53};
-    write_spool(spool_path, ogg_hdr, sizeof(ogg_hdr));
-
-    int64_t jid = insert_media_job_file(db, "audio", "audio/ogg", spool_path);
-    char *body = transcribe_build_body(db, ENDPOINT_OPENAI, "audio-two", jid);
-    if (!body) FAIL("no body");
-    int ok = strstr(body, "\"model\":\"audio-two\"") &&
-             strstr(body, "\"input_audio\"") &&
-             strstr(body, "\"format\":\"ogg\"") &&
-             strstr(body, "\"data\":\"T2dnUw==\"") &&
-             strstr(body, "Transcribe");
-    if (!ok) { printf("FAIL: bad body: %s\n", body); free(body); return; }
-    free(body);
-    PASS();
-}
-
-static void test_body_gemini_image(sqlite3 *db) {
-    TEST(body_gemini_image);
-    /* A fake 4-byte PNG header */
-    const unsigned char png_hdr[] = {0x89, 0x50, 0x4E, 0x47};
-    write_spool(spool_path, png_hdr, sizeof(png_hdr));
-
-    int64_t jid = insert_media_job_file(db, "image", "image/png", spool_path);
-    char *body = transcribe_build_body(db, ENDPOINT_GEMINI, "gemini-lite", jid);
-    if (!body) FAIL("no body");
-    int ok = strstr(body, "\"inlineData\"") &&
-             strstr(body, "\"mimeType\":\"image/png\"") &&
-             strstr(body, "Describe");
-    if (!ok) { printf("FAIL: bad body: %s\n", body); free(body); return; }
-    free(body);
-    PASS();
-}
-
-static void test_body_openai_image(sqlite3 *db) {
-    TEST(body_openai_image);
-    const unsigned char png_hdr[] = {0x89, 0x50, 0x4E, 0x47};
-    write_spool(spool_path, png_hdr, sizeof(png_hdr));
-
-    int64_t jid = insert_media_job_file(db, "image", "image/png", spool_path);
-    char *body = transcribe_build_body(db, ENDPOINT_OPENAI, "gpt-vision", jid);
-    if (!body) FAIL("no body");
-    int ok = strstr(body, "\"image_url\"") &&
-             strstr(body, "data:image/png;base64,") &&
-             strstr(body, "Describe");
-    if (!ok) { printf("FAIL: bad body: %s\n", body); free(body); return; }
-    free(body);
-    PASS();
-}
-
-static void test_body_openai_mp3(sqlite3 *db) {
-    TEST(body_openai_mp3);
-    /* audio/mpeg → format "mp3" */
-    const unsigned char mp3_hdr[] = {0xFF, 0xFB, 0x90, 0x00};
-    write_spool(spool_path, mp3_hdr, sizeof(mp3_hdr));
-
-    int64_t jid = insert_media_job_file(db, "audio", "audio/mpeg", spool_path);
-    char *body = transcribe_build_body(db, ENDPOINT_OPENAI, "audio-two", jid);
-    if (!body) FAIL("no body");
-    int ok = strstr(body, "\"format\":\"mp3\"") &&
-             strstr(body, "\"input_audio\"");
-    if (!ok) { printf("FAIL: bad body: %s\n", body); free(body); return; }
-    free(body);
-    PASS();
-}
-
-static void test_body_missing_job(sqlite3 *db) {
-    TEST(body_missing_job);
-    char *body = transcribe_build_body(db, ENDPOINT_GEMINI, "m", 999999);
-    if (body) { free(body); FAIL("expected NULL for missing job"); }
-    PASS();
-}
-
-static void test_body_unreadable_path(sqlite3 *db) {
-    TEST(body_unreadable_path);
-    /* Seed a job pointing to a file that doesn't exist */
-    int64_t jid = insert_media_job_file(db, "audio", "audio/ogg",
-                                        "/tmp/cclaw_test_NO_SUCH_FILE.ogg");
-    char *body = transcribe_build_body(db, ENDPOINT_GEMINI, "gemini-lite", jid);
-    if (body) { free(body); FAIL("expected NULL for unreadable path"); }
-    PASS();
+static void test_body_table(void) {
+    for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+        int64_t jid = 999999;
+        if (bodies[i].path) {
+            const char *path = bodies[i].path;
+            if (!*path) {
+                write_spool(spool_path, bodies[i].bytes, sizeof(bodies[i].bytes));
+                path = spool_path;
+            }
+            jid = insert_media_job_file(g_db, bodies[i].kind, bodies[i].mime, path);
+        }
+        char *body = transcribe_build_body(g_db, bodies[i].endpoint, bodies[i].model, jid);
+        int ok = bodies[i].want_null ? body == NULL : body != NULL;
+        for (int k = 0; ok && body && k < 5 && bodies[i].must[k]; k++)
+            ok = strstr(body, bodies[i].must[k]) != NULL;
+        if (ok && body && bodies[i].must_not) ok = !strstr(body, bodies[i].must_not);
+        if (!ok) {
+            printf("    row %zu: bad body: %s\n", i, body ? body : "(null)");
+            assert(0);
+        }
+        free(body);
+    }
 }
 
 int main(void) {
@@ -284,27 +212,20 @@ int main(void) {
              "/tmp/cclaw_test_media_%d.ogg", (int)getpid());
 
     test_db_clean(TEST_DB);
-    sqlite3 *db = test_db_open(TEST_DB);
-    assert(db);
-    seed_models(db);
+    g_db = test_db_open(TEST_DB);
+    assert(g_db);
+    seed_models();
 
-    test_picker_filters(db);
-    test_picker_no_match(db);
-    test_picker_degraded_expired(db);
-    test_media_pick_agent_list(db);
-    test_media_pick_agent_all_unhealthy(db);
-    test_media_pick_fallback(db);
-    test_body_gemini_audio(db);
-    test_body_openai_audio(db);
-    test_body_gemini_image(db);
-    test_body_openai_image(db);
-    test_body_openai_mp3(db);
-    test_body_missing_job(db);
-    test_body_unreadable_path(db);
+    RUN(test_picker_filters);
+    RUN(test_picker_no_match);
+    RUN(test_picker_degraded_expired);
+    RUN(test_media_pick_agent_list);
+    RUN(test_media_pick_agent_all_unhealthy);
+    RUN(test_media_pick_fallback);
+    RUN(test_body_table);
 
-    db_close(db);
+    db_close(g_db);
     test_db_clean(TEST_DB);
     unlink(spool_path);
-    printf("%d/%d tests passed\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    return 0;
 }

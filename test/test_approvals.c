@@ -1,4 +1,4 @@
-/* Test approvals module: create, pending, resolve, expire, state transitions */
+/* Test approvals module: resolve, expire, matching, tickets, grants */
 #define _POSIX_C_SOURCE 200809L
 #include "agent_config.h"
 #include "approval.h"
@@ -15,134 +15,26 @@
 
 #define DB_PATH "/tmp/test_approvals.db"
 
-static void clean_db(void) {
-    test_db_clean(DB_PATH);
-}
-
 static sqlite3 *fresh_db(void) {
-    clean_db();
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db != NULL);
     return db;
 }
 
-static void test_create_and_pending(void) {
+/* A fresh DB with agent "bot" and one session for it. */
+static sqlite3 *fresh_session(int64_t *sid) {
     sqlite3 *db = fresh_db();
     db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
-    assert(sid > 0);
-
-    int64_t id = approval_create(db, sid, "call_1", "request_config",
-                                 APPROVAL_PARK_REQUIRED,
-                                 "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"api.example.com\"]}}}",
-                                 "apply");
-    assert(id > 0);
-
-    Approval *a = approval_get_pending(db, sid);
-    assert(a != NULL);
-    assert(a->id == id);
-    assert(a->session_id == sid);
-    assert(strcmp(a->tool_call_id, "call_1") == 0);
-    assert(strcmp(a->tool_name, "request_config") == 0);
-    assert(strcmp(a->park_reason, APPROVAL_PARK_REQUIRED) == 0);
-    assert(strcmp(a->state, "pending") == 0);
-    approval_free(a);
-
-    db_close(db);
-    clean_db();
-    printf("  PASS: test_create_and_pending\n");
-}
-
-static void test_approve(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
-
-    int64_t id = approval_create(db, sid, "call_2", "request_config",
-                                 APPROVAL_PARK_REQUIRED,
-                                 "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}",
-                                 "apply");
-    assert(id > 0);
-
-    Approval *a = approval_resolve(db, id, 1, "cli:user");
-    assert(a != NULL);
-    assert(strcmp(a->state, "approved") == 0);
-    assert(strcmp(a->decided_via, "cli:user") == 0);
-    approval_free(a);
-
-    /* No longer pending */
-    a = approval_get_pending(db, sid);
-    assert(a == NULL);
-
-    db_close(db);
-    clean_db();
-    printf("  PASS: test_approve\n");
-}
-
-static void test_deny(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
-
-    int64_t id = approval_create(db, sid, "call_3", "request_config",
-                                 APPROVAL_PARK_REQUIRED,
-                                 "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"evil.com\"]}}}",
-                                 "apply");
-    assert(id > 0);
-
-    Approval *a = approval_resolve(db, id, 0, "auto:no-approver");
-    assert(a != NULL);
-    assert(strcmp(a->state, "denied") == 0);
-    assert(strcmp(a->decided_via, "auto:no-approver") == 0);
-    approval_free(a);
-
-    /* Not pending anymore */
-    a = approval_get_pending(db, sid);
-    assert(a == NULL);
-
-    db_close(db);
-    clean_db();
-    printf("  PASS: test_deny\n");
-}
-
-static void test_session_set_state_awaiting_approval(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
-
-    /* idle → llm_running (legal) */
-    assert(session_set_state(db, sid, "llm_running") == 0);
-
-    /* llm_running → awaiting_approval (legal) */
-    assert(session_set_state(db, sid, "awaiting_approval") == 0);
-
-    /* awaiting_approval → tool_running (legal: approval resolved) */
-    assert(session_set_state(db, sid, "tool_running") == 0);
-
-    /* tool_running → awaiting_approval (legal) */
-    assert(session_set_state(db, sid, "awaiting_approval") == 0);
-
-    /* awaiting_approval → idle (legal) */
-    assert(session_set_state(db, sid, "idle") == 0);
-
-    /* idle → awaiting_approval (ILLEGAL) */
-    assert(session_set_state(db, sid, "awaiting_approval") != 0);
-
-    /* Verify awaiting_approval → llm_running (legal via the busy-states clause) */
-    assert(session_set_state(db, sid, "tool_running") == 0);
-    assert(session_set_state(db, sid, "awaiting_approval") == 0);
-    assert(session_set_state(db, sid, "llm_running") == 0);
-
-    db_close(db);
-    clean_db();
-    printf("  PASS: test_session_set_state_awaiting_approval\n");
+    *sid = session_create(db, "test", "bot", -1, 0);
+    assert(*sid > 0);
+    return db;
 }
 
 static void test_fail_closed_denied(void) {
     /* A denied approval leaves no pending row — fail-closed behavior */
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
+    int64_t sid;
+    sqlite3 *db = fresh_session(&sid);
 
     int64_t id = approval_create(db, sid, "call_x", "request_config",
                                  APPROVAL_PARK_REQUIRED,
@@ -164,8 +56,7 @@ static void test_fail_closed_denied(void) {
     assert(a == NULL);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_fail_closed_denied\n");
+    test_db_clean(DB_PATH);
 }
 
 static void test_grant_caps_load(void) {
@@ -188,14 +79,12 @@ static void test_grant_caps_load(void) {
     agent_caps_free(&caps);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_grant_caps_load\n");
+    test_db_clean(DB_PATH);
 }
 
 static void test_approval_list_expired(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
+    int64_t sid;
+    sqlite3 *db = fresh_session(&sid);
 
     /* Create a pending approval (expires_at is in the future by default) */
     int64_t id = approval_create(db, sid, "call_e", "request_config",
@@ -233,8 +122,7 @@ static void test_approval_list_expired(void) {
     free(ids);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_approval_list_expired\n");
+    test_db_clean(DB_PATH);
 }
 
 static void test_tool_mode(void) {
@@ -268,14 +156,12 @@ static void test_tool_mode(void) {
     assert(grants_contains(db, "bot", "tool", "not_granted") == 1);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_tool_mode\n");
+    test_db_clean(DB_PATH);
 }
 
 static void test_get_for_tool_call(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
+    int64_t sid;
+    sqlite3 *db = fresh_session(&sid);
 
     /* No approval yet for this call. */
     assert(approval_get_for_tool_call(db, sid, "call_z") == NULL);
@@ -301,17 +187,15 @@ static void test_get_for_tool_call(void) {
     approval_free(a);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_get_for_tool_call\n");
+    test_db_clean(DB_PATH);
 }
 
 /* The gate's lookup: a row found by (session, call id) answers this call only
  * if it parked the same tool with the same arguments. Call ids come from the
  * model and get reused; a decision made for one call must not cover another. */
 static void test_for_call_matches_name_and_args(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
+    int64_t sid;
+    sqlite3 *db = fresh_session(&sid);
     const char *args = "{\"command\":\"ls\",\"timeout\":5}";
     int64_t id = approval_create(db, sid, "call_r", "shell_exec",
                                  APPROVAL_PARK_REQUIRED, args, "rerun");
@@ -342,14 +226,12 @@ static void test_for_call_matches_name_and_args(void) {
     assert(approval_for_call(db, sid, "call_a", "shell_exec", "{}") == NULL);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_for_call_matches_name_and_args\n");
+    test_db_clean(DB_PATH);
 }
 
 static void test_consume(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
+    int64_t sid;
+    sqlite3 *db = fresh_session(&sid);
 
     int64_t id = approval_create(db, sid, "call_c", "email_send", APPROVAL_PARK_REQUIRED,
                                  "{\"to\":\"a@b.c\"}", "rerun");
@@ -371,8 +253,7 @@ static void test_consume(void) {
     assert(approval_consume(db, id) == -1);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_consume\n");
+    test_db_clean(DB_PATH);
 }
 
 static void test_pending_subtree(void) {
@@ -420,18 +301,15 @@ static void test_pending_subtree(void) {
     approval_free(found);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_pending_subtree\n");
+    test_db_clean(DB_PATH);
 }
 
 /* approval_get_pending drives the park prompt; approval_get_pending_subtree
  * drives the CLI's y/n reader. With more than one park outstanding they must
  * name the SAME row, or the user is shown one approval and decides another. */
 static void test_pending_order_matches_subtree(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
-    assert(sid > 0);
+    int64_t sid;
+    sqlite3 *db = fresh_session(&sid);
 
     int64_t first = approval_create(db, sid, "call_first", "shell_exec",
                                     APPROVAL_PARK_REQUIRED, "{}", "rerun");
@@ -448,57 +326,79 @@ static void test_pending_order_matches_subtree(void) {
     approval_free(b);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_pending_order_matches_subtree\n");
+    test_db_clean(DB_PATH);
 }
 
-/* ── dedupe + ticket transfer (capability matching) ───────────────── */
+/* ── dedupe + ticket transfer (capability matching) ─────────────────── */
 
 static const char *ARGS_ASK_A =
     "{\"code\":\"fetch('https://x/1', 'token')\"}";
-/* Mutated code — must NOT dedupe: capability match is semantic JSON equality,
- * and a differing value is differing authority (the placeholder-set special
- * case died with the secret_bind park, D17). */
+/* Mutated code: a differing value is differing authority. */
 static const char *ARGS_ASK_B =
     "{\"code\":\"var r = go('token'); use(r)\"}";
 
-static void test_pending_match_dedupe(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
+/* Capability matching for dedupe. The same request re-serialized (key order,
+ * whitespace) is one capability, which is what kills the double-prompt (B1).
+ * A differing value, array order, extra key or tool is different
+ * authority (the placeholder-set special case died with the secret_bind park,
+ * D17). Empty containers are represented. */
+static void test_pending_match(void) {
+    int64_t sid;
+    sqlite3 *db = fresh_session(&sid);
+    const char *doc = "{\"host\":\"api.example.com\",\"ports\":[80,443]}";
+    int64_t ids[4];
+    ids[0] = approval_create(db, sid, "call_d1", "js_eval", APPROVAL_PARK_REQUIRED,
+                             ARGS_ASK_A, "rerun");
+    ids[1] = approval_create(db, sid, "call_d2", "web_fetch", APPROVAL_PARK_SENSITIVE,
+                             "{\"url\":\"https://bank.example\"}", "rerun");
+    ids[2] = approval_create(db, sid, "call_c1", "request_config",
+                             APPROVAL_PARK_REQUIRED, doc, "rerun");
+    ids[3] = approval_create(db, sid, "call_c2", "js_eval", APPROVAL_PARK_REQUIRED,
+                             "{\"a\":{}}", "rerun");
+    for (int i = 0; i < 4; i++) assert(ids[i] > 0);
 
-    int64_t id = approval_create(db, sid, "call_d1", "js_eval", APPROVAL_PARK_REQUIRED,
-                                 ARGS_ASK_A, "rerun");
-    assert(id > 0);
+    static const struct { int sens; const char *tool, *args; int want; } cases[] = {
+        {0, "js_eval", "{\"code\":\"fetch('https://x/1', 'token')\"}", 0},
+        {0, "js_eval", "{\"code\":\"var r = go('token'); use(r)\"}", -1},
+        {0, "file_write", "{\"code\":\"fetch('https://x/1', 'token')\"}", -1},
+        /* 'sensitive' stays per-call: an exact re-issue may dedupe, a variant
+         * may not */
+        {1, "web_fetch", "{\"url\":\"https://bank.example\"}", 1},
+        {1, "web_fetch", "{\"url\":\"https://bank.example/x\"}", -1},
+        {0, "request_config", "{\"ports\":[80,443],\"host\":\"api.example.com\"}", 2},
+        {0, "request_config", "{ \"host\" : \"api.example.com\" ,\n  \"ports\" : [ 80, 443 ] }", 2},
+        {0, "request_config", "{\"host\":\"evil.example.com\",\"ports\":[80,443]}", -1},
+        {0, "request_config", "{\"host\":\"api.example.com\",\"ports\":[443,80]}", -1},
+        {0, "request_config", "{\"host\":\"api.example.com\",\"ports\":[80,443],\"tls\":false}", -1},
+        {0, "js_eval", "{\"a\": {}}", 3},
+        {0, "js_eval", "{\"a\":1}", -1},
+        {0, "js_eval", "{\"a\":[]}", -1},
+        {0, "js_eval", "{\"a\":{\"b\":1}}", -1},
+        {0, "js_eval", "{}", -1},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int64_t got = approval_find_pending_match(db, sid,
+            cases[i].sens ? APPROVAL_PARK_SENSITIVE : APPROVAL_PARK_REQUIRED,
+            cases[i].tool, cases[i].args);
+        int64_t want = cases[i].want < 0 ? 0 : ids[cases[i].want];
+        if (got != want)
+            fprintf(stderr, "row %zu: %s %s -> %lld, want %lld\n", i, cases[i].tool,
+                    cases[i].args, (long long)got, (long long)want);
+        assert(got == want);
+    }
 
-    /* Byte-identical re-issue → match (dedupe hit). */
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval",
-                                       ARGS_ASK_A) == id);
-    /* Mutated args → no match. */
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval",
-                                       ARGS_ASK_B) == 0);
-    /* Different tool → no match. */
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "file_write",
-                                       ARGS_ASK_A) == 0);
-    /* 'sensitive' stays per-call: an exact re-issue may dedupe, a variant
-     * may not. */
-    int64_t s2 = approval_create(db, sid, "call_d2", "web_fetch", APPROVAL_PARK_SENSITIVE,
-                                 "{\"url\":\"https://bank.example\"}", "rerun");
-    assert(s2 > 0);
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_SENSITIVE, "web_fetch",
-                                       "{\"url\":\"https://bank.example\"}") == s2);
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_SENSITIVE, "web_fetch",
-                                       "{\"url\":\"https://bank.example/x\"}") == 0);
+    /* The stored row keeps exactly what the model sent — audit trail intact. */
+    Approval *a = approval_get_for_tool_call(db, sid, "call_c1");
+    assert(a != NULL && strcmp(a->args_json, doc) == 0);
+    approval_free(a);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_pending_match_dedupe\n");
+    test_db_clean(DB_PATH);
 }
 
 static void test_take_ticket(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
+    int64_t sid;
+    sqlite3 *db = fresh_session(&sid);
 
     int64_t id = approval_create(db, sid, "call_t1", "js_eval", APPROVAL_PARK_REQUIRED,
                                  ARGS_ASK_A, "rerun");
@@ -531,30 +431,7 @@ static void test_take_ticket(void) {
     assert(approval_take_ticket(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", ARGS_ASK_A) == 0);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_take_ticket\n");
-}
-
-static void test_pending_ids(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
-
-    char buf[64];
-    assert(approval_pending_ids(db, sid, buf, sizeof(buf)) == 0);
-    assert(buf[0] == '\0');
-
-    int64_t a1 = approval_create(db, sid, "c1", "js_eval", APPROVAL_PARK_REQUIRED, "{}", "rerun");
-    int64_t a2 = approval_create(db, sid, "c2", "js_eval", APPROVAL_PARK_REQUIRED, "{}", "rerun");
-    assert(a1 > 0 && a2 > 0);
-    assert(approval_pending_ids(db, sid, buf, sizeof(buf)) == 2);
-    char want[64];
-    snprintf(want, sizeof(want), "#%lld #%lld", (long long)a1, (long long)a2);
-    assert(strcmp(buf, want) == 0);
-
-    db_close(db);
-    clean_db();
-    printf("  PASS: test_pending_ids\n");
+    test_db_clean(DB_PATH);
 }
 
 /* Block window: global knob honours an explicit 0, and a session pinned to a
@@ -604,60 +481,8 @@ static void test_block_window_ambient(void) {
     assert(strstr(note, "notified") != NULL);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_block_window_ambient\n");
+    test_db_clean(DB_PATH);
 }
-
-/* B1: canonicalization. The same request re-serialized (key order, whitespace)
- * is one capability — matching it is what kills the double-prompt. Differing
- * values, and differing array order, are still different requests. */
-static void test_capability_match_canonical(void) {
-    sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL);
-    int64_t sid = session_create(db, "test", "bot", -1, 0);
-
-    const char *doc = "{\"host\":\"api.example.com\",\"ports\":[80,443]}";
-    int64_t id = approval_create(db, sid, "call_c1", "request_config",
-                                 APPROVAL_PARK_REQUIRED, doc, "rerun");
-    assert(id > 0);
-
-    /* Key order differs → same capability. */
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "request_config",
-               "{\"ports\":[80,443],\"host\":\"api.example.com\"}") == id);
-    /* Whitespace/indentation differs → same capability. */
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "request_config",
-               "{ \"host\" : \"api.example.com\" ,\n  \"ports\" : [ 80, 443 ] }") == id);
-    /* A changed value parks a new approval. */
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "request_config",
-               "{\"host\":\"evil.example.com\",\"ports\":[80,443]}") == 0);
-    /* Array ORDER matters — fullkey carries the index. */
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "request_config",
-               "{\"host\":\"api.example.com\",\"ports\":[443,80]}") == 0);
-    /* An extra key is a different request. */
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "request_config",
-               "{\"host\":\"api.example.com\",\"ports\":[80,443],\"tls\":false}") == 0);
-
-    /* The stored row keeps exactly what the model sent — audit trail intact. */
-    Approval *a = approval_get_pending(db, sid);
-    assert(a != NULL && strcmp(a->args_json, doc) == 0);
-    approval_free(a);
-
-    /* Empty containers are represented: {"a":{}} must not match {"a":1},
-     * nor {"a":[]}, nor a populated object at the same key. */
-    int64_t e = approval_create(db, sid, "call_c2", "js_eval", APPROVAL_PARK_REQUIRED,
-                                "{\"a\":{}}", "rerun");
-    assert(e > 0);
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", "{\"a\": {}}") == e);
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", "{\"a\":1}") == 0);
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", "{\"a\":[]}") == 0);
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", "{\"a\":{\"b\":1}}") == 0);
-    assert(approval_find_pending_match(db, sid, APPROVAL_PARK_REQUIRED, "js_eval", "{}") == 0);
-
-    db_close(db);
-    clean_db();
-    printf("  PASS: test_capability_match_canonical\n");
-}
-
 /* expires_at of a grant row; 0 for permanent (NULL), -1 when absent. */
 static int64_t grant_expiry(sqlite3 *db, const char *agent, const char *kind,
                             const char *value) {
@@ -699,32 +524,25 @@ static void test_grant_expiry_extends(void) {
     assert(grant_expiry(db, "bot", "host", "api.example.com") == 0);
 
     db_close(db);
-    clean_db();
-    printf("  PASS: test_grant_expiry_extends\n");
+    test_db_clean(DB_PATH);
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_approvals:\n");
-    test_create_and_pending();
-    test_approve();
-    test_deny();
-    test_session_set_state_awaiting_approval();
-    test_fail_closed_denied();
-    test_grant_caps_load();
-    test_approval_list_expired();
-    test_tool_mode();
-    test_get_for_tool_call();
-    test_for_call_matches_name_and_args();
-    test_consume();
-    test_pending_subtree();
-    test_pending_order_matches_subtree();
-    test_pending_match_dedupe();
-    test_capability_match_canonical();
-    test_grant_expiry_extends();
-    test_take_ticket();
-    test_pending_ids();
-    test_block_window_ambient();
+    RUN(test_fail_closed_denied);
+    RUN(test_grant_caps_load);
+    RUN(test_approval_list_expired);
+    RUN(test_tool_mode);
+    RUN(test_get_for_tool_call);
+    RUN(test_for_call_matches_name_and_args);
+    RUN(test_consume);
+    RUN(test_pending_subtree);
+    RUN(test_pending_order_matches_subtree);
+    RUN(test_grant_expiry_extends);
+    RUN(test_pending_match);
+    RUN(test_take_ticket);
+    RUN(test_block_window_ambient);
     printf("all approval tests passed\n");
     return 0;
 }

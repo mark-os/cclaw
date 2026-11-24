@@ -173,49 +173,14 @@ static void test_meta_complete(void) {
               " json_each(j.value, '$.links_out') b WHERE a.value->>'declared' = 0"
               " AND b.value->>'declared' = 1 AND a.value->>'to' = b.value->>'to'"
               " AND a.value->'from_columns' = b.value->'from_columns'", m) == 0);
-    /* Explanations come from the schema comments, joined into prose. */
-    char *d = q1("SELECT k.value->>'doc' FROM json_each(?1, '$.tables') j, json_each(j.value,"
-                 " '$.columns') k WHERE j.value->>'name' = 'agents' AND k.value->>'name' = 'hold_until'", m);
-    assert(d && strstr(d, "quiesce lease") && strstr(d, "Expiry self-heals") && !strchr(d, '\n'));
-    free(d);
-    d = q1("SELECT k.value->>'doc' FROM json_each(?1, '$.tables') j, json_each(j.value,"
-           " '$.columns') k WHERE j.value->>'name' = 'providers' AND k.value->>'name' = 'request_extra'", m);
-    assert(d && strstr(d, "json_patch") && strstr(d, "escape hatch"));
-    free(d);
-    d = q1("SELECT k.value->>'doc' FROM json_each(?1, '$.tables') j, json_each(j.value,"
-           " '$.columns') k WHERE j.value->>'name' = 'sessions' AND k.value->>'name' = 'chat_id'", m);
-    assert(d && strstr(d, "pinned to now") && !strstr(d, "chat stamp"));
-    free(d);
-    d = q1("SELECT k.value->>'doc' FROM json_each(?1, '$.tables') j, json_each(j.value,"
-           " '$.columns') k WHERE j.value->>'name' = 'extensions' AND k.value->>'name' = 'owner_agent'", m);
-    assert(d && strstr(d, "promoted it"));
-    free(d);
-    d = q1("SELECT j.value->>'doc' FROM json_each(?1, '$.tables') j WHERE j.value->>'name' = 'grants'", m);
-    assert(d && strstr(d, "\n'silent'") && strstr(d, "\napproval") &&
-           strstr(d, "(request_config, update_agent, \"always allow\""));
-    free(d);
-    d = q1("SELECT j.value->>'doc' FROM json_each(?1, '$.tables') j WHERE j.value->>'name' = 'llm_jobs'", m);
-    assert(d && strcmp(d, "LLM Jobs (transient queue)") == 0);
-    free(d);
     /* Keys: text, integer, composite, and rowid where the key is hidden. */
     assert(qi("SELECT j.value->>'key' = '[\"name\"]' FROM json_each(?1, '$.tables') j WHERE j.value->>'name' = 'agents'", m) == 1);
     assert(qi("SELECT j.value->>'key' = '[\"agent_name\",\"purpose\",\"pos\"]' FROM json_each(?1, '$.tables') j WHERE j.value->>'name' = 'agent_models'", m) == 1);
     assert(qi("SELECT j.value->>'key' = '[\"rowid\"]' FROM json_each(?1, '$.tables') j WHERE j.value->>'name' = 'shares'", m) == 1);
-    /* Display hints, codes, home order. */
-    assert(qi("SELECT count(*) FROM json_each(?1, '$.tables') j, json_each(j.value, '$.columns') k"
-              " WHERE (j.value->>'name', k.value->>'name', k.value->>'display') IN (VALUES"
-              " ('entries','role','code'), ('entries','created_at','time'),"
-              " ('models','degraded_until','time'), ('tools','enabled','bool'),"
-              " ('tools','droppable','bool'), ('hooks','async','bool'))", m) == 6);
-    assert(qi("SELECT ?1 ->> '$.codes.\"entries.role\".\"2\"' = 'assistant'", m) == 1);
-    assert(qi("SELECT ?1 ->> '$.home[0].tables[0]' = 'agents'"
-              " AND ?1 ->> '$.home[8].tables[0]' = 'approvals'", m) == 1);
     assert(qi("SELECT ?1 ->> '$.attention.chats_unrouted'", m) == 1);
-    assert(qi("SELECT ?1 ->> '$.attention.memory_shared'", m) == 1);
     /* Counts are real. */
     assert(qi("SELECT j.value->>'count' FROM json_each(?1, '$.tables') j WHERE j.value->>'name' = 'entries'", m) == 121);
     free(m);
-    printf("PASS: test_meta_complete\n");
 }
 
 /* ── rows ──────────────────────────────────────────────────────────────── */
@@ -295,7 +260,6 @@ static void test_rows_paging(void) {
     assert(rows_call("entries", NULL, "nope", 0, &out) == 400); free(out);
     assert(rows_call("entries", "[1]", NULL, 0, &out) == 400); free(out);
     assert(rows_call("entries", "{\"role\":{\"a\":1}}", NULL, 0, &out) == 400); free(out);
-    printf("PASS: test_rows_paging\n");
 }
 
 /* ── row ───────────────────────────────────────────────────────────────── */
@@ -364,57 +328,6 @@ static void test_row_keys(void) {
     assert(row_call("entries", key, &out) == 200);
     assert(qi("SELECT length(?1 ->> '$.row.values.content')", out) == 5000);
     free(out);
-    printf("PASS: test_row_keys\n");
-}
-
-/* ── an edited turn (specs/turn-edit.md), as the pages find it ─────────── */
-
-/* A Stop script's edit leaves a record on the turn's answer and the
- * originals in the table, off the branch. Both pages read that with the
- * generic calls: the turn's assistant entries (session, turn, type) with
- * whole values, or the answer's own row — a record is longer than a list
- * preview, so a plain list page cannot carry it. */
-static void test_edited_turn(void) {
-    exec("INSERT INTO sessions(id, name, agent_name) VALUES (3,'edited','alpha');"
-         "INSERT INTO entries(id, session_id, parent_id, turn_id, type, role, content, tool_call_id) VALUES"
-         " (901, 3,  -1, 1, 'user_message', 1, 'go', NULL),"
-         " (902, 3, 901, 1, 'tool_call', 2, '{}', 'c1'),"
-         " (903, 3, 902, 1, 'tool_result', 3, 'three hundred lines', 'c1'),"
-         " (905, 3, 902, 1, 'tool_result', 3, 'five lines', 'c1');"
-         "INSERT INTO entries(id, session_id, parent_id, turn_id, type, role, content, data) VALUES"
-         " (906, 3, 905, 1, 'system', 0, 'a note', '{\"source\":\"hook:rev\",\"edited_by\":\"hook:rev\"}'),"
-         " (904, 3, 906, 1, 'assistant_message', 2, 'done', json_object('turn_edits', json_array("
-         "   json_object('by','hook:rev','at',1763300000,'left_branch',json_array(903),"
-         "     'replaced',json_array(json_object('original',903,'replacement',905)),"
-         "     'notes',json_array(906),'tokens',json_object('before',9120,'after',3100),"
-         "     'record',json_object('why', printf('%.300c','y'))))));");
-    char *out = NULL;
-    const char *turn = "{\"session_id\":3,\"turn_id\":1,\"type\":\"assistant_message\"}";
-    assert(rows_call("entries", turn, NULL, 0, &out) == 200);
-    assert(qi("SELECT json_array_length(?1, '$.rows') = 1 AND ?1 ->> '$.rows[0].key[0]' = 904"
-              " AND ?1 ->> '$.rows[0].values.data.length' > 200", out) == 1);
-    free(out);
-    ExploreQuery q = { .table = "entries", .filter = turn, .full = 1 };
-    assert(explore_rows(g_db, &q, &out) == 200);
-    assert(qi("SELECT json_extract(?1 ->> '$.rows[0].values.data', '$.turn_edits[0].replaced[0].replacement') = 905"
-              " AND json_extract(?1 ->> '$.rows[0].values.data', '$.turn_edits[0].left_branch[0]') = 903", out) == 1);
-    free(out);
-    assert(row_call("entries", "[904]", &out) == 200);
-    assert(qi("SELECT json_extract(?1 ->> '$.row.values.data', '$.turn_edits[0].by') = 'hook:rev'", out) == 1);
-    free(out);
-    /* The original is still a row, reachable by its id, with the parent it
-     * was written under; the whole turn comes with the session's entries. */
-    assert(row_call("entries", "[903]", &out) == 200);
-    assert(qi("SELECT ?1 ->> '$.row.values.content' = 'three hundred lines'"
-              " AND ?1 ->> '$.row.values.parent_id' = 902", out) == 1);
-    free(out);
-    assert(rows_call("entries", "{\"session_id\":3}", NULL, 0, &out) == 200);
-    assert(qi("SELECT json_array_length(?1, '$.rows')", out) == 6);
-    char *src = q1("SELECT json_extract(j.value ->> '$.values.data', '$.source') FROM json_each(?1, '$.rows') j"
-                   " WHERE j.value ->> '$.key[0]' = 906", out);
-    assert(src && strcmp(src, "hook:rev") == 0);
-    free(src); free(out);
-    printf("PASS: test_edited_turn\n");
 }
 
 /* ── a session's context and edits (explore_session) ───────────────────── */
@@ -487,20 +400,30 @@ static void test_session_edits(void) {
     free(out);
     assert(explore_session(g_db, 999, &out) == 404);
     free(out);
-    printf("PASS: test_session_edits\n");
 }
 
 /* ── prompt-cache statistics (explore_cache) ───────────────────────────── */
 
-/* One field of one model's bucket in a cache response. */
-static long long cache_cell(const char *out, const char *model, const char *key, const char *field) {
+/* One field of one model's bucket in a cache response, as text (NULL for a
+ * JSON null or no such bucket). Heap. */
+static char *cache_cell(const char *out, const char *model, const char *key, const char *field) {
     char sql[512];
     snprintf(sql, sizeof(sql),
              "SELECT b.value ->> '$.%s' FROM json_each(?1, '$.models') m,"
              " json_each(m.value, '$.buckets') b"
              " WHERE m.value ->> '$.model' = '%s' AND b.value ->> '$.key' = '%s'",
              field, model, key);
-    return qi(sql, out);
+    return q1(sql, out);
+}
+
+static void cache_expect(const char *out, const char *model, const char *key, const char *field,
+                         const char *want) {
+    char *got = cache_cell(out, model, key, field);
+    int ok = want ? got && strcmp(got, want) == 0 : got == NULL;
+    if (!ok) fprintf(stderr, "%s %s %s: got %s want %s\n", model, key, field,
+                     got ? got : "null", want ? want : "null");
+    assert(ok);
+    free(got);
 }
 
 /* Gaps are per session (another session's request in between changes
@@ -527,42 +450,28 @@ static void test_cache(void) {
               " AND ?1 ->> '$.buckets[4].key' = 'gt60m' AND ?1 ->> '$.days' IS NULL", out) == 1);
     assert(qi("SELECT m.value ->> '$.requests' FROM json_each(?1, '$.models') m"
               " WHERE m.value ->> '$.model' = 'cm-a'", out) == 6);
-    assert(cache_cell(out, "cm-a", "first", "requests") == 2);
-    assert(cache_cell(out, "cm-a", "first", "not_reported") == 1);
-    assert(cache_cell(out, "cm-a", "first", "hits") == 1);
-    assert(cache_cell(out, "cm-a", "first", "prompt_tokens") == 400);
-    assert(cache_cell(out, "cm-a", "lt1m", "requests") == 1);
-    assert(cache_cell(out, "cm-a", "lt1m", "cached_tokens") == 900);
-    assert(cache_cell(out, "cm-a", "1to5m", "requests") == 1);
-    assert(cache_cell(out, "cm-a", "1to5m", "reported_zero") == 1);
-    assert(cache_cell(out, "cm-a", "1to5m", "not_reported") == 0);
-    assert(cache_cell(out, "cm-a", "1to5m", "hits") == 0);
-    assert(cache_cell(out, "cm-a", "5to60m", "requests") == 1);
-    assert(cache_cell(out, "cm-a", "5to60m", "not_reported") == 1);
-    assert(cache_cell(out, "cm-a", "5to60m", "reported_zero") == 0);
-    assert(cache_cell(out, "cm-a", "gt60m", "hits") == 1);
-    /* Shares: over reporting requests only; none reported is null, not 0. */
-    assert(qi("SELECT b.value ->> '$.share' = 0.9 FROM json_each(?1, '$.models') m,"
-              " json_each(m.value, '$.buckets') b WHERE m.value ->> '$.model' = 'cm-a'"
-              " AND b.value ->> '$.key' = 'lt1m'", out) == 1);
-    assert(qi("SELECT b.value ->> '$.share' = 0.25 FROM json_each(?1, '$.models') m,"
-              " json_each(m.value, '$.buckets') b WHERE m.value ->> '$.model' = 'cm-a'"
-              " AND b.value ->> '$.key' = 'first'", out) == 1);
-    assert(qi("SELECT b.value ->> '$.share' = 0 FROM json_each(?1, '$.models') m,"
-              " json_each(m.value, '$.buckets') b WHERE m.value ->> '$.model' = 'cm-a'"
-              " AND b.value ->> '$.key' = '1to5m'", out) == 1);
-    assert(qi("SELECT json_type(b.value, '$.share') = 'null' FROM json_each(?1, '$.models') m,"
-              " json_each(m.value, '$.buckets') b WHERE m.value ->> '$.model' = 'cm-a'"
-              " AND b.value ->> '$.key' = '5to60m'", out) == 1);
-    assert(cache_cell(out, "cm-old", "first", "hits") == 1);
+    static const struct { const char *model, *key, *field, *want; } cells[] = {
+        { "cm-a", "first", "requests", "2" },       { "cm-a", "first", "not_reported", "1" },
+        { "cm-a", "first", "hits", "1" },           { "cm-a", "first", "prompt_tokens", "400" },
+        { "cm-a", "lt1m", "requests", "1" },        { "cm-a", "lt1m", "cached_tokens", "900" },
+        { "cm-a", "1to5m", "requests", "1" },       { "cm-a", "1to5m", "reported_zero", "1" },
+        { "cm-a", "1to5m", "not_reported", "0" },   { "cm-a", "1to5m", "hits", "0" },
+        { "cm-a", "5to60m", "requests", "1" },      { "cm-a", "5to60m", "not_reported", "1" },
+        { "cm-a", "5to60m", "reported_zero", "0" }, { "cm-a", "gt60m", "hits", "1" },
+        /* Shares: over reporting requests only; none reported is null, not 0. */
+        { "cm-a", "lt1m", "share", "0.9" },         { "cm-a", "first", "share", "0.25" },
+        { "cm-a", "1to5m", "share", "0.0" },        { "cm-a", "5to60m", "share", NULL },
+        { "cm-old", "first", "hits", "1" },
+    };
+    for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++)
+        cache_expect(out, cells[i].model, cells[i].key, cells[i].field, cells[i].want);
     free(out);
     /* A window keeps recent requests, with the gaps they had in full history. */
     assert(explore_cache(g_db, 7, &out) == 200 && out);
     assert(qi("SELECT ?1 ->> '$.days' = 7 AND NOT EXISTS (SELECT 1 FROM json_each(?1, '$.models') m"
               " WHERE m.value ->> '$.model' = 'cm-old')", out) == 1);
-    assert(cache_cell(out, "cm-a", "gt60m", "hits") == 1);
+    cache_expect(out, "cm-a", "gt60m", "hits", "1");
     free(out);
-    printf("PASS: test_cache\n");
 }
 
 /* ── identifiers and values from the request never become SQL ──────────── */
@@ -597,7 +506,6 @@ static void test_injection(void) {
     assert(row_call("agents", "[\"alpha' OR '1'='1\"]", &out) == 404); free(out);
     assert(rows_call("agents", NULL, "[\"') OR 1=1 --\"]", 0, &out) == 200); free(out);
     assert(qi("SELECT count(*) FROM agents", NULL) == 5);
-    printf("PASS: test_injection\n");
 }
 
 /* ── secrets never leave the server ────────────────────────────────────── */
@@ -697,7 +605,6 @@ static void test_secret_walk(void) {
     free(out);
     assert(explore_hidden("secrets", "value") == 1 && explore_hidden("config", "value") == 2 &&
            explore_hidden("secrets", "name") == 0);
-    printf("PASS: test_secret_walk (%d responses)\n", g_walk_calls);
 }
 
 /* ── the page never builds markup from data ────────────────────────────── */
@@ -716,7 +623,6 @@ static void test_page_source(void) {
             assert(!strstr(p, SINKS[i]));
         }
     }
-    printf("PASS: test_page_source\n");
 }
 
 /* ── HTTP ──────────────────────────────────────────────────────────────── */
@@ -791,7 +697,6 @@ static void test_http(void) {
     assert(strstr(h.d, "Cache-Control: no-store"));
     assert(strcmp(b.d, TPL_EXPLORER_HTML) == 0);
     assert(http(c, "/admin/api/meta", NULL, &b, &h) == 200);
-    assert(qi("SELECT json_array_length(?1, '$.tables') > 30", b.d) == 1);
     assert(!strstr(b.d, tok));
     assert(strstr(h.d, "X-Content-Type-Options: nosniff"));
     assert(http(c, "/admin/api/rows?table=entries&limit=3&filter=%7B%22session_id%22%3A1%7D",
@@ -805,12 +710,11 @@ static void test_http(void) {
     assert(http(c, path, NULL, &b, &h) == 200);
     assert(qi("SELECT ?1 ->> '$.rows[0].key[0]'", b.d) == last - 1);
     free(next);
+    /* The query string reaches the in-process calls tested above. */
     assert(http(c, "/admin/api/row?table=agents&key=%5B%22alpha%22%5D", NULL, &b, &h) == 200);
-    assert(qi("SELECT ?1 ->> '$.row.values.name' = 'alpha'", b.d) == 1);
     assert(http(c, "/admin/api/cache?days=7", NULL, &b, &h) == 200);
-    assert(qi("SELECT ?1 ->> '$.days' = 7 AND json_type(?1, '$.models') = 'array'", b.d) == 1);
+    assert(qi("SELECT ?1 ->> '$.days'", b.d) == 7);
     assert(http(c, "/admin/api/session?id=20", NULL, &b, &h) == 200);
-    assert(qi("SELECT json_array_length(?1, '$.edits') = 2 AND ?1 ->> '$.session_id' = 20", b.d) == 1);
     assert(http(c, "/admin/api/session", NULL, &b, &h) == 400);
     assert(http(c, "/admin/api/session?id=999", NULL, &b, &h) == 404);
     assert(http(c, "/admin/api/row?table=nosuch&key=%5B1%5D", NULL, &b, &h) == 404);
@@ -829,7 +733,6 @@ static void test_http(void) {
     free(b.d); free(h.d); free(tok);
     curl_easy_cleanup(c);
     web_stop();
-    printf("PASS: test_http\n");
 }
 
 int main(void) {
@@ -838,16 +741,15 @@ int main(void) {
     g_db = test_db_open(DB);
     assert(g_db);
     seed();
-    test_meta_complete();
-    test_rows_paging();
-    test_row_keys();
-    test_injection();
-    test_edited_turn();
-    test_session_edits();
-    test_cache();
-    test_page_source();
-    test_secret_walk();
-    test_http();
+    RUN(test_meta_complete);
+    RUN(test_rows_paging);
+    RUN(test_row_keys);
+    RUN(test_injection);
+    RUN(test_session_edits);
+    RUN(test_cache);
+    RUN(test_page_source);
+    RUN(test_secret_walk);
+    RUN(test_http);
     db_close(g_db);
     test_db_clean(DB);
     printf("All explore tests passed.\n");

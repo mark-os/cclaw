@@ -24,6 +24,7 @@
 #include "../src/run_tool.h"
 #include "../src/tool_args.h"
 #include "test_run_tool_shell.h"
+#include "test_util.h"
 
 #define ROOT     "/tmp/cclaw_keymask"
 #define STATEDIR ROOT "/state"
@@ -84,7 +85,6 @@ static void test_directory_grant_masks_both(void) {
     assert(strstr(out, KEY_MARK) == NULL);
     assert(strstr(out, DB_MARK) == NULL);
     free(out);
-    printf("PASS test_directory_grant_masks_both\n");
 }
 
 /* Naming the DB file exactly does NOT unmask it. Such a grant is refused at
@@ -100,7 +100,6 @@ static void test_exact_db_grant_still_masked(void) {
     assert(strstr(out, KEY_MARK) == NULL);
     assert(strstr(out, DB_MARK) == NULL);
     free(out);
-    printf("PASS test_exact_db_grant_still_masked\n");
 }
 
 /* A grant naming the key file itself must still not expose it — the key is
@@ -112,7 +111,6 @@ static void test_exact_key_grant_still_masked(void) {
     assert(strstr(out, DECOY_MARK) != NULL);   /* positive control */
     assert(strstr(out, KEY_MARK) == NULL);
     free(out);
-    printf("PASS test_exact_key_grant_still_masked\n");
 }
 
 /* The shell tier is not the only way to read a file. file_read reaches the
@@ -228,7 +226,6 @@ static void test_file_tier_grant_masks_key_and_db(void) {
     printf("  file_read, exact key grant → %s\n", out);
     assert(strstr(out, KEY_MARK) == NULL);
     free(out);
-    printf("PASS test_file_tier_grant_masks_key_and_db\n");
 }
 
 /* No grant at all: invisible by omission, nothing mounted to mask. */
@@ -244,17 +241,15 @@ static void test_no_grant_exposes_nothing(void) {
     assert(strstr(out, KEY_MARK) == NULL);
     assert(strstr(out, DB_MARK) == NULL);
     free(out);
-    printf("PASS test_no_grant_exposes_nothing\n");
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    test_no_grant_exposes_nothing();
-    test_directory_grant_masks_both();
-    test_exact_db_grant_still_masked();
-    test_exact_key_grant_still_masked();
-    test_file_tier_grant_masks_key_and_db();
+    TEST_INIT();
+    RUN(test_no_grant_exposes_nothing);
+    RUN(test_directory_grant_masks_both);
+    RUN(test_exact_db_grant_still_masked);
+    RUN(test_exact_key_grant_still_masked);
+    RUN(test_file_tier_grant_masks_key_and_db);
     system("rm -rf " ROOT);
-    printf("All key-mask tests passed\n");
     return 0;
 }

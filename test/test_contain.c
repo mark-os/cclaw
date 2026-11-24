@@ -1,13 +1,11 @@
 #define _GNU_SOURCE
 #include "contain.h"
+#include <assert.h>
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-static int failures = 0;
-#define ASSERT(cond, msg) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); failures++; } } while(0)
 
 /* What the probe claims must be what a child actually gets: ask for the same
  * namespaces the shell tier does and compare. A probe that says yes on a host
@@ -25,23 +23,20 @@ static int really_contains(void) {
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
 
-    ASSERT(contain_backend() && contain_backend()[0], "backend has a name");
+    assert(contain_backend() && contain_backend()[0]);
 
     char why[160] = "stale";
     int ok = contain_probe(why, sizeof(why));
     if (strcmp(contain_backend(), "linux-ns") == 0)
-        ASSERT(ok == really_contains(), "probe agrees with a real unshare");
+        assert(ok == really_contains());
     else
-        ASSERT(ok == 0, "a build without a backend never claims to contain");
-    if (ok) ASSERT(why[0] == '\0', "no reason given on success");
-    else    ASSERT(why[0] != '\0', "a reason is given on failure");
+        assert(ok == 0);
+    assert(ok ? why[0] == '\0' : why[0] != '\0');   /* a reason only on failure */
     printf("  backend=%s contained=%d%s%s\n", contain_backend(), ok,
            ok ? "" : " why=", ok ? "" : why);
 
     /* It runs in a throwaway child, so asking twice gives the same answer. */
-    ASSERT(contain_probe(NULL, 0) == ok, "probe is repeatable and takes no buffer");
+    assert(contain_probe(NULL, 0) == ok);
 
-    if (failures) { printf("FAIL: test_contain (%d failures)\n", failures); return 1; }
-    printf("PASS: test_contain\n");
     return 0;
 }

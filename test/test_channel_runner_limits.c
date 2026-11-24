@@ -16,6 +16,7 @@
 #include "qjs_helpers.h"
 #include "approval.h"
 #include "resolve.h"
+#include "test_util.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,8 +41,6 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision,
 static void test_cap_fits_heap(void) {
     assert(CR_CONN_MSG_MAX > 0);
     assert((long)CR_CONN_MSG_MAX * 4 <= (long)CR_HEAP_SIZE);
-    printf("  PASS test_cap_fits_heap (cap=%ld bytes, heap=%d bytes)\n",
-           (long)CR_CONN_MSG_MAX, CR_HEAP_SIZE);
 }
 
 static void test_set_global_reports_oom(void) {
@@ -92,7 +91,6 @@ static void test_set_global_reports_oom(void) {
 
     JS_FreeContext(ctx);
     qjs_runtime_destroy(qrt);
-    printf("  PASS test_set_global_reports_oom\n");
 }
 
 /* A message right at the cap must still fit — the point of the 4x floor is
@@ -116,15 +114,13 @@ static void test_cap_sized_message_binds(void) {
 
     JS_FreeContext(ctx);
     qjs_runtime_destroy(qrt);
-    printf("  PASS test_cap_sized_message_binds\n");
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_channel_runner_limits:\n");
-    test_cap_fits_heap();
-    test_set_global_reports_oom();
-    test_cap_sized_message_binds();
-    printf("all channel_runner limit tests passed\n");
+    RUN(test_cap_fits_heap);
+    RUN(test_set_global_reports_oom);
+    RUN(test_cap_sized_message_binds);
     return 0;
 }

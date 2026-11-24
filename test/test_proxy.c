@@ -86,7 +86,6 @@ static void test_proxy_start_stop(void) {
 
     /* Socket file should be removed */
     assert(stat(proxy_sock_path(&ctx), &st) != 0);
-    printf("  PASS: proxy start/stop\n");
 }
 
 static void test_literal_grant_allowed(void) {
@@ -100,7 +99,6 @@ static void test_literal_grant_allowed(void) {
     assert(strcmp(ip, "8.8.8.8") == 0);
 
     proxy_stop(&ctx);
-    printf("  PASS: granted literal IP allowed\n");
 }
 
 static void test_resolve_denied(void) {
@@ -113,7 +111,6 @@ static void test_resolve_denied(void) {
     assert(proxy_decide(&ctx, "notallowed.test", ip, sizeof(ip), NULL) == PROXY_DENIED);
 
     proxy_stop(&ctx);
-    printf("  PASS: resolve denied (not in allowlist)\n");
 }
 
 static void test_resolve_private_rejected(void) {
@@ -128,7 +125,6 @@ static void test_resolve_private_rejected(void) {
     assert(proxy_decide(&ctx, "localhost", ip, sizeof(ip), NULL) == PROXY_UNRESOLVED);
 
     proxy_stop(&ctx);
-    printf("  PASS: resolve private rejected (SSRF)\n");
 }
 
 static void test_connect_denied(void) {
@@ -150,7 +146,6 @@ static void test_connect_denied(void) {
     close(fd);
 
     proxy_stop(&ctx);
-    printf("  PASS: connect denied (not in allowlist)\n");
 }
 
 static void test_connect_bad_preamble(void) {
@@ -172,7 +167,6 @@ static void test_connect_bad_preamble(void) {
     close(fd);
 
     proxy_stop(&ctx);
-    printf("  PASS: connect bad preamble\n");
 }
 
 static void test_connect_literal_private_ip_denied(void) {
@@ -195,7 +189,6 @@ static void test_connect_literal_private_ip_denied(void) {
     close(fd);
 
     proxy_stop(&ctx);
-    printf("  PASS: connect literal private IP denied (no grant)\n");
 }
 
 static void test_connect_literal_ungranted_public_ip_denied(void) {
@@ -219,7 +212,6 @@ static void test_connect_literal_ungranted_public_ip_denied(void) {
     assert(proxy_decide(&ctx, "1.2.3.4", ip, sizeof(ip), NULL) == PROXY_DENIED);
 
     proxy_stop(&ctx);
-    printf("  PASS: literal ungranted public IP denied (no allowlist bypass by IP)\n");
 }
 
 /* A throwaway loopback listener that accepts and holds connections open, so the
@@ -299,7 +291,6 @@ static void test_relay_cap(void) {
     for (int i = 1; i < PROXY_MAX_RELAYS; i++) close(clients[i]);
     proxy_stop(&ctx);
     close(lfd);
-    printf("  PASS: relay cap enforced (refuse past PROXY_MAX_RELAYS)\n");
 }
 
 static void test_pending_cap(void) {
@@ -346,7 +337,6 @@ static void test_pending_cap(void) {
 
     for (int i = 10; i < PROXY_MAX_PENDING; i++) close(pending[i]);
     proxy_stop(&ctx);
-    printf("  PASS: pending cap enforced (refuse past PROXY_MAX_PENDING)\n");
 }
 
 static double mono_ms(void) {
@@ -381,7 +371,6 @@ static void test_stop_is_prompt(void) {
         assert(proxy_start(&ctx, tmpdir, NULL, 0) == 0);
         proxy_stop(&ctx);
     }
-    printf("  PASS: proxy stop is prompt (%.1f ms)\n", best);
 }
 
 int main(void) {
@@ -389,20 +378,18 @@ int main(void) {
     alarm(10);
     setup_tmpdir();
 
-    printf("test_proxy:\n");
-    test_proxy_start_stop();
-    test_stop_is_prompt();
-    test_literal_grant_allowed();
-    test_resolve_denied();
-    test_resolve_private_rejected();
-    test_connect_denied();
-    test_connect_literal_private_ip_denied();
-    test_connect_literal_ungranted_public_ip_denied();
-    test_connect_bad_preamble();
-    test_relay_cap();
-    test_pending_cap();
+    RUN(test_proxy_start_stop);
+    RUN(test_stop_is_prompt);
+    RUN(test_literal_grant_allowed);
+    RUN(test_resolve_denied);
+    RUN(test_resolve_private_rejected);
+    RUN(test_connect_denied);
+    RUN(test_connect_literal_private_ip_denied);
+    RUN(test_connect_literal_ungranted_public_ip_denied);
+    RUN(test_connect_bad_preamble);
+    RUN(test_relay_cap);
+    RUN(test_pending_cap);
 
     cleanup_tmpdir();
-    printf("All proxy tests passed.\n");
     return 0;
 }

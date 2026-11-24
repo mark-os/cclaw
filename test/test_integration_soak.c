@@ -11,14 +11,8 @@
  * leak-slope question, which is cheap to settle deterministically. */
 #define _POSIX_C_SOURCE 200809L
 #include "test_run_session.h"
-#include "mock_server.h"
-#include <assert.h>
 #include <dirent.h>
-#include <signal.h>
-#include <stdio.h>
-#include <string.h>
 #include <unistd.h>
-#include "test_util.h"
 
 #define DB_PATH "/tmp/test_integ_soak.db"
 #define WARMUP  15
@@ -88,13 +82,7 @@ int main(void) {
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
-    int port = mock_server_start();
-    assert(port > 0);
-    char url[64]; snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
-    setenv("CCLAW_DB_PATH", DB_PATH, 1);
-    setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
-    setenv("OPENROUTER_API_KEY", "test-key", 1);
-    setenv("CCLAW_MODEL", "test-model", 1);
+    test_mock_env(DB_PATH);
     db_agent_upsert(db, "Soak", NULL, NULL);
 
     /* Warm up: first turns allocate lazily-initialized singletons (curl

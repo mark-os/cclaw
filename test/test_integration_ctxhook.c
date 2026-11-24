@@ -35,21 +35,11 @@
 #include "config.h"
 #include "config_registry.h"
 #include "context.h"
-#include "db.h"
 #include "extension_manifest.h"
 #include "mock_server.h"
-#include "test_util.h"
-#include <fcntl.h>
+#include "test_integ.h"
 #include <limits.h>
-#include <signal.h>
-#include <sqlite3.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
 
 #define ROOT    "/tmp/cclaw_integ_ctxhook"
 #define DB_PATH ROOT "/cclaw.db"
@@ -61,6 +51,12 @@
 
 #define STEPS      12
 #define STEP_BYTES 6000          /* ~2400 tokens of assistant text per iteration */
+
+/* The hook scripts run unsandboxed so the test does not depend on user
+ * namespaces; the sandboxed path is the same code. */
+static IntegEnv g_env = {.db = DB_PATH, .workspace = WS, .max_iter = "40",
+                         .sandbox = "host", .verbose = 1};
+#define db_count(sql) integ_db_int(DB_PATH, (sql), NULL)
 
 /* No prompt count: a mock's would be fiction, and a usable report's count
  * is the head (context.c, plan_head). */
@@ -87,94 +83,6 @@ static char *step_response(int i) {
              TOKENS_OF_BYTES(STEP_BYTES));
     free(text);
     return body;
-}
-
-static void dump_log(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-    char line[512];
-    fprintf(stderr, "--- %s ---\n", path);
-    while (fgets(line, sizeof(line), f)) fputs(line, stderr);
-    fprintf(stderr, "--- end %s ---\n", path);
-    fclose(f);
-}
-
-static int run_cli_p(const char *exe, const char *url, const char *prompt,
-                     int64_t sid, const char *logpath) {
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        int nfd = open("/dev/null", O_RDONLY);
-        int lfd = open(logpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (nfd < 0 || lfd < 0) _exit(110);
-        dup2(nfd, 0); dup2(lfd, 1); dup2(lfd, 2);
-        if (nfd > 2) close(nfd);
-        if (lfd > 2) close(lfd);
-        setenv("CCLAW_DB_PATH", DB_PATH, 1);
-        setenv("CCLAW_WORKSPACE", WS, 1);
-        setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
-        setenv("OPENROUTER_API_KEY", "test-key", 1);
-        setenv("CCLAW_MODEL", "test-model", 1);
-        setenv("CCLAW_MAX_ITERATIONS", "40", 1);
-        /* The hook scripts run unsandboxed so the test does not depend on
-         * the machine having user namespaces (test_turn_settle does the
-         * same); the sandboxed path is the same code. */
-        setenv("CCLAW_SANDBOX_PROFILE", "host", 1);
-        if (sid > 0) {
-            char sbuf[32];
-            snprintf(sbuf, sizeof(sbuf), "%lld", (long long)sid);
-            execl(exe, exe, "-v", "-p", prompt, "-s", sbuf, (char *)NULL);
-        } else {
-            execl(exe, exe, "-p", prompt, (char *)NULL);
-        }
-        _exit(111);
-    }
-    for (int i = 0; i < 350; i++) {   /* 35s deadline */
-        int st = 0;
-        pid_t w = waitpid(pid, &st, WNOHANG);
-        if (w == pid) return 0;
-        struct timespec ts = {0, 100 * 1000 * 1000};
-        nanosleep(&ts, NULL);
-    }
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
-    return -1;
-}
-
-static int64_t db_count(const char *sql) {
-    sqlite3 *db;
-    if ((db = db_open(DB_PATH)) == NULL) return -1;
-    sqlite3_stmt *s;
-    int64_t v = -1;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
-        if (sqlite3_step(s) == SQLITE_ROW) v = sqlite3_column_int64(s, 0);
-        sqlite3_finalize(s);
-    }
-    sqlite3_close(db);
-    return v;
-}
-
-static int seed_mock_provider(const char *url) {
-    sqlite3 *seed = test_db_open(DB_PATH);
-    if (!seed) return -1;
-    if (db_seed_defaults(seed) != 0) { sqlite3_close(seed); return -1; }
-    sqlite3_exec(seed, "DELETE FROM models; DELETE FROM providers;", NULL, NULL, NULL);
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(seed,
-            "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, default_model)"
-            " VALUES('openrouter', ?1, 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4.1-flash')",
-            -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(s, 1, url, -1, SQLITE_STATIC);
-        sqlite3_step(s);
-        sqlite3_finalize(s);
-    }
-    sqlite3_exec(seed,
-        "INSERT INTO models(id, provider_name, model, status, context_window)"
-        " VALUES('openrouter/deepseek/deepseek-v4.1-flash', 'openrouter',"
-        "        'deepseek/deepseek-v4.1-flash', 'healthy', 1000000)",
-        NULL, NULL, NULL);
-    sqlite3_close(seed);
-    return 0;
 }
 
 /* The agent's head as the trim estimates it, a threshold four iterations
@@ -239,24 +147,14 @@ static int install_hook(const char *agent, const char *fields, const char *js) {
     return rc;
 }
 
-static int count_in_log(const char *path, const char *needle) {
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-    char line[1024];
-    int n = 0;
-    while (fgets(line, sizeof(line), f)) if (strstr(line, needle)) n++;
-    fclose(f);
-    return n;
-}
-
-/* One long turn on `sid`. It must end on the model's answer, after every
- * step was asked for, having trimmed mid-turn more than once. *first_id is
- * where to start counting this turn's rows. */
 /* The bundled script's request: its instructions open with this. */
 #define SUMMARISER "You compress the oldest part of an AI agent"
 static int g_summariser_down;   /* (f): the bundled script's model answers 500 */
 
-static int long_turn(const char *exe, const char *url, int64_t sid, const char *label) {
+/* One long turn on `sid`. It must end on the model's answer, after every
+ * step was asked for, having trimmed mid-turn more than once. */
+
+static int long_turn(const char *exe, int64_t sid, const char *label) {
     char sql[512];
     int64_t since = db_count("SELECT COALESCE(MAX(id),0) FROM entries;");
     mock_server_reset();
@@ -267,15 +165,15 @@ static int long_turn(const char *exe, const char *url, int64_t sid, const char *
         free(b);
     }
     mock_server_enqueue(200, RESP_FINAL);
-    if (run_cli_p(exe, url, "work through it", sid, LOG2) != 0) {
+    if (integ_run_cli_p(&g_env, exe, "work through it", sid, LOG2, 350) < 0) {
         fprintf(stderr, "FAIL %s: the run did not exit\n", label);
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         return -1;
     }
     if (mock_server_request_count() != STEPS + 1) {
         fprintf(stderr, "FAIL %s: %d requests, expected %d\n", label,
                 mock_server_request_count(), STEPS + 1);
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         return -1;
     }
     snprintf(sql, sizeof(sql),
@@ -283,7 +181,7 @@ static int long_turn(const char *exe, const char *url, int64_t sid, const char *
              " WHERE id=(SELECT leaf_id FROM sessions WHERE id=%lld);", (long long)sid);
     if (db_count(sql) != 1) {
         fprintf(stderr, "FAIL %s: the turn did not end on the model's answer\n", label);
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         return -1;
     }
     snprintf(sql, sizeof(sql),
@@ -294,7 +192,7 @@ static int long_turn(const char *exe, const char *url, int64_t sid, const char *
     if (db_count(sql) < 2) {
         fprintf(stderr, "FAIL %s: expected at least two mid-turn trims, got %lld\n", label,
                 (long long)db_count(sql));
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         return -1;
     }
     const char *last = mock_server_last_request_body();
@@ -306,7 +204,7 @@ static int long_turn(const char *exe, const char *url, int64_t sid, const char *
 }
 
 /* (d): one long turn where the script, not C, keeps the session small. */
-static int summarise_turn(const char *exe, const char *url, int64_t sid) {
+static int summarise_turn(const char *exe, int64_t sid) {
     char sql[512];
     int64_t since = db_count("SELECT COALESCE(MAX(id),0) FROM entries;");
     mock_server_reset();
@@ -316,11 +214,11 @@ static int summarise_turn(const char *exe, const char *url, int64_t sid) {
         free(b);
     }
     mock_server_enqueue(200, RESP_FINAL);
-    if (run_cli_p(exe, url, "work through it", sid, LOG2) != 0 ||
+    if (integ_run_cli_p(&g_env, exe, "work through it", sid, LOG2, 350) < 0 ||
         mock_server_request_count() != STEPS + 1) {
         fprintf(stderr, "FAIL (d): the run did not finish (%d requests)\n",
                 mock_server_request_count());
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         return -1;
     }
     snprintf(sql, sizeof(sql),
@@ -328,10 +226,10 @@ static int summarise_turn(const char *exe, const char *url, int64_t sid) {
              " WHERE id=(SELECT leaf_id FROM sessions WHERE id=%lld);", (long long)sid);
     if (db_count(sql) != 1) {
         fprintf(stderr, "FAIL (d): the turn did not end on the model's answer\n");
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         return -1;
     }
-    int applied = count_in_log(LOG2, "hook ContextThreshold ext=compact outcome=applied");
+    int applied = integ_count_in_log(LOG2, "hook ContextThreshold ext=compact outcome=applied");
     snprintf(sql, sizeof(sql),
              "SELECT COUNT(*) FROM entries WHERE session_id=%lld AND id > %lld"
              " AND type='compaction' AND json_extract(data,'$.source')='hook:compact'"
@@ -348,7 +246,7 @@ static int summarise_turn(const char *exe, const char *url, int64_t sid) {
         fprintf(stderr, "FAIL (d): %d applied, %lld summaries in the turn, %lld C trims"
                 " of its iterations\n",
                 applied, (long long)summaries, (long long)trims);
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         return -1;
     }
     const char *last = mock_server_last_request_body();
@@ -394,7 +292,7 @@ static const char *RESP_SUMMARY =
     "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":9}}";
 
 /* (e): the bundled extension keeps the running turn small. */
-static int bundled_turn(const char *exe, const char *url, int64_t sid) {
+static int bundled_turn(const char *exe, int64_t sid) {
     char sql[512];
     mock_server_reset();
     mock_server_answer_when(SUMMARISER, 200, RESP_SUMMARY);
@@ -404,11 +302,11 @@ static int bundled_turn(const char *exe, const char *url, int64_t sid) {
         free(b);
     }
     mock_server_enqueue(200, RESP_FINAL);
-    if (run_cli_p(exe, url, "work through it", sid, LOG2) != 0 ||
+    if (integ_run_cli_p(&g_env, exe, "work through it", sid, LOG2, 350) < 0 ||
         mock_server_request_count() != STEPS + 1) {
         fprintf(stderr, "FAIL (e): the run did not finish (%d requests)\n",
                 mock_server_request_count());
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         return -1;
     }
     snprintf(sql, sizeof(sql),
@@ -416,10 +314,10 @@ static int bundled_turn(const char *exe, const char *url, int64_t sid) {
              " WHERE id=(SELECT leaf_id FROM sessions WHERE id=%lld);", (long long)sid);
     if (db_count(sql) != 1) {
         fprintf(stderr, "FAIL (e): the turn did not end on the model's answer\n");
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         return -1;
     }
-    int applied = count_in_log(LOG2, "hook ContextThreshold ext=compaction outcome=applied");
+    int applied = integ_count_in_log(LOG2, "hook ContextThreshold ext=compaction outcome=applied");
     int asked = mock_server_rule_hits();
     snprintf(sql, sizeof(sql),
              "SELECT COUNT(*) FROM entries WHERE session_id=%lld AND type='system'"
@@ -438,7 +336,7 @@ static int bundled_turn(const char *exe, const char *url, int64_t sid) {
         fprintf(stderr, "FAIL (e): %d applied, %d summariser calls, %lld C trims,"
                 " %lld bundled summaries on the branch\n",
                 applied, asked, (long long)trims, (long long)on_branch);
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         return -1;
     }
     const char *last = mock_server_last_request_body();
@@ -473,18 +371,19 @@ int main(void) {
     if (port < 0) FAIL("mock_server_start");
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
+    g_env.url = url;
 
     int rc = 1;
     char agent[64] = "";
-    if (seed_mock_provider(url) != 0) { fprintf(stderr, "FAIL: seed\n"); goto done; }
+    if (integ_seed_provider(DB_PATH, url, 0, 1000000) != 0) { fprintf(stderr, "FAIL: seed\n"); goto done; }
 
     /* run 1: the session, the agent and its routing entry */
     mock_server_reset();
     mock_server_enqueue(200, RESP_FINAL);
     mock_server_enqueue(200, RESP_FINAL);
-    if (run_cli_p(exe, url, "hello", 0, LOG1) != 0) {
+    if (integ_run_cli_p(&g_env, exe, "hello", 0, LOG1, 350) < 0) {
         fprintf(stderr, "FAIL: run 1 did not exit\n");
-        dump_log(LOG1);
+        integ_dump_log(LOG1);
         goto done;
     }
     int64_t sid = db_count("SELECT MAX(id) FROM sessions;");
@@ -501,35 +400,33 @@ int main(void) {
             "    || args.iterations.length < 1)"
             "  throw new Error('unexpected input');"
             "return '{}';") != 0) { fprintf(stderr, "FAIL: install (a)\n"); goto done; }
-    if (long_turn(exe, url, sid, "(a) no edits") != 0) goto done;
-    int ran = count_in_log(LOG2, "hook ContextThreshold ext=compact outcome=nothing");
+    if (long_turn(exe, sid, "(a) no edits") != 0) goto done;
+    int ran = integ_count_in_log(LOG2, "hook ContextThreshold ext=compact outcome=nothing");
     if (ran < 2 || db_count("SELECT fail_count FROM hooks WHERE extension_name='compact'") != 0) {
         fprintf(stderr, "FAIL (a): the hook ran %d times, fail_count %lld\n", ran,
                 (long long)db_count("SELECT fail_count FROM hooks WHERE extension_name='compact'"));
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         goto done;
     }
     /* Each run is followed by C's check: the log has a trim after a hook. */
-    if (count_in_log(LOG2, "trim session=") < 2) {
+    if (integ_count_in_log(LOG2, "trim session=") < 2) {
         fprintf(stderr, "FAIL (a): no trim logged after the hook\n");
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         goto done;
     }
-    printf("  PASS long_turn_hook_no_edits_then_trim\n");
 
     /* (b) A script that crashes: nothing it did, counted, C's trim. */
     if (install_hook(agent, "", "throw new Error('compactor died');") != 0) {
         fprintf(stderr, "FAIL: install (b)\n");
         goto done;
     }
-    if (long_turn(exe, url, sid, "(b) crash") != 0) goto done;
-    if (count_in_log(LOG2, "hook ContextThreshold ext=compact outcome=failed") < 1 ||
+    if (long_turn(exe, sid, "(b) crash") != 0) goto done;
+    if (integ_count_in_log(LOG2, "hook ContextThreshold ext=compact outcome=failed") < 1 ||
         db_count("SELECT fail_count FROM hooks WHERE extension_name='compact'") < 1) {
         fprintf(stderr, "FAIL (b): no counted failure\n");
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         goto done;
     }
-    printf("  PASS long_turn_hook_crashes_turn_finishes\n");
 
     /* (c) A script that outlives its own one-second timeout. */
     if (install_hook(agent, ",\"timeout\":1",
@@ -537,14 +434,13 @@ int main(void) {
         fprintf(stderr, "FAIL: install (c)\n");
         goto done;
     }
-    if (long_turn(exe, url, sid, "(c) timeout") != 0) goto done;
-    if (count_in_log(LOG2, "timed out") < 1 ||
+    if (long_turn(exe, sid, "(c) timeout") != 0) goto done;
+    if (integ_count_in_log(LOG2, "timed out") < 1 ||
         db_count("SELECT fail_count FROM hooks WHERE extension_name='compact'") < 1) {
         fprintf(stderr, "FAIL (c): no counted timeout\n");
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         goto done;
     }
-    printf("  PASS long_turn_hook_times_out_turn_finishes\n");
 
     /* (d) The script keeps the session under the threshold itself. */
     if (install_hook(agent, "",
@@ -559,21 +455,19 @@ int main(void) {
         fprintf(stderr, "FAIL: install (d)\n");
         goto done;
     }
-    if (summarise_turn(exe, url, sid) != 0) goto done;
-    printf("  PASS long_turn_hook_summarises_running_turn\n");
+    if (summarise_turn(exe, sid) != 0) goto done;
 
     /* (e) The bundled extension, as shipped. */
     if (use_bundled(agent, 1) != 0) { fprintf(stderr, "FAIL: switch to bundled\n"); goto done; }
     int64_t sid_e = new_session(agent);
-    if (sid_e <= 0 || bundled_turn(exe, url, sid_e) != 0) goto done;
-    printf("  PASS long_turn_bundled_compaction_summarises_mid_turn\n");
+    if (sid_e <= 0 || bundled_turn(exe, sid_e) != 0) goto done;
 
     /* (f) The bundled extension with its model down. */
     int64_t sid_f = new_session(agent);
     if (sid_f <= 0) goto done;
     g_summariser_down = 1;
-    if (long_turn(exe, url, sid_f, "(f) bundled, model down") != 0) goto done;
-    int failed = count_in_log(LOG2, "hook ContextThreshold ext=compaction outcome=failed");
+    if (long_turn(exe, sid_f, "(f) bundled, model down") != 0) goto done;
+    int failed = integ_count_in_log(LOG2, "hook ContextThreshold ext=compaction outcome=failed");
     if (failed < 1 || mock_server_rule_hits() != failed ||
         db_count("SELECT (disabled=1) = (fail_count>=3) FROM hooks"
                  " WHERE extension_name='compaction' AND event='ContextThreshold'") != 1 ||
@@ -584,10 +478,9 @@ int main(void) {
                  " WHERE extension_name='compaction' AND event='CacheExpiring'") != 1) {
         fprintf(stderr, "FAIL (f): %d failed runs, %d summariser calls\n", failed,
                 mock_server_rule_hits());
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         goto done;
     }
-    printf("  PASS long_turn_bundled_compaction_fails_turn_finishes\n");
     printf("All context-hook integration tests passed.\n");
     rc = 0;
 

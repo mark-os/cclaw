@@ -68,14 +68,10 @@ static void test_signal(int sig, const char *expected_name) {
     /* Under glibc, expect at least one backtrace frame (contains "0x" or "[") */
     assert(strstr(buf, "0x") != NULL || strstr(buf, "[") != NULL);
 #endif
-
-    printf("  signal=%s... PASS\n", expected_name);
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_crash:\n");
-
     test_signal(SIGSEGV, "SIGSEGV");
     test_signal(SIGABRT, "SIGABRT");
     test_signal(SIGBUS,  "SIGBUS");

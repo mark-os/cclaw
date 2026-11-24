@@ -16,6 +16,15 @@
  * survives the Makefile timeout-kill (see AGENTS.md Testing Guidelines). */
 #define TEST_INIT() setvbuf(stdout, NULL, _IOLBF, 0)
 
+/* Run one test function and name it. A test reports failure by assert (the
+ * abort names the file and line), so reaching the next line is the pass:
+ * no per-test PASS printf, no counters. */
+#define RUN(fn) do { printf("  %s\n", #fn); fn(); } while (0)
+
+/* One-value reads for assertions, over SQL with no parameters. */
+#define test_qi(db, sql) db_scalar_i64((db), (sql), 0, -1)
+#define test_qs(db, sql) db_scalar_text((db), (sql), 0)   /* caller frees */
+
 /* Remove a test DB and all its derived artifacts: <base>, <base>-wal,
  * <base>-shm. ENOENT is fine — stale debris from a killed run must not
  * survive into the next one. */

@@ -62,7 +62,6 @@ static void test_set_load_rm_roundtrip(void) {
 
     db_wipe_secret_key();
     sqlite3_close(db);
-    printf("  PASS: set_load_rm_roundtrip\n");
 }
 
 static void test_set_fails_without_key(void) {
@@ -72,7 +71,6 @@ static void test_set_fails_without_key(void) {
     assert(db_secret_key_loaded() == 0);
     assert(db_secret_set(db, "X", "value", "operator", NULL) == -1);
     sqlite3_close(db);
-    printf("  PASS: set_fails_without_key\n");
 }
 
 static void test_captured_loads(void) {
@@ -87,7 +85,6 @@ static void test_captured_loads(void) {
     shell_secrets_free(s, n);
     db_wipe_secret_key();
     sqlite3_close(db);
-    printf("  PASS: captured_loads\n");
 }
 
 static void test_snapshot_env_wins(void) {
@@ -113,7 +110,6 @@ static void test_snapshot_env_wins(void) {
     free(env[0].value);
     db_wipe_secret_key();
     sqlite3_close(db);
-    printf("  PASS: snapshot_env_wins\n");
 }
 
 static void test_snapshot_empty(void) {
@@ -123,7 +119,6 @@ static void test_snapshot_empty(void) {
     assert(snap == NULL && snap_n == 0);
     db_wipe_secret_key();
     sqlite3_close(db);
-    printf("  PASS: snapshot_empty\n");
 }
 
 static void test_name_validation(void) {
@@ -135,7 +130,6 @@ static void test_name_validation(void) {
     assert(!is_valid_secret_name(""));
     assert(!is_valid_secret_name(NULL));
     assert(!is_valid_secret_name("TOKEN-NAME"));      /* hyphen not allowed */
-    printf("  PASS: name_validation\n");
 }
 
 /* Removing a secret removes the name everywhere, in one transaction: the
@@ -175,7 +169,6 @@ static void test_rm_cleans_bindings_and_grants(void) {
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM grants WHERE value='KEPT'", 0, -1) == 2);
     db_wipe_secret_key();
     sqlite3_close(db);
-    printf("  PASS: rm_cleans_bindings_and_grants\n");
 }
 
 /* The use gate's filter: only the names this agent holds a live grant for,
@@ -198,7 +191,6 @@ static void test_secrets_granted_filter(void) {
     assert(secret_granted(db, "Ann", "B_TWO") == 1 && secret_granted(db, "Ann", "A_ONE") == 0);
     db_wipe_secret_key();
     sqlite3_close(db);
-    printf("  PASS: secrets_granted_filter\n");
 }
 
 /* `cclaw secret set` with a provider's key name stores a system secret, the
@@ -219,22 +211,19 @@ static void test_verb_set_provider_key_is_system(void) {
     assert(db_scalar_i64(db, "SELECT count(*) FROM secrets WHERE name='MY_TOKEN'"
                              " AND scope='agent' AND ?1", 1, 0) == 1);
     sqlite3_close(db);
-    printf("  PASS: verb_set_provider_key_is_system\n");
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_secret_store:\n");
-    test_set_load_rm_roundtrip();
-    test_set_fails_without_key();
-    test_captured_loads();
-    test_snapshot_env_wins();
-    test_snapshot_empty();
-    test_name_validation();
-    test_rm_cleans_bindings_and_grants();
-    test_secrets_granted_filter();
-    test_verb_set_provider_key_is_system();
+    RUN(test_set_load_rm_roundtrip);
+    RUN(test_set_fails_without_key);
+    RUN(test_captured_loads);
+    RUN(test_snapshot_env_wins);
+    RUN(test_snapshot_empty);
+    RUN(test_name_validation);
+    RUN(test_rm_cleans_bindings_and_grants);
+    RUN(test_secrets_granted_filter);
+    RUN(test_verb_set_provider_key_is_system);
     clean_db();
-    printf("  all tests passed\n");
     return 0;
 }

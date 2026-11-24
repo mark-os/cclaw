@@ -14,14 +14,11 @@ static void expect(const char *name, const unsigned char *in, size_t len,
         printf("  %s... FAIL: got '%s' want '%s'\n", name, got ? got : "NULL", want);
         exit(1);
     }
-    printf("  %s... PASS\n", name);
     free(got);
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_base64\n");
-
     /* RFC 4648 §10 test vectors — every padding case */
     expect("empty", (const unsigned char *)"", 0, "");
     expect("f", (const unsigned char *)"f", 1, "Zg==");

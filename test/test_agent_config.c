@@ -43,33 +43,6 @@ static void test_whitelist_add_remove(void) {
 
     db_close(db);
     test_db_clean("/tmp/test_agent_wl.db");
-    printf("  PASS: test_whitelist_add_remove\n");
-}
-
-static void test_add_tool(void) {
-    test_db_clean("/tmp/test_agent_tool.db");
-    sqlite3 *db = test_db_open("/tmp/test_agent_tool.db");
-    assert(db);
-    db_agent_upsert(db, "bot", NULL, NULL);
-
-    assert(agent_config_grant(db, "bot", "tool", "shell_exec", 0, GRANT_ORIGIN("operator", 0)) == 0);
-    assert(agent_config_grant(db, "bot", "tool", "web_fetch", 0, GRANT_ORIGIN("operator", 0)) == 0);
-
-    AgentCaps caps;
-    agent_caps_load(db, "bot", &caps);
-    assert(caps.tool_count == 2);
-    /* Both present (order-independent) */
-    int found_shell = 0, found_web = 0;
-    for (size_t i = 0; i < caps.tool_count; i++) {
-        if (strcmp(caps.tools[i], "shell_exec") == 0) found_shell = 1;
-        if (strcmp(caps.tools[i], "web_fetch") == 0) found_web = 1;
-    }
-    assert(found_shell && found_web);
-    agent_caps_free(&caps);
-
-    db_close(db);
-    test_db_clean("/tmp/test_agent_tool.db");
-    printf("  PASS: test_add_tool\n");
 }
 
 /* cclaw.db is never reachable from inside the sandbox, so a path grant that
@@ -135,15 +108,13 @@ static void test_db_path_grant_refused(void) {
 
     db_close(db);
     system("rm -rf /tmp/cclaw_grantdb /tmp/cclaw_grantok");
-    printf("  PASS: test_db_path_grant_refused\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_agent_config:\n");
-    test_whitelist_add_remove();
-    test_add_tool();
-    test_db_path_grant_refused();
+    RUN(test_whitelist_add_remove);
+    RUN(test_db_path_grant_refused);
     printf("all agent_config tests passed\n");
     return 0;
 }

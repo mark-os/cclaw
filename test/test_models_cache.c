@@ -22,6 +22,8 @@ static const char *CATALOG =
     " {\"context_length\":1}"        /* no id — skipped, not fatal */
     "]}";
 
+static sqlite3 *g_db;
+
 static long long row_count(sqlite3 *db, const char *provider) {
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(db,
@@ -47,7 +49,8 @@ static void touch_fresh(sqlite3 *db) {
                         NULL, NULL, NULL) == SQLITE_OK);
 }
 
-static void test_ingest(sqlite3 *db) {
+static void test_ingest(void) {
+    sqlite3 *db = g_db;
     char err[256] = "";
     assert(models_cache_ingest(db, "openrouter", CATALOG, err, sizeof(err)) == 0);
     assert(row_count(db, "openrouter") == 2);
@@ -75,11 +78,10 @@ static void test_ingest(sqlite3 *db) {
     assert(models_cache_ingest(db, "openrouter", "{\"models\":[]}",
                                err, sizeof(err)) == -1);
     assert(row_count(db, "openrouter") == 1);
-
-    printf("  PASS ingest\n");
 }
 
-static void test_query(sqlite3 *db) {
+static void test_query(void) {
+    sqlite3 *db = g_db;
     char err[256] = "", *out = NULL;
     assert(models_cache_ingest(db, "openrouter", CATALOG, err, sizeof(err)) == 0);
     touch_fresh(db);
@@ -105,16 +107,13 @@ static void test_query(sqlite3 *db) {
     assert(models_cache_query(db, "openrouter", "zzz", 10, 1, 0, &out, err, sizeof(err)) == 0);
     assert(strstr(out, "no model matches"));
     free(out); out = NULL;
-
-    printf("  PASS query\n");
 }
 
-/* Above MODELS_CACHE_LIST_MAX rows a search term is mandatory — the rule that
- * keeps an aggregator's catalog out of a context window. */
 /* Anthropic's real catalog (2026-11-23) names the window max_input_tokens
  * and states no price; a model with no window at all lists as "?", not 0.
  * A named key that is nowhere is reported as missing, before any request. */
-static void test_anthropic_shape_and_unknowns(sqlite3 *db) {
+static void test_anthropic_shape_and_unknowns(void) {
+    sqlite3 *db = g_db;
     char err[256] = "", *out = NULL;
     assert(models_cache_ingest(db, "anthropic",
         "{\"data\":[{\"type\":\"model\",\"id\":\"claude-x\","
@@ -134,10 +133,12 @@ static void test_anthropic_shape_and_unknowns(sqlite3 *db) {
     unsetenv("CCLAW_TEST_ABSENT_KEY");
     assert(models_cache_refresh(db, "keyless", err, sizeof(err)) == -1);
     assert(strstr(err, "no API key") && strstr(err, "CCLAW_TEST_ABSENT_KEY"));
-    printf("  PASS anthropic shape, unknown window, missing key\n");
 }
 
-static void test_query_required(sqlite3 *db) {
+/* Above MODELS_CACHE_LIST_MAX rows a search term is mandatory — the rule that
+ * keeps an aggregator's catalog out of a context window. */
+static void test_query_required(void) {
+    sqlite3 *db = g_db;
     Buf b = {0};
     buf_append_str(&b, "{\"data\":[");
     for (int i = 0; i < MODELS_CACHE_LIST_MAX + 5; i++)
@@ -161,13 +162,12 @@ static void test_query_required(sqlite3 *db) {
     assert(models_cache_query(db, "aggregator", "m0", 10, 1, 0, &out, err, sizeof(err)) == 0);
     assert(strstr(out, "more — page=2 or narrow your query"));
     free(out);
-
-    printf("  PASS query_required\n");
 }
 
 /* Paging is plain OFFSET over the same ordering: page 2 continues where page 1
  * stopped, and a page past the end says so rather than erroring. */
-static void test_paging(sqlite3 *db) {
+static void test_paging(void) {
+    sqlite3 *db = g_db;
     char err[256] = "", *out = NULL;
     assert(models_cache_ingest(db, "pager",
         "{\"data\":[{\"id\":\"a\"},{\"id\":\"b\"},{\"id\":\"c\"}]}",
@@ -187,14 +187,13 @@ static void test_paging(sqlite3 *db) {
     assert(models_cache_query(db, "pager", NULL, 2, 9, 0, &out, err, sizeof(err)) == 0);
     assert(strstr(out, "no models listed on page 9"));
     free(out);
-
-    printf("  PASS paging\n");
 }
 
 /* A stale row is what makes the lazy refresh fire; a fresh one must not. The
  * probe here can only fail (the seeded base_url is a dead port), so a stale
  * cache surfaces as an error and a fresh cache as a clean listing. */
-static void test_ttl(sqlite3 *db) {
+static void test_ttl(void) {
+    sqlite3 *db = g_db;
     char err[256] = "", *out = NULL;
     seed_provider(db, "openrouter");
     assert(models_cache_ingest(db, "openrouter", CATALOG, err, sizeof(err)) == 0);
@@ -211,14 +210,13 @@ static void test_ttl(sqlite3 *db) {
     assert(out == NULL);
     /* The failed probe wrote nothing — the stale rows are still there. */
     assert(row_count(db, "openrouter") == 2);
-
-    printf("  PASS ttl\n");
 }
 
 /* Mark's call: search_models is granted-only. The gate is the ordinary one —
  * a tool is callable iff a grants row names it — so the whole decision is the
  * absence of the name from the default grant list. */
-static void test_not_default_granted(sqlite3 *db) {
+static void test_not_default_granted(void) {
+    sqlite3 *db = g_db;
     char *defaults = config_get(db, "agent_default_tools");
     assert(defaults != NULL);
     assert(strstr(defaults, "search_config") != NULL);   /* list really loaded */
@@ -228,28 +226,25 @@ static void test_not_default_granted(sqlite3 *db) {
     char *worker = config_get(db, "worker_tools");
     assert(worker != NULL && strstr(worker, "search_models") == NULL);
     free(worker);
-
-    printf("  PASS not_default_granted\n");
 }
 
 int main(void) {
     TEST_INIT();
     const char *path = "/tmp/test_cclaw_models_cache.sqlite";
     test_db_clean(path);
-    sqlite3 *db = test_db_open(path);
-    assert(db != NULL);
+    g_db = test_db_open(path);
+    assert(g_db != NULL);
 
     printf("models_cache tests\n");
-    test_ingest(db);
-    test_query(db);
-    test_anthropic_shape_and_unknowns(db);
-    test_query_required(db);
-    test_paging(db);
-    test_ttl(db);
-    test_not_default_granted(db);
+    RUN(test_ingest);
+    RUN(test_query);
+    RUN(test_anthropic_shape_and_unknowns);
+    RUN(test_query_required);
+    RUN(test_paging);
+    RUN(test_ttl);
+    RUN(test_not_default_granted);
 
-    sqlite3_close(db);
+    sqlite3_close(g_db);
     test_db_clean(path);
-    printf("ALL MODELS_CACHE TESTS PASSED\n");
     return 0;
 }

@@ -47,7 +47,6 @@ static void test_no_save_secret(void) {
     assert(secret_capture_apply(db, "TestAgent", "{\"url\":\"https://x\"}", NULL, 0) == NULL);
     db_wipe_secret_key();
     sqlite3_close(db);
-    printf("  PASS: no_save_secret\n");
 }
 
 static void test_whole_result_capture(void) {
@@ -69,7 +68,6 @@ static void test_whole_result_capture(void) {
     free(v); free(out);
     db_wipe_secret_key();
     sqlite3_close(db);
-    printf("  PASS: whole_result_capture\n");
 }
 
 static void test_json_path_capture(void) {
@@ -88,7 +86,6 @@ static void test_json_path_capture(void) {
     free(v); free(out);
     db_wipe_secret_key();
     sqlite3_close(db);
-    printf("  PASS: json_path_capture\n");
 }
 
 static void test_capture_errors(void) {
@@ -128,17 +125,14 @@ static void test_capture_errors(void) {
 
     db_wipe_secret_key();
     sqlite3_close(db);
-    printf("  PASS: capture_errors\n");
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_secret_capture:\n");
-    test_no_save_secret();
-    test_whole_result_capture();
-    test_json_path_capture();
-    test_capture_errors();
+    RUN(test_no_save_secret);
+    RUN(test_whole_result_capture);
+    RUN(test_json_path_capture);
+    RUN(test_capture_errors);
     clean_db();
-    printf("  all tests passed\n");
     return 0;
 }

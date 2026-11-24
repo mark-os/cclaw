@@ -19,21 +19,10 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 600
-#include "db.h"
 #include "mock_server.h"
-#include "test_util.h"
-#include <errno.h>
-#include <fcntl.h>
+#include "test_integ.h"
 #include <limits.h>
-#include <signal.h>
-#include <sqlite3.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
 
 #define DB_PATH "/tmp/cclaw_integ_approval_park.db"
 #define LOG1    "/tmp/cclaw_integ_approval_park_run1.log"
@@ -43,7 +32,9 @@
  * covering cclaw.db is refused before it can ever park. */
 #define DIR_A   "/tmp/cclaw_park_a"
 #define DIR_B   "/tmp/cclaw_park_b"
-static int g_exit = -1;   /* exit status of the last run_cli_p child */
+static int g_exit = -1;   /* exit status of the last -p run */
+static IntegEnv g_env = {.db = DB_PATH};
+#define db_count(sql) integ_db_int(DB_PATH, (sql), NULL)
 #define FAIL(m) do { fprintf(stderr, "FAIL: %s\n", m); return 1; } while (0)
 
 /* Turn 1: ask for a read grant on document A. */
@@ -74,71 +65,8 @@ static const char *RESP_FINAL =
 
 /* ── helpers ─────────────────────────────────────────────────────── */
 
-static void dump_log(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-    char line[512];
-    fprintf(stderr, "--- %s ---\n", path);
-    while (fgets(line, sizeof(line), f)) fputs(line, stderr);
-    fprintf(stderr, "--- end %s ---\n", path);
-    fclose(f);
-}
-
-/* Run `cclaw -p <prompt>` (optionally pinned to a session) to completion with
- * stdin on /dev/null, so isatty(stdin) is false — the auto-deny path. */
-static int run_cli_p(const char *exe, const char *url, const char *prompt,
-                     int64_t sid, const char *logpath) {
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        int nfd = open("/dev/null", O_RDONLY);
-        int lfd = open(logpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (nfd < 0 || lfd < 0) _exit(110);
-        dup2(nfd, 0); dup2(lfd, 1); dup2(lfd, 2);
-        if (nfd > 2) close(nfd);
-        if (lfd > 2) close(lfd);
-        setenv("CCLAW_DB_PATH", DB_PATH, 1);
-        setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
-        setenv("OPENROUTER_API_KEY", "test-key", 1);
-        setenv("CCLAW_MODEL", "test-model", 1);
-        unsetenv("CCLAW_SANDBOX_PROFILE");
-        if (sid > 0) {
-            char sbuf[32];
-            snprintf(sbuf, sizeof(sbuf), "%lld", (long long)sid);
-            execl(exe, exe, "-p", prompt, "-s", sbuf, (char *)NULL);
-        } else {
-            execl(exe, exe, "-p", prompt, (char *)NULL);
-        }
-        _exit(111);
-    }
-    for (int i = 0; i < 200; i++) {   /* 20s deadline */
-        int st = 0;
-        pid_t w = waitpid(pid, &st, WNOHANG);
-        if (w == pid) { g_exit = WIFEXITED(st) ? WEXITSTATUS(st) : -1; return 0; }
-        struct timespec ts = {0, 100 * 1000 * 1000};
-        nanosleep(&ts, NULL);
-    }
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
-    return -1;
-}
-
-/* Exit status of the last run_cli_p child. */
+/* Exit status of a -p run that left an approval pending. */
 #define EXIT_LEFT_PENDING 3
-
-/* Single-integer query against the test DB. Returns -1 on any failure. */
-static int64_t db_count(const char *sql) {
-    sqlite3 *db;
-    if ((db = db_open(DB_PATH)) == NULL) return -1;
-    sqlite3_stmt *s;
-    int64_t v = -1;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
-        if (sqlite3_step(s) == SQLITE_ROW) v = sqlite3_column_int64(s, 0);
-        sqlite3_finalize(s);
-    }
-    sqlite3_close(db);
-    return v;
-}
 
 /* ── the two assertions blocks ───────────────────────────────────── */
 
@@ -250,32 +178,6 @@ static void cleanup_files(void) {
     rmdir(DIR_B);
 }
 
-/* Point providers/models at the mock, exactly as the request_config PTY test
- * does: the child skips reseeding once the config table is non-empty, so the
- * real OpenRouter rows can't outrank the mock. */
-static int seed_mock_provider(const char *url) {
-    sqlite3 *seed = test_db_open(DB_PATH);
-    if (!seed) return -1;
-    if (db_seed_defaults(seed) != 0) { sqlite3_close(seed); return -1; }
-    sqlite3_exec(seed, "DELETE FROM models; DELETE FROM providers;", NULL, NULL, NULL);
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(seed,
-            "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, default_model)"
-            " VALUES('openrouter', ?1, 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4.1-flash')",
-            -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(s, 1, url, -1, SQLITE_STATIC);
-        sqlite3_step(s);
-        sqlite3_finalize(s);
-    }
-    sqlite3_exec(seed,
-        "INSERT INTO models(id, provider_name, model, status)"
-        " VALUES('openrouter/deepseek/deepseek-v4.1-flash', 'openrouter',"
-        "        'deepseek/deepseek-v4.1-flash', 'healthy')",
-        NULL, NULL, NULL);
-    sqlite3_close(seed);
-    return 0;
-}
-
 int main(void) {
     TEST_INIT();
     alarm(40);   /* below make's 45s wrapper: fail loud, not hung */
@@ -292,21 +194,21 @@ int main(void) {
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
 
+    g_env.url = url;
     int rc = 1;
-    if (seed_mock_provider(url) != 0) { fprintf(stderr, "FAIL: seed\n"); goto done; }
+    if (integ_seed_provider(DB_PATH, url, 0, 0) != 0) { fprintf(stderr, "FAIL: seed\n"); goto done; }
 
     /* ── run 1: park + left pending ───────────────────────────────── */
     mock_server_reset();
     mock_server_enqueue(200, RESP_CALL_A);
     mock_server_enqueue(200, RESP_FINAL);
     mock_server_enqueue(200, RESP_FINAL);
-    if (run_cli_p(exe, url, "please read document A", 0, LOG1) != 0) {
+    if ((g_exit = integ_run_cli_p(&g_env, exe, "please read document A", 0, LOG1, 200)) < 0) {
         fprintf(stderr, "FAIL: run 1 did not exit\n");
-        dump_log(LOG1);
+        integ_dump_log(LOG1);
         goto done;
     }
-    if (check_run1()) { dump_log(LOG1); goto done; }
-    printf("  PASS parked_call_answered_before_exit\n");
+    if (check_run1()) { integ_dump_log(LOG1); goto done; }
 
     int64_t sid = db_count("SELECT MAX(id) FROM sessions;");
     if (sid <= 0) { fprintf(stderr, "FAIL: no session after run 1\n"); goto done; }
@@ -316,13 +218,12 @@ int main(void) {
     mock_server_enqueue(200, RESP_CALL_B);
     mock_server_enqueue(200, RESP_FINAL);
     mock_server_enqueue(200, RESP_FINAL);
-    if (run_cli_p(exe, url, "now read document B", sid, LOG2) != 0) {
+    if ((g_exit = integ_run_cli_p(&g_env, exe, "now read document B", sid, LOG2, 200)) < 0) {
         fprintf(stderr, "FAIL: run 2 did not exit\n");
-        dump_log(LOG2);
+        integ_dump_log(LOG2);
         goto done;
     }
-    if (check_run2()) { dump_log(LOG2); goto done; }
-    printf("  PASS fresh_call_parks_its_own_document\n");
+    if (check_run2()) { integ_dump_log(LOG2); goto done; }
 
     printf("All approval park tests passed.\n");
     rc = 0;

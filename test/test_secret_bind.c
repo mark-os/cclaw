@@ -15,12 +15,8 @@
 
 #define DB_PATH "/tmp/cclaw_test_secret_bind.db"
 
-static void clean_db(void) {
-    test_db_clean(DB_PATH);
-}
-
 static sqlite3 *fresh_db(void) {
-    clean_db();
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db != NULL);
     return db;
@@ -32,7 +28,6 @@ static void test_unbound_secret_has_no_hosts(void) {
     char **hosts = db_secret_hosts(db, "GH_TOKEN", &n);
     assert(hosts == NULL && n == 0);   /* zero bindings → dispatch parks */
     sqlite3_close(db);
-    printf("  PASS: unbound_secret_has_no_hosts\n");
 }
 
 static void test_bind_roundtrip_and_coverage(void) {
@@ -62,7 +57,6 @@ static void test_bind_roundtrip_and_coverage(void) {
     assert(n == 1 && strcmp(hosts[0], ".githubusercontent.com") == 0);
     free(hosts[0]); free(hosts);
     sqlite3_close(db);
-    printf("  PASS: bind_roundtrip_and_coverage\n");
 }
 
 static void test_placeholder_to_binding_composition(void) {
@@ -86,7 +80,6 @@ static void test_placeholder_to_binding_composition(void) {
     free(bh);
     secret_names_free(names, un);
     sqlite3_close(db);
-    printf("  PASS: placeholder_to_binding_composition\n");
 }
 
 static void test_invalid_args(void) {
@@ -98,17 +91,14 @@ static void test_invalid_args(void) {
     int n = 0;
     assert(db_secret_hosts(db, NULL, &n) == NULL && n == 0);
     sqlite3_close(db);
-    printf("  PASS: invalid_args\n");
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_secret_bind:\n");
-    test_unbound_secret_has_no_hosts();
-    test_bind_roundtrip_and_coverage();
-    test_placeholder_to_binding_composition();
-    test_invalid_args();
-    clean_db();
-    printf("  all tests passed\n");
+    RUN(test_unbound_secret_has_no_hosts);
+    RUN(test_bind_roundtrip_and_coverage);
+    RUN(test_placeholder_to_binding_composition);
+    RUN(test_invalid_args);
+    test_db_clean(DB_PATH);
     return 0;
 }

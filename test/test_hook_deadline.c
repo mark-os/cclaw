@@ -75,7 +75,6 @@ static void test_deadline(void) {
         abort();
     }
     assert(fail_count("slow1") == 1);
-    printf("  PASS test_deadline\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -84,7 +83,7 @@ int main(int argc, char *argv[]) {
     TEST_INIT();
     printf("test_hook_deadline:\n");
     fixture_open();
-    test_deadline();
+    RUN(test_deadline);
     fixture_close();
     printf("All hook_deadline tests passed.\n");
     return 0;

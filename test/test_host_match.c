@@ -1,396 +1,182 @@
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <arpa/inet.h>
 #include "host_match.h"
 #include "test_util.h"
 
-static int tests_run = 0;
-static int tests_passed = 0;
+enum { MATCH, COVERED };
 
-#define TEST(name) do { tests_run++; printf("  " name "... "); } while(0)
-#define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while(0)
+/* host_match (allow rules) and host_covered (deny labels). */
+static const struct {
+    int fn; int n; const char *rules[2]; const char *host; int want;
+} hosts[] = {
+    {MATCH, 2, {"github.com", "api.example.com"}, "github.com", 1},
+    {MATCH, 2, {"github.com", "api.example.com"}, "api.example.com", 1},
+    {MATCH, 2, {"github.com", "api.example.com"}, "evil.com", 0},
+    {MATCH, 1, {".github.com"}, "api.github.com", 1},
+    {MATCH, 1, {".github.com"}, "deep.api.github.com", 1},
+    {MATCH, 1, {".github.com"}, "github.com", 1},          /* suffix covers base */
+    /* the dot boundary is load-bearing */
+    {MATCH, 1, {".github.com"}, "evilgithub.com", 0},
+    {MATCH, 1, {".github.com"}, "notgithub.com", 0},
+    /* the fully-qualified spelling names the same host, allow and deny */
+    {MATCH, 2, {".github.com", "example.org"}, "api.github.com.", 1},
+    {MATCH, 2, {".github.com", "example.org"}, "example.org.", 1},
+    {MATCH, 2, {".github.com", "example.org"}, "evilgithub.com.", 0},
+    {COVERED, 1, {"secret.example.com"}, "secret.example.com.", 1},
+    {COVERED, 1, {"secret.example.com"}, "a.secret.example.com.", 1},
+    /* ASCII fold regardless of process locale (review-3 F2) */
+    {MATCH, 2, {"GitHub.com", ".Example.COM"}, "github.com", 1},
+    {MATCH, 2, {"GitHub.com", ".Example.COM"}, "API.EXAMPLE.com", 1},
+    {MATCH, 0, {NULL}, "x.com", 0},                        /* no rules: deny */
+    {MATCH, 1, {"*"}, "anything.example", 1},
+    {MATCH, 1, {"*"}, "a", 1},
+    /* "*.example.com" is not the wildcard sentinel and globs nothing */
+    {MATCH, 1, {"*.example.com"}, "api.example.com", 0},
+    {MATCH, 1, {"*.example.com"}, "example.com", 0},
+};
 
-/* ─── host_match ─── */
-
-static void test_exact_match(void) {
-    TEST("exact_match");
-    char *rules[] = {"github.com", "api.example.com"};
-    if (!host_match(rules, 2, "github.com")) FAIL("should match");
-    if (!host_match(rules, 2, "api.example.com")) FAIL("should match api");
-    if (host_match(rules, 2, "evil.com")) FAIL("should not match");
-    PASS();
+static void test_host_table(void) {
+    for (size_t i = 0; i < sizeof(hosts) / sizeof(hosts[0]); i++) {
+        char **r = (char **)hosts[i].rules;
+        int got = hosts[i].fn == MATCH ? host_match(r, hosts[i].n, hosts[i].host)
+                                       : host_covered(r, hosts[i].n, hosts[i].host);
+        if (!!got != hosts[i].want) {
+            printf("    row %zu: %s -> %d, want %d\n", i, hosts[i].host, got, hosts[i].want);
+            assert(0);
+        }
+    }
 }
 
-static void test_suffix_match_subdomain(void) {
-    TEST("suffix_match_subdomain");
-    char *rules[] = {".github.com"};
-    if (!host_match(rules, 1, "api.github.com")) FAIL("subdomain should match");
-    if (!host_match(rules, 1, "deep.api.github.com")) FAIL("deep sub should match");
-    PASS();
+/* host_in_text: registered-domain semantics over free text. */
+static const struct {
+    int n; const char *label; const char *text; int want; const char *token;
+} texts[] = {
+    {1, "chase.com", "{\"url\":\"https://chase.com/login\"}", 1, "chase.com"},
+    {1, "chase.com", "curl -s api.chase.com/transfer", 1, "api.chase.com"},
+    {1, "chase.com", "visit mychase.com now", 0, NULL},
+    {1, "chase.com", "https://chase.com.evil.co/x", 0, NULL},
+    {1, "chase.com", "chasexcom or chase-com", 0, NULL},
+    {1, "bank.example", "go to BANK.EXAMPLE.", 1, "BANK.EXAMPLE"},
+    {1, "bank.example", "", 0, NULL},
+    {0, "bank.example", "bank.example", 0, NULL},
+    {1, ".pay.example.com", "POST https://api.pay.example.com/v1", 1, NULL},
+    {1, ".pay.example.com", "pay.example.com", 1, NULL},
+    {1, ".pay.example.com", "prepay.example.com", 0, NULL},
+};
+
+static void test_text_table(void) {
+    for (size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); i++) {
+        char *labels[1] = {(char *)texts[i].label};
+        char got[254] = "";
+        int hit = host_in_text(labels, texts[i].n, texts[i].text, got, sizeof(got));
+        if (!!hit != texts[i].want ||
+            (texts[i].token && strcmp(got, texts[i].token) != 0)) {
+            printf("    row %zu: \"%s\" -> %d \"%s\"\n", i, texts[i].text, hit, got);
+            assert(0);
+        }
+    }
 }
 
-static void test_suffix_match_bare(void) {
-    TEST("suffix_match_bare_domain");
-    char *rules[] = {".github.com"};
-    /* ".github.com" should match "github.com" (the base) */
-    if (!host_match(rules, 1, "github.com")) FAIL("bare base should match");
-    PASS();
+/* cidr_parse: host bits zeroed, bare IP is a full-length prefix, and a
+ * malformed prefix must never default to /0 (allow-all). */
+static const struct {
+    const char *in; int ok; int family; int plen; unsigned char bytes[16];
+} parses[] = {
+    {"192.168.1.0/24", 1, AF_INET, 24, {192, 168, 1, 0}},
+    {"10.0.0.5", 1, AF_INET, 32, {10, 0, 0, 5}},
+    {"192.168.1.100/24", 1, AF_INET, 24, {192, 168, 1, 0}},
+    {"fe80::/10", 1, AF_INET6, 10, {0xfe, 0x80}},
+    {"::1", 1, AF_INET6, 128, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1}},
+    {"10.0.0.0/", 0, 0, 0, {0}},
+    {"1.2.3.4/xyz", 0, 0, 0, {0}},
+    {"1.2.3.4/33", 0, 0, 0, {0}},
+    {"fe80::/129", 0, 0, 0, {0}},
+};
+
+static void test_parse_table(void) {
+    for (size_t i = 0; i < sizeof(parses) / sizeof(parses[0]); i++) {
+        Cidr c;
+        int ok = cidr_parse(parses[i].in, &c) == 0;
+        int good = ok == parses[i].ok;
+        if (good && ok)
+            good = c.family == parses[i].family && c.prefix_len == parses[i].plen &&
+                   memcmp(c.prefix, parses[i].bytes,
+                          parses[i].family == AF_INET ? 4 : 16) == 0;
+        if (!good) {
+            printf("    row %zu: %s\n", i, parses[i].in);
+            assert(0);
+        }
+    }
 }
 
-static void test_suffix_no_false_positive(void) {
-    TEST("suffix_no_evilgithub");
-    char *rules[] = {".github.com"};
-    /* MUST NOT match "evilgithub.com" — the dot boundary is load-bearing */
-    if (host_match(rules, 1, "evilgithub.com")) FAIL("evilgithub.com must NOT match");
-    if (host_match(rules, 1, "notgithub.com")) FAIL("notgithub.com must NOT match");
-    PASS();
+enum { CIDR_MATCH, EXACT };
+
+/* cidr_match, and granted_exact: only an exact /32 or /128 grant counts,
+ * so a covering CIDR cannot open the metadata carve-out. */
+static const struct {
+    int fn; int n; const char *rules[2]; const char *addr; int want;
+} matches[] = {
+    {CIDR_MATCH, 1, {"192.168.1.0/24"}, "192.168.1.50", 1},
+    {CIDR_MATCH, 1, {"192.168.1.0/24"}, "192.168.2.50", 0},
+    {CIDR_MATCH, 1, {"10.0.0.5"}, "10.0.0.5", 1},
+    {CIDR_MATCH, 1, {"10.0.0.5"}, "10.0.0.6", 0},
+    {CIDR_MATCH, 1, {"fe80::/10"}, "fe80::1", 1},
+    {CIDR_MATCH, 1, {"fe80::/10"}, "2001:db8::1", 0},
+    {CIDR_MATCH, 1, {"::1"}, "::1", 1},
+    {CIDR_MATCH, 1, {"::1"}, "::2", 0},
+    {EXACT, 2, {"169.254.0.0/16", "169.254.169.254"}, "169.254.169.254", 1},
+    {EXACT, 1, {"169.254.0.0/16"}, "169.254.169.254", 0},
+    {EXACT, 1, {"0.0.0.0/0"}, "169.254.169.254", 0},
+};
+
+static void test_match_table(void) {
+    for (size_t i = 0; i < sizeof(matches) / sizeof(matches[0]); i++) {
+        Cidr rules[2];
+        for (int k = 0; k < matches[i].n; k++)
+            assert(cidr_parse(matches[i].rules[k], &rules[k]) == 0);
+        int fam = strchr(matches[i].addr, ':') ? AF_INET6 : AF_INET;
+        unsigned char a[16];
+        assert(inet_pton(fam, matches[i].addr, a) == 1);
+        int got = matches[i].fn == CIDR_MATCH ? cidr_match(rules, matches[i].n, fam, a)
+                                              : granted_exact(rules, matches[i].n, fam, a);
+        if (!!got != matches[i].want) {
+            printf("    row %zu: %s -> %d\n", i, matches[i].addr, got);
+            assert(0);
+        }
+    }
 }
 
-/* The fully-qualified spelling names the same host, for allow and deny alike. */
-static void test_trailing_dot(void) {
-    TEST("trailing_dot");
-    char *rules[] = {".github.com", "example.org"};
-    if (!host_match(rules, 2, "api.github.com.")) FAIL("suffix rule, trailing dot");
-    if (!host_match(rules, 2, "example.org.")) FAIL("exact rule, trailing dot");
-    if (host_match(rules, 2, "evilgithub.com.")) FAIL("dot boundary still holds");
-    char *deny[] = {"secret.example.com"};
-    if (!host_covered(deny, 1, "secret.example.com.")) FAIL("deny label, trailing dot");
-    if (!host_covered(deny, 1, "a.secret.example.com.")) FAIL("deny subdomain, trailing dot");
-    PASS();
-}
+/* url_host_normalize (r2 F11): encoded or invisible-char spellings of a
+ * host must reach the deny check as the plain host. */
+static const struct { const char *in; const char *out; } norms[] = {
+    {"chase%2Ecom", "chase.com"},
+    {"chase%252Ecom", "chase.com"},             /* %25 -> '%', then %2E -> '.' */
+    {"chase\xE2\x80\x8B.com", "chase.com"},     /* U+200B inside the host */
+    {"api.example.com", "api.example.com"},
+};
 
-static void test_case_insensitive_ascii(void) {
-    TEST("case_insensitive_ascii");
-    /* ASCII fold must hold regardless of process locale (review-3 F2) */
-    char *rules[] = {"GitHub.com", ".Example.COM"};
-    if (!host_match(rules, 2, "github.com")) FAIL("exact should fold case");
-    if (!host_match(rules, 2, "API.EXAMPLE.com")) FAIL("suffix should fold case");
-    PASS();
-}
-
-static void test_empty_rules_deny_all(void) {
-    TEST("empty_rules_deny_all");
-    if (host_match(NULL, 0, "anything.com")) FAIL("NULL rules should deny");
-    char *rules[] = {};
-    if (host_match(rules, 0, "x.com")) FAIL("empty array should deny");
-    PASS();
-}
-
-static void test_wildcard_matches_any_host(void) {
-    TEST("wildcard_matches_any_host");
-    char *rules[] = {"*"};
-    if (!host_match(rules, 1, "anything.example")) FAIL("* should match arbitrary host");
-    if (!host_match(rules, 1, "a")) FAIL("* should match single-label host");
-    PASS();
-}
-
-static void test_wildcard_is_bare_only(void) {
-    TEST("wildcard_is_bare_only");
-    /* "*.example.com" is NOT the wildcard sentinel — it's an unimplemented
-     * per-label glob (TODO Q3), so it must be treated as a literal (and thus
-     * useless) exact-match rule, never silently promoted to allow-all. */
-    char *rules[] = {"*.example.com"};
-    if (host_match(rules, 1, "api.example.com")) FAIL("*.example.com must not glob-match");
-    if (host_match(rules, 1, "example.com")) FAIL("*.example.com must not match the base either");
-    PASS();
-}
-
-/* ─── host_in_text ─── */
-
-static void test_hit_exact_and_subdomain(void) {
-    TEST("hit_exact_and_subdomain");
-    char *labels[] = {"chase.com"};
-    char got[254];
-    if (!host_in_text(labels, 1, "{\"url\":\"https://chase.com/login\"}", got, sizeof(got)))
-        FAIL("exact label in url should hit");
-    if (strcmp(got, "chase.com") != 0) FAIL("wrong token for exact");
-    if (!host_in_text(labels, 1, "curl -s api.chase.com/transfer", got, sizeof(got)))
-        FAIL("subdomain should hit (registered-domain semantics)");
-    if (strcmp(got, "api.chase.com") != 0) FAIL("wrong token for subdomain");
-    PASS();
-}
-
-static void test_lookalikes_do_not_hit(void) {
-    TEST("lookalikes_do_not_hit");
-    char *labels[] = {"chase.com"};
-    if (host_in_text(labels, 1, "visit mychase.com now", NULL, 0))
-        FAIL("prefix lookalike must NOT hit");
-    if (host_in_text(labels, 1, "https://chase.com.evil.co/x", NULL, 0))
-        FAIL("suffix lookalike must NOT hit");
-    if (host_in_text(labels, 1, "chasexcom or chase-com", NULL, 0))
-        FAIL("non-host text must NOT hit");
-    PASS();
-}
-
-static void test_text_punctuation_boundaries(void) {
-    TEST("text_punctuation_boundaries");
-    char *labels[] = {"bank.example"};
-    char got[64];
-    /* Token embedded in JSON quotes, trailing dot prose, case */
-    if (!host_in_text(labels, 1, "go to BANK.EXAMPLE.", got, sizeof(got)))
-        FAIL("case-insensitive + trailing dot should hit");
-    if (strcmp(got, "BANK.EXAMPLE") != 0) FAIL("token should be trimmed of edge dot");
-    if (host_in_text(labels, 1, "", NULL, 0)) FAIL("empty text");
-    if (host_in_text(NULL, 0, "bank.example", NULL, 0)) FAIL("no labels = no hit");
-    PASS();
-}
-
-static void test_suffix_label_form(void) {
-    TEST("suffix_label_form");
-    char *labels[] = {".pay.example.com"};
-    if (!host_in_text(labels, 1, "POST https://api.pay.example.com/v1", NULL, 0))
-        FAIL("suffix-form label should cover subdomain");
-    if (!host_in_text(labels, 1, "pay.example.com", NULL, 0))
-        FAIL("suffix-form label should cover base");
-    if (host_in_text(labels, 1, "prepay.example.com", NULL, 0))
-        FAIL("dot boundary must hold for suffix-form label");
-    PASS();
-}
-
-/* ─── cidr_parse ─── */
-
-static void test_parse_v4_cidr(void) {
-    TEST("parse_v4_cidr");
-    Cidr c;
-    if (cidr_parse("192.168.1.0/24", &c) != 0) FAIL("parse failed");
-    if (c.family != AF_INET) FAIL("wrong family");
-    if (c.prefix_len != 24) FAIL("wrong prefix_len");
-    /* Host bits zeroed: 192.168.1.0 */
-    unsigned char expect[] = {192, 168, 1, 0};
-    if (memcmp(c.prefix, expect, 4) != 0) FAIL("wrong prefix bits");
-    PASS();
-}
-
-static void test_parse_v4_bare_ip(void) {
-    TEST("parse_v4_bare_ip");
-    Cidr c;
-    if (cidr_parse("10.0.0.5", &c) != 0) FAIL("parse failed");
-    if (c.prefix_len != 32) FAIL("bare IP should be /32");
-    unsigned char expect[] = {10, 0, 0, 5};
-    if (memcmp(c.prefix, expect, 4) != 0) FAIL("wrong addr");
-    PASS();
-}
-
-static void test_parse_v4_host_bits_zeroed(void) {
-    TEST("parse_v4_host_bits_zeroed");
-    Cidr c;
-    /* 192.168.1.100/24 → prefix should be 192.168.1.0 */
-    if (cidr_parse("192.168.1.100/24", &c) != 0) FAIL("parse failed");
-    unsigned char expect[] = {192, 168, 1, 0};
-    if (memcmp(c.prefix, expect, 4) != 0) FAIL("host bits not zeroed");
-    PASS();
-}
-
-static void test_parse_v6_cidr(void) {
-    TEST("parse_v6_cidr");
-    Cidr c;
-    if (cidr_parse("fe80::/10", &c) != 0) FAIL("parse failed");
-    if (c.family != AF_INET6) FAIL("wrong family");
-    if (c.prefix_len != 10) FAIL("wrong prefix_len");
-    PASS();
-}
-
-static void test_parse_v6_bare(void) {
-    TEST("parse_v6_bare_loopback");
-    Cidr c;
-    if (cidr_parse("::1", &c) != 0) FAIL("parse failed");
-    if (c.prefix_len != 128) FAIL("bare v6 should be /128");
-    unsigned char lo[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
-    if (memcmp(c.prefix, lo, 16) != 0) FAIL("wrong addr");
-    PASS();
-}
-
-static void test_parse_rejects_malformed_prefix(void) {
-    TEST("parse_rejects_malformed_prefix");
-    Cidr c;
-    /* Empty or non-numeric prefix length must NOT default to /0 (allow-all). */
-    if (cidr_parse("10.0.0.0/", &c) == 0) FAIL("trailing-slash must reject");
-    if (cidr_parse("1.2.3.4/xyz", &c) == 0) FAIL("non-numeric prefix must reject");
-    if (cidr_parse("1.2.3.4/33", &c) == 0) FAIL("v4 prefix > 32 must reject");
-    if (cidr_parse("fe80::/129", &c) == 0) FAIL("v6 prefix > 128 must reject");
-    PASS();
-}
-
-/* ─── cidr_match ─── */
-
-static void test_cidr_match_v4_in_range(void) {
-    TEST("cidr_match_v4_in_range");
-    Cidr rules[1];
-    cidr_parse("192.168.1.0/24", &rules[0]);
-    struct in_addr a;
-    inet_pton(AF_INET, "192.168.1.50", &a);
-    if (!cidr_match(rules, 1, AF_INET, (unsigned char *)&a)) FAIL("should match");
-    PASS();
-}
-
-static void test_cidr_match_v4_out_of_range(void) {
-    TEST("cidr_match_v4_out_of_range");
-    Cidr rules[1];
-    cidr_parse("192.168.1.0/24", &rules[0]);
-    struct in_addr a;
-    inet_pton(AF_INET, "192.168.2.50", &a);
-    if (cidr_match(rules, 1, AF_INET, (unsigned char *)&a)) FAIL("should NOT match");
-    PASS();
-}
-
-static void test_cidr_match_v4_32(void) {
-    TEST("cidr_match_v4_/32_exact");
-    Cidr rules[1];
-    cidr_parse("10.0.0.5", &rules[0]);  /* bare → /32 */
-    struct in_addr a;
-    inet_pton(AF_INET, "10.0.0.5", &a);
-    if (!cidr_match(rules, 1, AF_INET, (unsigned char *)&a)) FAIL("exact should match");
-    inet_pton(AF_INET, "10.0.0.6", &a);
-    if (cidr_match(rules, 1, AF_INET, (unsigned char *)&a)) FAIL("/32 should not match neighbor");
-    PASS();
-}
-
-static void test_cidr_match_v6(void) {
-    TEST("cidr_match_v6_fe80");
-    Cidr rules[1];
-    cidr_parse("fe80::/10", &rules[0]);
-    struct in6_addr a6;
-    inet_pton(AF_INET6, "fe80::1", &a6);
-    if (!cidr_match(rules, 1, AF_INET6, (unsigned char *)&a6)) FAIL("link-local should match");
-    inet_pton(AF_INET6, "2001:db8::1", &a6);
-    if (cidr_match(rules, 1, AF_INET6, (unsigned char *)&a6)) FAIL("global should NOT match");
-    PASS();
-}
-
-static void test_cidr_match_v6_128(void) {
-    TEST("cidr_match_v6_/128_exact");
-    Cidr rules[1];
-    cidr_parse("::1", &rules[0]);
-    struct in6_addr a6;
-    inet_pton(AF_INET6, "::1", &a6);
-    if (!cidr_match(rules, 1, AF_INET6, (unsigned char *)&a6)) FAIL("loopback should match");
-    inet_pton(AF_INET6, "::2", &a6);
-    if (cidr_match(rules, 1, AF_INET6, (unsigned char *)&a6)) FAIL("::2 should not match /128");
-    PASS();
-}
-
-/* ─── granted_exact ─── */
-
-static void test_granted_exact_hit(void) {
-    TEST("granted_exact_hit");
-    Cidr rules[2];
-    cidr_parse("169.254.0.0/16", &rules[0]);   /* covering CIDR — NOT exact */
-    cidr_parse("169.254.169.254", &rules[1]);   /* exact /32 */
-    struct in_addr a;
-    inet_pton(AF_INET, "169.254.169.254", &a);
-    if (!granted_exact(rules, 2, AF_INET, (unsigned char *)&a)) FAIL("exact grant should match");
-    PASS();
-}
-
-static void test_granted_exact_cidr_not_exact(void) {
-    TEST("granted_exact_cidr_does_not_count");
-    Cidr rules[1];
-    cidr_parse("169.254.0.0/16", &rules[0]);   /* covers it but not exact */
-    struct in_addr a;
-    inet_pton(AF_INET, "169.254.169.254", &a);
-    if (granted_exact(rules, 1, AF_INET, (unsigned char *)&a))
-        FAIL("CIDR must NOT count as exact — metadata carve-out broken");
-    PASS();
-}
-
-static void test_granted_exact_0_0_0_0_not_exact(void) {
-    TEST("granted_exact_0.0.0.0/0_not_exact");
-    Cidr rules[1];
-    cidr_parse("0.0.0.0/0", &rules[0]);
-    struct in_addr a;
-    inet_pton(AF_INET, "169.254.169.254", &a);
-    if (granted_exact(rules, 1, AF_INET, (unsigned char *)&a))
-        FAIL("0.0.0.0/0 must NOT pass exact check");
-    PASS();
-}
-
-/* ─── metadata carve-out integration (addr_permitted logic) ─── */
-
-static void test_url_host_normalize_percent(void) {
-    TEST("url_host_normalize: percent-encoded host decodes and matches");
-    char host[254] = "chase%2Ecom";
-    url_host_normalize(host, sizeof(host));
-    char *labels[1] = {"chase.com"};
-    if (strcmp(host, "chase.com") != 0) FAIL("decode failed");
-    if (!host_covered(labels, 1, host)) FAIL("decoded host should match");
-    PASS();
-}
-
-static void test_url_host_normalize_double_encoded(void) {
-    TEST("url_host_normalize: double-encoded host unwraps");
-    char host[254] = "chase%252Ecom";   /* %25 → '%', then %2E → '.' */
-    url_host_normalize(host, sizeof(host));
-    if (strcmp(host, "chase.com") != 0) FAIL("double decode failed");
-    PASS();
-}
-
-static void test_url_host_normalize_invisible(void) {
-    TEST("url_host_normalize: zero-width chars stripped");
-    char host[254] = "chase\xE2\x80\x8B.com";   /* U+200B inside the host */
-    url_host_normalize(host, sizeof(host));
-    char *labels[1] = {"chase.com"};
-    if (!host_covered(labels, 1, host)) FAIL("stripped host should match");
-    PASS();
-}
-
-static void test_url_host_normalize_plain_untouched(void) {
-    TEST("url_host_normalize: plain host unchanged");
-    char host[254] = "api.example.com";
-    url_host_normalize(host, sizeof(host));
-    if (strcmp(host, "api.example.com") != 0) FAIL("plain host modified");
-    PASS();
+static void test_normalize_table(void) {
+    for (size_t i = 0; i < sizeof(norms) / sizeof(norms[0]); i++) {
+        char host[254];
+        snprintf(host, sizeof(host), "%s", norms[i].in);
+        url_host_normalize(host, sizeof(host));
+        char *labels[1] = {(char *)norms[i].out};
+        if (strcmp(host, norms[i].out) != 0 || !host_covered(labels, 1, host)) {
+            printf("    row %zu: -> \"%s\"\n", i, host);
+            assert(0);
+        }
+    }
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_host_match\n");
-    test_trailing_dot();
-
-    /* host_match */
-    test_exact_match();
-    test_suffix_match_subdomain();
-    test_suffix_match_bare();
-    test_suffix_no_false_positive();
-    test_case_insensitive_ascii();
-    test_empty_rules_deny_all();
-    test_wildcard_matches_any_host();
-    test_wildcard_is_bare_only();
-
-    /* host_in_text */
-    test_hit_exact_and_subdomain();
-    test_lookalikes_do_not_hit();
-    test_text_punctuation_boundaries();
-    test_suffix_label_form();
-
-    /* cidr_parse */
-    test_parse_v4_cidr();
-    test_parse_v4_bare_ip();
-    test_parse_v4_host_bits_zeroed();
-    test_parse_v6_cidr();
-    test_parse_v6_bare();
-    test_parse_rejects_malformed_prefix();
-
-    /* cidr_match */
-    test_cidr_match_v4_in_range();
-    test_cidr_match_v4_out_of_range();
-    test_cidr_match_v4_32();
-    test_cidr_match_v6();
-    test_cidr_match_v6_128();
-
-    /* granted_exact */
-    test_granted_exact_hit();
-    test_granted_exact_cidr_not_exact();
-    test_granted_exact_0_0_0_0_not_exact();
-
-    /* metadata carve-out logic */
-
-    /* url_host_normalize (r2 F11) */
-    test_url_host_normalize_percent();
-    test_url_host_normalize_double_encoded();
-    test_url_host_normalize_invisible();
-    test_url_host_normalize_plain_untouched();
-
-    printf("%d/%d passed\n", tests_passed, tests_run);
-    return (tests_passed == tests_run) ? 0 : 1;
+    RUN(test_host_table);
+    RUN(test_text_table);
+    RUN(test_parse_table);
+    RUN(test_match_table);
+    RUN(test_normalize_table);
+    return 0;
 }

@@ -12,8 +12,6 @@
 #include <string.h>
 #include <assert.h>
 
-static int tests_run = 0, tests_passed = 0;
-
 /* JSON-escape src into a freshly malloc'd string (no surrounding quotes). */
 static char *json_escape(const char *src) {
     size_t n = strlen(src);
@@ -62,40 +60,31 @@ static char *eval_expr(const char *expr) {
 }
 
 static void expect(const char *name, const char *expr, const char *want) {
-    tests_run++;
-    printf("  %s... ", name);
+    printf("  %s\n", name);
     char *r = eval_expr(expr);
     if (!r || strcmp(r, want) != 0) {
-        printf("FAIL: got '%s' want '%s'\n", r ? r : "NULL", want);
-    } else {
-        tests_passed++;
-        printf("PASS\n");
+        fprintf(stderr, "%s: got '%s' want '%s'\n", name, r ? r : "NULL", want);
+        assert(0);
     }
     free(r);
 }
 
 static void expect_has(const char *name, const char *expr, const char *needle) {
-    tests_run++;
-    printf("  %s... ", name);
+    printf("  %s\n", name);
     char *r = eval_expr(expr);
     if (!r || !strstr(r, needle)) {
-        printf("FAIL: '%s' missing '%s'\n", r ? r : "NULL", needle);
-    } else {
-        tests_passed++;
-        printf("PASS\n");
+        fprintf(stderr, "%s: '%s' missing '%s'\n", name, r ? r : "NULL", needle);
+        assert(0);
     }
     free(r);
 }
 
 static void expect_lacks(const char *name, const char *expr, const char *needle) {
-    tests_run++;
-    printf("  %s... ", name);
+    printf("  %s\n", name);
     char *r = eval_expr(expr);
     if (!r || strstr(r, needle)) {
-        printf("FAIL: '%s' should not contain '%s'\n", r ? r : "NULL", needle);
-    } else {
-        tests_passed++;
-        printf("PASS\n");
+        fprintf(stderr, "%s: '%s' should not contain '%s'\n", name, r ? r : "NULL", needle);
+        assert(0);
     }
     free(r);
 }
@@ -435,6 +424,5 @@ int main(void) {
         "COMMANDS.approvals.handler('7'); __sent[0].body",
         "No pending approvals");
 
-    printf("%d/%d passed\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    return 0;
 }

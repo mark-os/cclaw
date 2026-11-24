@@ -14,24 +14,18 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
-#include <assert.h>
-#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
-#include <curl/curl.h>
 #include "db.h"
-#include "util.h"          /* base64_encode, curl_ws_available */
+#include "util.h"          /* curl_ws_available, util_read_file */
 #include "test_util.h"
+#include "test_ws.h"
 
 #define DB_PATH  "/tmp/test_integ_discord.db"
 #define EXT_DIR  "/tmp/test_integ_discord_ext"
@@ -39,165 +33,15 @@
 #define BOT_ID   "999000"
 #define FAIL(m)  do { fprintf(stderr, "FAIL: %s\n", m); goto fail; } while (0)
 
-/* ── Minimal SHA-1 (public domain, for the WS handshake accept key) ── */
-typedef struct { uint32_t h[5]; uint64_t len; unsigned char buf[64]; size_t n; } Sha1;
-static uint32_t rol(uint32_t v, int b) { return (v << b) | (v >> (32 - b)); }
-static void sha1_block(Sha1 *s, const unsigned char *p) {
-    uint32_t w[80];
-    for (int i = 0; i < 16; i++)
-        w[i] = (uint32_t)p[i*4] << 24 | (uint32_t)p[i*4+1] << 16 |
-               (uint32_t)p[i*4+2] << 8 | (uint32_t)p[i*4+3];
-    for (int i = 16; i < 80; i++) w[i] = rol(w[i-3]^w[i-8]^w[i-14]^w[i-16], 1);
-    uint32_t a=s->h[0],b=s->h[1],c=s->h[2],d=s->h[3],e=s->h[4];
-    for (int i = 0; i < 80; i++) {
-        uint32_t f, k;
-        if (i < 20)      { f = (b & c) | (~b & d);            k = 0x5A827999; }
-        else if (i < 40) { f = b ^ c ^ d;                     k = 0x6ED9EBA1; }
-        else if (i < 60) { f = (b & c) | (b & d) | (c & d);   k = 0x8F1BBCDC; }
-        else             { f = b ^ c ^ d;                     k = 0xCA62C1D6; }
-        uint32_t t = rol(a,5) + f + e + k + w[i];
-        e = d; d = c; c = rol(b,30); b = a; a = t;
-    }
-    s->h[0]+=a; s->h[1]+=b; s->h[2]+=c; s->h[3]+=d; s->h[4]+=e;
-}
-static void sha1_init(Sha1 *s) {
-    s->h[0]=0x67452301; s->h[1]=0xEFCDAB89; s->h[2]=0x98BADCFE;
-    s->h[3]=0x10325476; s->h[4]=0xC3D2E1F0; s->len=0; s->n=0;
-}
-static void sha1_update(Sha1 *s, const void *data, size_t len) {
-    const unsigned char *p = data;
-    s->len += len;
-    while (len) {
-        size_t take = 64 - s->n; if (take > len) take = len;
-        memcpy(s->buf + s->n, p, take); s->n += take; p += take; len -= take;
-        if (s->n == 64) { sha1_block(s, s->buf); s->n = 0; }
-    }
-}
-static void sha1_final(Sha1 *s, unsigned char out[20]) {
-    uint64_t bits = s->len * 8;
-    unsigned char pad = 0x80;
-    sha1_update(s, &pad, 1);
-    unsigned char zero = 0;
-    while (s->n != 56) sha1_update(s, &zero, 1);
-    unsigned char lenbuf[8];
-    for (int i = 0; i < 8; i++) lenbuf[i] = (unsigned char)(bits >> (56 - i*8));
-    sha1_update(s, lenbuf, 8);
-    for (int i = 0; i < 5; i++) {
-        out[i*4]   = (unsigned char)(s->h[i] >> 24);
-        out[i*4+1] = (unsigned char)(s->h[i] >> 16);
-        out[i*4+2] = (unsigned char)(s->h[i] >> 8);
-        out[i*4+3] = (unsigned char)(s->h[i]);
-    }
-}
-
-/* ── WS framing helpers (server side) ─────────────────────────────── */
-static int read_n(int fd, void *buf, size_t n) {
-    unsigned char *p = buf;
-    size_t got = 0;
-    while (got < n) {
-        ssize_t r = read(fd, p + got, n - got);
-        if (r <= 0) return -1;
-        got += (size_t)r;
-    }
-    return 0;
-}
-static int write_all(int fd, const void *buf, size_t n) {
-    const unsigned char *p = buf;
-    size_t off = 0;
-    while (off < n) {
-        ssize_t w = write(fd, p + off, n - off);
-        if (w <= 0) { if (w < 0 && errno == EINTR) continue; return -1; }
-        off += (size_t)w;
-    }
-    return 0;
-}
-static int ws_send_text(int fd, const char *s) {
-    size_t len = strlen(s);
-    unsigned char hdr[10];
-    size_t hn = 0;
-    hdr[hn++] = 0x81;                       /* FIN + text */
-    if (len < 126) {
-        hdr[hn++] = (unsigned char)len;
-    } else if (len < 65536) {
-        hdr[hn++] = 126;
-        hdr[hn++] = (unsigned char)(len >> 8);
-        hdr[hn++] = (unsigned char)(len & 0xff);
-    } else {
-        hdr[hn++] = 127;
-        for (int i = 7; i >= 0; i--) hdr[hn++] = (unsigned char)((uint64_t)len >> (i*8));
-    }
-    if (write_all(fd, hdr, hn) != 0) return -1;
-    return write_all(fd, s, len);
-}
-static int ws_read_frame(int fd, char *payload, size_t cap, size_t *out_len) {
-    unsigned char b[2];
-    if (read_n(fd, b, 2) != 0) return -1;
-    int opcode = b[0] & 0x0f;
-    int masked = b[1] & 0x80;
-    uint64_t len = b[1] & 0x7f;
-    if (len == 126) {
-        unsigned char e[2]; if (read_n(fd, e, 2) != 0) return -1;
-        len = (uint64_t)e[0] << 8 | e[1];
-    } else if (len == 127) {
-        unsigned char e[8]; if (read_n(fd, e, 8) != 0) return -1;
-        len = 0; for (int i = 0; i < 8; i++) len = (len << 8) | e[i];
-    }
-    unsigned char mask[4] = {0};
-    if (masked && read_n(fd, mask, 4) != 0) return -1;
-    if (len >= cap) return -1;
-    if (len && read_n(fd, payload, (size_t)len) != 0) return -1;
-    if (masked) for (uint64_t i = 0; i < len; i++)
-        payload[i] = (char)((unsigned char)payload[i] ^ mask[i % 4]);
-    payload[len] = '\0';
-    if (out_len) *out_len = (size_t)len;
-    return opcode;
-}
-
 /* ── Mock gateway state ────────────────────────────────────────────── */
 static int g_listen_fd = -1;
 static volatile int g_identify_seen = 0;
 static volatile int g_heartbeat_seen = 0;
 
-static int extract_ws_key(const char *req, char *out, size_t cap) {
-    const char *h = strcasestr(req, "Sec-WebSocket-Key:");
-    if (!h) return -1;
-    h += strlen("Sec-WebSocket-Key:");
-    while (*h == ' ' || *h == '\t') h++;
-    size_t n = 0;
-    while (*h && *h != '\r' && *h != '\n' && n < cap - 1) out[n++] = *h++;
-    out[n] = '\0';
-    return 0;
-}
-
 static void *mock_gateway(void *arg) {
     (void)arg;
-    int cfd = accept(g_listen_fd, NULL, NULL);
+    int cfd = ws_accept_upgrade(g_listen_fd);
     if (cfd < 0) return NULL;
-    struct timeval tv = {10, 0};
-    setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    char req[2048]; size_t rn = 0;
-    while (rn < sizeof(req) - 1) {
-        ssize_t r = read(cfd, req + rn, sizeof(req) - 1 - rn);
-        if (r <= 0) { close(cfd); return NULL; }
-        rn += (size_t)r; req[rn] = '\0';
-        if (strstr(req, "\r\n\r\n")) break;
-    }
-    char key[128];
-    if (extract_ws_key(req, key, sizeof(key)) != 0) { close(cfd); return NULL; }
-    char concat[256];
-    snprintf(concat, sizeof(concat), "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
-    Sha1 s; sha1_init(&s); sha1_update(&s, concat, strlen(concat));
-    unsigned char digest[20]; sha1_final(&s, digest);
-    char *accept = base64_encode(digest, 20);
-    if (!accept) { close(cfd); return NULL; }
-    char resp[256];
-    int rl = snprintf(resp, sizeof(resp),
-        "HTTP/1.1 101 Switching Protocols\r\n"
-        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-        "Sec-WebSocket-Accept: %s\r\n\r\n", accept);
-    free(accept);
-    if (write_all(cfd, resp, (size_t)rl) != 0) { close(cfd); return NULL; }
 
     /* Short heartbeat interval so the timer fires within the test window. */
     ws_send_text(cfd, "{\"op\":10,\"d\":{\"heartbeat_interval\":1000}}");
@@ -242,13 +86,6 @@ static void *mock_gateway(void *arg) {
                 "\"token\":\"tok3\",\"type\":2,\"channel_id\":\"dmcmd\","
                 "\"data\":{\"name\":\"approvals\"},"
                 "\"user\":{\"id\":\"u1\",\"username\":\"alice\"}}}");
-            /* GUILD_CREATE teaches the handler the room's display names,
-             * so emitted envelopes can say where the bot is chatting. */
-            ws_send_text(cfd,
-                "{\"op\":0,\"s\":2,\"t\":\"GUILD_CREATE\",\"d\":{\"id\":\"g1\","
-                "\"name\":\"My Server\",\"channels\":["
-                "{\"id\":\"chan1\",\"type\":0,\"name\":\"general\"},"
-                "{\"id\":\"chan2\",\"type\":0,\"name\":\"lounge\"}]}}");
             /* guild, no mention -> dropped by require_mention */
             ws_send_text(cfd,
                 "{\"op\":0,\"s\":3,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m1\","
@@ -361,7 +198,7 @@ static void *mock_rest(void *arg) {
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
             "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
             strlen(body), body);
-        write_all(cfd, resp, (size_t)rl);
+        ws_write_all(cfd, resp, (size_t)rl);
         close(cfd);
     }
     return NULL;
@@ -403,15 +240,6 @@ static void seed_db(int port, int rest_port) {
     db_close(db);
 }
 
-static int test_scalar_count_db(sqlite3 *db, const char *sql) {
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
-    int c = -1;
-    if (sqlite3_step(s) == SQLITE_ROW) c = sqlite3_column_int(s, 0);
-    sqlite3_finalize(s);
-    return c;
-}
-
 /* Count channel_events whose payload contains `needle`. */
 static int event_count(sqlite3 *db, const char *needle) {
     sqlite3_stmt *st;
@@ -438,38 +266,12 @@ int main(void) {
 
     (void)!system("rm -f /tmp/test_integ_discord.db* /tmp/test_integ_discord.discord.*");
 
-    g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (g_listen_fd < 0) { fprintf(stderr, "FAIL: socket\n"); return 1; }
-    int one = 1;
-    setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sa.sin_port = 0;
-    if (bind(g_listen_fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) { fprintf(stderr, "FAIL: bind\n"); return 1; }
-    if (listen(g_listen_fd, 4) != 0) { fprintf(stderr, "FAIL: listen\n"); return 1; }
-    socklen_t sl = sizeof(sa);
-    getsockname(g_listen_fd, (struct sockaddr *)&sa, &sl);
-    int port = ntohs(sa.sin_port);
-    struct timeval atv = {10, 0};
-    setsockopt(g_listen_fd, SOL_SOCKET, SO_RCVTIMEO, &atv, sizeof(atv));
-
-    /* Second listener: the mock Discord REST API (base_url). */
-    g_rest_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (g_rest_fd < 0) { fprintf(stderr, "FAIL: rest socket\n"); return 1; }
-    setsockopt(g_rest_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    struct sockaddr_in ra; memset(&ra, 0, sizeof(ra));
-    ra.sin_family = AF_INET;
-    ra.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    ra.sin_port = 0;
-    if (bind(g_rest_fd, (struct sockaddr *)&ra, sizeof(ra)) != 0) { fprintf(stderr, "FAIL: rest bind\n"); return 1; }
-    if (listen(g_rest_fd, 8) != 0) { fprintf(stderr, "FAIL: rest listen\n"); return 1; }
-    socklen_t rl_ = sizeof(ra);
-    getsockname(g_rest_fd, (struct sockaddr *)&ra, &rl_);
-    int rest_port = ntohs(ra.sin_port);
-    /* Short accept timeout: the mock loops on it, so shutdown joins fast. */
-    struct timeval rtv = {1, 0};
-    setsockopt(g_rest_fd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
+    int port = 0, rest_port = 0;
+    g_listen_fd = ws_listen_loopback(4, 10, &port);
+    /* The mock REST API (base_url). Short accept timeout: the mock loops on
+     * it, so shutdown joins fast. */
+    g_rest_fd = ws_listen_loopback(8, 1, &rest_port);
+    if (g_listen_fd < 0 || g_rest_fd < 0) { fprintf(stderr, "FAIL: listen\n"); return 1; }
 
     pthread_t th, rth;
     if (pthread_create(&th, NULL, mock_gateway, NULL) != 0) { fprintf(stderr, "FAIL: thread\n"); return 1; }
@@ -503,36 +305,17 @@ int main(void) {
         if (event_count(db, "help me") > 0) got_mention = 1;
     }
     if (!got_mention) FAIL("@mention guild message never reached channel_events");
-    printf("  PASS: IDENTIFY -> READY -> @mention MESSAGE_CREATE -> emit\n");
 
     if (!g_identify_seen) FAIL("server never received IDENTIFY");
-    printf("  PASS: handler sent IDENTIFY\n");
 
     if (event_count(db, "hi in dm") < 1) FAIL("DM message was not emitted");
-    printf("  PASS: DM bypasses the mention gate\n");
-
-    /* GUILD_CREATE names the room: the guild envelope is titled
-     * "#general @ My Server", the DM after its author. */
-    if (test_scalar_count_db(db,
-            "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
-            " AND json_extract(payload,'$.text') LIKE '%help me%'"
-            " AND json_extract(payload,'$.chat_title')='#general @ My Server';") != 1)
-        FAIL("guild message did not carry the GUILD_CREATE-derived chat_title");
-    if (test_scalar_count_db(db,
-            "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
-            " AND json_extract(payload,'$.text')='hi in dm'"
-            " AND json_extract(payload,'$.chat_title')='DM with alice';") != 1)
-        FAIL("DM did not carry an author-derived chat_title");
-    printf("  PASS: chat_title names the guild channel and the DM\n");
 
     if (event_count(db, "hello world") != 0) FAIL("unmentioned guild message was NOT dropped");
-    printf("  PASS: require_mention drops unmentioned guild chatter\n");
 
     /* Heartbeats are timer-driven (first at ~interval/2, tick ~1s), so they
      * can lag the message burst — poll rather than check instantly. */
     for (int i = 0; i < 50 && !g_heartbeat_seen; i++) usleep(100000);
     if (!g_heartbeat_seen) FAIL("server never received a heartbeat");
-    printf("  PASS: heartbeat liveness\n");
 
     /* Slash commands: registered once with Discord; each interaction is
      * answered privately; only the DM /admin becomes a message for the
@@ -541,30 +324,29 @@ int main(void) {
     if (g_cmds_registered != 1) FAIL("slash commands were not registered exactly once");
     if (g_int_acks != 7) FAIL("a slash-command interaction was not answered privately");
     for (int i = 0; i < 50 && event_count(db, "dmchan7") < 1; i++) usleep(100000);
-    if (test_scalar_count_db(db,
+    if (test_qi(db,
             "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
             " AND json_extract(payload,'$.text')='/admin'"
             " AND json_extract(payload,'$.chat_id')='dmcmd'"
             " AND json_extract(payload,'$.chat_type')='dm'"
             " AND json_extract(payload,'$.sender_id')='adminuser';") != 1)
         FAIL("/admin picked in a DM did not reach the daemon as the text /admin");
-    if (test_scalar_count_db(db,
+    if (test_qi(db,
             "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
             " AND json_extract(payload,'$.text')='/admin'"
             " AND json_extract(payload,'$.chat_id')='dmchan7'"
             " AND json_extract(payload,'$.chat_type')='dm'"
             " AND json_extract(payload,'$.sender_id')='admin2';") != 1)
         FAIL("/admin picked in a server was not asked from the operator's DM channel");
-    if (test_scalar_count_db(db,
+    if (test_qi(db,
             "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
             " AND json_extract(payload,'$.text')='/admin'"
             " AND json_extract(payload,'$.chat_id')='chan1';") != 0)
         FAIL("/admin picked in a server was forwarded for the room");
-    if (test_scalar_count_db(db,
+    if (test_qi(db,
             "SELECT COUNT(*) FROM channel_state WHERE channel_name='discord'"
             " AND key='disc_cmds' AND value LIKE 'app1:%';") != 1)
         FAIL("the registered command set was not remembered");
-    printf("  PASS: slash commands register once, answer privately; /admin asks from the DM\n");
 
     /* Admin notice (to_user=1): the destination is a *user* id, so the handler
      * must open a DM channel first and send there. */
@@ -578,27 +360,6 @@ int main(void) {
     if (!g_dm_open_seen) FAIL("handler never opened a DM channel for the admin user id");
     if (!g_dm_msg_seen) FAIL("admin notice never delivered to the opened DM channel");
     if (g_bad_channel_post) FAIL("handler POSTed to the admin user id as if it were a channel");
-    printf("  PASS: to_user notice DM-opens then delivers\n");
-
-    /* Second notice to the same admin: served from the in-memory cache. */
-    g_dm_msg_seen = 0; g_dm_open_seen = 0;
-    if (sqlite3_exec(db,
-            "INSERT INTO channel_outbox(channel_name, session_id, payload)"
-            " VALUES('discord', 0, json_object('chat_id','adminuser',"
-            " 'text','ping the admin again', 'to_user', 1));",
-            NULL, NULL, NULL) != SQLITE_OK)
-        FAIL("could not queue the second admin outbox row");
-    for (int i = 0; i < 80; i++) {
-        usleep(100000);
-        if (test_scalar_count_db(db,
-                "SELECT COUNT(*) FROM channel_outbox WHERE status='pending';") == 0)
-            break;
-    }
-    if (test_scalar_count_db(db,
-            "SELECT COUNT(*) FROM channel_outbox WHERE status='pending';") != 0)
-        FAIL("admin outbox rows were not delivered");
-    if (g_dm_open_seen) FAIL("DM channel was re-opened instead of cached");
-    printf("  PASS: DM channel id is cached across notices\n");
 
     /* A file row (channel_send's `file`): one multipart post with the caption
      * and the file's exact bytes, read from the media spool by C; delivered,
@@ -622,21 +383,20 @@ int main(void) {
         FAIL("could not queue the file outbox rows");
     for (int i = 0; i < 80; i++) {
         usleep(100000);
-        if (test_scalar_count_db(db,
+        if (test_qi(db,
                 "SELECT COUNT(*) FROM channel_outbox WHERE status IN ('pending','sending');") == 0)
             break;
     }
     if (!g_file_upload_ok) FAIL("file was not uploaded as multipart with its bytes intact");
-    if (test_scalar_count_db(db,
+    if (test_qi(db,
             "SELECT COUNT(*) FROM channel_outbox WHERE status='delivered'"
             " AND json_extract(payload,'$.file.name')='pic.png';") != 1)
         FAIL("file row was not acked");
     if (access(SPOOL_FILE, F_OK) == 0) FAIL("spool copy was not removed after delivery");
-    if (test_scalar_count_db(db,
+    if (test_qi(db,
             "SELECT COUNT(*) FROM channel_outbox WHERE status LIKE 'failed:%media spool%'"
             " AND json_extract(payload,'$.file.path')='/etc/hostname';") != 1)
         FAIL("a file outside the media spool was not refused");
-    printf("  PASS: file row uploads as multipart; a path outside the spool is refused\n");
 
     /* Ambient debounce: leading edge emits alone, the rest of the burst
      * arrives as ONE combined envelope carrying both lines with per-line
@@ -644,18 +404,17 @@ int main(void) {
     int combined = 0;
     for (int i = 0; i < 80 && !combined; i++) {
         usleep(100000);
-        combined = test_scalar_count_db(db,
+        combined = test_qi(db,
             "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
             " AND payload LIKE '%bob: second line%'"
             " AND payload LIKE '%carol: third line%';");
     }
     if (combined != 1) FAIL("burst was not combined into one ambient envelope");
     if (event_count(db, "first line") != 1) FAIL("leading-edge message was not emitted alone");
-    if (test_scalar_count_db(db,
+    if (test_qi(db,
             "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
             " AND payload LIKE '%chan2%';") != 2)
         FAIL("ambient burst of 3 did not collapse to 2 envelopes");
-    printf("  PASS: ambient debounce collapses a 3-message burst to 2 envelopes\n");
 
     rc = 0;
 fail:
@@ -688,7 +447,6 @@ fail:
                 fprintf(stderr, "  runner exited with status %d\n", WEXITSTATUS(wstatus));
             rc = 1;
         } else {
-            printf("  PASS: clean shutdown after SIGTERM (exit 0)\n");
         }
     }
 

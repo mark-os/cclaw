@@ -54,7 +54,6 @@ static void test_held_agent_does_not_open_a_turn(void) {
     assert(inbox_count(db, sid) == 0);
 
     db_close(db);
-    printf("  PASS test_held_agent_does_not_open_a_turn\n");
 }
 
 /* A holder that died mid-rename must not wedge the agent forever: the lease
@@ -71,7 +70,6 @@ static void test_expired_lease_promotes(void) {
     assert(inbox_count(db, sid) == 0);
 
     db_close(db);
-    printf("  PASS test_expired_lease_promotes\n");
 }
 
 /* The lease is per-agent, not global: another agent's sessions run normally
@@ -89,7 +87,6 @@ static void test_hold_is_scoped_to_the_agent(void) {
     assert(advance_session(db, free_sid, 25).action == ADVANCE_DISPATCH_LLM);
 
     db_close(db);
-    printf("  PASS test_hold_is_scoped_to_the_agent\n");
 }
 
 /* Two operators racing: exactly one gets the lease. */
@@ -103,16 +100,15 @@ static void test_lease_contention(void) {
     assert(who && strcmp(who, "cli:100") == 0);
     free(who);
     db_close(db);
-    printf("  PASS test_lease_contention\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_agent_hold:\n");
-    test_held_agent_does_not_open_a_turn();
-    test_expired_lease_promotes();
-    test_hold_is_scoped_to_the_agent();
-    test_lease_contention();
+    RUN(test_held_agent_does_not_open_a_turn);
+    RUN(test_expired_lease_promotes);
+    RUN(test_hold_is_scoped_to_the_agent);
+    RUN(test_lease_contention);
     printf("All agent hold tests passed.\n");
     return 0;
 }

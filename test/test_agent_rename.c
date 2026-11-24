@@ -61,7 +61,6 @@ static void test_successful_rename(void) {
     assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE created_by='OldAgent'") == 0);
 
     db_close(db);
-    printf("  PASS: test_successful_rename\n");
 }
 
 static void test_busy_rejection(void) {
@@ -75,7 +74,6 @@ static void test_busy_rejection(void) {
     assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE name='OldAgent'") == 1);
 
     db_close(db);
-    printf("  PASS: test_busy_rejection\n");
 }
 
 static void test_busy_allows_requesting_session(void) {
@@ -93,7 +91,6 @@ static void test_busy_allows_requesting_session(void) {
     assert(rc == 0);
 
     db_close(db);
-    printf("  PASS: test_busy_allows_requesting_session\n");
 }
 
 static void test_name_conflict(void) {
@@ -102,7 +99,6 @@ static void test_name_conflict(void) {
     int rc = agent_rename(db, "OldAgent", "Taken", 0);
     assert(rc == -2);
     db_close(db);
-    printf("  PASS: test_name_conflict\n");
 }
 
 static void test_invalid_name(void) {
@@ -111,7 +107,6 @@ static void test_invalid_name(void) {
     assert(agent_rename(db, "OldAgent", "", 0) == -3);
     assert(agent_rename(db, "OldAgent", "a/b", 0) == -3);
     db_close(db);
-    printf("  PASS: test_invalid_name\n");
 }
 
 static void test_not_found(void) {
@@ -119,7 +114,6 @@ static void test_not_found(void) {
     int rc = agent_rename(db, "Nonexistent", "NewName", 0);
     assert(rc == -4);
     db_close(db);
-    printf("  PASS: test_not_found\n");
 }
 
 /* Schema-shape audit (schema-string-keys decision, 2026-07-18): the rename
@@ -172,7 +166,6 @@ static void test_fk_shape_audit(void) {
         " WHERE m.type='table' AND c.name='created_by'") >= 2);
 
     db_close(db);
-    printf("  PASS: test_fk_shape_audit\n");
 }
 
 /* The configuration-side links declared in v59 (plan/projects/
@@ -220,7 +213,6 @@ static void test_config_link_audit(void) {
     }
     assert(bad == 0);
     db_close(db);
-    printf("  PASS: test_config_link_audit\n");
 }
 
 /* Behavioral belt-and-braces for the shape audit above: enumerate every
@@ -335,7 +327,6 @@ static void test_rename_no_orphans_self_audit(void) {
     assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE name='OldAgent'") == 0);
 
     db_close(db);
-    printf("  PASS: test_rename_no_orphans_self_audit (%d agent_name tables)\n", nt);
 }
 
 /* ── v47: target_agent cascade, quiesce lease, two-domain rename ── */
@@ -355,7 +346,6 @@ static void test_target_agent_cascade(void) {
     assert(count_rows(db,
         "SELECT COUNT(*) FROM cron_jobs WHERE target_agent='OldAgent'") == 0);
     db_close(db);
-    printf("  PASS: test_target_agent_cascade\n");
 }
 
 /* The lease is a CAS: the second taker loses, and only the holder can
@@ -379,7 +369,6 @@ static void test_hold_lease(void) {
      * both are "you don't hold it". */
     assert(agent_hold_acquire(db, "Ghost", 60, "cli:1") == -1);
     db_close(db);
-    printf("  PASS: test_hold_lease\n");
 }
 
 /* The drain predicate: a busy session only counts while its owner is alive. */
@@ -405,7 +394,6 @@ static void test_busy_session_liveness(void) {
                  NULL, NULL, NULL);
     assert(agent_busy_session(db, "OldAgent", state, sizeof(state)) == 0);
     db_close(db);
-    printf("  PASS: test_busy_session_liveness\n");
 }
 
 /* Two storage domains, one logical change: when the disk move can't happen,
@@ -439,25 +427,24 @@ static void test_rename_full_disk_rollback(void) {
     snprintf(cmd, sizeof(cmd), "rm -rf %s", root);
     assert(system(cmd) == 0);
     db_close(db);
-    printf("  PASS: test_rename_full_disk_rollback\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_agent_rename:\n");
-    test_successful_rename();
-    test_fk_shape_audit();
-    test_config_link_audit();
-    test_rename_no_orphans_self_audit();
-    test_busy_rejection();
-    test_busy_allows_requesting_session();
-    test_name_conflict();
-    test_invalid_name();
-    test_not_found();
-    test_target_agent_cascade();
-    test_hold_lease();
-    test_busy_session_liveness();
-    test_rename_full_disk_rollback();
+    RUN(test_successful_rename);
+    RUN(test_fk_shape_audit);
+    RUN(test_config_link_audit);
+    RUN(test_rename_no_orphans_self_audit);
+    RUN(test_busy_rejection);
+    RUN(test_busy_allows_requesting_session);
+    RUN(test_name_conflict);
+    RUN(test_invalid_name);
+    RUN(test_not_found);
+    RUN(test_target_agent_cascade);
+    RUN(test_hold_lease);
+    RUN(test_busy_session_liveness);
+    RUN(test_rename_full_disk_rollback);
     printf("all agent_rename tests passed\n");
     return 0;
 }

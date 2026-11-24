@@ -32,27 +32,27 @@ static sqlite3 *fresh_db(void) {
     return db;
 }
 
-static void test_register(void) {
-    sqlite3 *db = fresh_db();
-    ToolRegistry reg;
-    tools_init(&reg);
-    ToolSecretCreateCtx ctx = { .db = db, .agent_name = "TestAgent" };
-    assert(tool_secret_create_register(&reg, &ctx) == 0);
-    ToolEntry *e = tools_lookup(&reg, "secret_create");
-    assert(e && strcmp(e->name, "secret_create") == 0);
-    tools_free(&reg);
+typedef struct { sqlite3 *db; ToolRegistry reg; ToolSecretCreateCtx ctx; ToolEntry *e; } Fx;
+
+static void fx_open(Fx *f) {
+    f->db = fresh_db();
+    tools_init(&f->reg);
+    f->ctx = (ToolSecretCreateCtx){ .db = f->db, .agent_name = "TestAgent" };
+    assert(tool_secret_create_register(&f->reg, &f->ctx) == 0);
+    f->e = tools_lookup(&f->reg, "secret_create");
+    assert(f->e);
+}
+
+static void fx_close(Fx *f) {
+    tools_free(&f->reg);
     db_wipe_secret_key();
-    sqlite3_close(db);
-    printf("  PASS: register\n");
+    sqlite3_close(f->db);
 }
 
 static void test_creates_encrypted_row_and_hides_value(void) {
-    sqlite3 *db = fresh_db();
-    ToolRegistry reg;
-    tools_init(&reg);
-    ToolSecretCreateCtx ctx = { .db = db, .agent_name = "TestAgent" };
-    tool_secret_create_register(&reg, &ctx);
-    ToolEntry *e = tools_lookup(&reg, "secret_create");
+    Fx f; fx_open(&f);
+    sqlite3 *db = f.db;
+    ToolEntry *e = f.e;
 
     char *r = e->handler("{\"name\":\"TRELLO_PW\"}", e->user_data, &(int){0});
     assert(r);
@@ -64,13 +64,9 @@ static void test_creates_encrypted_row_and_hides_value(void) {
         0, -1) == 1);
 
     /* The raw row is enc:-prefixed ciphertext, never the plaintext. */
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(db, "SELECT value FROM secrets WHERE name='TRELLO_PW'",
-                              -1, &st, NULL) == SQLITE_OK);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    const char *raw = (const char *)sqlite3_column_text(st, 0);
-    assert(strncmp(raw, "enc:", 4) == 0);
-    sqlite3_finalize(st);
+    char *raw = test_qs(db, "SELECT value FROM secrets WHERE name='TRELLO_PW'");
+    assert(raw && strncmp(raw, "enc:", 4) == 0);
+    free(raw);
 
     size_t n = 0;
     ShellSecret *loaded = db_secrets_load(db, &n);
@@ -79,19 +75,12 @@ static void test_creates_encrypted_row_and_hides_value(void) {
     shell_secrets_free(loaded, n);
 
     free(r);
-    tools_free(&reg);
-    db_wipe_secret_key();
-    sqlite3_close(db);
-    printf("  PASS: creates_encrypted_row_and_hides_value\n");
+    fx_close(&f);
 }
 
 static void test_duplicate_name_errors(void) {
-    sqlite3 *db = fresh_db();
-    ToolRegistry reg;
-    tools_init(&reg);
-    ToolSecretCreateCtx ctx = { .db = db, .agent_name = "TestAgent" };
-    tool_secret_create_register(&reg, &ctx);
-    ToolEntry *e = tools_lookup(&reg, "secret_create");
+    Fx f; fx_open(&f);
+    ToolEntry *e = f.e;
 
     char *r1 = e->handler("{\"name\":\"DUP\"}", e->user_data, &(int){0});
     assert(r1 && !strstr(r1, "error"));
@@ -100,37 +89,24 @@ static void test_duplicate_name_errors(void) {
     assert(r2 && strstr(r2, "error") && strstr(r2, "already exists"));
     free(r2);
 
-    tools_free(&reg);
-    db_wipe_secret_key();
-    sqlite3_close(db);
-    printf("  PASS: duplicate_name_errors\n");
+    fx_close(&f);
 }
 
 static void test_bad_name_errors(void) {
-    sqlite3 *db = fresh_db();
-    ToolRegistry reg;
-    tools_init(&reg);
-    ToolSecretCreateCtx ctx = { .db = db, .agent_name = "TestAgent" };
-    tool_secret_create_register(&reg, &ctx);
-    ToolEntry *e = tools_lookup(&reg, "secret_create");
+    Fx f; fx_open(&f);
+    ToolEntry *e = f.e;
 
     char *r = e->handler("{\"name\":\"lowercase\"}", e->user_data, &(int){0});
     assert(r && strstr(r, "error"));
     free(r);
 
-    tools_free(&reg);
-    db_wipe_secret_key();
-    sqlite3_close(db);
-    printf("  PASS: bad_name_errors\n");
+    fx_close(&f);
 }
 
 static void test_charset_and_length(void) {
-    sqlite3 *db = fresh_db();
-    ToolRegistry reg;
-    tools_init(&reg);
-    ToolSecretCreateCtx ctx = { .db = db, .agent_name = "TestAgent" };
-    tool_secret_create_register(&reg, &ctx);
-    ToolEntry *e = tools_lookup(&reg, "secret_create");
+    Fx f; fx_open(&f);
+    sqlite3 *db = f.db;
+    ToolEntry *e = f.e;
 
     char *r = e->handler("{\"name\":\"HEXY\",\"length\":16,\"charset\":\"hex\"}", e->user_data, &(int){0});
     assert(r && strstr(r, "16 chars") && strstr(r, "hex"));
@@ -151,21 +127,16 @@ static void test_charset_and_length(void) {
     assert(r3 && strstr(r3, "error"));
     free(r3);
 
-    tools_free(&reg);
-    db_wipe_secret_key();
-    sqlite3_close(db);
-    printf("  PASS: charset_and_length\n");
+    fx_close(&f);
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_tool_secret_create:\n");
-    test_register();
-    test_creates_encrypted_row_and_hides_value();
-    test_duplicate_name_errors();
-    test_bad_name_errors();
-    test_charset_and_length();
+    RUN(test_creates_encrypted_row_and_hides_value);
+    RUN(test_duplicate_name_errors);
+    RUN(test_bad_name_errors);
+    RUN(test_charset_and_length);
     clean_db();
-    printf("  all tests passed\n");
     return 0;
 }

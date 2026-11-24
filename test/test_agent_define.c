@@ -80,7 +80,6 @@ static void test_operator_apply(void) {
     assert(agent_definition_apply(g_db, "{\"name\":\"Scout\"}", NULL, NULL, GRANT_ORIGIN("seed", 0), &err2) != 0);
     assert(err2 && strstr(err2, "already exists"));
     free(err2);
-    printf("  PASS test_operator_apply\n");
 }
 
 static void test_profile_escalation_refused(void) {
@@ -103,7 +102,6 @@ static void test_profile_escalation_refused(void) {
     /* Equal or tighter is fine. */
     assert(agent_definition_validate(g_db,
         "{\"name\":\"Tight\",\"sandbox_profile\":\"restricted\"}", "Std", NULL) == 0);
-    printf("  PASS test_profile_escalation_refused\n");
 }
 
 static void test_grants_superset_refused(void) {
@@ -132,7 +130,6 @@ static void test_grants_superset_refused(void) {
     if (rc != 0) fprintf(stderr, "err: %s\n", err ? err : "?");
     assert(rc == 0);
     assert(grants_contains(g_db, "Child", "host", "ok.example.com"));
-    printf("  PASS test_grants_superset_refused\n");
 }
 
 static void test_extension_gate(void) {
@@ -164,7 +161,6 @@ static void test_extension_gate(void) {
         " AND extension_name='pubext' AND enabled=1", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     sqlite3_finalize(s);
-    printf("  PASS test_extension_gate\n");
 }
 
 static void test_clone_from(void) {
@@ -224,7 +220,6 @@ static void test_clone_from(void) {
     /* Missing clone source refused. */
     assert(agent_definition_validate(g_db,
         "{\"name\":\"NoSrc\",\"clone_from\":\"Ghost\"}", NULL, NULL) != 0);
-    printf("  PASS test_clone_from\n");
 }
 
 static void test_update_agent(void) {
@@ -338,7 +333,6 @@ static void test_update_agent(void) {
     /* Self-update is authorized (grant self-adds are no-ops by construction). */
     assert(agent_definition_update_validate(g_db,
         "{\"name\":\"Mentor\",\"description\":\"self-described\"}", "Mentor", NULL) == 0);
-    printf("  PASS test_update_agent\n");
 }
 
 /* Livermore thread 5: silence on tools = the baseline, stated; naming tools
@@ -372,7 +366,6 @@ static void test_tools_exhaustive_vs_baseline(void) {
     ntools = sqlite3_column_int(s, 0);
     sqlite3_finalize(s);
     assert(ntools == 2);
-    printf("  PASS test_tools_exhaustive_vs_baseline\n");
 }
 
 /* Livermore audit: an invalid memory label rejects the whole create at
@@ -392,7 +385,6 @@ static void test_memory_label_rejected(void) {
         "\"memory_blocks\":[{\"description\":\"d\"}]}", NULL, &err);
     assert(rc != 0);
     free(err);
-    printf("  PASS test_memory_label_rejected\n");
 }
 
 static void test_bad_input(void) {
@@ -401,7 +393,6 @@ static void test_bad_input(void) {
     assert(agent_definition_validate(g_db, "{\"name\":\"bad name\"}", NULL, NULL) != 0);
     assert(agent_definition_validate(g_db,
         "{\"name\":\"X\",\"sandbox_profile\":\"ultra\"}", NULL, NULL) != 0);
-    printf("  PASS test_bad_input\n");
 }
 
 /* Sharing a block through a definition: a creator may share only a block it
@@ -448,7 +439,6 @@ static void test_memory_attach(void) {
     mb = memory_block_get(g_db, "Auditor", "secrets");
     assert(mb && mb->read_only == 1);
     memory_block_free(mb);
-    printf("  PASS test_memory_attach\n");
 }
 
 /* v60: every grant a definition writes says where it came from, and the
@@ -515,7 +505,6 @@ static void test_provenance_and_secret_subset(void) {
                                   GRANT_ORIGIN("agent_create", 31), &err) == 0);
     assert(grant_count("agent_name='Plain'") > 0);
     assert(grant_count("agent_name='Plain' AND NOT (source='agent_create' AND approval_id=31)") == 0);
-    printf("  PASS test_provenance_and_secret_subset\n");
 }
 
 int main(void) {
@@ -523,17 +512,17 @@ int main(void) {
     printf("test_agent_define:\n");
     g_db = test_db_open(":memory:");
     assert(g_db);
-    test_operator_apply();
-    test_profile_escalation_refused();
-    test_grants_superset_refused();
-    test_extension_gate();
-    test_clone_from();
-    test_update_agent();
-    test_tools_exhaustive_vs_baseline();
-    test_memory_label_rejected();
-    test_memory_attach();
-    test_bad_input();
-    test_provenance_and_secret_subset();
+    RUN(test_operator_apply);
+    RUN(test_profile_escalation_refused);
+    RUN(test_grants_superset_refused);
+    RUN(test_extension_gate);
+    RUN(test_clone_from);
+    RUN(test_update_agent);
+    RUN(test_tools_exhaustive_vs_baseline);
+    RUN(test_memory_label_rejected);
+    RUN(test_memory_attach);
+    RUN(test_bad_input);
+    RUN(test_provenance_and_secret_subset);
     db_close(g_db);
     printf("\nAll agent_define tests passed.\n");
     return 0;

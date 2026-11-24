@@ -97,7 +97,6 @@ static void test_defer_and_resume(void) {
     assert(inbox_count(db, sid) == 0);
 
     db_close(db);
-    printf("  PASS test_defer_and_resume\n");
 }
 
 /* A human anywhere in the pending batch opens the turn even over the cap. */
@@ -115,7 +114,6 @@ static void test_human_batch_passes(void) {
     assert(inbox_count(db, sid) == 0);
 
     db_close(db);
-    printf("  PASS test_human_batch_passes\n");
 }
 
 /* The deadlock regression. A parent blocked on blocking launch_agent sits in
@@ -148,7 +146,6 @@ static void test_blocked_parent_is_not_a_holder(void) {
     assert(out.deferred == 1);
 
     db_close(db);
-    printf("  PASS test_blocked_parent_is_not_a_holder\n");
 }
 
 /* A role-3 leaf is a half-spent turn resuming after a mid-turn bounce —
@@ -191,7 +188,6 @@ static void test_role3_resume_exempt(void) {
     assert(out.iteration == 1);   /* same turn, not a fresh one */
 
     db_close(db);
-    printf("  PASS test_role3_resume_exempt\n");
 }
 
 /* A role-1 leaf is a turn that never dispatched (refused-dispatch repark).
@@ -226,7 +222,6 @@ static void test_role1_leaf_gated_by_stamp(void) {
     assert(out.deferred == 0);
 
     db_close(db);
-    printf("  PASS test_role1_leaf_gated_by_stamp\n");
 }
 
 /* The session's own stale llm_jobs row must not count against it — it can
@@ -247,7 +242,6 @@ static void test_own_stale_job_excluded(void) {
     assert(out.action == ADVANCE_DISPATCH_LLM);
 
     db_close(db);
-    printf("  PASS test_own_stale_job_excluded\n");
 }
 
 /* cap 0 = gate off, however many holders exist. */
@@ -264,19 +258,17 @@ static void test_cap_zero_off(void) {
     assert(out.deferred == 0);
 
     db_close(db);
-    printf("  PASS test_cap_zero_off\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_concurrency_gate:\n");
-    test_defer_and_resume();
-    test_human_batch_passes();
-    test_blocked_parent_is_not_a_holder();
-    test_role3_resume_exempt();
-    test_role1_leaf_gated_by_stamp();
-    test_own_stale_job_excluded();
-    test_cap_zero_off();
-    printf("All concurrency gate tests passed.\n");
+    RUN(test_defer_and_resume);
+    RUN(test_human_batch_passes);
+    RUN(test_blocked_parent_is_not_a_holder);
+    RUN(test_role3_resume_exempt);
+    RUN(test_role1_leaf_gated_by_stamp);
+    RUN(test_own_stale_job_excluded);
+    RUN(test_cap_zero_off);
     return 0;
 }

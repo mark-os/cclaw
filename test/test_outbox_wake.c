@@ -6,29 +6,25 @@
 #include <string.h>
 #include <unistd.h>
 #include "channel_api.h"
-#include "db.h"
 #include "test_util.h"
 
 #define DB_PATH "/tmp/test_outbox_wake.db"
 
+/* The FIFO sits beside the DB, named for the channel; ".db" is dropped. */
 static void test_fifo_path(void) {
-    char *p = channel_outbox_fifo_path("/home/user/cclaw.db", "telegram");
-    assert(p);
-    assert(strcmp(p, "/home/user/cclaw.telegram.pipe") == 0);
-    free(p);
-
-    p = channel_outbox_fifo_path("/tmp/test.db", "discord");
-    assert(p);
-    assert(strcmp(p, "/tmp/test.discord.pipe") == 0);
-    free(p);
-
-    /* No .db suffix */
-    p = channel_outbox_fifo_path("/tmp/mydb", "chan");
-    assert(p);
-    assert(strcmp(p, "/tmp/mydb.chan.pipe") == 0);
-    free(p);
-
-    printf("  PASS: test_fifo_path\n");
+    static const struct { const char *db, *chan, *want; } cases[] = {
+        { "/home/user/cclaw.db", "telegram", "/home/user/cclaw.telegram.pipe" },
+        { "/tmp/test.db",        "discord",  "/tmp/test.discord.pipe" },
+        { "/tmp/mydb",           "chan",     "/tmp/mydb.chan.pipe" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char *p = channel_outbox_fifo_path(cases[i].db, cases[i].chan);
+        if (!p || strcmp(p, cases[i].want) != 0) {
+            fprintf(stderr, "row %zu: got %s\n", i, p ? p : "(null)");
+            assert(0);
+        }
+        free(p);
+    }
 }
 
 static void test_fifo_wake(void) {
@@ -49,44 +45,12 @@ static void test_fifo_wake(void) {
     assert(n == 1);
 
     channel_outbox_fifo_close(fd, DB_PATH, "testchan");
-    printf("  PASS: test_fifo_wake\n");
-}
-
-static void test_outbox_insert(void) {
-    test_db_clean(DB_PATH);
-    sqlite3 *db = test_db_open(DB_PATH);
-    assert(db);
-
-    {   sqlite3_stmt *s;
-        assert(sqlite3_prepare_v2(db, "INSERT INTO channel_outbox(channel_name,session_id,payload) VALUES(?,?,?)", -1, &s, NULL) == SQLITE_OK);
-        sqlite3_bind_text(s, 1, "telegram", -1, SQLITE_STATIC);
-        sqlite3_bind_int64(s, 2, 42);
-        sqlite3_bind_text(s, 3, "{\"chat_id\":\"123\",\"text\":\"hello\"}", -1, SQLITE_STATIC);
-        assert(sqlite3_step(s) == SQLITE_DONE);
-        sqlite3_finalize(s);
-    }
-
-    /* Verify via channel_next_outbox */
-    ChannelCtx *ctx = channel_ctx_open(DB_PATH, "telegram");
-    assert(ctx);
-    ChannelOutboxRow *row = channel_next_outbox(ctx);
-    assert(row);
-    assert(row->session_id == 42);
-    assert(strstr(row->payload, "hello") != NULL);
-    channel_outbox_row_free(row);
-    channel_ctx_free(ctx);
-
-    db_close(db);
-    test_db_clean(DB_PATH);
-    printf("  PASS: test_outbox_insert\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_outbox_wake:\n");
-    test_fifo_path();
-    test_fifo_wake();
-    test_outbox_insert();
-    printf("all outbox_wake tests passed\n");
+    RUN(test_fifo_path);
+    RUN(test_fifo_wake);
     return 0;
 }

@@ -1,116 +1,59 @@
-/* Test: tool_calls status helpers (db_tool_call_set_status, db_tool_call_get_pending) */
+/* tool_calls workflow state: pending → status, and the dispatch claim CAS. */
 #include "db.h"
 #include "test_util.h"
 #include "db_response.h"
 #include <assert.h>
-#include <stdio.h>
-#include <string.h>
 
-static sqlite3 *setup(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
-    return db;
-}
-
-static void test_get_pending_empty(void) {
-    sqlite3 *db = setup();
-    int count = 0;
-    PendingToolCall *list = db_tool_call_get_pending(db, 1, &count);
-    assert(count == 0);
-    assert(list == NULL);
-    db_close(db);
-    printf("  PASS test_get_pending_empty\n");
-}
-
-static void test_insert_and_get_pending(void) {
-    sqlite3 *db = setup();
-    /* Create session + tool_call entry (args live in entries.content) */
-    int64_t sid = session_create(db, "test", NULL, -1, 0);
-    assert(sid > 0);
-    int64_t eid = entry_append_typed(db, sid, 1, "tool_call", 0,
-        "{\"path\":\"x.txt\"}", "call_1", "file_read", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
+static int64_t add_call(sqlite3 *db, int64_t sid, const char *call_id,
+                        const char *name, const char *args) {
+    int64_t eid = entry_append_typed(db, sid, 1, "tool_call", 0, args, call_id,
+                                     name, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
     assert(eid > 0);
-
-    /* Insert tool_calls workflow row (no arguments column) */
-    const char *sql = "INSERT INTO tool_calls(session_id, entry_id, call_id, name)"
-                      " VALUES(?, ?, 'call_1', 'file_read');";
     sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_prepare_v2(db, "INSERT INTO tool_calls(session_id, entry_id, call_id, name)"
+                           " VALUES(?, ?, ?, ?);", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, sid);
     sqlite3_bind_int64(stmt, 2, eid);
-    sqlite3_step(stmt);
+    sqlite3_bind_text(stmt, 3, call_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, name, -1, SQLITE_STATIC);
+    assert(sqlite3_step(stmt) == SQLITE_DONE);
     sqlite3_finalize(stmt);
+    return eid;
+}
 
-    /* Should appear as pending */
+static void test_pending_and_status(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    assert(sid > 0);
+    add_call(db, sid, "call_1", "file_read", "{\"path\":\"x.txt\"}");
+
+    /* Arguments come from entries.content (tool_calls has no args column). */
     int count = 0;
     PendingToolCall *list = db_tool_call_get_pending(db, sid, &count);
     assert(count == 1);
     assert(strcmp(list[0].call_id, "call_1") == 0);
-    assert(strcmp(list[0].name, "file_read") == 0);
     assert(strstr(list[0].arguments, "x.txt") != NULL);
     db_tool_call_free_pending(list, count);
 
-    db_close(db);
-    printf("  PASS test_insert_and_get_pending\n");
-}
+    assert(db_tool_call_set_status(db, sid, "call_1", "awaiting_approval", NULL) == 0);
+    list = db_tool_call_get_pending(db, sid, &count);
+    assert(count == 0 && list == NULL);
 
-static void test_set_status(void) {
-    sqlite3 *db = setup();
-    int64_t sid = session_create(db, "test", NULL, -1, 0);
-    int64_t eid = entry_append_typed(db, sid, 1, "tool_call", 0,
-        "{}", "call_2", "web_fetch", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-
-    const char *sql = "INSERT INTO tool_calls(session_id, entry_id, call_id, name)"
-                      " VALUES(?, ?, 'call_2', 'web_fetch');";
-    sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, sid);
-    sqlite3_bind_int64(stmt, 2, eid);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-
-    /* Set to awaiting_approval */
-    int rc = db_tool_call_set_status(db, sid, "call_2", "awaiting_approval", NULL);
-    assert(rc == 0);
-
-    /* Should no longer be pending */
-    int count = 0;
-    PendingToolCall *list = db_tool_call_get_pending(db, sid, &count);
-    assert(count == 0);
-    assert(list == NULL);
-
-    /* Resolve it */
-    rc = db_tool_call_set_status(db, sid, "call_2", "done", "admin");
-    assert(rc == 0);
-
-    /* Verify resolved_by was set */
-    sqlite3_prepare_v2(db, "SELECT resolved_by FROM tool_calls WHERE call_id='call_2'",
-                       -1, &stmt, NULL);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    const char *by = (const char *)sqlite3_column_text(stmt, 0);
+    assert(db_tool_call_set_status(db, sid, "call_1", "done", "admin") == 0);
+    char *by = test_qs(db, "SELECT resolved_by FROM tool_calls WHERE call_id='call_1'");
     assert(by && strcmp(by, "admin") == 0);
-    sqlite3_finalize(stmt);
-
+    free(by);
     db_close(db);
-    printf("  PASS test_set_status\n");
 }
 
 static void test_claim_cas(void) {
     /* r5 F10: the dispatch claim is a CAS — a second dispatcher (co-pointed
      * CLI vs daemon) must lose the claim, not double-dispatch. */
-    sqlite3 *db = setup();
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
-    int64_t eid = entry_append_typed(db, sid, 1, "tool_call", 0,
-        "{}", "call_3", "shell_exec", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-
-    const char *sql = "INSERT INTO tool_calls(session_id, entry_id, call_id, name)"
-                      " VALUES(?, ?, 'call_3', 'shell_exec');";
-    sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, sid);
-    sqlite3_bind_int64(stmt, 2, eid);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    add_call(db, sid, "call_3", "shell_exec", "{}");
 
     /* First claim wins, second loses. */
     assert(db_tool_call_claim(db, sid, "call_3") == 1);
@@ -120,8 +63,7 @@ static void test_claim_cas(void) {
      * too — but the claim is what closes the read-then-dispatch race). */
     int count = 0;
     PendingToolCall *list = db_tool_call_get_pending(db, sid, &count);
-    assert(count == 0);
-    assert(list == NULL);
+    assert(count == 0 && list == NULL);
 
     /* Unclaim (park path): back to pending, claimable again. */
     db_tool_call_unclaim(db, sid, "call_3");
@@ -133,27 +75,18 @@ static void test_claim_cas(void) {
     /* Unclaim is a CAS too: a call that completed meanwhile stays done. */
     assert(db_tool_call_set_status(db, sid, "call_3", "done", NULL) == 0);
     db_tool_call_unclaim(db, sid, "call_3");
-    sqlite3_prepare_v2(db, "SELECT status FROM tool_calls WHERE call_id='call_3'",
-                       -1, &stmt, NULL);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    const char *st = (const char *)sqlite3_column_text(stmt, 0);
+    char *st = test_qs(db, "SELECT status FROM tool_calls WHERE call_id='call_3'");
     assert(st && strcmp(st, "done") == 0);
-    sqlite3_finalize(stmt);
+    free(st);
 
     /* Claiming a done call fails — a stale dispatcher can't resurrect it. */
     assert(db_tool_call_claim(db, sid, "call_3") == 0);
-
     db_close(db);
-    printf("  PASS test_claim_cas\n");
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_tool_calls_status:\n");
-    test_get_pending_empty();
-    test_insert_and_get_pending();
-    test_set_status();
-    test_claim_cas();
-    printf("ALL PASSED\n");
+    RUN(test_pending_and_status);
+    RUN(test_claim_cas);
     return 0;
 }

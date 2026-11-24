@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
 #include <unistd.h>
 #include "test_util.h"
 
@@ -51,7 +50,6 @@ static void test_env_defaults(void) {
     config_free(cfg);
     db_close(db);
     test_db_clean(TEST_DB);
-    printf("  PASS test_env_defaults\n");
 }
 
 static void test_env_all_overrides(void) {
@@ -84,7 +82,6 @@ static void test_env_all_overrides(void) {
     db_close(db);
     test_db_clean(TEST_DB);
     clear_env();
-    printf("  PASS test_env_all_overrides\n");
 }
 
 static void test_render_workspace_var(void) {
@@ -107,7 +104,6 @@ static void test_render_workspace_var(void) {
     db_close(db);
     test_db_clean(TEST_DB);
     clear_env();
-    printf("  PASS test_render_workspace_var\n");
 }
 
 static void test_render_no_template_vars(void) {
@@ -120,17 +116,15 @@ static void test_render_no_template_vars(void) {
     assert(strcmp(rendered, "plain prompt no vars") == 0);
     free(rendered);
     free(cfg.system_prompt);
-    printf("  PASS test_render_no_template_vars\n");
 }
 
 int main(void) {
     TEST_INIT();
-    alarm(10);
     printf("test_config_env:\n");
-    test_env_defaults();
-    test_env_all_overrides();
-    test_render_workspace_var();
-    test_render_no_template_vars();
+    RUN(test_env_defaults);
+    RUN(test_env_all_overrides);
+    RUN(test_render_workspace_var);
+    RUN(test_render_no_template_vars);
     printf("All config_env tests passed.\n");
     return 0;
 }

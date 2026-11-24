@@ -8,15 +8,9 @@
  *   (d) refuses to overwrite an existing file (fail-closed). */
 #define _POSIX_C_SOURCE 200809L
 #include "test_run_session.h"
-#include "mock_server.h"
-#include <assert.h>
 #include <pthread.h>
-#include <signal.h>
-#include <stdio.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include "test_util.h"
 
 #define DB_PATH  "/tmp/test_integ_backup.db"
 #define BAK1     "/tmp/test_integ_backup.snap1.db"
@@ -58,13 +52,7 @@ int main(void) {
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
-    int port = mock_server_start();
-    assert(port > 0);
-    char url[64]; snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
-    setenv("CCLAW_DB_PATH", DB_PATH, 1);
-    setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
-    setenv("OPENROUTER_API_KEY", "test-key", 1);
-    setenv("CCLAW_MODEL", "test-model", 1);
+    test_mock_env(DB_PATH);
     db_agent_upsert(db, "Backup", NULL, NULL);
 
     /* A real turn so the snapshot has genuine content. */
@@ -110,11 +98,9 @@ int main(void) {
     assert(midstate && strcmp(midstate, "llm_running") == 0);
     free(midstate);
     db_close(snap);
-    printf("  PASS backup captures consistent snapshot (incl. mid-turn session)\n");
 
     /* (d) Overwrite is refused. */
     assert(db_backup_to(db, BAK1, NULL) == -1);
-    printf("  PASS backup refuses to overwrite\n");
 
     /* (c) Backup under a concurrent writer. */
     volatile int stop = 0;
@@ -130,7 +116,6 @@ int main(void) {
     assert(snap && db_schema_compat(snap));
     assert(entry_count(snap, sid) >= entries_live);  /* consistent, not torn */
     db_close(snap);
-    printf("  PASS backup succeeds under a concurrent writer (WAL read snapshot)\n");
 
     mock_server_stop();
     db_close(db);

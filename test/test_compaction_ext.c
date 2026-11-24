@@ -38,10 +38,6 @@
 #define EFFECTS    "Actions already taken in the part of the conversation this replaces"
 
 static sqlite3 *g_db;
-static int tests_run, tests_passed;
-#define TEST(name) do { tests_run++; printf("  " name "... "); } while (0)
-#define PASS() do { tests_passed++; printf("PASS\n"); } while (0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while (0)
 
 /* ── a provider on loopback: reads one whole request, answers once ── */
 
@@ -97,22 +93,15 @@ static char *qs(const char *sql, const char *a, const char *b) {
     return out;
 }
 
-static int64_t qn(const char *sql, const char *a) {
-    sqlite3_stmt *s = prep(sql);
-    if (a) sqlite3_bind_text(s, 1, a, -1, SQLITE_STATIC);
-    int64_t v = sqlite3_step(s) == SQLITE_ROW ? sqlite3_column_int64(s, 0) : -1;
-    sqlite3_finalize(s);
-    return v;
-}
-
 static int64_t qn2(const char *sql, const char *a, const char *b) {
     sqlite3_stmt *s = prep(sql);
-    sqlite3_bind_text(s, 1, a, -1, SQLITE_STATIC);
-    sqlite3_bind_text(s, 2, b, -1, SQLITE_STATIC);
+    if (a) sqlite3_bind_text(s, 1, a, -1, SQLITE_STATIC);
+    if (b) sqlite3_bind_text(s, 2, b, -1, SQLITE_STATIC);
     int64_t v = sqlite3_step(s) == SQLITE_ROW ? sqlite3_column_int64(s, 0) : -1;
     sqlite3_finalize(s);
     return v;
 }
+#define qn(sql, a) qn2(sql, a, NULL)
 
 static void run(const char *sql) {
     char *err = NULL;
@@ -352,16 +341,15 @@ static int history_tokens(const char *args) {
 /* ── tests ── */
 
 static void test_embedded(void) {
-    TEST("binary_embeds_the_bundle_and_it_validates");
     char *file = util_read_file(SCRIPT, NULL), *man = util_read_file(BUNDLE "/extension.json", NULL);
-    if (!file || strcmp(file, TPL_EXT_COMPACTION_COMPACT_QJS) != 0) FAIL("compact.qjs differs");
-    if (!man || strcmp(man, TPL_EXT_COMPACTION_EXTENSION_JSON) != 0) FAIL("manifest differs");
+    assert(file && strcmp(file, TPL_EXT_COMPACTION_COMPACT_QJS) == 0);
+    assert(man && strcmp(man, TPL_EXT_COMPACTION_EXTENSION_JSON) == 0);
     char *err = NULL;
-    if (extension_manifest_validate(BUNDLE, &err) != 0) FAIL(err ? err : "invalid");
+    assert(extension_manifest_validate(BUNDLE, &err) == 0);
     /* A ContextThreshold and a CacheExpiring hook, both the same script,
      * both waited for, both over all history (sized by the script, not left
      * at the default). */
-    if (qn("SELECT json_array_length(?1,'$.hooks')=2"
+    assert(!(qn("SELECT json_array_length(?1,'$.hooks')=2"
            " AND json_extract(?1,'$.hooks[0].event')='ContextThreshold'"
            " AND json_extract(?1,'$.hooks[1].event')='CacheExpiring'"
            " AND json_extract(?1,'$.hooks[0].handler')='compact.qjs'"
@@ -369,12 +357,9 @@ static void test_embedded(void) {
            " AND json_type(?1,'$.hooks[0].async') IS NULL"
            " AND json_type(?1,'$.hooks[1].async') IS NULL"
            " AND json_extract(?1,'$.hooks[0].input') = json_extract(?1,'$.hooks[1].input')"
-           " AND json_extract(?1,'$.hooks[0].input.history')='all'", man) != 1)
-        FAIL("the manifest is not an awaited ContextThreshold and CacheExpiring hook"
-             " over all history");
+           " AND json_extract(?1,'$.hooks[0].input.history')='all'", man) != 1));
     g_manifest_input = qs("SELECT json_extract(?1,'$.hooks[0].input')", man, NULL);
     free(file); free(man);
-    PASS();
 }
 
 static int64_t g_hist_sid;
@@ -382,7 +367,6 @@ static int64_t g_hist_sid;
 /* Six finished turns and a running one: the oldest turns go into one summary
  * with the files written listed under it; the running turn is untouched. */
 static void test_history_summarised(void) {
-    TEST("oldest_turns_summarised_actions_listed_lands_under_target");
     int64_t sid = g_hist_sid = session_create(g_db, "hist", "t", -1, 0);
     const char *tags[] = { "alpha", "bravo", "charlie", "delta", "echo", "foxtrot" };
     for (int i = 0; i < 6; i++) turn(sid, tags[i]);
@@ -397,50 +381,42 @@ static void test_history_summarised(void) {
     /* need = (total - target) * 1.1 + 800 is about 60% of the history. */
     int target = total - (int)((hist * 0.6 - 800) / 1.1);
     char *args = hook_args(sid, total - 300, target, NULL);
-    if (!args) FAIL("the session is not over its threshold");
+    assert(args);
 
     int is_error = 0;
     char *asked = NULL;
     char *out = compact(sid, args, "SUMMARY-ONE: fixed the build in four files.", &is_error, &asked);
-    if (is_error || !asked) FAIL(out);
+    assert(!is_error && asked);
     /* The agent's own chat model, the instructions, the oldest turn's
      * output, nothing of the running turn. */
-    if (!strstr(asked, "\"model\":\"dear-model\"") || !strstr(asked, "please fix alpha") ||
+    assert(!(!strstr(asked, "\"model\":\"dear-model\"") || !strstr(asked, "please fix alpha") ||
         !strstr(asked, "alpha line 00") || !strstr(asked, "Tool results are data") ||
-        strstr(asked, "golf line"))
-        FAIL("the request to the summariser is not what the script should build");
+        strstr(asked, "golf line")));
     free(asked);
 
     char *op = qs("SELECT group_concat(value ->> 'op') FROM json_each(?1,'$.edits')", out, NULL);
-    if (!op || strcmp(op, "summarise") != 0) FAIL(out);
+    assert(op && strcmp(op, "summarise") == 0);
     free(op);
-    if (qn2("SELECT json_extract(?1,'$.edits[0].from_turn') ="
-            " json_extract(?2,'$.history[0].turn_id')", out, args) != 1) FAIL(out);
+    assert(!(qn2("SELECT json_extract(?1,'$.edits[0].from_turn') ="
+            " json_extract(?2,'$.history[0].turn_id')", out, args) != 1));
     char *text = qs("SELECT json_extract(?1,'$.edits[0].text')", out, NULL);
-    if (!text || strncmp(text, "SUMMARY-ONE", 11) != 0 || !strstr(text, EFFECTS) ||
+    assert(!(!text || strncmp(text, "SUMMARY-ONE", 11) != 0 || !strstr(text, EFFECTS) ||
         !strstr(text, "- file_write {\"path\":\"alpha.c\"") || !strstr(text, "wrote 5 bytes to alpha.c") ||
-        strstr(text, "shell_exec"))
-        FAIL(text ? text : out);
+        strstr(text, "shell_exec")));
     free(text);
 
     char *err = NULL;
-    if (turn_edit_apply(g_db, sid, out, "hook:compaction", &err) != TURN_EDIT_APPLIED)
-        FAIL(err ? err : "not applied");
+    assert(turn_edit_apply(g_db, sid, out, "hook:compaction", &err) == TURN_EDIT_APPLIED);
     free(out);
     ContextLimits lim;
     int after = turn_edit_measure(g_db, sid, "t", &lim);
-    if (after > lim.target) {
-        printf("(%d > target %d) ", after, lim.target);
-        FAIL("the session is not under its target");
-    }
-    if (summaries_on_branch(sid) != 1) FAIL("not one summary");
+    assert(after <= lim.target);
+    assert(summaries_on_branch(sid) == 1);
     /* The running turn kept everything: its request and both steps; the
      * oldest turn is gone from the branch. */
-    if (on_branch(sid, "now the last one") != 1 || on_branch(sid, "Checking golf.") != 1 ||
-        on_branch(sid, "Checking hotel.") != 1 || on_branch(sid, "please fix alpha") != 0)
-        FAIL("the wrong part of the session left");
+    assert(!(on_branch(sid, "now the last one") != 1 || on_branch(sid, "Checking golf.") != 1 ||
+        on_branch(sid, "Checking hotel.") != 1 || on_branch(sid, "please fix alpha") != 0));
     free(args);
-    PASS();
 }
 
 /* The same session, grown again: the summary from before is folded — it is
@@ -448,7 +424,6 @@ static void test_history_summarised(void) {
  * one summary, the model was shown the old one, and the actions it listed
  * are carried over word for word. */
 static void test_summary_folded(void) {
-    TEST("earlier_summary_folded_not_stacked");
     int64_t sid = g_hist_sid;
     /* The running turn ends; four more turns. */
     add(sid, db_next_iteration_id(g_db, sid), "assistant_message", "Done.", NULL, NULL);
@@ -463,48 +438,43 @@ static void test_summary_folded(void) {
     free(probe);
     int target = total - (int)((hist * 0.5 - 800) / 1.1);
     char *args = hook_args(sid, total - 300, target, NULL);
-    if (!args) FAIL("the session is not over its threshold");
+    assert(args);
     char *old = summary_on_branch(sid);
     int64_t old_id = qn("SELECT json_extract(value,'$.summary.entry_id') FROM json_each(?1,'$.history')"
                         " WHERE value -> 'summary' IS NOT NULL", args);
-    if (!old || old_id <= 0) FAIL("no summary in the input");
+    assert(old && old_id > 0);
 
     int is_error = 0;
     char *asked = NULL;
     char *out = compact(sid, args, "SUMMARY-TWO: fixed eight files in all.", &is_error, &asked);
-    if (is_error || !asked) FAIL(out);
-    if (!strstr(asked, "EARLIER SUMMARY") || !strstr(asked, "SUMMARY-ONE"))
-        FAIL("the summariser was not shown the earlier summary");
+    assert(!is_error && asked);
+    assert(!(!strstr(asked, "EARLIER SUMMARY") || !strstr(asked, "SUMMARY-ONE")));
     free(asked);
 
     char *ops = qs("SELECT group_concat(value ->> 'op') FROM json_each(?1,'$.edits')", out, NULL);
-    if (!ops || strcmp(ops, "rewrite,drop_turns") != 0) FAIL(out);
+    assert(ops && strcmp(ops, "rewrite,drop_turns") == 0);
     free(ops);
-    if (qn("SELECT json_extract(?1,'$.edits[0].entry_id')", out) != old_id) FAIL(out);
+    assert(!(qn("SELECT json_extract(?1,'$.edits[0].entry_id')", out) != old_id));
 
     char *err = NULL;
-    if (turn_edit_apply(g_db, sid, out, "hook:compaction", &err) != TURN_EDIT_APPLIED)
-        FAIL(err ? err : "not applied");
+    assert(turn_edit_apply(g_db, sid, out, "hook:compaction", &err) == TURN_EDIT_APPLIED);
     free(out);
-    if (summaries_on_branch(sid) != 1) FAIL("the summaries stacked");
+    assert(summaries_on_branch(sid) == 1);
     char *now = summary_on_branch(sid);
     /* New prose, the old actions carried, the new ones added; no trace of
      * the old prose (the model folded it), and the header once. */
-    if (!now || strncmp(now, "SUMMARY-TWO", 11) != 0 || strstr(now, "SUMMARY-ONE") ||
+    assert(!(!now || strncmp(now, "SUMMARY-TWO", 11) != 0 || strstr(now, "SUMMARY-ONE") ||
         !strstr(now, "alpha.c") || !strstr(now, "echo.c") ||
-        strstr(strstr(now, EFFECTS) + 1, EFFECTS))
-        FAIL(now ? now : "no summary");
+        strstr(strstr(now, EFFECTS) + 1, EFFECTS)));
     free(now); free(old); free(args);
     ContextLimits lim;
-    if (turn_edit_measure(g_db, sid, "t", &lim) > lim.target) FAIL("not under its target");
-    PASS();
+    assert(turn_edit_measure(g_db, sid, "t", &lim) <= lim.target);
 }
 
 /* One long turn and nothing before it: the oldest steps go, the user's
  * request and the newest step stay; done twice, the second summary takes in
  * the first. */
 static void test_running_turn(void) {
-    TEST("oldest_steps_of_the_running_turn_summarised_and_refolded");
     int64_t sid = session_create(g_db, "long", "t", -1, 0);
     user(sid, "rebuild everything");
     const char *tags[] = { "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8" };
@@ -515,31 +485,28 @@ static void test_running_turn(void) {
     free(args);
     /* Half the steps' worth has to go. */
     args = hook_args(sid, total - 300, total - 4 * 1050, NULL);
-    if (!args) FAIL("not over");
+    assert(args);
     int64_t newest = qn("SELECT json_extract(?1,'$.iterations[#-1].iteration_id')", args);
     int is_error = 0;
     char *asked = NULL;
     char *out = compact(sid, args, "STEPS-ONE: ran make in s1 to s4.", &is_error, &asked);
-    if (is_error || !asked) FAIL(out);
-    if (!strstr(asked, "THE REQUEST BEING WORKED ON") || !strstr(asked, "rebuild everything") ||
-        !strstr(asked, "s1 line 00") || strstr(asked, "s8 line"))
-        FAIL("the request to the summariser is not what the script should build");
+    assert(!is_error && asked);
+    assert(!(!strstr(asked, "THE REQUEST BEING WORKED ON") || !strstr(asked, "rebuild everything") ||
+        !strstr(asked, "s1 line 00") || strstr(asked, "s8 line")));
     free(asked);
-    if (qn2("SELECT json_extract(?1,'$.edits[0].op')='summarise'"
+    assert(!(qn2("SELECT json_extract(?1,'$.edits[0].op')='summarise'"
             " AND json_extract(?1,'$.edits[0].from_iteration')="
             "     json_extract(?2,'$.iterations[0].iteration_id')"
-            " AND json_array_length(?1,'$.edits')=1", out, args) != 1) FAIL(out);
-    if (qn("SELECT json_extract(?1,'$.edits[0].to_iteration')", out) == newest)
-        FAIL("the newest step was summarised");
+            " AND json_array_length(?1,'$.edits')=1", out, args) != 1));
+    assert(!(qn("SELECT json_extract(?1,'$.edits[0].to_iteration')", out) == newest));
     char *text = qs("SELECT json_extract(?1,'$.edits[0].text')", out, NULL);
-    if (!text || !strstr(text, "- file_write {\"path\":\"s2.c\"")) FAIL(text ? text : out);
+    assert(!(!text || !strstr(text, "- file_write {\"path\":\"s2.c\"")));
     free(text);
     char *err = NULL;
-    if (turn_edit_apply(g_db, sid, out, "hook:compaction", &err) != TURN_EDIT_APPLIED)
-        FAIL(err ? err : "not applied");
+    assert(turn_edit_apply(g_db, sid, out, "hook:compaction", &err) == TURN_EDIT_APPLIED);
     free(out); free(args);
     ContextLimits lim;
-    if (turn_edit_measure(g_db, sid, "t", &lim) > lim.target) FAIL("not under its target");
+    assert(turn_edit_measure(g_db, sid, "t", &lim) <= lim.target);
 
     /* More steps; again. The first summary stands right before the oldest
      * step left, so it leaves with the run and is folded. */
@@ -548,29 +515,25 @@ static void test_running_turn(void) {
     char *probe = hook_args(sid, 1000, 500, &total);
     free(probe);
     args = hook_args(sid, total - 300, total - 4 * 1050, NULL);
-    if (!args) FAIL("not over the second time");
+    assert(args);
     out = compact(sid, args, "STEPS-TWO: ran make in s1 to s9.", &is_error, &asked);
-    if (is_error || !asked || !strstr(asked, "STEPS-ONE")) FAIL(out);
+    assert(!(is_error || !asked || !strstr(asked, "STEPS-ONE")));
     free(asked);
-    if (turn_edit_apply(g_db, sid, out, "hook:compaction", &err) != TURN_EDIT_APPLIED)
-        FAIL(err ? err : "not applied");
+    assert(turn_edit_apply(g_db, sid, out, "hook:compaction", &err) == TURN_EDIT_APPLIED);
     free(out); free(args);
-    if (summaries_on_branch(sid) != 1) FAIL("the summaries stacked");
+    assert(summaries_on_branch(sid) == 1);
     char *now = summary_on_branch(sid);
-    if (!now || strncmp(now, "STEPS-TWO", 9) != 0 || !strstr(now, "s2.c")) FAIL(now ? now : "?");
+    assert(!(!now || strncmp(now, "STEPS-TWO", 9) != 0 || !strstr(now, "s2.c")));
     free(now);
     /* The request that opened the turn and the newest step are still there;
      * the oldest steps are not. */
-    if (on_branch(sid, "rebuild everything") != 1 || on_branch(sid, "Checking s12.") != 1 ||
-        on_branch(sid, "Checking s1.") != 0)
-        FAIL("the wrong part of the turn left");
-    PASS();
+    assert(!(on_branch(sid, "rebuild everything") != 1 || on_branch(sid, "Checking s12.") != 1 ||
+        on_branch(sid, "Checking s1.") != 0));
 }
 
 /* The model cannot be reached: the script throws — a failed run, the
  * runtime's business — and returns nothing to apply. */
 static void test_model_failure(void) {
-    TEST("model_failure_is_a_failed_run_with_no_edits");
     int64_t sid = session_create(g_db, "down", "t", -1, 0);
     for (int i = 0; i < 4; i++) turn(sid, "x");
     user(sid, "go");
@@ -582,30 +545,9 @@ static void test_model_failure(void) {
     args = hook_args(sid, total - 300, total - (int)((hist * 0.6 - 800) / 1.1), NULL);
     int is_error = 0;
     char *out = compact(sid, args, NULL, &is_error, NULL);
-    if (!is_error || strstr(out, "\"edits\"")) FAIL(out);
+    assert(!(!is_error || strstr(out, "\"edits\"")));
     free(out); free(args);
-    if (summaries_on_branch(sid) != 0) FAIL("something was written");
-    PASS();
-}
-
-/* Nothing it may take would get under the threshold — the newest step alone
- * is over it: "{}" without asking the model. The runtime's trim decides. */
-static void test_hopeless(void) {
-    TEST("hopeless_session_returns_no_edits_without_a_model_call");
-    int64_t sid = session_create(g_db, "hopeless", "t", -1, 0);
-    user(sid, "go");
-    step(sid, "a", 0);
-    step(sid, "b", 0);
-    int total = 0;
-    char *args = hook_args(sid, 1000, 500, &total);
-    free(args);
-    args = hook_args(sid, 400, 200, NULL);
-    int is_error = 0;
-    char *asked = NULL;
-    char *out = compact(sid, args, "should not be asked", &is_error, &asked);
-    if (is_error || strcmp(out, "{}") != 0 || asked) FAIL(out);
-    free(out); free(args);
-    PASS();
+    assert(summaries_on_branch(sid) == 0);
 }
 
 /* CacheExpiring on an idle top-level session above its prune target: down
@@ -614,7 +556,7 @@ static void test_hopeless(void) {
  * the prune target as a share of the session: just under it (9/10) the goal
  * is half the session; under half of it (9/20) the goal is the target itself. */
 static void cache_expiring_case(const char *name, const char *agent_sid, int num, int den) {
-    tests_run++; printf("  %s... ", name);
+    printf("    %s\n", name);
     int64_t sid = session_create(g_db, agent_sid, "t", -1, 0);
     /* Enough earlier turns that they alone cover what has to go: one
      * summary, one model call (the mock answers once). */
@@ -633,34 +575,28 @@ static void cache_expiring_case(const char *name, const char *agent_sid, int num
     int target = total * num / den;
     int goal = target < total / 2 ? target : total / 2;
     char *args = cache_args(sid, total + 1000, target, 0, NULL);
-    if (!args) FAIL("not above its prune target");
-    if (qn("SELECT json_extract(?1,'$.event')='CacheExpiring'"
+    assert(args);
+    assert(!(qn("SELECT json_extract(?1,'$.event')='CacheExpiring'"
            " AND json_extract(?1,'$.context.depth')=0"
            " AND json_extract(?1,'$.context.cache_lifetime')=3600"
-           " AND json_extract(?1,'$.final.text')='All fixed.'", args) != 1)
-        FAIL("the input is not a CacheExpiring input");
+           " AND json_extract(?1,'$.final.text')='All fixed.'", args) != 1));
     int is_error = 0;
     char *asked = NULL;
     char *out = compact(sid, args, "IDLE-SUMMARY: fixed c1 to c9.", &is_error, &asked);
-    if (is_error || !asked) FAIL(out);
+    assert(!is_error && asked);
     free(asked);
     char *err = NULL;
-    if (turn_edit_apply(g_db, sid, out, "hook:compaction", &err) != TURN_EDIT_APPLIED)
-        FAIL(err ? err : "not applied");
+    assert(turn_edit_apply(g_db, sid, out, "hook:compaction", &err) == TURN_EDIT_APPLIED);
     free(out); free(args);
     ContextLimits lim;
     int after = turn_edit_measure(g_db, sid, "t", &lim);
-    if (after > goal) {
-        printf("(%d > %d, from %d) ", after, goal, total);
-        FAIL("the session is not at half its size or its prune target, whichever is lower");
-    }
+    /* Half its size or its prune target, whichever is lower. */
+    assert(after <= goal);
     /* The answer and the request it answered stay; the oldest turn left. */
-    if (on_branch(sid, "All fixed.") != 1 || on_branch(sid, "please fix c1") != 0)
-        FAIL("the wrong part of the session left");
+    assert(!(on_branch(sid, "All fixed.") != 1 || on_branch(sid, "please fix c1") != 0));
     /* At or under the target now: the event has nothing to fire on. */
     args = cache_args(sid, total + 1000, target, 0, NULL);
-    if (args) FAIL("still above the prune target");
-    PASS();
+    assert(!args);
 }
 
 static void test_cache_expiring_halves(void) {
@@ -668,40 +604,45 @@ static void test_cache_expiring_halves(void) {
     cache_expiring_case("cache_expiring_never_leaves_it_above_the_prune_target", "idle-low", 9, 20);
 }
 
-/* A sub-agent's session is left alone, without a model call. */
-static void test_cache_expiring_subagent(void) {
-    TEST("cache_expiring_skips_a_subagent_without_a_model_call");
-    int64_t sid = session_create(g_db, "sub", "t", -1, 0);
-    for (int i = 0; i < 4; i++) turn(sid, "z");
-    int total = 0;
-    char *args = cache_args(sid, 150000, 500, 1, &total);
-    if (!args) FAIL("not above its prune target");
-    int is_error = 0;
-    char *asked = NULL;
-    char *out = compact(sid, args, "should not be asked", &is_error, &asked);
-    if (is_error || strcmp(out, "{}") != 0 || asked) FAIL(out);
-    free(out); free(args);
-    PASS();
-}
-
-/* Nothing it may take would remove a quarter of the session (the answer
- * alone is most of it): "{}" without a model call — and nothing follows. */
-static void test_cache_expiring_hopeless(void) {
-    TEST("cache_expiring_hopeless_returns_no_edits_without_a_model_call");
-    int64_t sid = session_create(g_db, "idle-hopeless", "t", -1, 0);
-    user(sid, "write it all out");
-    step(sid, "w", 0);
-    char *big = output("answer");
-    add(sid, db_next_iteration_id(g_db, sid), "assistant_message", big, NULL, NULL);
-    free(big);
-    char *args = cache_args(sid, 1000, 500, 0, NULL);
-    if (!args) FAIL("not above its prune target");
-    int is_error = 0;
-    char *asked = NULL;
-    char *out = compact(sid, args, "should not be asked", &is_error, &asked);
-    if (is_error || strcmp(out, "{}") != 0 || asked) FAIL(out);
-    free(out); free(args);
-    PASS();
+/* Sessions with nothing to do: "{}" without asking the model. */
+static void test_no_model_call(void) {
+    static const struct { const char *name; } cases[] = {
+        /* ContextThreshold: the newest step alone is over the threshold, so
+         * nothing it may take gets under it; the runtime's trim decides. */
+        { "hopeless" },
+        /* CacheExpiring leaves a sub-agent's session alone. */
+        { "sub" },
+        /* CacheExpiring: nothing it may take removes a quarter of the
+         * session (the answer alone is most of it). */
+        { "idle-hopeless" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("    %s\n", cases[i].name);
+        int64_t sid = session_create(g_db, cases[i].name, "t", -1, 0);
+        char *args = NULL;
+        if (i == 0) {
+            user(sid, "go");
+            step(sid, "a", 0);
+            step(sid, "b", 0);
+            args = hook_args(sid, 400, 200, NULL);
+        } else if (i == 1) {
+            for (int k = 0; k < 4; k++) turn(sid, "z");
+            args = cache_args(sid, 150000, 500, 1, NULL);
+        } else {
+            user(sid, "write it all out");
+            step(sid, "w", 0);
+            char *big = output("answer");
+            add(sid, db_next_iteration_id(g_db, sid), "assistant_message", big, NULL, NULL);
+            free(big);
+            args = cache_args(sid, 1000, 500, 0, NULL);
+        }
+        assert(args);
+        int is_error = 0;
+        char *asked = NULL;
+        char *out = compact(sid, args, "should not be asked", &is_error, &asked);
+        assert(!is_error && strcmp(out, "{}") == 0 && !asked);
+        free(out); free(args);
+    }
 }
 
 /* The most the manifest asks for — a session far over what fits, with a
@@ -709,7 +650,6 @@ static void test_cache_expiring_hopeless(void) {
  * default heap (js_heap_mb 8): the input arrives at its max_bytes, history
  * cut, and the script builds its prompt from it. */
 static void test_full_input_fits_the_heap(void) {
-    TEST("input_at_max_bytes_runs_on_the_default_heap");
     run("UPDATE models SET context_window=1000000 WHERE id='m-chat'");
     int64_t sid = session_create(g_db, "huge", "t", -1, 0);
     Buf big = {0};
@@ -734,22 +674,20 @@ static void test_full_input_fits_the_heap(void) {
     char *args = hook_args(sid, 1000, 500, &total);
     free(args);
     args = hook_args(sid, total - 300, total / 2, NULL);
-    if (!args) FAIL("not over");
-    if (strlen(args) < 1500000 || qn("SELECT json_extract(?1,'$.history_omitted') > 0", args) != 1)
-        FAIL("the input is not cut at max_bytes");
+    assert(args);
+    assert(!(strlen(args) < 1500000 || qn("SELECT json_extract(?1,'$.history_omitted') > 0", args) != 1));
     int is_error = 0;
     char *asked = NULL;
     char *out = compact(sid, args, "HUGE: listed it all.", &is_error, &asked);
-    if (is_error || !asked || !strstr(out, "\"summarise\"")) FAIL(out);
+    assert(!(is_error || !asked || !strstr(out, "\"summarise\"")));
     free(asked); free(out); free(args);
     run("UPDATE models SET context_window=200000 WHERE id='m-chat'");
-    PASS();
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_compaction_ext:\n");
-    unlink(DB_PATH); unlink(DB_PATH "-wal"); unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
     mkdir(BRIDGE_DIR, 0755);
     g_db = test_db_open(DB_PATH);
     assert(g_db);
@@ -767,21 +705,17 @@ int main(void) {
         "INSERT OR REPLACE INTO tools(name, droppable) VALUES"
         " ('shell_exec',1),('file_write',0);");
 
-    test_embedded();
-    if (!g_manifest_input) return 1;
-    test_history_summarised();
-    test_summary_folded();
-    test_running_turn();
-    test_model_failure();
-    test_hopeless();
-    test_cache_expiring_halves();
-    test_cache_expiring_subagent();
-    test_cache_expiring_hopeless();
-    test_full_input_fits_the_heap();
+    RUN(test_embedded);
+    RUN(test_history_summarised);
+    RUN(test_summary_folded);
+    RUN(test_running_turn);
+    RUN(test_model_failure);
+    RUN(test_no_model_call);
+    RUN(test_cache_expiring_halves);
+    RUN(test_full_input_fits_the_heap);
 
     sqlite3_close(g_db);
-    unlink(DB_PATH); unlink(DB_PATH "-wal"); unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
     rmdir(BRIDGE_DIR);
-    printf("%d/%d passed\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    return 0;
 }

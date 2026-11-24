@@ -7,7 +7,6 @@
  * Drives shell_exec via the --run-tool re-exec path (production behavior). */
 
 static char workspace[256];
-static int ns_available = 1;
 
 static void setup_workspace(void) {
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_ns_test_%d", getpid());
@@ -20,19 +19,8 @@ static void cleanup_workspace(void) {
     system(cmd);
 }
 
-/* Detect if namespaces work via the broker */
-static void test_namespace_active(void) {
-    ns_available = run_tool_ns_available(workspace);
-    if (!ns_available) {
-        printf("  SKIP (namespaces unavailable on this system)\n");
-    } else {
-        printf("  PASS test_namespace_active\n");
-    }
-}
-
 /* Test: writing inside workspace succeeds */
 static void test_write_inside_workspace(void) {
-    if (!ns_available) { printf("  SKIP test_write_inside_workspace\n"); return; }
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.workspace = workspace;
     char cmd[1024];
@@ -45,12 +33,10 @@ static void test_write_inside_workspace(void) {
     assert(strstr(res, "[exit 0]") != NULL);
     assert(strstr(res, "hello") != NULL);
     free(res);
-    printf("  PASS test_write_inside_workspace\n");
 }
 
 /* Test: writing to /etc fails (read-only bind mount) */
 static void test_write_system_dir_blocked(void) {
-    if (!ns_available) { printf("  SKIP test_write_system_dir_blocked\n"); return; }
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.workspace = workspace;
     r.command = "touch /etc/cclaw_escape_test 2>&1; echo rc=$?";
@@ -58,12 +44,10 @@ static void test_write_system_dir_blocked(void) {
     assert(res != NULL);
     assert(strstr(res, "rc=1") != NULL || strstr(res, "Read-only") != NULL);
     free(res);
-    printf("  PASS test_write_system_dir_blocked\n");
 }
 
 /* Test: reading system files still works (/ is ro, not invisible) */
 static void test_read_system_files(void) {
-    if (!ns_available) { printf("  SKIP test_read_system_files\n"); return; }
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.workspace = workspace;
     r.command = "ls /bin/sh";
@@ -72,12 +56,10 @@ static void test_read_system_files(void) {
     assert(strstr(res, "[exit 0]") != NULL);
     assert(strstr(res, "/bin/sh") != NULL);
     free(res);
-    printf("  PASS test_read_system_files\n");
 }
 
 /* Test: network is isolated (CLONE_NEWNET = no interfaces except lo down) */
 static void test_network_isolated(void) {
-    if (!ns_available) { printf("  SKIP test_network_isolated\n"); return; }
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.workspace = workspace;
     /* In a new network namespace, only lo exists and it's down.
@@ -90,12 +72,10 @@ static void test_network_isolated(void) {
         assert(strstr(res, "\n0\n") != NULL);
     }
     free(res);
-    printf("  PASS test_network_isolated\n");
 }
 
 /* Test: agent DB path is not accessible from shell child */
 static void test_agent_db_inaccessible(void) {
-    if (!ns_available) { printf("  SKIP test_agent_db_inaccessible\n"); return; }
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.workspace = workspace;
     r.command = "cat /root/.bashrc 2>&1; echo rc=$?";
@@ -103,7 +83,6 @@ static void test_agent_db_inaccessible(void) {
     assert(res != NULL);
     assert(strstr(res, "rc=1") != NULL || strstr(res, "No such file") != NULL);
     free(res);
-    printf("  PASS test_agent_db_inaccessible\n");
 }
 
 /* Verify /etc/shadow inaccessible from shell child.
@@ -117,10 +96,8 @@ static void test_agent_db_inaccessible(void) {
  * failure: the read-only remounts and the empty netns hold either way. Skip
  * rather than fail, so a root-in-a-container dev box still gets a green suite. */
 static void test_etc_shadow_inaccessible(void) {
-    if (!ns_available) { printf("  SKIP test_etc_shadow_inaccessible\n"); return; }
     if (geteuid() == 0) {
-        printf("  SKIP test_etc_shadow_inaccessible (running as root: "
-               "uid_map is identity, so DAC cannot filter root-owned files)\n");
+        printf("    skipped: running as root, uid_map is identity\n");
         return;
     }
     ShellToolReq r = SHELL_REQ_DEFAULTS;
@@ -131,12 +108,10 @@ static void test_etc_shadow_inaccessible(void) {
     assert(strstr(res, "rc=1") != NULL || strstr(res, "Permission denied") != NULL
            || strstr(res, "No such file") != NULL);
     free(res);
-    printf("  PASS test_etc_shadow_inaccessible\n");
 }
 
 /* CWD rw bind-mount in CLI mode — cwd_path accessible rw alongside workspace */
 static void test_cwd_path_rw(void) {
-    if (!ns_available) { printf("  SKIP test_cwd_path_rw\n"); return; }
 
     /* Create a separate "cwd" directory to simulate CLI CWD */
     char cwd_dir[256];
@@ -179,12 +154,10 @@ static void test_cwd_path_rw(void) {
     char rm[512];
     snprintf(rm, sizeof(rm), "rm -rf %s", cwd_dir);
     system(rm);
-    printf("  PASS test_cwd_path_rw\n");
 }
 
 /* Without cwd_path (daemon mode), CWD dir is NOT accessible */
 static void test_no_cwd_path_blocked(void) {
-    if (!ns_available) { printf("  SKIP test_no_cwd_path_blocked\n"); return; }
 
     char cwd_dir[256];
     snprintf(cwd_dir, sizeof(cwd_dir), "/tmp/cclaw_nocwd_test_%d", getpid());
@@ -211,15 +184,9 @@ static void test_no_cwd_path_blocked(void) {
     char rm[512];
     snprintf(rm, sizeof(rm), "rm -rf %s", cwd_dir);
     system(rm);
-    printf("  PASS test_no_cwd_path_blocked\n");
 }
 
-/* Key/DB masking moved out of this file. The comment that used to live here
- * ("the broker always sets db_path=NULL, so the mask is unavailable") described
- * a real bug, since fixed: db_path is now a required parameter of
- * run_tool_req_init() and rides the wire on every tier. Coverage — key and DB,
- * shell and file tiers, each with a positive control — is
- * test/test_sandbox_key_mask.c. */
+/* Key/DB masking is covered in test_sandbox_key_mask.c. */
 /* sandbox=0 (host mode) — namespace NOT applied, child runs unsandboxed */
 static void test_sandbox_none_skips_namespace(void) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
@@ -241,24 +208,25 @@ static void test_sandbox_none_skips_namespace(void) {
     char rm[128];
     snprintf(rm, sizeof(rm), "rm -f /tmp/cclaw_sbtest_%d", getpid());
     system(rm);
-    printf("  PASS test_sandbox_none_skips_namespace\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_shell_namespace:\n");
     setup_workspace();
-    test_namespace_active();
-    test_write_inside_workspace();
-    test_write_system_dir_blocked();
-    test_read_system_files();
-    test_network_isolated();
-    test_agent_db_inaccessible();
-    test_etc_shadow_inaccessible();
-    test_cwd_path_rw();
-    test_no_cwd_path_blocked();
-    test_sandbox_none_skips_namespace();
+    if (!run_tool_ns_available(workspace)) {
+        printf("  SKIP (namespaces unavailable on this system)\n");
+    } else {
+        RUN(test_write_inside_workspace);
+        RUN(test_write_system_dir_blocked);
+        RUN(test_read_system_files);
+        RUN(test_network_isolated);
+        RUN(test_agent_db_inaccessible);
+        RUN(test_etc_shadow_inaccessible);
+        RUN(test_cwd_path_rw);
+        RUN(test_no_cwd_path_blocked);
+    }
+    RUN(test_sandbox_none_skips_namespace);
     cleanup_workspace();
-    printf("All namespace sandbox tests passed.\n");
     return 0;
 }

@@ -93,15 +93,7 @@ static int run_call_as(const char *agent, int64_t sid, const char *tool,
     return rc;
 }
 
-static int approvals_count(void) {
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(g_db,
-        "SELECT COUNT(*) FROM approvals", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    int n = sqlite3_column_int(s, 0);
-    sqlite3_finalize(s);
-    return n;
-}
+#define approvals_count() test_qi(g_db, "SELECT COUNT(*) FROM approvals")
 
 /* Using a secret is a grant (v60): before the agent holds a 'secret' grant,
  * naming the secret is refused inline — before any binding check, before
@@ -131,7 +123,6 @@ static void test_ungranted_secret_refused(void) {
     assert(rc == 1 && r && strstr(r, "names no known secret"));
     free(r);
     assert(approvals_count() == 0);
-    printf("  PASS test_ungranted_secret_refused\n");
 }
 
 /* Unbound secret, static url: inline error names secret + url host and the
@@ -148,7 +139,6 @@ static void test_unbound_denies_inline(void) {
     assert(strstr(r, "api.x.test"));       /* web tier: the host is known */
     assert(approvals_count() == 0);        /* the park class is gone */
     free(r);
-    printf("  PASS test_unbound_denies_inline\n");
 }
 
 /* Bound elsewhere, url host uncovered: the error names the mismatch pair. */
@@ -162,7 +152,6 @@ static void test_uncovered_host_denies(void) {
     assert(r && strstr(r, "ALPACA_KEY is not bound to api.x.test"));
     assert(approvals_count() == 0);
     free(r);
-    printf("  PASS test_uncovered_host_denies\n");
 }
 
 /* Positive control: bound + covered passes the gate — the call is dispatched
@@ -192,7 +181,6 @@ static void test_bound_covered_passes(void) {
         if (done) break;
         usleep(100 * 1000);
     }
-    printf("  PASS test_bound_covered_passes\n");
 }
 
 /* Runtime discovery (shell tier, no static target): the call runs narrowed,
@@ -241,7 +229,6 @@ static void test_runtime_deny_note(void) {
     assert(strstr(r, "secret_bindings"));
     assert(!strstr(r, "grants.hosts"));
     free(r);
-    printf("  PASS test_runtime_deny_note\n");
 }
 
 /* Sensitivity is the orthogonal axis: a bound, covered call to a
@@ -266,7 +253,6 @@ static void test_sensitivity_still_parks(void) {
     assert(sqlite3_column_int(s, 1) == 1);
     assert(sqlite3_column_int(s, 2) == 0);
     sqlite3_finalize(s);
-    printf("  PASS test_sensitivity_still_parks\n");
 }
 
 /* The shared tool setup is initialised for one agent (the daemon's default),
@@ -287,7 +273,6 @@ static void test_request_config_answers_for_the_caller(void) {
     assert(db_scalar_i64(g_db, "SELECT COUNT(*) FROM approvals WHERE session_id=?1"
                          " AND tool_name='request_config' AND state='pending'",
                          eve_sid, -1) == 1);
-    printf("  PASS test_request_config_answers_for_the_caller\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -295,9 +280,7 @@ int main(int argc, char *argv[]) {
     if (argc >= 2 && strcmp(argv[1], "--run-tool") == 0)
         return run_tool_main();
     (void)argv;
-    setvbuf(stdout, NULL, _IOLBF, 0);
     TEST_INIT();
-    printf("test_secret_gate:\n");
 
     test_db_clean(DB_PATH);
     char ws[128];
@@ -327,18 +310,18 @@ int main(int argc, char *argv[]) {
     assert(agent_setup_init(&setup, g_db, g_sid, cfg, "bot") == 0);
     proc_set_tool_setup(&setup);
 
-    test_ungranted_secret_refused();
+    RUN(test_ungranted_secret_refused);
     /* From here on the agent may use both: the binding rule is what's left. */
     assert(agent_config_grant(g_db, "bot", "secret", "ALPACA_KEY", 0,
                               GRANT_ORIGIN("operator", 0)) == 0);
     assert(agent_config_grant(g_db, "bot", "secret", "GH_TOKEN", 0,
                               GRANT_ORIGIN("operator", 0)) == 0);
-    test_unbound_denies_inline();
-    test_uncovered_host_denies();
-    test_bound_covered_passes();
-    test_runtime_deny_note();
-    test_sensitivity_still_parks();
-    test_request_config_answers_for_the_caller();
+    RUN(test_unbound_denies_inline);
+    RUN(test_uncovered_host_denies);
+    RUN(test_bound_covered_passes);
+    RUN(test_runtime_deny_note);
+    RUN(test_sensitivity_still_parks);
+    RUN(test_request_config_answers_for_the_caller);
 
     agent_setup_destroy(&setup);
     config_free(cfg);
@@ -347,6 +330,5 @@ int main(int argc, char *argv[]) {
     char cmd[160];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", ws);
     (void)!system(cmd);
-    printf("All secret_gate tests passed.\n");
     return 0;
 }

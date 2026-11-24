@@ -11,7 +11,6 @@
 static char workspace[256];
 static char rw_dir[256];
 static char ro_dir[256];
-static int ns_available_flag = 1;
 
 static void setup(void) {
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_mnt_test_%d_ws", getpid());
@@ -38,17 +37,8 @@ static void cleanup(void) {
     system(cmd);
 }
 
-static void test_ns_available(void) {
-    ns_available_flag = run_tool_ns_available(workspace);
-    if (!ns_available_flag)
-        printf("  SKIP (namespaces unavailable)\n");
-    else
-        printf("  PASS test_ns_available\n");
-}
-
 /* Test: write to rw extra-mount succeeds */
 static void test_write_rw_mount(void) {
-    if (!ns_available_flag) { printf("  SKIP test_write_rw_mount\n"); return; }
     const char *wp[] = { rw_dir };
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
@@ -65,12 +55,10 @@ static void test_write_rw_mount(void) {
     assert(strstr(res, "hello") != NULL);
     assert(strstr(res, "[exit 0]") != NULL);
     free(res);
-    printf("  PASS test_write_rw_mount\n");
 }
 
 /* Test: read from ro extra-mount succeeds */
 static void test_read_ro_mount(void) {
-    if (!ns_available_flag) { printf("  SKIP test_read_ro_mount\n"); return; }
     const char *rp[] = { ro_dir };
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "cat %s/readable.txt", ro_dir);
@@ -85,12 +73,10 @@ static void test_read_ro_mount(void) {
     assert(res != NULL);
     assert(strstr(res, "readonly_content") != NULL);
     free(res);
-    printf("  PASS test_read_ro_mount\n");
 }
 
 /* Test: write to ro extra-mount fails */
 static void test_write_ro_mount_fails(void) {
-    if (!ns_available_flag) { printf("  SKIP test_write_ro_mount_fails\n"); return; }
     const char *rp[] = { ro_dir };
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
@@ -107,7 +93,6 @@ static void test_write_ro_mount_fails(void) {
     /* Write should fail — exit code non-zero or "Read-only" error */
     assert(strstr(res, "exit=0") == NULL || strstr(res, "Read-only") != NULL);
     free(res);
-    printf("  PASS test_write_ro_mount_fails\n");
 }
 
 /* A grant naming a single file mounts that file and nothing else. This is what
@@ -116,7 +101,6 @@ static void test_write_ro_mount_fails(void) {
  * refused non-directories), so an agent needing one file had to be handed its
  * whole parent. */
 static void test_file_grant_mounts_only_that_file(void) {
-    if (!ns_available_flag) { printf("  SKIP test_file_grant_mounts_only_that_file\n"); return; }
     char granted[512];
     snprintf(granted, sizeof(granted), "%s/readable.txt", ro_dir);
     const char *rp[] = { granted };
@@ -139,13 +123,11 @@ static void test_file_grant_mounts_only_that_file(void) {
      * a file bind, not just a directory one. */
     assert(strstr(res, "WROTE_RO") == NULL);
     free(res);
-    printf("  PASS test_file_grant_mounts_only_that_file\n");
 }
 
 /* A write grant on a single file is writable, and the write lands on the host
  * (the bind is the real file, not a copy). */
 static void test_file_write_grant_persists(void) {
-    if (!ns_available_flag) { printf("  SKIP test_file_write_grant_persists\n"); return; }
     char target[512];
     snprintf(target, sizeof(target), "%s/writable.txt", rw_dir);
     FILE *f = fopen(target, "w");
@@ -173,7 +155,6 @@ static void test_file_write_grant_persists(void) {
     fclose(f);
     buf[n] = '\0';
     assert(strstr(buf, "after") != NULL);
-    printf("  PASS test_file_write_grant_persists\n");
 }
 
 /* Read the first bytes of a host file into buf (NUL-terminated). */
@@ -196,7 +177,6 @@ static void read_host_file(const char *path, char *buf, size_t sz) {
  * enclosing read-only grant removed, mounts and writes through to the host —
  * so a vacuous "nothing worked" run cannot pass this test. */
 static void test_nested_file_grant_is_loud(void) {
-    if (!ns_available_flag) { printf("  SKIP test_nested_file_grant_is_loud\n"); return; }
     char nested[512];
     snprintf(nested, sizeof(nested), "%s/nested.txt", ro_dir);
 
@@ -255,7 +235,6 @@ static void test_nested_file_grant_is_loud(void) {
 
     read_host_file(nested, buf, sizeof(buf));
     assert(strstr(buf, "after") != NULL);
-    printf("  PASS test_nested_file_grant_is_loud\n");
 }
 
 /* HOME must be the path the workspace was actually mounted at. The bind mount
@@ -267,7 +246,6 @@ static void test_nested_file_grant_is_loud(void) {
  * Positive control in the same function: the same workspace named directly
  * (no symlink) still yields a HOME that exists and is the workspace. */
 static void test_home_follows_resolved_workspace(void) {
-    if (!ns_available_flag) { printf("  SKIP test_home_follows_resolved_workspace\n"); return; }
     char real_ws[256], link_ws[256], resolved[PATH_MAX], expect[PATH_MAX + 16];
     snprintf(real_ws, sizeof(real_ws), "/tmp/cclaw_mnt_test_%d_hreal", getpid());
     snprintf(link_ws, sizeof(link_ws), "/tmp/cclaw_mnt_test_%d_hlink", getpid());
@@ -301,22 +279,23 @@ static void test_home_follows_resolved_workspace(void) {
     assert(strstr(res, "HOME_IS_DIR") != NULL);
     assert(strstr(res, "HOME_MISSING") == NULL);
     free(res);
-    printf("  PASS test_home_follows_resolved_workspace\n");
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_sandbox_mounts\n");
+    printf("test_sandbox_mounts:\n");
     setup();
-    test_ns_available();
-    test_write_rw_mount();
-    test_read_ro_mount();
-    test_write_ro_mount_fails();
-    test_file_grant_mounts_only_that_file();
-    test_file_write_grant_persists();
-    test_nested_file_grant_is_loud();
-    test_home_follows_resolved_workspace();
+    if (!run_tool_ns_available(workspace)) {
+        printf("  SKIP (namespaces unavailable)\n");
+    } else {
+        RUN(test_write_rw_mount);
+        RUN(test_read_ro_mount);
+        RUN(test_write_ro_mount_fails);
+        RUN(test_file_grant_mounts_only_that_file);
+        RUN(test_file_write_grant_persists);
+        RUN(test_nested_file_grant_is_loud);
+        RUN(test_home_follows_resolved_workspace);
+    }
     cleanup();
-    printf("All sandbox_mounts tests passed\n");
     return 0;
 }

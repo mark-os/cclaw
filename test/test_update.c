@@ -7,6 +7,7 @@
  * the one that genuinely fits. */
 
 #define _GNU_SOURCE
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,8 +18,6 @@
 #include "config_registry.h"
 #include "cclaw.h"
 #include "test_util.h"
-
-static int tests_run = 0, tests_passed = 0;
 
 /* ── rollback apply: the file swap, on a scratch directory ─────────
  * No daemon and no real database: the applier only renames files, so fake
@@ -48,7 +47,7 @@ static void write_marker(const char *db, const char *failed, const char *bin) {
 
 static void test_rollback_apply(void) {
     char dir[] = "/tmp/cclaw_rollback_XXXXXX";
-    if (!mkdtemp(dir)) { printf("  rollback: mkdtemp failed\n"); return; }
+    assert(mkdtemp(dir));
     char db[300], wal[320], snap[320], bin[300], prev[320], bad[320], failed[320],
          marker[320], msg[1024];
     snprintf(db, sizeof(db), "%s/cclaw.db", dir);
@@ -61,54 +60,40 @@ static void test_rollback_apply(void) {
     snprintf(marker, sizeof(marker), "%s.rollback", db);
 
     /* No marker: a no-op that touches nothing. */
-    tests_run++; printf("  rollback_no_marker_is_noop... ");
     put(db, "new-db");
-    if (update_rollback_apply(db, msg, sizeof(msg)) != 0 || !has(db, "new-db"))
-        printf("FAIL\n");
-    else { tests_passed++; printf("PASS\n"); }
+    assert(update_rollback_apply(db, msg, sizeof(msg)) == 0 && has(db, "new-db"));
 
     /* Marker but no snapshot: refused, marker consumed, nothing moved. */
-    tests_run++; printf("  rollback_missing_snapshot_refuses... ");
     put(bin, "new-bin"); chmod(bin, 0755);
     put(prev, "old-bin"); chmod(prev, 0755);
     write_marker(db, failed, bin);
-    int rc = update_rollback_apply(db, msg, sizeof(msg));
-    if (rc != -1 || access(marker, F_OK) == 0 || !has(db, "new-db") ||
-        !has(bin, "new-bin") || access(failed, F_OK) == 0)
-        printf("FAIL: rc=%d %s\n", rc, msg);
-    else { tests_passed++; printf("PASS\n"); }
+    assert(update_rollback_apply(db, msg, sizeof(msg)) == -1);
+    assert(access(marker, F_OK) != 0 && has(db, "new-db") && has(bin, "new-bin") &&
+           access(failed, F_OK) != 0);
 
     /* Marker but no previous build: same. */
-    tests_run++; printf("  rollback_missing_prev_refuses... ");
     put(snap, "snap-db");
     unlink(prev);
     write_marker(db, failed, bin);
-    rc = update_rollback_apply(db, msg, sizeof(msg));
-    if (rc != -1 || access(marker, F_OK) == 0 || !has(db, "new-db") ||
-        !has(snap, "snap-db") || access(failed, F_OK) == 0)
-        printf("FAIL: rc=%d %s\n", rc, msg);
-    else { tests_passed++; printf("PASS\n"); }
+    assert(update_rollback_apply(db, msg, sizeof(msg)) == -1);
+    assert(access(marker, F_OK) != 0 && has(db, "new-db") && has(snap, "snap-db") &&
+           access(failed, F_OK) != 0);
 
     /* Everything in place: the DB, its WAL, and the binary all swap; the
      * replaced ones are kept; the marker and snapshot are consumed. */
-    tests_run++; printf("  rollback_applies... ");
     put(prev, "old-bin"); chmod(prev, 0755);
     put(wal, "new-wal");
     write_marker(db, failed, bin);
-    rc = update_rollback_apply(db, msg, sizeof(msg));
+    int rc = update_rollback_apply(db, msg, sizeof(msg));
+    if (rc != 1) fprintf(stderr, "rollback: rc=%d %s\n", rc, msg);
+    assert(rc == 1);
     char failed_wal[340];
     snprintf(failed_wal, sizeof(failed_wal), "%s-wal", failed);
-    if (rc != 1) printf("FAIL: rc=%d %s\n", rc, msg);
-    else if (!has(db, "snap-db")) printf("FAIL: db not restored\n");
-    else if (!has(failed, "new-db")) printf("FAIL: replaced db not kept\n");
-    else if (!has(failed_wal, "new-wal") || access(wal, F_OK) == 0)
-        printf("FAIL: wal did not travel with its db\n");
-    else if (!has(bin, "old-bin")) printf("FAIL: binary not restored\n");
-    else if (!has(bad, "new-bin")) printf("FAIL: replaced binary not kept\n");
-    else if (access(marker, F_OK) == 0 || access(snap, F_OK) == 0 ||
-             access(prev, F_OK) == 0)
-        printf("FAIL: marker/snapshot/prev not consumed\n");
-    else { tests_passed++; printf("PASS\n"); }
+    assert(has(db, "snap-db"));                                   /* db restored */
+    assert(has(failed, "new-db"));                                /* replaced db kept */
+    assert(has(failed_wal, "new-wal") && access(wal, F_OK) != 0); /* wal travels with its db */
+    assert(has(bin, "old-bin") && has(bad, "new-bin"));           /* binary swapped, kept */
+    assert(access(marker, F_OK) != 0 && access(snap, F_OK) != 0 && access(prev, F_OK) != 0);
 
     unlink(db); unlink(failed); unlink(failed_wal); unlink(bin); unlink(bad);
     unlink(snap); unlink(prev); unlink(wal); unlink(marker);
@@ -129,47 +114,13 @@ static void test_checksum(void) {
     char why[256] = "";
     const unsigned char *hello = (const unsigned char *)"hello";
 
-    tests_run++; printf("  checksum_matches... ");
-    if (update_checksum_ok(list, "cclaw-linux-x64", hello, 5, why, sizeof(why)))
-        { tests_passed++; printf("PASS\n"); }
-    else printf("FAIL: %s\n", why);
-
-    tests_run++; printf("  checksum_mismatch_refuses... ");
-    if (!update_checksum_ok(list, "cclaw-linux-armv5te", hello, 5, why, sizeof(why)) &&
-        strstr(why, "mismatch"))
-        { tests_passed++; printf("PASS\n"); }
-    else printf("FAIL: %s\n", why);
-
-    tests_run++; printf("  checksum_unlisted_refuses... ");
-    if (!update_checksum_ok(list, "cclaw-linux-x86", hello, 5, why, sizeof(why)) &&
-        strstr(why, "not listed"))
-        { tests_passed++; printf("PASS\n"); }
-    else printf("FAIL: %s\n", why);
-
+    assert(update_checksum_ok(list, "cclaw-linux-x64", hello, 5, why, sizeof(why)));
+    assert(!update_checksum_ok(list, "cclaw-linux-armv5te", hello, 5, why, sizeof(why)) &&
+           strstr(why, "mismatch"));
+    assert(!update_checksum_ok(list, "cclaw-linux-x86", hello, 5, why, sizeof(why)) &&
+           strstr(why, "not listed"));
     /* A name that is a suffix of a listed one must not match it. */
-    tests_run++; printf("  checksum_suffix_is_not_a_match... ");
-    if (!update_checksum_ok(list, "linux-x64", hello, 5, why, sizeof(why)))
-        { tests_passed++; printf("PASS\n"); }
-    else printf("FAIL\n");
-}
-
-static void expect(const char *label, const char *range, int db_version,
-                   int want_ok, const char *want_reason_substr) {
-    tests_run++;
-    printf("  %s... ", label);
-    char why[256] = "";
-    int ok = update_schema_ok(range, db_version, why, sizeof(why));
-    if (ok != want_ok) {
-        printf("FAIL: expected %s, got %s (%s)\n",
-               want_ok ? "accept" : "refuse", ok ? "accept" : "refuse", why);
-        return;
-    }
-    if (!want_ok && want_reason_substr && !strstr(why, want_reason_substr)) {
-        printf("FAIL: reason %s did not mention %s\n", why, want_reason_substr);
-        return;
-    }
-    tests_passed++;
-    printf("PASS\n");
+    assert(!update_checksum_ok(list, "linux-x64", hello, 5, why, sizeof(why)));
 }
 
 /* The crash-loop marker is JSON read back with json_extract; a tag that needs
@@ -177,17 +128,10 @@ static void expect(const char *label, const char *range, int db_version,
  * a marker the guard cannot read — an unreadable marker restarts the count on
  * every start, so the guard never trips. */
 static void test_verify_marker_escapes_tag(void) {
-    tests_run++;
     sqlite3 *db = test_db_open(":memory:");
     const char *tag = "pre-7 \"quoted\" back\\slash";
     update_verify_arm(db, tag);
-    if (db_scalar_i64(db,
-            "SELECT json_valid(value) FROM config WHERE key='update.verify'",
-            0, -1) != 1) {
-        printf("  FAIL verify_marker_escapes_tag: armed marker is not JSON\n");
-        sqlite3_close(db);
-        return;
-    }
+    assert(test_qi(db, "SELECT json_valid(value) FROM config WHERE key='update.verify'") == 1);
     /* Each start rewrites the marker; the count must survive the rewrite. */
     update_verify_startup(db);
     update_verify_startup(db);
@@ -202,8 +146,7 @@ static void test_verify_marker_escapes_tag(void) {
     }
     sqlite3_finalize(st);
     sqlite3_close(db);
-    if (ok) { tests_passed++; printf("  PASS verify_marker_escapes_tag\n"); }
-    else printf("  FAIL verify_marker_escapes_tag: count or tag lost on restart\n");
+    assert(ok);   /* count and tag survive the restart */
 }
 
 /* The guard's two forward events. "Served" is sticky and asks the agent, once,
@@ -218,7 +161,6 @@ static void test_verify_events(void) {
     free(def);
     update_verify_arm(db, "v9");
 
-    tests_run++; printf("  verify_serving_is_sticky_and_says_so_once... ");
     update_verify_serving(db);
     update_verify_serving(db);
     update_verify_startup(db);   /* a restart must not lose the flag */
@@ -226,20 +168,16 @@ static void test_verify_events(void) {
         "SELECT json_extract(value,'$.served') FROM config WHERE key='update.verify'", 0, -1);
     int notes = (int)db_scalar_i64(db,
         "SELECT COUNT(*) FROM inbox WHERE source='update' AND payload LIKE '%v9%'", 0, -1);
-    if (served != 1 || notes != 1) printf("FAIL: served=%d notes=%d\n", served, notes);
-    else { tests_passed++; printf("PASS\n"); }
+    assert(served == 1 && notes == 1);
 
-    tests_run++; printf("  verify_failed_turn_is_not_verified... ");
     Message bad = { .role = ROLE_ASSISTANT, .content = "provider error",
                     .stop_reason = STOP_REASON_ERROR };
     entry_append_with_iteration(db, sid, &bad, 0);
     update_verify_turn_done(db, sid);
     int armed = (int)db_scalar_i64(db,
         "SELECT value<>'' FROM config WHERE key='update.verify'", 0, -1);
-    if (armed != 1) printf("FAIL: marker cleared by a failed turn\n");
-    else { tests_passed++; printf("PASS\n"); }
+    assert(armed == 1);   /* a failed turn does not clear the marker */
 
-    tests_run++; printf("  verify_first_good_turn_verifies... ");
     Message good = { .role = ROLE_ASSISTANT, .content = "updated to v9",
                      .stop_reason = STOP_REASON_STOP };
     entry_append_with_iteration(db, sid, &good, 0);
@@ -249,8 +187,7 @@ static void test_verify_events(void) {
     int verified = (int)db_scalar_i64(db,
         "SELECT json_extract(value,'$.outcome')='verified' AND"
         " json_extract(value,'$.tag')='v9' FROM config WHERE key='update.last'", 0, -1);
-    if (armed != 0 || verified != 1) printf("FAIL: armed=%d verified=%d\n", armed, verified);
-    else { tests_passed++; printf("PASS\n"); }
+    assert(armed == 0 && verified == 1);
     sqlite3_close(db);
 }
 
@@ -284,7 +221,7 @@ static void stage_db(const char *path, const char *which, int armed) {
 
 static void test_verify_rollback_records_outcome(void) {
     char dir[] = "/tmp/cclaw_vrollback_XXXXXX";
-    if (!mkdtemp(dir)) { printf("  verify_rollback: mkdtemp failed\n"); return; }
+    assert(mkdtemp(dir));
     char db[300], snap[320], bin[300], prev[320], failed[320], got[256], cmd[400];
     snprintf(db, sizeof(db), "%s/cclaw.db", dir);
     snprintf(snap, sizeof(snap), "%s/cclaw.db.preupdate", dir);
@@ -297,24 +234,20 @@ static void test_verify_rollback_records_outcome(void) {
 
     /* Nothing to go back to: nothing moves, and the live database says so and
      * stops counting, rather than retrying the same rollback at every start. */
-    tests_run++; printf("  verify_rollback_failure_is_recorded_in_place... ");
     write_marker(db, failed, bin);
     update_verify_rollback(db);
     outcome_of(db, got, sizeof(got));
-    if (strcmp(got, "live:crash_loop_no_revert:") != 0 || !has(bin, "new-bin"))
-        printf("FAIL: %s\n", got);
-    else { tests_passed++; printf("PASS\n"); }
+    if (strcmp(got, "live:crash_loop_no_revert:") != 0) fprintf(stderr, "got %s\n", got);
+    assert(strcmp(got, "live:crash_loop_no_revert:") == 0 && has(bin, "new-bin"));
 
     /* Snapshot present: it becomes the database and carries the outcome. */
-    tests_run++; printf("  verify_rollback_records_in_restored_db... ");
     stage_db(snap, "snap", 0);
     write_marker(db, failed, bin);
     update_verify_rollback(db);
     outcome_of(db, got, sizeof(got));
-    if (strcmp(got, "snap:crash_loop_rolled_back:") != 0 ||
-        !has(bin, "old-bin") || access(failed, F_OK) != 0)
-        printf("FAIL: %s\n", got);
-    else { tests_passed++; printf("PASS\n"); }
+    if (strcmp(got, "snap:crash_loop_rolled_back:") != 0) fprintf(stderr, "got %s\n", got);
+    assert(strcmp(got, "snap:crash_loop_rolled_back:") == 0 && has(bin, "old-bin") &&
+           access(failed, F_OK) == 0);
 
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
     if (system(cmd) != 0) printf("  (could not remove %s)\n", dir);
@@ -323,7 +256,6 @@ static void test_verify_rollback_records_outcome(void) {
 /* Writing the downloaded binary: a failure that only shows at fclose (the
  * flush hitting a full disk) is still a failure, reported once. */
 static void test_write_file_reports_flush_failure(void) {
-    tests_run++;
     int full = update_write_file("/dev/full", "x", 1);
     char path[] = "/tmp/cclaw_test_update_wf_XXXXXX";
     int fd = mkstemp(path);
@@ -331,62 +263,60 @@ static void test_write_file_reports_flush_failure(void) {
     int good = update_write_file(path, "binary", 6);
     int roundtrip = has(path, "binary");
     unlink(path);
-    if (full != 0 && good == 0 && roundtrip) {
-        tests_passed++; printf("  PASS write_file_reports_flush_failure\n");
-    } else printf("  FAIL write_file_reports_flush_failure (full=%d good=%d)\n", full, good);
+    assert(full != 0 && good == 0 && roundtrip);
+}
+
+/* The handshake: update_schema_ok(range the candidate prints, live DB
+ * version). Every row but the fitting ones is a refusal, with a reason. */
+static void test_schema_handshake(void) {
+    char ours[64];
+    snprintf(ours, sizeof(ours), "min=%d current=%d", CCLAW_SCHEMA_MIN, CCLAW_SCHEMA_VERSION);
+    const struct { const char *range; int db; int ok; const char *why; } cases[] = {
+        /* The ordinary case: our own range, our own database. */
+        { ours, CCLAW_SCHEMA_VERSION, 1, NULL },
+        /* A newer build that still patches from our floor is the whole point. */
+        { "min=40 current=99", 51, 1, NULL },
+        /* The database predates the candidate's floor, so the candidate would
+         * refuse to open it: the v30-vs-v40 wall the Pogoplug was behind. */
+        { "min=40 current=51", 30, 0, "patches forward from" },
+        /* Downgrade: the candidate does not know this database's shape. */
+        { "min=40 current=45", 51, 0, "downgrade" },
+        /* A binary that cannot say what it accepts, which also covers every
+         * build older than --schema-range itself. */
+        { NULL, 51, 0, "does not answer" },
+        { "", 51, 0, "does not answer" },
+        { "cclaw 1307fc3 (2026-08-28)", 51, 0, "unparseable" },
+        { "min=40", 51, 0, "unparseable" },
+        { "min=99 current=40", 51, 0, "unparseable" },
+        { "min=0 current=0", 51, 0, "unparseable" },
+        /* Boundary: a database sitting exactly on either end is fine. */
+        { "min=40 current=51", 40, 1, NULL },
+        { "min=40 current=51", 51, 1, NULL },
+        /* Loader noise before the marker must not break the handshake: a
+         * custom libcurl prints "no version information available" to stderr
+         * on every exec, and the capture merges stderr (found by the CI
+         * websocket target). */
+        { "/opt/lib/libcurl.so.4: no version information available min=40 current=51", 51, 1, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char why[256] = "";
+        int ok = update_schema_ok(cases[i].range, cases[i].db, why, sizeof(why));
+        int good = ok == cases[i].ok && (ok || !cases[i].why || strstr(why, cases[i].why));
+        if (!good) fprintf(stderr, "row %zu (%s, db %d): ok=%d why=%s\n", i,
+                           cases[i].range ? cases[i].range : "NULL", cases[i].db, ok, why);
+        assert(good);
+    }
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_update:\n");
-
-    /* The ordinary case: our own range, our own database. */
-    char ours[64];
-    snprintf(ours, sizeof(ours), "min=%d current=%d",
-             CCLAW_SCHEMA_MIN, CCLAW_SCHEMA_VERSION);
-    expect("same_build_accepts", ours, CCLAW_SCHEMA_VERSION, 1, NULL);
-
-    /* A newer build that still patches from our floor is the whole point. */
-    expect("newer_build_accepts", "min=40 current=99", 51, 1, NULL);
-
-    /* The case this feature exists for: the database predates the candidate's
-     * floor, so the candidate would refuse to open it. Exactly the v30-vs-v40
-     * wall the Pogoplug was behind. */
-    expect("db_below_candidate_floor_refuses", "min=40 current=51", 30, 0,
-           "patches forward from");
-
-    /* Downgrade: the candidate does not know this database's shape. */
-    expect("db_newer_than_candidate_refuses", "min=40 current=45", 51, 0,
-           "downgrade");
-
-    /* A binary that cannot say what it accepts is not one we can reason about,
-     * which also covers every build older than --schema-range itself. */
-    expect("no_answer_refuses", NULL, 51, 0, "does not answer");
-    expect("empty_answer_refuses", "", 51, 0, "does not answer");
-    expect("garbage_refuses", "cclaw 1307fc3 (2026-08-28)", 51, 0, "unparseable");
-    expect("partial_refuses", "min=40", 51, 0, "unparseable");
-    expect("nonsense_range_refuses", "min=99 current=40", 51, 0, "unparseable");
-    expect("zero_min_refuses", "min=0 current=0", 51, 0, "unparseable");
-
-    /* Boundary: a database sitting exactly on either end is fine. */
-    expect("db_at_floor_accepts", "min=40 current=51", 40, 1, NULL);
-    expect("db_at_ceiling_accepts", "min=40 current=51", 51, 1, NULL);
-
-    /* Loader noise before the marker must not break the handshake — a custom
-     * libcurl prints "no version information available" to stderr on every
-     * exec, and the capture merges stderr (the CI websocket target found
-     * this; a real deployment with a hand-built library would hit it too). */
-    expect("loader_noise_prefix_accepts",
-           "/opt/lib/libcurl.so.4: no version information available "
-           "min=40 current=51", 51, 1, NULL);
-
-    test_rollback_apply();
-    test_checksum();
-    test_verify_marker_escapes_tag();
-    test_verify_events();
-    test_verify_rollback_records_outcome();
-    test_write_file_reports_flush_failure();
-
-    printf("%d/%d passed\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    RUN(test_schema_handshake);
+    RUN(test_rollback_apply);
+    RUN(test_checksum);
+    RUN(test_verify_marker_escapes_tag);
+    RUN(test_verify_events);
+    RUN(test_verify_rollback_records_outcome);
+    RUN(test_write_file_reports_flush_failure);
+    printf("test_update: all tests passed\n");
+    return 0;
 }

@@ -8,7 +8,6 @@
 #include "secret_scan_rules.h"
 #include "test_util.h"
 
-#define PASS(name) printf("  PASS: %s\n", name)
 
 /* Generate a high-entropy tail of the correct charset into buf[0..len-1].
  * Uses a deterministic pattern that exceeds any entropy threshold ≤ 4.5.
@@ -132,7 +131,6 @@ static int test_span(int rule_idx) {
 
 int main(void) {
     TEST_INIT();
-    printf("test_secret_scan_coverage:\n");
 
     int passed = 0, failed = 0, skipped = 0;
 
@@ -159,7 +157,6 @@ int main(void) {
         }
 
         if (ok) {
-            printf("  PASS: rule %d %s (%s)\n", i, r->id, r->keyword);
             passed++;
         } else {
             printf("  FAIL: rule %d %s (%s)\n", i, r->id, r->keyword);
@@ -172,6 +169,5 @@ int main(void) {
     if (failed) printf(", %d FAILED", failed);
     printf("\n");
     assert(failed == 0);
-    printf("  ALL PASSED\n");
     return 0;
 }

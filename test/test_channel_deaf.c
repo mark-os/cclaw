@@ -159,7 +159,6 @@ static void test_threshold_resolution(void) {
     unsetenv("CCLAW_CHANNEL_DEAF_TIMEOUT");
 
     db_close(db);
-    printf("  PASS test_threshold_resolution\n");
 }
 
 /* ── Enrolment: only received traffic creates the mark ── */
@@ -185,7 +184,6 @@ static void test_enrolment(void) {
     assert(channel_activity_age(db, CH) <= 2);
 
     db_close(db);
-    printf("  PASS test_enrolment\n");
 }
 
 /* ── The failure this exists for ── */
@@ -223,7 +221,6 @@ static void test_wedged_runner_restarts(void) {
 
     channel_shutdown_all();
     db_close(db);
-    printf("  PASS test_wedged_runner_restarts\n");
 }
 
 /* ── Crash supervision ──
@@ -312,7 +309,6 @@ static void test_crash_loop_reverts_then_keeps_trying(void) {
 
     channel_shutdown_all();
     db_close(db);
-    printf("  PASS test_crash_loop_reverts_then_keeps_trying\n");
 }
 
 /* The predecessor is a revert target only while the new code proves itself. */
@@ -345,7 +341,6 @@ static void test_healthy_swap_is_accepted(void) {
 
     channel_shutdown_all();
     db_close(db);
-    printf("  PASS test_healthy_swap_is_accepted\n");
 }
 
 /* ── A channel with no watched transport is never judged deaf ── */
@@ -362,7 +357,6 @@ static void test_unenrolled_never_bounced(void) {
 
     channel_shutdown_all();
     db_close(db);
-    printf("  PASS test_unenrolled_never_bounced\n");
 }
 
 /* ── deaf_timeout=0 is the off switch ── */
@@ -381,7 +375,6 @@ static void test_watchdog_disabled(void) {
 
     channel_shutdown_all();
     db_close(db);
-    printf("  PASS test_watchdog_disabled\n");
 }
 
 int main(int argc, char **argv) {
@@ -397,14 +390,13 @@ int main(int argc, char **argv) {
      * 20s wrapper, so a real hang still reports FAIL rather than TIMEOUT. */
     alarm(15);
     printf("test_channel_deaf:\n");
-    test_threshold_resolution();
-    test_enrolment();
-    test_wedged_runner_restarts();
-    test_crash_loop_reverts_then_keeps_trying();
-    test_healthy_swap_is_accepted();
-    test_unenrolled_never_bounced();
-    test_watchdog_disabled();
+    RUN(test_threshold_resolution);
+    RUN(test_enrolment);
+    RUN(test_wedged_runner_restarts);
+    RUN(test_crash_loop_reverts_then_keeps_trying);
+    RUN(test_healthy_swap_is_accepted);
+    RUN(test_unenrolled_never_bounced);
+    RUN(test_watchdog_disabled);
     clean_all();
-    printf("all channel deaf-watchdog tests passed\n");
     return 0;
 }

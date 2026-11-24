@@ -10,7 +10,6 @@
 #include <time.h>
 #include <unistd.h>
 
-/* For test_register only */
 #include "tool_shell.h"
 #include "test_util.h"
 
@@ -25,16 +24,23 @@ static void cleanup(void) {
     rmdir(workspace);
 }
 
-static void test_basic_command(void) {
-    ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.command = "echo hello";
-    r.workspace = workspace;
-    char *res = run_tool_shell(&r);
-    assert(res != NULL);
-    assert(strstr(res, "[exit 0]") != NULL);
-    assert(strstr(res, "hello") != NULL);
-    free(res);
-    printf("  PASS test_basic_command\n");
+static void test_command_results(void) {
+    static const struct { const char *cmd; const char *want1; const char *want2; } cases[] = {
+        { "echo hello",   "[exit 0]",  "hello" },
+        { "echo err >&2", "[exit 0]",  "err" },    /* stderr is captured */
+        { "exit 42",      "[exit 42]", NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        ShellToolReq r = SHELL_REQ_DEFAULTS;
+        r.command = cases[i].cmd;
+        r.workspace = workspace;
+        char *res = run_tool_shell(&r);
+        int ok = res && strstr(res, cases[i].want1) &&
+                 (!cases[i].want2 || strstr(res, cases[i].want2));
+        if (!ok) printf("    row %zu (%s) got: %s\n", i, cases[i].cmd, res ? res : "NULL");
+        assert(ok);
+        free(res);
+    }
 }
 
 static void test_default_shell_is_sh(void) {
@@ -52,7 +58,6 @@ static void test_default_shell_is_sh(void) {
     if (strstr(res, "[exit 99]")) { free(res); printf("  SKIP test_default_shell_is_sh (no /bin/bash)\n"); return; }
     assert(strstr(res, "[exit 0]") == NULL);
     free(res);
-    printf("  PASS test_default_shell_is_sh\n");
 }
 
 static void test_configurable_shell_path(void) {
@@ -66,42 +71,6 @@ static void test_configurable_shell_path(void) {
     assert(strstr(res, "[exit 0]") != NULL);
     assert(strstr(res, "yes") != NULL);
     free(res);
-    printf("  PASS test_configurable_shell_path\n");
-}
-
-static void test_stderr_captured(void) {
-    ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.command = "echo err >&2";
-    r.workspace = workspace;
-    char *res = run_tool_shell(&r);
-    assert(res != NULL);
-    assert(strstr(res, "[exit 0]") != NULL);
-    assert(strstr(res, "err") != NULL);
-    free(res);
-    printf("  PASS test_stderr_captured\n");
-}
-
-static void test_nonzero_exit(void) {
-    ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.command = "exit 42";
-    r.workspace = workspace;
-    char *res = run_tool_shell(&r);
-    assert(res != NULL);
-    assert(strstr(res, "[exit 42]") != NULL);
-    free(res);
-    printf("  PASS test_nonzero_exit\n");
-}
-
-static void test_timeout(void) {
-    ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.command = "sleep 10";
-    r.timeout = 1;
-    r.workspace = workspace;
-    char *res = run_tool_shell(&r);
-    assert(res != NULL);
-    assert(strstr(res, "[timeout after 1s") != NULL);
-    free(res);
-    printf("  PASS test_timeout\n");
 }
 
 static void test_timeout_kills_process_group(void) {
@@ -134,7 +103,6 @@ static void test_timeout_kills_process_group(void) {
         fclose(f);
     }
     unlink(pidfile);
-    printf("  PASS test_timeout_kills_process_group\n");
 }
 
 static void test_register(void) {
@@ -147,7 +115,6 @@ static void test_register(void) {
     assert(e->recipe.vehicle == EXEC_SANDBOX);
     assert(e->recipe.tier == SBX_SHELL);
     tools_free(&reg);
-    printf("  PASS test_register\n");
 }
 
 /* Verify env vars set in test process don't reach the sandboxed child */
@@ -184,7 +151,6 @@ static void test_env_hardened(void) {
     unsetenv("GEMINI_API_KEY");
     unsetenv("CCLAW_DB_PATH");
     unsetenv("CCLAW_WEB_PORT");
-    printf("  PASS test_env_hardened\n");
 }
 
 /* The child may well find a cclaw on PATH: /usr/local/bin is the documented
@@ -228,42 +194,26 @@ static void test_real_state_unreachable(void) {
     assert(strstr(res, "host_state_hidden") != NULL);
     assert(strstr(res, "db=unset") != NULL);
     free(res);
-    printf("  PASS test_real_state_unreachable\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_tool_shell:\n");
-
     setup();
 
-    /* Basic tests — sandbox=1 (default), need ns */
+    /* sandbox=1 is the default, so these need namespaces */
     if (!run_tool_ns_available(workspace)) {
-        printf("  SKIP test_basic_command (namespaces unavailable)\n");
-        printf("  SKIP test_stderr_captured (namespaces unavailable)\n");
-        printf("  SKIP test_nonzero_exit (namespaces unavailable)\n");
-        printf("  SKIP test_timeout (namespaces unavailable)\n");
-        printf("  SKIP test_timeout_kills_process_group (namespaces unavailable)\n");
-        printf("  SKIP test_default_shell_is_sh (namespaces unavailable)\n");
-        printf("  SKIP test_configurable_shell_path (namespaces unavailable)\n");
+        printf("  SKIP command tests (namespaces unavailable)\n");
     } else {
-        test_basic_command();
-        test_stderr_captured();
-        test_nonzero_exit();
-        test_timeout();
-        test_timeout_kills_process_group();
-        test_default_shell_is_sh();
-        test_configurable_shell_path();
+        RUN(test_command_results);
+        RUN(test_timeout_kills_process_group);
+        RUN(test_default_shell_is_sh);
+        RUN(test_configurable_shell_path);
     }
-
-    /* Registry test — no subprocess needed */
-    test_register();
-
-    /* Sandbox-specific tests (own ns detection inside) */
-    test_env_hardened();
-    test_real_state_unreachable();
+    RUN(test_register);
+    RUN(test_env_hardened);
+    RUN(test_real_state_unreachable);
 
     cleanup();
-    printf("All shell_exec tool tests passed.\n");
     return 0;
 }

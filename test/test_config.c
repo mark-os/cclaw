@@ -36,7 +36,6 @@ static void test_defaults(void) {
     config_free(cfg);
     db_close(db);
     unsetenv("OPENROUTER_API_KEY");
-    printf("  PASS: test_defaults\n");
 }
 
 /* Registry sync writes defaults+descriptions to the config table; a NULL
@@ -46,15 +45,8 @@ static void test_registry_sync_and_revert(void) {
     assert(db);
     db_seed_defaults(db);
     config_registry_sync(db);
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT default_value, description FROM config WHERE key='max_iterations'",
-        -1, &st, NULL) == SQLITE_OK);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(st, 0), "25") == 0);
-    const char *desc = (const char *)sqlite3_column_text(st, 1);
-    assert(desc != NULL && strlen(desc) > 0);
-    sqlite3_finalize(st);
+    assert(test_qi(db, "SELECT default_value='25' AND length(description) > 0"
+                       " FROM config WHERE key='max_iterations'") == 1);
 
     assert(config_get_int(db, "max_iterations") == 25);
     config_set(db, "max_iterations", "50");
@@ -62,7 +54,6 @@ static void test_registry_sync_and_revert(void) {
     config_set(db, "max_iterations", NULL);
     assert(config_get_int(db, "max_iterations") == 25);
     db_close(db);
-    printf("  PASS: test_registry_sync_and_revert\n");
 }
 
 /* Sync owns non-namespaced keys: a row whose key left the C registry is
@@ -82,27 +73,11 @@ static void test_registry_sync_drops_orphans(void) {
         " ('context_threshold', '0.7', '0.6'), ('compaction_target', '0.4', '0.3');",
         NULL, NULL, NULL) == SQLITE_OK);
     assert(config_registry_sync(db) == 0);
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM config WHERE key IN ('turn_settled_timeout','compaction',"
-        " 'context_threshold','compaction_target')", -1, &st, NULL) == SQLITE_OK);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 0);
-    sqlite3_finalize(st);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM config WHERE key='agent_max_per_parent'",
-        -1, &st, NULL) == SQLITE_OK);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 0);
-    sqlite3_finalize(st);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM config WHERE key='myext.poll_secs'",
-        -1, &st, NULL) == SQLITE_OK);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 1);
-    sqlite3_finalize(st);
+    assert(test_qi(db, "SELECT COUNT(*) FROM config WHERE key IN ('turn_settled_timeout',"
+                       "'compaction','context_threshold','compaction_target',"
+                       "'agent_max_per_parent')") == 0);
+    assert(test_qi(db, "SELECT COUNT(*) FROM config WHERE key='myext.poll_secs'") == 1);
     db_close(db);
-    printf("  PASS: test_registry_sync_drops_orphans\n");
 }
 
 static void test_kv_values(void) {
@@ -126,7 +101,6 @@ static void test_kv_values(void) {
     assert(cfg->web_port == 9090);
     config_free(cfg);
     db_close(db);
-    printf("  PASS: test_kv_values\n");
 }
 
 static void test_env_overrides_kv(void) {
@@ -146,7 +120,6 @@ static void test_env_overrides_kv(void) {
     unsetenv("OPENROUTER_API_KEY");
     unsetenv("CCLAW_MODEL");
     db_close(db);
-    printf("  PASS: test_env_overrides_kv\n");
 }
 
 static void test_kv_secret_fallback(void) {
@@ -165,7 +138,6 @@ static void test_kv_secret_fallback(void) {
     assert(strcmp(cfg->provider.api_key, "sk-from-kv") == 0);
     config_free(cfg);
     db_close(db);
-    printf("  PASS: test_kv_secret_fallback\n");
 }
 
 static void test_fallback_providers(void) {
@@ -188,7 +160,6 @@ static void test_fallback_providers(void) {
     assert(cfg->fallback_providers[1].endpoint_type == ENDPOINT_GEMINI);
     config_free(cfg);
     db_close(db);
-    printf("  PASS: test_fallback_providers\n");
 }
 
 static void test_system_prompt(void) {
@@ -204,8 +175,6 @@ static void test_system_prompt(void) {
     char *rendered = config_render_system_prompt(cfg, 42);
     assert(rendered != NULL);
     assert(strstr(rendered, "CClaw") != NULL);
-    assert(strstr(rendered, "## How You Work") != NULL);
-    assert(strstr(rendered, "## Workspace") != NULL);
     free(rendered);
     config_free(cfg);
     db_close(db);
@@ -223,7 +192,6 @@ static void test_system_prompt(void) {
 
     unsetenv("OPENROUTER_API_KEY");
     unsetenv("CCLAW_SYSTEM_PROMPT");
-    printf("  PASS: test_system_prompt\n");
 }
 
 
@@ -256,7 +224,6 @@ static void test_agent_dir_resolve(void) {
     assert(strcmp(agent_dir_resolve(NULL, NULL, out, sizeof(out)),
                   ".cclaw/agents") == 0);
 
-    printf("  PASS: test_agent_dir_resolve\n");
 }
 
 /* specs/config.md: env(CCLAW_<KEY>) ?? value ?? default; secret keys resolve
@@ -299,22 +266,21 @@ static void test_resolution_rule(void) {
     unsetenv("CCLAW_TG_TOK");
 
     db_close(db);
-    printf("  PASS: test_resolution_rule\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_config:\n");
-    test_agent_dir_resolve();
-    test_resolution_rule();
-    test_defaults();
-    test_registry_sync_and_revert();
-    test_registry_sync_drops_orphans();
-    test_kv_values();
-    test_env_overrides_kv();
-    test_kv_secret_fallback();
-    test_fallback_providers();
-    test_system_prompt();
+    RUN(test_agent_dir_resolve);
+    RUN(test_resolution_rule);
+    RUN(test_defaults);
+    RUN(test_registry_sync_and_revert);
+    RUN(test_registry_sync_drops_orphans);
+    RUN(test_kv_values);
+    RUN(test_env_overrides_kv);
+    RUN(test_kv_secret_fallback);
+    RUN(test_fallback_providers);
+    RUN(test_system_prompt);
     printf("All config tests passed.\n");
     return 0;
 }

@@ -75,7 +75,6 @@ static void test_arm(void) {
     run("INSERT INTO agent_models(agent_name, model_id, pos) VALUES ('Plain','c@a',1);");
     assert(cache_expiring_arm(g_db, p, "Plain", 1000) == 0);
     assert(armed(p) == 0);
-    printf("  PASS test_arm\n");
 }
 
 static void test_due_window(void) {
@@ -100,7 +99,6 @@ static void test_due_window(void) {
     assert(cache_expiring_arm(g_db, s, "Hour", T + 5000) == 0);
     assert(take(T + 5000 + 3239, NULL) == 0);
     assert(take(T + 5000 + 3240, NULL) == 1);
-    printf("  PASS test_due_window\n");
 }
 
 /* A 300-second entry is due at 270 — the window to lapse is 30 seconds. */
@@ -112,7 +110,6 @@ static void test_five_minutes(void) {
     assert(take(T + 269, NULL) == 0);
     CacheDue d[8];
     assert(take(T + 299, d) == 1 && d[0].lifetime == 300);
-    printf("  PASS test_five_minutes\n");
 }
 
 /* Busy, or with a message waiting: the session is about to send a request
@@ -133,7 +130,6 @@ static void test_not_idle(void) {
     assert(armed(s) == T);
     run("UPDATE inbox SET consumed=1;");
     assert(take(T + 3300, NULL) == 1);
-    printf("  PASS test_not_idle\n");
 }
 
 /* At or past the lifetime the cache is gone: nothing to save, the arm goes,
@@ -157,7 +153,6 @@ static void test_lapsed(void) {
     assert(take(T + 10, NULL) == 0);
     assert(armed(d) == 0);
     run("UPDATE agent_models SET cache_lifetime=3600 WHERE agent_name='Hour';");
-    printf("  PASS test_lapsed\n");
 }
 
 /* Any depth is taken: the depth is in the payload, the policy is the
@@ -169,7 +164,6 @@ static void test_depth(void) {
     assert(cache_expiring_arm(g_db, child, "Hour", T) == 0);
     CacheDue d[8];
     assert(take(T + 3240, d) == 1 && d[0].session_id == child && d[0].depth == 1);
-    printf("  PASS test_depth\n");
 }
 
 /* The payload's own numbers: depth, lifetime, idle time since the last
@@ -211,20 +205,19 @@ static void test_context(void) {
     assert(strcmp((const char *)sqlite3_column_text(st, 0), "3000,1800,248") == 0);
     sqlite3_finalize(st);
     free(c);
-    printf("  PASS test_context\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_cache_expiring:\n");
     setup();
-    test_arm();
-    test_due_window();
-    test_five_minutes();
-    test_not_idle();
-    test_lapsed();
-    test_depth();
-    test_context();
+    RUN(test_arm);
+    RUN(test_due_window);
+    RUN(test_five_minutes);
+    RUN(test_not_idle);
+    RUN(test_lapsed);
+    RUN(test_depth);
+    RUN(test_context);
     db_close(g_db);
     test_db_clean(DB_PATH);
     printf("ALL PASSED\n");

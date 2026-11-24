@@ -22,21 +22,11 @@
 #include "config.h"
 #include "config_registry.h"
 #include "context.h"
-#include "db.h"
 #include "extension_manifest.h"
 #include "mock_server.h"
-#include "test_util.h"
-#include <fcntl.h>
+#include "test_integ.h"
 #include <limits.h>
-#include <signal.h>
-#include <sqlite3.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
 
 #define ROOT    "/tmp/cclaw_integ_holdcrash"
 #define DB_PATH ROOT "/cclaw.db"
@@ -50,6 +40,11 @@
     fprintf(stderr, "FAIL: %s\n", msg); goto done; } } while (0)
 
 #define STEP_BYTES 6000
+
+static IntegEnv g_env = {.db = DB_PATH, .workspace = WS, .home = HOME,
+                         .sandbox = "host", .verbose = 1};
+#define db_int(sql) integ_db_int(DB_PATH, (sql), NULL)
+#define db_exec(sql) integ_db_exec(DB_PATH, (sql))
 
 /* No prompt count: a mock's would be fiction, and a usable report's count
  * is the head (context.c, plan_head). */
@@ -75,131 +70,12 @@ static char *step_response(void) {
     return body;
 }
 
-static void dump_log(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-    char line[512];
-    fprintf(stderr, "--- %s ---\n", path);
-    while (fgets(line, sizeof(line), f)) fputs(line, stderr);
-    fprintf(stderr, "--- end %s ---\n", path);
-    fclose(f);
-}
-
-static void child_env(const char *url) {
-    setenv("CCLAW_DB_PATH", DB_PATH, 1);
-    setenv("CCLAW_WORKSPACE", WS, 1);
-    setenv("HOME", HOME, 1);
-    setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
-    setenv("OPENROUTER_API_KEY", "test-key", 1);
-    setenv("CCLAW_MODEL", "test-model", 1);
-    setenv("CCLAW_SANDBOX_PROFILE", "host", 1);
-}
-
-/* A `-p` run, started and left running (the caller waits or kills it). */
-static pid_t spawn_cli(const char *exe, const char *url, const char *prompt, int64_t sid) {
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        int nfd = open("/dev/null", O_RDONLY);
-        int lfd = open(LOG1, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (nfd < 0 || lfd < 0) _exit(110);
-        dup2(nfd, 0); dup2(lfd, 1); dup2(lfd, 2);
-        child_env(url);
-        char sbuf[32];
-        snprintf(sbuf, sizeof(sbuf), "%lld", (long long)sid);
-        if (sid > 0) execl(exe, exe, "-v", "-p", prompt, "-s", sbuf, (char *)NULL);
-        else execl(exe, exe, "-p", prompt, (char *)NULL);
-        _exit(111);
-    }
-    return pid;
-}
-
-static int wait_exit(pid_t pid, int tenths) {
-    for (int i = 0; i < tenths; i++) {
-        int st = 0;
-        if (waitpid(pid, &st, WNOHANG) == pid)
-            return WIFEXITED(st) ? WEXITSTATUS(st) : 128;
-        usleep(100 * 1000);
-    }
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
-    return -1;
-}
-
-static pid_t spawn_daemon(const char *exe, const char *url) {
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        int fd = open(LOGD, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
-        child_env(url);
-        execl(exe, exe, "-v", "--daemon", (char *)NULL);
-        _exit(127);
-    }
-    return pid;
-}
-
-static void stop(pid_t pid, int sig) {
-    if (pid <= 0) return;
-    kill(pid, sig);
-    for (int i = 0; i < 100 && waitpid(pid, NULL, WNOHANG) == 0; i++) usleep(100000);
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
-}
-
-static int64_t db_int(const char *sql) {
-    sqlite3 *db = db_open(DB_PATH);
-    if (!db) return -1;
-    sqlite3_stmt *s;
-    int64_t v = -1;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
-        if (sqlite3_step(s) == SQLITE_ROW) v = sqlite3_column_int64(s, 0);
-        sqlite3_finalize(s);
-    }
-    db_close(db);
-    return v;
-}
-
-static int db_exec(const char *sql) {
-    sqlite3 *db = db_open(DB_PATH);
-    if (!db) return -1;
-    char *err = NULL;
-    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
-    if (rc != SQLITE_OK) fprintf(stderr, "sql: %s\n  %s\n", err ? err : "?", sql);
-    sqlite3_free(err);
-    db_close(db);
-    return rc == SQLITE_OK ? 0 : -1;
-}
-
 /* Poll until `sql` returns 1. */
 static int until(const char *sql, int tenths) {
     for (int i = 0; i < tenths; i++) {
         if (db_int(sql) == 1) return 1;
         usleep(100 * 1000);
     }
-    return 0;
-}
-
-static int seed_mock_provider(const char *url) {
-    sqlite3 *seed = test_db_open(DB_PATH);
-    if (!seed) return -1;
-    if (db_seed_defaults(seed) != 0) { sqlite3_close(seed); return -1; }
-    sqlite3_exec(seed, "DELETE FROM models; DELETE FROM providers;", NULL, NULL, NULL);
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(seed,
-            "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, default_model)"
-            " VALUES('openrouter', ?1, 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4.1-flash')",
-            -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(s, 1, url, -1, SQLITE_STATIC);
-        sqlite3_step(s);
-        sqlite3_finalize(s);
-    }
-    sqlite3_exec(seed,
-        "INSERT INTO models(id, provider_name, model, status, context_window)"
-        " VALUES('openrouter/deepseek/deepseek-v4.1-flash', 'openrouter',"
-        "        'deepseek/deepseek-v4.1-flash', 'healthy', 1000000)",
-        NULL, NULL, NULL);
-    sqlite3_close(seed);
     return 0;
 }
 
@@ -296,18 +172,19 @@ int main(void) {
     if (port < 0) { fprintf(stderr, "FAIL: mock_server_start\n"); return 1; }
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
+    g_env.url = url;
 
     int rc = 1;
     pid_t daemon = 0, cli = 0;
     char *step = NULL;
     char agent[64] = "", sql[512];
-    CHECK(seed_mock_provider(url) == 0, "seed");
+    CHECK(integ_seed_provider(DB_PATH, url, 0, 1000000) == 0, "seed");
 
     /* The session, its agent and routing entry. */
     mock_server_reset();
     mock_server_enqueue(200, RESP_FINAL);
-    cli = spawn_cli(exe, url, "hello", 0);
-    if (wait_exit(cli, 150) != 0) { dump_log(LOG1); CHECK(0, "run 1 did not exit"); }
+    cli = integ_spawn_cli(&g_env, exe, "hello", 0, LOG1, 1);
+    if (integ_wait(cli, 150) != 0) { integ_dump_log(LOG1); CHECK(0, "run 1 did not exit"); }
     cli = 0;
     int64_t sid = db_int("SELECT MAX(id) FROM sessions");
     CHECK(sid > 0, "no session after run 1");
@@ -322,17 +199,17 @@ int main(void) {
     snprintf(sql, sizeof(sql), "INSERT INTO inbox(session_id, source, payload)"
              " VALUES(%lld, 'cli', 'go on')", (long long)sid);
     CHECK(db_exec(sql) == 0, "queue the message");
-    daemon = spawn_daemon(exe, url);
+    daemon = integ_spawn_daemon(&g_env, exe, LOGD, 1);
     CHECK(daemon > 0, "spawn the daemon");
     held_sql(sql, sizeof(sql), sid);
-    if (!until(sql, 150)) dump_log(LOGD);
+    if (!until(sql, 150)) integ_dump_log(LOGD);
     CHECK(until(sql, 1), "the daemon did not hold the session with the note as its leaf");
-    stop(daemon, SIGKILL);
+    integ_stop(daemon, SIGKILL);
     daemon = 0;
     CHECK(mock_server_request_count() == 1, "the killed daemon sent more than one request");
-    daemon = spawn_daemon(exe, url);
+    daemon = integ_spawn_daemon(&g_env, exe, LOGD, 1);
     CHECK(daemon > 0, "respawn the daemon");
-    if (!answered(sid, since, 1)) dump_log(LOGD);
+    if (!answered(sid, since, 1)) integ_dump_log(LOGD);
     CHECK(answered(sid, since, 1), "the interrupted turn was not resumed to its answer");
     CHECK(mock_server_request_count() == 2, "the resumed turn did not make one request");
     {
@@ -340,35 +217,33 @@ int main(void) {
         CHECK(last && strstr(last, "HOLD NOTE") && strstr(last, "go on"),
               "the resumed request does not carry the turn and its note");
     }
-    stop(daemon, SIGTERM);
+    integ_stop(daemon, SIGTERM);
     daemon = 0;
-    printf("  PASS daemon_resumes_turn_held_at_crash\n");
 
     /* ── 2. CLI ── */
     mock_server_reset();
     mock_server_enqueue(200, step);
     mock_server_enqueue(200, RESP_FINAL);
     since = db_int("SELECT MAX(id) FROM entries");
-    cli = spawn_cli(exe, url, "once more", sid);
+    cli = integ_spawn_cli(&g_env, exe, "once more", sid, LOG1, 1);
     held_sql(sql, sizeof(sql), sid);
-    if (!until(sql, 150)) dump_log(LOG1);
+    if (!until(sql, 150)) integ_dump_log(LOG1);
     CHECK(until(sql, 1), "the CLI did not hold the session with the note as its leaf");
-    stop(cli, SIGKILL);
+    integ_stop(cli, SIGKILL);
     cli = 0;
-    cli = spawn_cli(exe, url, "and now?", sid);
-    int st = wait_exit(cli, 200);
+    cli = integ_spawn_cli(&g_env, exe, "and now?", sid, LOG1, 1);
+    int st = integ_wait(cli, 200);
     cli = 0;
-    if (st != 0) dump_log(LOG1);
+    if (st != 0) integ_dump_log(LOG1);
     CHECK(st == 0, "the next CLI run did not finish");
     CHECK(answered(sid, since, 2), "the next CLI run did not end its turn on the answer");
-    printf("  PASS cli_next_turn_after_crash\n");
 
     printf("All hold-crash integration tests passed.\n");
     rc = 0;
 done:
     free(step);
-    stop(daemon, SIGKILL);
-    stop(cli, SIGKILL);
+    integ_stop(daemon, SIGKILL);
+    integ_stop(cli, SIGKILL);
     mock_server_stop();
     if (rc == 0) (void)!system("rm -rf " ROOT);
     return rc;

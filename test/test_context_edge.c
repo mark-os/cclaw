@@ -20,7 +20,6 @@ static void test_session_tmp_dir(void) {
     session_tmp_dir(NULL, 42, buf, sizeof(buf));
     assert(strcmp(buf, "/ws/.tool_results/42") == 0);
     unsetenv("CCLAW_WORKSPACE");
-    printf("  PASS test_session_tmp_dir\n");
 }
 
 static void test_session_tmp_dir_agent(void) {
@@ -45,7 +44,6 @@ static void test_session_tmp_dir_agent(void) {
     assert(strcmp(buf, "/tmp/cclaw-99") == 0);
     sqlite3_close(db);
     unlink(dbp);
-    printf("  PASS test_session_tmp_dir_agent\n");
 }
 
 /* A byte-budget cut that lands inside a multi-byte character must back up to
@@ -79,16 +77,15 @@ static void test_spill_cut_keeps_utf8_whole(void) {
     unlink(path);
     free(out); free(out2); free(src);
     sqlite3_close(db);
-    printf("  PASS test_spill_cut_keeps_utf8_whole\n");
 }
 
 int main(void) {
     TEST_INIT();
     alarm(10);
     printf("test_context_edge:\n");
-    test_session_tmp_dir();
-    test_session_tmp_dir_agent();
-    test_spill_cut_keeps_utf8_whole();
+    RUN(test_session_tmp_dir);
+    RUN(test_session_tmp_dir_agent);
+    RUN(test_spill_cut_keeps_utf8_whole);
     printf("All context_edge tests passed.\n");
     return 0;
 }

@@ -64,6 +64,5 @@ int main(void) {
     assert(tool_args_json(db, args, "cmd") == NULL);
 
     db_close(db);
-    printf("  PASS tool_args\nAll tool_args tests passed.\n");
     return 0;
 }

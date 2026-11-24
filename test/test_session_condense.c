@@ -110,7 +110,6 @@ static void test_happy_path(void) {
                              " WHERE id=?)", sid, 0) == 4);
 
     teardown(db);
-    printf("  PASS test_happy_path\n");
 }
 
 static void test_refuses_live_turn(void) {
@@ -127,7 +126,6 @@ static void test_refuses_live_turn(void) {
     assert(branch_len(db, sid) == before);
 
     teardown(db);
-    printf("  PASS test_refuses_live_turn\n");
 }
 
 static void test_refuses_bad_range(void) {
@@ -159,7 +157,6 @@ static void test_refuses_bad_range(void) {
 
     assert(branch_len(db, sid) == before);
     teardown(db);
-    printf("  PASS test_refuses_bad_range\n");
 }
 
 /* The first turn has nothing before it; the summary becomes the root. */
@@ -180,7 +177,6 @@ static void test_from_first_turn(void) {
     assert(db_scalar_i64(db, "SELECT parent_id FROM entries WHERE session_id=?"
                              " AND type='compaction'", sid, 0) == -1);
     teardown(db);
-    printf("  PASS test_from_first_turn\n");
 }
 
 /* A secret in the summary refuses it, as any text an edit writes. */
@@ -196,7 +192,6 @@ static void test_refuses_secret(void) {
     free(r);
     assert(branch_len(db, sid) == before);
     teardown(db);
-    printf("  PASS test_refuses_secret\n");
 }
 
 static void test_refuses_other_agents_session(void) {
@@ -214,7 +209,6 @@ static void test_refuses_other_agents_session(void) {
     free(r);
 
     teardown(db);
-    printf("  PASS test_refuses_other_agents_session\n");
 }
 
 /* Registered (so it is requestable and grantable) but never baseline. */
@@ -242,7 +236,6 @@ static void test_not_in_default_baseline(void) {
     assert(grants_contains(db, AGENT, "tool", "session_condense") == 1);
 
     teardown(db);
-    printf("  PASS test_not_in_default_baseline\n");
 }
 
 /* E2: the mechanical coda names every open commitment, and says nothing at
@@ -300,20 +293,19 @@ static void test_state_coda(void) {
     free(coda);
 
     teardown(db);
-    printf("  PASS test_state_coda\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("TEST session_condense\n");
-    test_happy_path();
-    test_refuses_live_turn();
-    test_refuses_bad_range();
-    test_from_first_turn();
-    test_refuses_secret();
-    test_refuses_other_agents_session();
-    test_not_in_default_baseline();
-    test_state_coda();
+    RUN(test_happy_path);
+    RUN(test_refuses_live_turn);
+    RUN(test_refuses_bad_range);
+    RUN(test_from_first_turn);
+    RUN(test_refuses_secret);
+    RUN(test_refuses_other_agents_session);
+    RUN(test_not_in_default_baseline);
+    RUN(test_state_coda);
     printf("PASS session_condense\n");
     return 0;
 }

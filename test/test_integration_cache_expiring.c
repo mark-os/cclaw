@@ -16,21 +16,11 @@
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 600
 #include "context.h"
-#include "db.h"
 #include "extension_manifest.h"
 #include "mock_server.h"
-#include "test_util.h"
-#include <fcntl.h>
+#include "test_integ.h"
 #include <limits.h>
-#include <signal.h>
-#include <sqlite3.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
 
 #define ROOT    "/tmp/cclaw_integ_cacheexp"
 #define DB_PATH ROOT "/cclaw.db"
@@ -43,6 +33,11 @@
 #define CHECK(cond, msg) do { if (!(cond)) { \
     fprintf(stderr, "FAIL: %s\n", msg); goto done; } } while (0)
 
+static const IntegEnv ENV = {.db = DB_PATH, .workspace = WS, .home = HOME,
+                             .sandbox = "host"};
+#define db_int(sql, arg) integ_db_int(DB_PATH, (sql), (arg))
+#define db_exec(sql) integ_db_exec(DB_PATH, (sql))
+
 static const char *RESP_FINAL =
     "{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":["
     "{\"type\":\"text\",\"text\":\"acknowledged\"}],\"stop_reason\":\"end_turn\","
@@ -51,125 +46,21 @@ static const char *RESP_FINAL =
     "\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,"
     "\"ephemeral_1h_input_tokens\":900}}}";
 
-static void dump_log(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-    char line[512];
-    fprintf(stderr, "--- %s ---\n", path);
-    while (fgets(line, sizeof(line), f)) fputs(line, stderr);
-    fprintf(stderr, "--- end %s ---\n", path);
-    fclose(f);
-}
-
-static void child_env(void) {
-    setenv("CCLAW_DB_PATH", DB_PATH, 1);
-    setenv("CCLAW_WORKSPACE", WS, 1);
-    setenv("HOME", HOME, 1);
-    setenv("ANTHROPIC_API_KEY", "test-key", 1);
-    setenv("CCLAW_SANDBOX_PROFILE", "host", 1);
-    unsetenv("CCLAW_PROVIDER_BASE_URL");
-    unsetenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
-    unsetenv("CCLAW_MODEL");
-    unsetenv("OPENROUTER_API_KEY");
-}
-
-static int run_cli_p(const char *exe, const char *prompt) {
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        int nfd = open("/dev/null", O_RDONLY);
-        int lfd = open(LOG1, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (nfd < 0 || lfd < 0) _exit(110);
-        dup2(nfd, 0); dup2(lfd, 1); dup2(lfd, 2);
-        child_env();
-        execl(exe, exe, "-p", prompt, (char *)NULL);
-        _exit(111);
-    }
-    for (int i = 0; i < 150; i++) {
-        if (waitpid(pid, NULL, WNOHANG) == pid) return 0;
-        usleep(100 * 1000);
-    }
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
-    return -1;
-}
-
-static pid_t spawn_daemon(const char *exe) {
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        int fd = open(LOGD, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
-        child_env();
-        execl(exe, exe, "-v", "--daemon", (char *)NULL);
-        _exit(127);
-    }
-    return pid;
-}
-
-static void stop_daemon(pid_t pid) {
-    if (pid <= 0) return;
-    kill(pid, SIGTERM);
-    for (int i = 0; i < 100 && waitpid(pid, NULL, WNOHANG) == 0; i++) usleep(100000);
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
-}
-
-/* One integer through a fresh connection, ?1 bound to `arg` when given. */
-static int64_t db_int(const char *sql, const char *arg) {
-    sqlite3 *db = db_open(DB_PATH);
-    if (!db) return -1;
-    sqlite3_stmt *s;
-    int64_t v = -1;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
-        if (arg) sqlite3_bind_text(s, 1, arg, -1, SQLITE_STATIC);
-        if (sqlite3_step(s) == SQLITE_ROW) v = sqlite3_column_int64(s, 0);
-        sqlite3_finalize(s);
-    }
-    db_close(db);
-    return v;
-}
-
-static int db_exec(const char *sql) {
-    sqlite3 *db = db_open(DB_PATH);
-    if (!db) return -1;
-    char *err = NULL;
-    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
-    if (rc != SQLITE_OK) fprintf(stderr, "sql: %s\n  %s\n", err ? err : "?", sql);
-    sqlite3_free(err);
-    db_close(db);
-    return rc == SQLITE_OK ? 0 : -1;
-}
-
+/* The agent routes to the mock's Anthropic entry, inserted with nothing
+ * said, so the schema's default for an Anthropic entry applies. */
 static int seed_mock_provider(const char *url) {
-    sqlite3 *seed = test_db_open(DB_PATH);
+    if (integ_seed_provider(DB_PATH, url, 1, 200000) != 0) return -1;
+    sqlite3 *seed = db_open(DB_PATH);
     if (!seed) return -1;
-    if (db_seed_defaults(seed) != 0) { sqlite3_close(seed); return -1; }
-    sqlite3_exec(seed, "DELETE FROM models; DELETE FROM providers;", NULL, NULL, NULL);
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(seed,
-            "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, default_model)"
-            " VALUES('anthropic', ?1, 'anthropic', 'ANTHROPIC_API_KEY', 'claude-test')",
-            -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(s, 1, url, -1, SQLITE_STATIC);
-        sqlite3_step(s);
-        sqlite3_finalize(s);
-    }
-    sqlite3_exec(seed,
-        "INSERT INTO models(id, provider_name, model, status, context_window)"
-        " VALUES('anthropic/claude-test', 'anthropic', 'claude-test', 'healthy', 200000);"
-        /* The seeded agent routes to it — inserted with nothing said, so the
-         * schema's default for an Anthropic entry applies. */
-        "DELETE FROM agent_models;",
-        NULL, NULL, NULL);
+    sqlite3_exec(seed, "DELETE FROM agent_models;", NULL, NULL, NULL);
     test_seed_agent(seed, "Assistant");
-    sqlite3_exec(seed,
+    int rc = sqlite3_exec(seed,
         "DELETE FROM agent_models;"
         "INSERT INTO agent_models(agent_name, model_id, pos)"
         " VALUES('Assistant', 'anthropic/claude-test', 0);",
         NULL, NULL, NULL);
-    sqlite3_close(seed);
-    return 0;
+    db_close(seed);
+    return rc == SQLITE_OK ? 0 : -1;
 }
 
 /* The agent's CacheExpiring hook: a note naming the numbers it was sent. */
@@ -227,10 +118,10 @@ int main(void) {
     mock_server_reset();
     mock_server_enqueue(200, RESP_FINAL);
     int64_t t0 = (int64_t)time(NULL);
-    if (run_cli_p(exe, "hello") != 0) { dump_log(LOG1); CHECK(0, "run 1 did not exit"); }
+    if (integ_run_cli_p(&ENV, exe, "hello", 0, LOG1, 150) < 0) { integ_dump_log(LOG1); CHECK(0, "run 1 did not exit"); }
     int64_t t1 = (int64_t)time(NULL);
     int64_t sid = db_int("SELECT MAX(id) FROM sessions", NULL);
-    if (sid <= 0 || mock_server_request_count() != 1) dump_log(LOG1);
+    if (sid <= 0 || mock_server_request_count() != 1) integ_dump_log(LOG1);
     CHECK(sid > 0 && mock_server_request_count() == 1, "run 1 did not make one request");
     {
         sqlite3 *db = db_open(DB_PATH);
@@ -253,7 +144,6 @@ int main(void) {
     CHECK(db_int("SELECT cache_write_tokens FROM llm_responses WHERE status='ok'"
                  " ORDER BY id DESC LIMIT 1", NULL) == 900,
           "the 1-hour write did not land in cache_write_tokens");
-    printf("  PASS marker_and_arm\n");
 
     /* ── 2. a daemon fires it once, on the session whose cache is about to
      * lapse, and on no other ── */
@@ -288,7 +178,7 @@ int main(void) {
     CHECK(lapsed > 0, "seed the lapsed session");
 
     mock_server_reset();
-    daemon = spawn_daemon(exe);
+    daemon = integ_spawn_daemon(&ENV, exe, LOGD, 0);
     CHECK(daemon > 0, "spawn the daemon");
     snprintf(sql, sizeof(sql),
              "SELECT COUNT(*) FROM entries WHERE session_id=%lld AND type='system'"
@@ -299,7 +189,7 @@ int main(void) {
         usleep(100 * 1000);
         notes = db_int(sql, NULL);
     }
-    if (notes != 1) dump_log(LOGD);
+    if (notes != 1) integ_dump_log(LOGD);
     CHECK(notes == 1, "the daemon did not run the CacheExpiring hook and apply its edit");
     /* Released, disarmed; no C trim; nothing sent to the model. */
     for (int i = 0; i < 50; i++) {
@@ -326,12 +216,11 @@ int main(void) {
              "SELECT COUNT(*) FROM entries WHERE session_id=%lld AND type='system'"
              " AND json_extract(data,'$.source')='hook:ce'", (long long)sid);
     CHECK(db_int(sql, NULL) == 1, "the hook fired again in the same idle period");
-    printf("  PASS daemon_fires_once\n");
 
     printf("All CacheExpiring integration tests passed.\n");
     rc = 0;
 done:
-    stop_daemon(daemon);
+    integ_stop(daemon, SIGTERM);
     mock_server_stop();
     free(agent);
     if (rc == 0) (void)!system("rm -rf " ROOT);

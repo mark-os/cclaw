@@ -17,11 +17,9 @@
 #include "mock_server.h"
 
 static int s_port;
-static int tests_run = 0, tests_passed = 0;
 
-#define TEST(name) do { tests_run++; printf("  %s... ", #name); } while (0)
-#define PASS() do { tests_passed++; printf("PASS\n"); } while (0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while (0)
+/* A failed check ends the run: the mock server is in-process threads. */
+#define FAIL(msg) do { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } while (0)
 
 static const char *GEMINI_TRANSCRIPT_RESPONSE =
     "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello from voice\"}]},"
@@ -94,18 +92,7 @@ static char *inbox_payload(sqlite3 *db, int64_t sid) {
     return out;
 }
 
-static int media_jobs_count(sqlite3 *db) {
-    sqlite3_stmt *s;
-    int n = -1;
-    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM media_jobs", -1, &s, NULL) == SQLITE_OK) {
-        if (sqlite3_step(s) == SQLITE_ROW) n = sqlite3_column_int(s, 0);
-        sqlite3_finalize(s);
-    }
-    return n;
-}
-
 static void test_transcribe_success(void) {
-    TEST(transcribe_success);
     const char *db_path = "/tmp/cclaw_transcribe_test.db";
     test_db_clean(db_path);
 
@@ -136,7 +123,7 @@ static void test_transcribe_success(void) {
              strstr(payload, "\"chat_id\":\"42\"") != NULL &&
              strstr(payload, "T2dnUw==") == NULL;   /* audio never enters context */
     free(payload);
-    int jobs_left = media_jobs_count(db);
+    int jobs_left = (int)test_qi(db, "SELECT COUNT(*) FROM media_jobs");
 
     /* Spool file must be deleted after successful transcription */
     int spool_gone = (access(spool, F_OK) != 0);
@@ -145,11 +132,9 @@ static void test_transcribe_success(void) {
     if (!ok) FAIL("bad inbox payload");
     if (jobs_left != 0) FAIL("media_jobs row not deleted");
     if (!spool_gone) FAIL("spool file not deleted after success");
-    PASS();
 }
 
 static void test_transcribe_caption_prepended(void) {
-    TEST(transcribe_caption_prepended);
     const char *db_path = "/tmp/cclaw_transcribe_cap_test.db";
     test_db_clean(db_path);
 
@@ -180,11 +165,9 @@ static void test_transcribe_caption_prepended(void) {
     db_close(db); test_db_clean(db_path);
     if (!ok) FAIL("caption not prepended");
     if (!spool_gone) FAIL("spool file not deleted after caption test");
-    PASS();
 }
 
 static void test_transcribe_terminal_failure(void) {
-    TEST(transcribe_terminal_failure);
     const char *db_path = "/tmp/cclaw_transcribe_fail_test.db";
     test_db_clean(db_path);
 
@@ -208,7 +191,7 @@ static void test_transcribe_terminal_failure(void) {
     if (!payload) { db_close(db); test_db_clean(db_path); FAIL("no inbox row"); }
     int ok = strstr(payload, "[voice message received but transcription failed]") != NULL;
     free(payload);
-    int jobs_left = media_jobs_count(db);
+    int jobs_left = (int)test_qi(db, "SELECT COUNT(*) FROM media_jobs");
 
     /* Spool file must be deleted even on terminal failure */
     int spool_gone = (access(spool, F_OK) != 0);
@@ -217,11 +200,9 @@ static void test_transcribe_terminal_failure(void) {
     if (!ok) FAIL("missing failure text");
     if (jobs_left != 0) FAIL("media_jobs row not deleted");
     if (!spool_gone) FAIL("spool file not deleted after terminal failure");
-    PASS();
 }
 
 static void test_transcribe_no_audio_model(void) {
-    TEST(transcribe_no_audio_model);
     const char *db_path = "/tmp/cclaw_transcribe_nomodel_test.db";
     test_db_clean(db_path);
 
@@ -253,14 +234,12 @@ static void test_transcribe_no_audio_model(void) {
     db_close(db); test_db_clean(db_path);
     if (!ok) FAIL("expected terminal failure without network traffic");
     if (!spool_gone) FAIL("spool file not deleted in no-model path");
-    PASS();
 }
 
 /* agent_models.purpose='audio' (v59): the job's session names an agent, and
  * that agent's audio list is used instead of the global capability pick —
  * proved by which model's request counter moved. */
 static void test_transcribe_agent_audio_list(void) {
-    TEST(transcribe_agent_audio_list);
     const char *db_path = "/tmp/cclaw_transcribe_agent_test.db";
     test_db_clean(db_path);
 
@@ -304,7 +283,6 @@ static void test_transcribe_agent_audio_list(void) {
         printf("FAIL: mine=%lld lite=%lld\n", (long long)mine, (long long)lite);
         return;
     }
-    PASS();
 }
 
 int main(void) {
@@ -316,13 +294,12 @@ int main(void) {
     }
 
     printf("test_integration_transcribe:\n");
-    test_transcribe_success();
-    test_transcribe_caption_prepended();
-    test_transcribe_terminal_failure();
-    test_transcribe_no_audio_model();
-    test_transcribe_agent_audio_list();
+    RUN(test_transcribe_success);
+    RUN(test_transcribe_caption_prepended);
+    RUN(test_transcribe_terminal_failure);
+    RUN(test_transcribe_no_audio_model);
+    RUN(test_transcribe_agent_audio_list);
 
     mock_server_stop();
-    printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    return 0;
 }

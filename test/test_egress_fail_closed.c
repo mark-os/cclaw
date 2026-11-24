@@ -97,12 +97,10 @@ static void run_case(const char *label, const char *proxy_sock) {
         printf("  FAIL %s (child exit %d)\n", label, code);
         assert(0);
     }
-    printf("  PASS %s\n", label);
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_egress_fail_closed:\n");
 
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_egress_fc_%d", getpid());
     mkdir(workspace, 0755);
@@ -116,6 +114,5 @@ int main(void) {
     char cmd[300];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", workspace);
     system(cmd);
-    printf("  ALL PASSED\n");
     return 0;
 }

@@ -1,6 +1,5 @@
-/* integration test — db_query secret filtering.
- * Seed secrets table w/ enc: values, run db_query("SELECT * FROM secrets") tool,
- * verify no enc: rows in result; no network. */
+/* db_query secret filtering: encrypted secrets rows never reach the result,
+ * neither as enc: ciphertext nor as plaintext. No network. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,105 +11,62 @@
 #include "tool_db_query.h"
 #include "secret.h"
 
-static int tests_run = 0;
-static int tests_passed = 0;
-
-#define TEST(name) do { tests_run++; printf("  %s... ", #name); } while(0)
-#define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while(0)
-
 static char tmpdir[64];
 static char db_path[128];
 static char key_path[128];
 
-static void setup(void) {
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cclaw_t179_XXXXXX");
-    assert(mkdtemp(tmpdir) != NULL);
-    snprintf(db_path, sizeof(db_path), "%s/test.db", tmpdir);
-    snprintf(key_path, sizeof(key_path), "%s/.cclaw_key", tmpdir);
+static void assert_no_secret(const char *sql_json, sqlite3 *db) {
+    char *result = tool_db_query_handler(sql_json, db, &(int){0});
+    assert(result);
+    assert(!strstr(result, "enc:"));
+    assert(!strstr(result, "sk-or-v1"));
+    free(result);
 }
 
-static void teardown(void) {
-    unlink(key_path);
-    test_db_clean(db_path);
-    rmdir(tmpdir);
-}
-
-/* Seed secrets table with real encrypted secrets, verify db_query filters enc: rows */
 static void test_select_star_filters_secrets(void) {
-    TEST(select_star_filters_secrets);
-
     sqlite3 *db = test_db_open(db_path);
-    if (!db) FAIL("db_open");
-
+    assert(db);
     uint8_t key[32];
-    if (secret_key_load_or_create(db_path, key) != 0) { db_close(db); FAIL("key_load_or_create"); }
+    assert(secret_key_load_or_create(db_path, key) == 0);
     db_set_secret_key(key);
-
-    /* Seed encrypted secrets in secrets table */
     db_secret_set(db, "PROVIDER_API_KEY", "sk-or-v1-secret123", "operator", "system");
     db_secret_set(db, "GEMINI_API_KEY", "AIzaSy-secret456", "operator", "system");
-
-    /* Run db_query tool: SELECT * FROM secrets */
-    char *result = tool_db_query_handler("{\"sql\":\"SELECT * FROM secrets\"}", db, &(int){0});
-    if (!result) { db_close(db); FAIL("handler returned NULL"); }
-
-    /* Encrypted values filtered — neither enc: value nor plaintext appears */
-    if (strstr(result, "enc:")) { free(result); db_close(db); FAIL("enc: prefix in result"); }
-    if (strstr(result, "sk-or-v1")) { free(result); db_close(db); FAIL("plaintext secret leaked"); }
-
-    free(result);
+    assert_no_secret("{\"sql\":\"SELECT * FROM secrets\"}", db);
     db_close(db);
-    PASS();
 }
 
-/* Verify WHERE clause targeting secret key still returns nothing */
 static void test_where_clause_secret_key(void) {
-    TEST(where_clause_secret_key);
-
     sqlite3 *db = test_db_open(db_path);
-    if (!db) FAIL("db_open");
-
-    char *result = tool_db_query_handler(
-        "{\"sql\":\"SELECT name, value FROM secrets WHERE name = 'PROVIDER_API_KEY'\"}", db, &(int){0});
-    if (!result) { db_close(db); FAIL("handler returned NULL"); }
-
-    /* Should be empty or masked — row filtered */
-    if (strstr(result, "enc:")) { free(result); db_close(db); FAIL("enc: in targeted query"); }
-    if (strstr(result, "sk-or-v1")) { free(result); db_close(db); FAIL("plaintext in targeted query"); }
-
-    free(result);
+    assert(db);
+    assert_no_secret("{\"sql\":\"SELECT name, value FROM secrets"
+                     " WHERE name = 'PROVIDER_API_KEY'\"}", db);
     db_close(db);
-    PASS();
 }
 
-/* Verify non-kv tables unaffected by filtering */
+/* The filter must not blank out ordinary tables. */
 static void test_non_kv_table_unaffected(void) {
-    TEST(non_kv_table_unaffected);
-
     sqlite3 *db = test_db_open(db_path);
-    if (!db) FAIL("db_open");
-
-    /* sessions table should work normally */
+    assert(db);
     session_create(db, "test-session", NULL, -1, 0);
     char *result = tool_db_query_handler(
         "{\"sql\":\"SELECT id, name FROM sessions\"}", db, &(int){0});
-    if (!result) { db_close(db); FAIL("handler returned NULL"); }
-    if (!strstr(result, "test-session")) { free(result); db_close(db); FAIL("missing session"); }
-
+    assert(result && strstr(result, "test-session"));
     free(result);
     db_close(db);
-    PASS();
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_integration_db_query_secrets:\n");
-    setup();
-    test_select_star_filters_secrets();
-    test_where_clause_secret_key();
-    test_non_kv_table_unaffected();
-    teardown();
-    printf("  %d/%d passed\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cclaw_t179_XXXXXX");
+    assert(mkdtemp(tmpdir) != NULL);
+    snprintf(db_path, sizeof(db_path), "%s/test.db", tmpdir);
+    snprintf(key_path, sizeof(key_path), "%s/.cclaw_key", tmpdir);
+    RUN(test_select_star_filters_secrets);
+    RUN(test_where_clause_secret_key);
+    RUN(test_non_kv_table_unaffected);
+    unlink(key_path);
+    test_db_clean(db_path);
+    rmdir(tmpdir);
+    return 0;
 }

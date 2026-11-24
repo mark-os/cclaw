@@ -34,7 +34,6 @@
 
 #define DB_PATH ROOT "/cclaw.db"
 
-
 static sqlite3 *g_db;
 
 static inline void run(const char *sql) {
@@ -124,13 +123,10 @@ static inline int64_t seed_turn(const char *agent, int lines) {
 }
 
 static inline int is_state(int64_t sid, const char *want) {
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(g_db, "SELECT state FROM sessions WHERE id=?1",
-                              -1, &st, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(st, 1, sid);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    int same = strcmp((const char *)sqlite3_column_text(st, 0), want) == 0;
-    sqlite3_finalize(st);
+    char *got = db_scalar_text(g_db, "SELECT state FROM sessions WHERE id=?", sid);
+    assert(got);
+    int same = strcmp(got, want) == 0;
+    free(got);
     return same;
 }
 

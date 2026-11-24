@@ -92,7 +92,6 @@ static void test_harness_pass(void) {
     int rc = channel_harness_run(TEST_DB, "echo", scenario_path);
     assert(rc == 0);
     unlink(scenario_path);
-    printf("  PASS test_harness_pass\n");
 }
 
 static void test_harness_unmatched_request_fails(void) {
@@ -107,7 +106,6 @@ static void test_harness_unmatched_request_fails(void) {
     int rc = channel_harness_run(TEST_DB, "echo", scenario_path);
     assert(rc != 0);
     unlink(scenario_path);
-    printf("  PASS test_harness_unmatched_request_fails\n");
 }
 
 static void test_harness_unknown_channel(void) {
@@ -118,7 +116,6 @@ static void test_harness_unknown_channel(void) {
     int rc = channel_harness_run(TEST_DB, "does-not-exist", scenario_path);
     assert(rc != 0);
     unlink(scenario_path);
-    printf("  PASS test_harness_unknown_channel\n");
 }
 
 /* save_to scenario: channel.http with save_to resolves {status, path, bytes}. */
@@ -148,18 +145,16 @@ static void test_harness_save_to(void) {
     int rc = channel_harness_run(TEST_DB, "echo", scenario_path);
     assert(rc == 0);
     unlink(scenario_path);
-    printf("  PASS test_harness_save_to\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_channel_harness:\n");
-    test_harness_pass();
-    test_harness_save_to();
-    test_harness_unmatched_request_fails();
-    test_harness_unknown_channel();
+    RUN(test_harness_pass);
+    RUN(test_harness_save_to);
+    RUN(test_harness_unmatched_request_fails);
+    RUN(test_harness_unknown_channel);
     test_db_clean(TEST_DB);
     rm_rf(EXT_DIR);
-    printf("all channel harness tests passed\n");
     return 0;
 }

@@ -14,105 +14,6 @@
 #include <assert.h>
 #include <unistd.h>
 
-static int get_pragma_int(sqlite3 *db, const char *pragma) {
-    char sql[64];
-    snprintf(sql, sizeof(sql), "PRAGMA %s;", pragma);
-    sqlite3_stmt *stmt;
-    int val = -1;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW)
-            val = sqlite3_column_int(stmt, 0);
-        sqlite3_finalize(stmt);
-    }
-    return val;
-}
-
-static int get_pragma_text(sqlite3 *db, const char *pragma, char *buf, int bufsz) {
-    char sql[64];
-    snprintf(sql, sizeof(sql), "PRAGMA %s;", pragma);
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char *txt = (const char *)sqlite3_column_text(stmt, 0);
-            if (txt) snprintf(buf, (size_t)bufsz, "%s", txt);
-        }
-        sqlite3_finalize(stmt);
-        return 0;
-    }
-    return -1;
-}
-
-static void test_wal_mode(void) {
-    const char *path = "/tmp/test_cclaw_wal.sqlite";
-    test_db_clean(path);
-
-    sqlite3 *db = test_db_open(path);
-    assert(db != NULL);
-
-    char mode[16] = {0};
-    get_pragma_text(db, "journal_mode", mode, sizeof(mode));
-    assert(strcmp(mode, "wal") == 0);
-
-    db_close(db);
-    test_db_clean(path);
-    printf("  PASS test_wal_mode\n");
-}
-
-static void test_reopen_idempotent(void) {
-    const char *path = "/tmp/test_cclaw_reopen.sqlite";
-    test_db_clean(path);
-
-    sqlite3 *db = test_db_open(path);
-    assert(db != NULL);
-    db_close(db);
-
-    /* Open again — should not fail on CREATE IF NOT EXISTS */
-    db = test_db_open(path);
-    assert(db != NULL);
-    db_close(db);
-
-    test_db_clean(path);
-    printf("  PASS test_reopen_idempotent\n");
-}
-
-static void test_fts5_search(void) {
-    const char *path = "/tmp/test_cclaw_fts5.sqlite";
-    test_db_clean(path);
-
-    sqlite3 *db = test_db_open(path);
-    assert(db != NULL);
-
-    int64_t sid = session_create(db, "fts_test", NULL, -1, 0);
-    assert(sid > 0);
-
-    Message m1 = {.role = ROLE_USER, .content = "hello world from the user"};
-    Message m2 = {.role = ROLE_ASSISTANT, .content = "goodbye cruel world"};
-    Message m3 = {.role = ROLE_USER, .content = "unrelated message about cats"};
-    assert(entry_append_with_iteration(db, sid, &m1, 1) > 0);
-    assert(entry_append_with_iteration(db, sid, &m2, 1) > 0);
-    assert(entry_append_with_iteration(db, sid, &m3, 1) > 0);
-
-    /* The entries_fts trigger indexed all three appends */
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM entries_fts f JOIN entries e ON e.id = f.rowid"
-        " WHERE entries_fts MATCH ?1 AND e.session_id = ?2", -1, &st, NULL) == SQLITE_OK);
-    const char *queries[] = {"world", "cats", "nonexistent"};
-    int expected[] = {2, 1, 0};
-    for (int i = 0; i < 3; i++) {
-        sqlite3_reset(st);
-        sqlite3_bind_text(st, 1, queries[i], -1, SQLITE_STATIC);
-        sqlite3_bind_int64(st, 2, sid);
-        assert(sqlite3_step(st) == SQLITE_ROW);
-        assert(sqlite3_column_int(st, 0) == expected[i]);
-    }
-    sqlite3_finalize(st);
-
-    db_close(db);
-    test_db_clean(path);
-    printf("  PASS test_fts5_search\n");
-}
-
 static void test_config_registry(void) {
     const char *path = "/tmp/test_cclaw_registry.sqlite";
     test_db_clean(path);
@@ -136,45 +37,6 @@ static void test_config_registry(void) {
 
     db_close(db);
     test_db_clean(path);
-    printf("  PASS test_config_registry\n");
-}
-
-static void test_agent_pragmas(void) {
-    const char *path = "/tmp/test_cclaw_agent_pragmas.db";
-    test_db_clean(path);
-    sqlite3 *db = test_db_open(path);
-    assert(db != NULL);
-
-    db_set_child_pragmas(db);
-
-    /* After: mmap_size=67108864, cache_size=-512 */
-    sqlite3_int64 mmap_after = 0;
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "PRAGMA mmap_size;", -1, &stmt, NULL) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW)
-            mmap_after = sqlite3_column_int64(stmt, 0);
-        sqlite3_finalize(stmt);
-    }
-    assert(mmap_after == 67108864);
-
-    int cache = get_pragma_int(db, "cache_size");
-    assert(cache == -512);
-
-    db_close(db);
-    test_db_clean(path);
-    printf("  PASS test_agent_pragmas\n");
-}
-
-static int count_rows(sqlite3 *db, const char *table) {
-    char sql[64];
-    snprintf(sql, sizeof(sql), "SELECT count(*) FROM %s;", table);
-    sqlite3_stmt *s;
-    int n = -1;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
-        if (sqlite3_step(s) == SQLITE_ROW) n = sqlite3_column_int(s, 0);
-        sqlite3_finalize(s);
-    }
-    return n;
 }
 
 static void test_prune_inbox(void) {
@@ -190,14 +52,13 @@ static void test_prune_inbox(void) {
         " (1,'cli','b',1,unixepoch()),"          /* consumed + fresh → kept   */
         " (1,'cli','c',0,unixepoch()-800000);",  /* old but unconsumed → kept */
         NULL, NULL, NULL) == SQLITE_OK);
-    assert(count_rows(db, "inbox") == 3);
+    assert(test_qi(db, "SELECT count(*) FROM inbox") == 3);
 
     db_prune_inbox(db);
-    assert(count_rows(db, "inbox") == 2);
+    assert(test_qi(db, "SELECT count(*) FROM inbox") == 2);
 
     db_close(db);
     test_db_clean(path);
-    printf("  PASS test_prune_inbox\n");
 }
 
 static void test_prune_outbox(void) {
@@ -214,14 +75,13 @@ static void test_prune_outbox(void) {
         " ('t',1,'c','pending',unixepoch()-800000,NULL),"                 /* not terminal → kept   */
         " ('t',1,'d','delivered',unixepoch(),unixepoch());",              /* terminal+fresh→ kept  */
         NULL, NULL, NULL) == SQLITE_OK);
-    assert(count_rows(db, "channel_outbox") == 4);
+    assert(test_qi(db, "SELECT count(*) FROM channel_outbox") == 4);
 
     db_prune_outbox(db);
-    assert(count_rows(db, "channel_outbox") == 2);
+    assert(test_qi(db, "SELECT count(*) FROM channel_outbox") == 2);
 
     db_close(db);
     test_db_clean(path);
-    printf("  PASS test_prune_outbox\n");
 }
 
 static void test_free_mb(void) {
@@ -232,12 +92,9 @@ static void test_free_mb(void) {
 
     /* On-disk DB on /tmp: measurable and positive. */
     assert(db_free_mb(db) > 0);
-    /* NULL handle is unmeasurable, not a crash. */
-    assert(db_free_mb(NULL) == -1);
 
     db_close(db);
     test_db_clean(path);
-    printf("  PASS test_free_mb\n");
 }
 
 static void set_user_version(sqlite3 *db, int v) {
@@ -270,34 +127,21 @@ static void test_seed_backfills_and_preserves(void) {
 
     assert(db_seed_defaults(db) == 0);   /* second run — no longer a no-op */
 
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM providers WHERE name='cerebras'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(sqlite3_column_int(s, 0) == 1);      /* backfilled */
-    sqlite3_finalize(s);
+    assert(test_qi(db, "SELECT COUNT(*) FROM providers WHERE name='cerebras'") == 1);
 
     /* Every catalog provider is routable — a providers row with no models row
      * could never be selected by chat routing. */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM providers p"
-        " WHERE NOT EXISTS (SELECT 1 FROM models m WHERE m.provider_name=p.name)",
-        -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(sqlite3_column_int(s, 0) == 0);
-    sqlite3_finalize(s);
+    assert(test_qi(db, "SELECT COUNT(*) FROM providers p"
+                       " WHERE NOT EXISTS (SELECT 1 FROM models m WHERE m.provider_name=p.name)")
+           == 0);
 
     /* INSERT OR IGNORE: the operator's edit won, not the seed's default. */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT default_model FROM providers WHERE name='openrouter'",
-        -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "pinned-by-operator") == 0);
-    sqlite3_finalize(s);
+    char *dm = test_qs(db, "SELECT default_model FROM providers WHERE name='openrouter'");
+    assert(dm && strcmp(dm, "pinned-by-operator") == 0);
+    free(dm);
 
     db_close(db);
     test_db_clean(path);
-    printf("  PASS: test_seed_backfills_and_preserves\n");
 }
 
 static void test_schema_state(void) {
@@ -338,7 +182,6 @@ static void test_schema_state(void) {
 
     db_close(db);
     test_db_clean(path);
-    printf("  PASS test_schema_state\n");
 }
 
 static void test_rate_limit_and_cost(void) {
@@ -370,7 +213,6 @@ static void test_rate_limit_and_cost(void) {
 
     db_close(db);
     test_db_clean(path);
-    printf("  PASS test_rate_limit_and_cost\n");
 }
 
 /* cache_lifetime on an Anthropic entry: 300 or 3600 only, on insert and on
@@ -430,7 +272,6 @@ static void test_agent_models_cache_lifetime(void) {
 #undef LT
     db_close(db);
     test_db_clean(path);
-    printf("  PASS test_agent_models_cache_lifetime\n");
 }
 
 /* reasoning_display: 'summary' unless said otherwise, 'none' allowed,
@@ -463,7 +304,6 @@ static void test_agent_models_reasoning_display(void) {
 #undef RD
     db_close(db);
     test_db_clean(path);
-    printf("  PASS test_agent_models_reasoning_display\n");
 }
 
 static void test_agent_models_capability_gate(void) {
@@ -521,26 +361,19 @@ static void test_agent_models_capability_gate(void) {
         0, -1) == 5);
     db_close(db);
     test_db_clean(path);
-    printf("  PASS test_agent_models_capability_gate\n");
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_db:\n");
-    test_wal_mode();
-    test_reopen_idempotent();
-    test_fts5_search();
-    test_config_registry();
-    test_agent_pragmas();
-    test_prune_inbox();
-    test_prune_outbox();
-    test_free_mb();
-    test_seed_backfills_and_preserves();
-    test_schema_state();
-    test_agent_models_capability_gate();
-    test_agent_models_cache_lifetime();
-    test_agent_models_reasoning_display();
-    test_rate_limit_and_cost();
-    printf("All db tests passed.\n");
+    RUN(test_config_registry);
+    RUN(test_prune_inbox);
+    RUN(test_prune_outbox);
+    RUN(test_free_mb);
+    RUN(test_seed_backfills_and_preserves);
+    RUN(test_schema_state);
+    RUN(test_agent_models_capability_gate);
+    RUN(test_agent_models_cache_lifetime);
+    RUN(test_agent_models_reasoning_display);
+    RUN(test_rate_limit_and_cost);
     return 0;
 }

@@ -86,7 +86,6 @@ static void test_drain_streams_to_log(void) {
     close(rfd);
     assert(memcmp(first, "hello-log ", 10) == 0);
     unlink(logp);
-    printf("  PASS test_drain_streams_to_log\n");
 }
 
 /* ── the exec-failure frame parses as an error result ─────────────── */
@@ -107,7 +106,6 @@ static void test_exec_fail_frame_is_readable(void) {
     assert(c.hosts_json == NULL);
     assert(c.outbuf && strcmp(c.outbuf, "error: execve failed") == 0);
     free(c.outbuf);
-    printf("  PASS test_exec_fail_frame_is_readable\n");
 }
 
 /* ── job log path + tail round trip ───────────────────────────────── */
@@ -130,7 +128,6 @@ static void test_log_path_and_tail(void) {
     free(tail);
     unlink(path);
     db_close(db);
-    printf("  PASS test_log_path_and_tail\n");
 }
 
 /* ── jobs snapshot renders into the user context block ────────────── */
@@ -157,7 +154,6 @@ static void test_context_block_lists_jobs(void) {
     assert(ctx && strstr(ctx, "<background_jobs>") == NULL);
     free(ctx);
     db_close(db);
-    printf("  PASS test_context_block_lists_jobs\n");
 }
 
 /* ── orphan reconciliation: dead instance's job closes, live one stays ── */
@@ -189,7 +185,6 @@ static void test_recovery_reconciles_orphans(void) {
     assert(db_scalar_i64(db,
         "SELECT COUNT(*) FROM inbox WHERE source='job_result';", 0, 0) == 1);
     db_close(db);
-    printf("  PASS test_recovery_reconciles_orphans\n");
 }
 
 /* ── check_session arities ────────────────────────────────────────── */
@@ -240,7 +235,6 @@ static void test_check_session_job_and_list(void) {
     assert(strstr(r, "no live sub-agent sessions") != NULL);
     free(r);
     db_close(db);
-    printf("  PASS test_check_session_job_and_list\n");
 }
 
 /* ── cancel: ownership + no-live-child path ───────────────────────── */
@@ -285,7 +279,6 @@ static void test_cancel(void) {
     assert(r && err);
     free(r);
     db_close(db);
-    printf("  PASS test_cancel\n");
 }
 
 /* ── turn-join ignores 'background' ───────────────────────────────── */
@@ -298,7 +291,6 @@ static void test_turn_join_ignores_background(void) {
     PendingToolCall *p = db_tool_call_get_pending(db, sid, &n);
     assert(n == 0 && p == NULL);
     db_close(db);
-    printf("  PASS test_turn_join_ignores_background\n");
 }
 
 int main(void) {
@@ -307,15 +299,14 @@ int main(void) {
     snprintf(g_ws, sizeof(g_ws), "/tmp/cclaw_test_bgjobs_XXXXXX");
     assert(mkdtemp(g_ws) != NULL);
     printf("test_background_jobs:\n");
-    test_drain_streams_to_log();
-    test_exec_fail_frame_is_readable();
-    test_log_path_and_tail();
-    test_context_block_lists_jobs();
-    test_recovery_reconciles_orphans();
-    test_check_session_job_and_list();
-    test_cancel();
-    test_turn_join_ignores_background();
+    RUN(test_drain_streams_to_log);
+    RUN(test_exec_fail_frame_is_readable);
+    RUN(test_log_path_and_tail);
+    RUN(test_context_block_lists_jobs);
+    RUN(test_recovery_reconciles_orphans);
+    RUN(test_check_session_job_and_list);
+    RUN(test_cancel);
+    RUN(test_turn_join_ignores_background);
     rmdir(g_ws);
-    printf("All background-job tests passed\n");
     return 0;
 }

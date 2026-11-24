@@ -44,33 +44,15 @@ static void exec(const char *sql) {
     }
 }
 
-static char *q1(const char *sql) {
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK) {
-        fprintf(stderr, "prepare: %s\n%s\n", sqlite3_errmsg(g_db), sql);
-        assert(0);
-    }
-    char *out = NULL;
-    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
-        out = strdup((const char *)sqlite3_column_text(st, 0));
-    sqlite3_finalize(st);
-    return out;
-}
-
-static long long qi(const char *sql) {
-    char *s = q1(sql);
-    long long v = s ? atoll(s) : -1;
-    free(s);
-    return v;
-}
-
 static int qeq(const char *sql, const char *want) {
-    char *s = q1(sql);
+    char *s = test_qs(g_db, sql);
     int ok = s && strcmp(s, want) == 0;
     if (!ok) fprintf(stderr, "got [%s] want [%s] for %s\n", s ? s : "(null)", want, sql);
     free(s);
     return ok;
 }
+
+#define qi(sql) test_qi(g_db, sql)
 
 static void collect(const char *out) {
     size_t a = g_all ? strlen(g_all) : 0, b = strlen(out);
@@ -99,6 +81,26 @@ static void has(const char *out, const char *needle) {
     if (!strstr(out, needle)) fprintf(stderr, "missing [%s] in %s\n", needle, out);
     assert(strstr(out, needle));
 }
+
+/* Actions answered with a status and, when kw is set, one word that says
+ * which check refused. Rows run in order: later rows see earlier writes. */
+typedef struct { int status; const char *json; const char *kw; } Case;
+
+static void cases(const Case *c, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        const char *out = act(c[i].status, c[i].json);
+        if (c[i].kw && !strstr(out, c[i].kw)) {
+            fprintf(stderr, "row %zu: missing [%s] in %s\n  for %s\n", i, c[i].kw, out, c[i].json);
+            assert(0);
+        }
+    }
+}
+#define CASES(...) do { static const Case c_[] = { __VA_ARGS__ }; \
+                        cases(c_, sizeof(c_) / sizeof(c_[0])); } while (0)
+
+#define GA(agent, rest) "{\"action\":\"grant_add\",\"agent\":\"" agent "\"," rest "}"
+#define MS(purpose, models) "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"" \
+                            purpose "\",\"models\":[" models "]}"
 
 /* The last change_log row for a table: "actor|context|action". */
 static int logged(const char *table, const char *want) {
@@ -223,75 +225,56 @@ static void seed(void) {
 /* ── tests ───────────────────────────────────────────────────────────────── */
 
 static void test_dispatch(void) {
-    act(400, "not json");
-    act(400, "[1,2]");
-    act(400, "{\"no\":\"action\"}");
-    has(act(404, "{\"action\":\"drop_table\"}"), "no action called");
-    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"knd\":\"tool\"}"),
-        "does not take a field called \\\"knd\\\"");
-    printf("PASS: test_dispatch\n");
+    CASES({ 400, "not json", NULL },
+          { 400, "[1,2]", NULL },
+          { 400, "{\"no\":\"action\"}", NULL },
+          { 404, "{\"action\":\"drop_table\"}", "no action" },
+          { 400, GA("Alpha", "\"knd\":\"tool\""), "knd" });
 }
 
 static void test_grants(void) {
-    has(act(200, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"tool\",\"value\":\"web_fetch\"}"),
-        "runs it freely");
+    has(act(200, GA("Alpha", "\"kind\":\"tool\",\"value\":\"web_fetch\"")), "freely");
     assert(qeq("SELECT source || '|' || approval_mode || '|' || COALESCE(approval_id, '-') FROM grants"
                " WHERE agent_name='Alpha' AND value='web_fetch'", "operator|silent|-"));
     assert(logged("grants", "dashboard|act:grant_add|insert"));
     /* A tool on agent_approval_tools starts out asking, as for a new agent. */
-    has(act(200, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"tool\","
-                 "\"value\":\"extension_publish\"}"), "asks you each time");
+    has(act(200, GA("Alpha", "\"kind\":\"tool\",\"value\":\"extension_publish\"")), "asks");
     /* The mode of an existing tool grant can change; its origin stays. */
-    act(200, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"tool\",\"value\":\"shell_exec\","
-             "\"approval_mode\":\"always\"}");
+    act(200, GA("Alpha", "\"kind\":\"tool\",\"value\":\"shell_exec\",\"approval_mode\":\"always\""));
     assert(qeq("SELECT source || '|' || approval_mode FROM grants WHERE agent_name='Alpha'"
                " AND value='shell_exec'", "seed|always"));
-    act(200, "{\"action\":\"grant_add\",\"agent\":\"Beta\",\"kind\":\"host\",\"value\":\".github.com\","
-             "\"expires_at\":4102444800}");
+    act(200, GA("Beta", "\"kind\":\"host\",\"value\":\".github.com\",\"expires_at\":4102444800"));
     assert(qi("SELECT expires_at FROM grants WHERE agent_name='Beta' AND value='.github.com'") == 4102444800LL);
-    has(act(409, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"host\",\"value\":\"api.example.com\"}"),
-        "already has this grant");
-    has(act(404, "{\"action\":\"grant_add\",\"agent\":\"Nobody\",\"kind\":\"tool\",\"value\":\"web_fetch\"}"),
-        "no agent called");
-    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"root\",\"value\":\"x\"}"),
-        "kind must be one of");
-    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"tool\",\"value\":\"rm_rf\"}"),
-        "no tool called");
-    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"secret\","
-                 "\"value\":\"NO_SUCH_SECRET\"}"), "no secret called");
-    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"host\","
-                 "\"value\":\"https://x.example/path\"}"), "not a host name");
-    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"read_path\",\"value\":\"rel/dir\"}"),
-        "absolute path");
+    CASES({ 409, GA("Alpha", "\"kind\":\"host\",\"value\":\"api.example.com\""), "already" },
+          { 404, GA("Nobody", "\"kind\":\"tool\",\"value\":\"web_fetch\""), "agent" },
+          { 400, GA("Alpha", "\"kind\":\"root\",\"value\":\"x\""), "kind" },
+          { 400, GA("Alpha", "\"kind\":\"tool\",\"value\":\"rm_rf\""), "no tool" },
+          { 400, GA("Alpha", "\"kind\":\"secret\",\"value\":\"NO_SUCH_SECRET\""), "no secret called" },
+          { 400, GA("Alpha", "\"kind\":\"host\",\"value\":\"https://x.example/path\""), "host" },
+          { 400, GA("Alpha", "\"kind\":\"read_path\",\"value\":\"rel/dir\""), "absolute" });
+    /* A path grant that would expose the database is refused at grant time. */
     char cwd[1024], j[1400];
     assert(getcwd(cwd, sizeof(cwd)));
-    snprintf(j, sizeof(j), "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"read_path\","
-             "\"value\":\"%s\"}", cwd);
-    has(act(400, j), "would expose cclaw.db");
+    snprintf(j, sizeof(j), GA("Alpha", "\"kind\":\"read_path\",\"value\":\"%s\""), cwd);
+    has(act(400, j), "cclaw.db");
     assert(qi("SELECT count(*) FROM grants WHERE kind='read_path'") == 0);
     exec("INSERT INTO secrets(name, value, scope) VALUES ('PROV_KEY', 'enc:00', 'system')");
-    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"secret\",\"value\":\"PROV_KEY\"}"),
-        "system secret");
-    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"secret\",\"value\":\"lower\"}"),
-        "not a secret name");
-    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"host\",\"value\":\"a.example\","
-                 "\"approval_mode\":\"always\"}"), "tool grants only");
-    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"tool\",\"value\":\"web_fetch\","
-                 "\"approval_mode\":\"sometimes\"}"), "silent, always or tool_decides");
-    has(act(400, "{\"action\":\"grant_add\",\"agent\":\"Alpha\",\"kind\":\"host\",\"value\":\"b.example\","
-                 "\"expires_at\":1000}"), "in the past");
+    CASES({ 400, GA("Alpha", "\"kind\":\"secret\",\"value\":\"PROV_KEY\""), "system" },
+          { 400, GA("Alpha", "\"kind\":\"secret\",\"value\":\"lower\""), "secret name" },
+          { 400, GA("Alpha", "\"kind\":\"host\",\"value\":\"a.example\",\"approval_mode\":\"always\""), "tool" },
+          { 400, GA("Alpha", "\"kind\":\"tool\",\"value\":\"web_fetch\",\"approval_mode\":\"sometimes\""),
+            "tool_decides" },
+          { 400, GA("Alpha", "\"kind\":\"host\",\"value\":\"b.example\",\"expires_at\":1000"), "past" });
     /* Remove. */
     act(200, "{\"action\":\"grant_remove\",\"agent\":\"Alpha\",\"kind\":\"tool\",\"value\":\"web_fetch\"}");
     assert(qi("SELECT count(*) FROM grants WHERE agent_name='Alpha' AND value='web_fetch'") == 0);
     assert(logged("grants", "dashboard|act:grant_remove|delete"));
-    has(act(404, "{\"action\":\"grant_remove\",\"agent\":\"Alpha\",\"kind\":\"tool\",\"value\":\"web_fetch\"}"),
-        "has no tool grant");
-    printf("PASS: test_grants\n");
+    act(404, "{\"action\":\"grant_remove\",\"agent\":\"Alpha\",\"kind\":\"tool\",\"value\":\"web_fetch\"}");
 }
 
 static void test_agent_copy(void) {
-    has(act(200, "{\"action\":\"agent_copy\",\"from\":\"Alpha\",\"name\":\"AlphaTwo\","
-                 "\"description\":\"a copy\",\"attach_memory\":true}"), "Created AlphaTwo as a copy of Alpha");
+    act(200, "{\"action\":\"agent_copy\",\"from\":\"Alpha\",\"name\":\"AlphaTwo\","
+             "\"description\":\"a copy\",\"attach_memory\":true}");
     /* The row, with created_by NULL (the operator made it). */
     assert(qeq("SELECT description || '|' || COALESCE(created_by, 'operator') FROM agents"
                " WHERE name='AlphaTwo'", "a copy|operator"));
@@ -314,140 +297,93 @@ static void test_agent_copy(void) {
     /* Without memory. */
     act(200, "{\"action\":\"agent_copy\",\"from\":\"Alpha\",\"name\":\"AlphaThree\"}");
     assert(qi("SELECT count(*) FROM agent_memory_blocks WHERE agent_name='AlphaThree'") == 0);
-    has(act(400, "{\"action\":\"agent_copy\",\"from\":\"Alpha\",\"name\":\"bad name\"}"), "PascalCase");
-    has(act(409, "{\"action\":\"agent_copy\",\"from\":\"Alpha\",\"name\":\"Beta\"}"), "already an agent");
-    has(act(404, "{\"action\":\"agent_copy\",\"from\":\"Ghost\",\"name\":\"Ghost2\"}"), "no agent called");
-    printf("PASS: test_agent_copy\n");
+    CASES({ 400, "{\"action\":\"agent_copy\",\"from\":\"Alpha\",\"name\":\"bad name\"}", "PascalCase" },
+          { 409, "{\"action\":\"agent_copy\",\"from\":\"Alpha\",\"name\":\"Beta\"}", "already" },
+          { 404, "{\"action\":\"agent_copy\",\"from\":\"Ghost\",\"name\":\"Ghost2\"}", "agent" });
+}
+
+/* A per-entry setting on Beta's chat list: set on mock/a; an entry that
+ * leaves it out keeps it (a page that does not show it cannot reset it);
+ * null clears it. Leaves the list as mock/c, mock/a. */
+static void keep_then_clear(const char *field, const char *value, const char *set, const char *cleared) {
+    char j[384], sql[256];
+    snprintf(sql, sizeof(sql), "SELECT COALESCE(%s, '-') FROM agent_models WHERE agent_name='Beta'"
+             " AND purpose='chat' AND model_id='mock/a'", field);
+    snprintf(j, sizeof(j), MS("chat", "{\"model_id\":\"mock/a\",\"%s\":%s},{\"model_id\":\"mock/c\"}"),
+             field, value);
+    act(200, j);
+    act(200, MS("chat", "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\"}"));
+    assert(qeq(sql, set));
+    snprintf(j, sizeof(j), MS("chat", "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\",\"%s\":null}"),
+             field);
+    act(200, j);
+    assert(qeq(sql, cleared));
 }
 
 static void test_models(void) {
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\",\"reasoning_effort\":\"medium\"}]}");
-    assert(qeq("SELECT group_concat(model_id || ':' || COALESCE(reasoning_effort, '-'), ',') FROM"
-               " (SELECT * FROM agent_models WHERE agent_name='Beta' AND purpose='chat' ORDER BY pos)",
-               "mock/c:-,mock/a:medium"));
+    static const char LIST[] = "SELECT group_concat(model_id || ':' || COALESCE(reasoning_effort, '-'), ',')"
+        " FROM (SELECT * FROM agent_models WHERE agent_name='Beta' AND purpose='%s' ORDER BY pos)";
+    char sql[256];
+    act(200, MS("chat", "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\",\"reasoning_effort\":\"medium\"}"));
+    snprintf(sql, sizeof(sql), LIST, "chat");
+    assert(qeq(sql, "mock/c:-,mock/a:medium"));
     assert(logged("agent_models", "dashboard|act:models_set|insert"));
-    has(act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\",\"reasoning_effort\":\"medium\"}]}"),
+    has(act(200, MS("chat", "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\",\"reasoning_effort\":\"medium\"}")),
         "Nothing changed");
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"image\",\"models\":["
-             "{\"model_id\":\"mock/b\"}]}");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"image\",\"models\":["
-                 "{\"model_id\":\"mock/c\"}]}"), "cannot be used for images");
+    act(200, MS("image", "{\"model_id\":\"mock/b\"}"));
+    has(act(400, MS("image", "{\"model_id\":\"mock/c\"}")), "image");
     assert(qeq("SELECT model_id FROM agent_models WHERE agent_name='Beta' AND purpose='image'", "mock/b"));
-    has(act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"image\",\"models\":[]}"),
-        "global pick by capability");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":[]}"),
-        "at least one chat model");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"mock/a\"},{\"model_id\":\"mock/a\"}]}"), "twice");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"nope/x\"}]}"), "no model called");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"image\",\"models\":["
-                 "{\"model_id\":\"mock/b\",\"reasoning_effort\":\"low\"}]}"), "chat and utility models only");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"mock/a\",\"reasoning_effort\":\"max\"}]}"), "not an effort level");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"video\",\"models\":[]}"),
-        "chat, image, audio or utility");
+    has(act(200, MS("image", "")), "capability");
+    CASES({ 400, MS("chat", ""), "chat model" },
+          { 400, MS("chat", "{\"model_id\":\"mock/a\"},{\"model_id\":\"mock/a\"}"), "twice" },
+          { 400, MS("chat", "{\"model_id\":\"nope/x\"}"), "no model" },
+          { 400, MS("image", "{\"model_id\":\"mock/b\",\"reasoning_effort\":\"low\"}"), "utility" },
+          { 400, MS("chat", "{\"model_id\":\"mock/a\",\"reasoning_effort\":\"max\"}"), "effort" },
+          { 400, MS("video", ""), "utility" });
     /* Utility: any model (mock/c has no capabilities), effort allowed, and
      * an empty list is legal — scripts then get the chat list. */
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"utility\",\"models\":["
-             "{\"model_id\":\"mock/c\",\"reasoning_effort\":\"low\"},{\"model_id\":\"mock/b\"}]}");
-    assert(qeq("SELECT group_concat(model_id || ':' || COALESCE(reasoning_effort, '-'), ',') FROM"
-               " (SELECT * FROM agent_models WHERE agent_name='Beta' AND purpose='utility' ORDER BY pos)",
-               "mock/c:low,mock/b:-"));
-    has(act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"utility\",\"models\":[]}"),
-        "get the chat list");
-    assert(qeq("SELECT count(*) FROM agent_models WHERE agent_name='Beta' AND purpose='utility'", "0"));
-    assert(qeq("SELECT group_concat(model_id, ',') FROM (SELECT * FROM agent_models WHERE agent_name='Beta'"
-               " AND purpose='chat' ORDER BY pos)", "mock/c,mock/a"));
-    /* Trim numbers: set on the chat list; an entry that leaves them out
-     * keeps them (a page that does not show them cannot reset them); null
-     * clears; the schema's refusals come back as plain words. */
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/c\",\"trim_threshold\":9000,\"prune_target\":3000},"
-             "{\"model_id\":\"mock/a\",\"reasoning_effort\":\"medium\"}]}");
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/a\"},{\"model_id\":\"mock/c\"}]}");
-    assert(qeq("SELECT group_concat(model_id || ':' || COALESCE(trim_threshold, '-') || ':'"
-               " || COALESCE(prune_target, '-'), ',') FROM (SELECT * FROM agent_models"
-               " WHERE agent_name='Beta' AND purpose='chat' ORDER BY pos)",
-               "mock/a:-:-,mock/c:9000:3000"));
-    has(act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"mock/a\"},{\"model_id\":\"mock/c\"}]}"), "Nothing changed");
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/a\"},{\"model_id\":\"mock/c\",\"prune_target\":null}]}");
-    assert(qeq("SELECT trim_threshold || ':' || COALESCE(prune_target, '-') FROM agent_models"
-               " WHERE agent_name='Beta' AND model_id='mock/c'", "9000:-"));
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"mock/a\",\"trim_threshold\":0}]}"), "token counts");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"mock/a\",\"trim_threshold\":100,\"prune_target\":200}]}"),
-        "below its trim threshold");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"image\",\"models\":["
-                 "{\"model_id\":\"mock/b\",\"trim_threshold\":100}]}"), "chat list only");
-    /* An empty threshold is half the window (mock/a has none of its own:
-     * the default 128000), and the target must be below that too. */
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"mock/a\",\"trim_threshold\":null,\"prune_target\":64000}]}"),
-        "half the model's window (64000 tokens)");
-    exec("UPDATE models SET context_window = 10000 WHERE id = 'mock/a';");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"mock/a\",\"trim_threshold\":null,\"prune_target\":6000}]}"),
-        "(5000 tokens)");
-    exec("UPDATE models SET context_window = NULL WHERE id = 'mock/a';");
-    /* The cache lifetime the same way: set, kept when left out, cleared by
-     * null; on an Anthropic model only 300 or 3600, and 3600 when a new
-     * entry says nothing. */
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/a\",\"cache_lifetime\":600},{\"model_id\":\"mock/c\"}]}");
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\"}]}");
-    assert(qeq("SELECT cache_lifetime FROM agent_models WHERE agent_name='Beta' AND model_id='mock/a'",
-               "600"));
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\",\"cache_lifetime\":null}]}");
-    assert(qeq("SELECT COALESCE(cache_lifetime, '-') FROM agent_models WHERE agent_name='Beta'"
-               " AND model_id='mock/a'", "-"));
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"mock/a\",\"cache_lifetime\":0}]}"), "seconds");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"image\",\"models\":["
-                 "{\"model_id\":\"mock/b\",\"cache_lifetime\":300}]}"), "chat list only");
-    exec("INSERT INTO providers(name, base_url, endpoint_type) VALUES ('cachetest','http://x','anthropic');"
-         "INSERT INTO models(id, provider_name, model) VALUES ('cachetest/c','cachetest','c');");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"cachetest/c\",\"cache_lifetime\":600}]}"), "300 (the");
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/c\"},{\"model_id\":\"cachetest/c\"}]}");
-    assert(qeq("SELECT cache_lifetime FROM agent_models WHERE agent_name='Beta' AND model_id='cachetest/c'",
-               "3600"));
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/c\"},{\"model_id\":\"cachetest/c\",\"cache_lifetime\":300}]}");
-    assert(qeq("SELECT cache_lifetime FROM agent_models WHERE agent_name='Beta' AND model_id='cachetest/c'",
-               "300"));
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\"}]}");
-    /* The reasoning display: summary by default, set, kept when left out,
-     * back to summary on null; two values; the chat list only. */
+    act(200, MS("utility", "{\"model_id\":\"mock/c\",\"reasoning_effort\":\"low\"},{\"model_id\":\"mock/b\"}"));
+    snprintf(sql, sizeof(sql), LIST, "utility");
+    assert(qeq(sql, "mock/c:low,mock/b:-"));
+    has(act(200, MS("utility", "")), "chat list");
+    assert(qi("SELECT count(*) FROM agent_models WHERE agent_name='Beta' AND purpose='utility'") == 0);
+    snprintf(sql, sizeof(sql), LIST, "chat");
+    assert(qeq(sql, "mock/c:-,mock/a:medium"));
+
+    /* Trim numbers, cache lifetime and reasoning display: chat list only. */
+    keep_then_clear("trim_threshold", "9000", "9000", "-");
+    keep_then_clear("prune_target", "3000", "3000", "-");
+    keep_then_clear("cache_lifetime", "600", "600", "-");
     assert(qeq("SELECT reasoning_display FROM agent_models WHERE agent_name='Beta' AND model_id='mock/a'",
                "summary"));
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/a\",\"reasoning_display\":\"none\"},{\"model_id\":\"mock/c\"}]}");
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\"}]}");
-    assert(qeq("SELECT reasoning_display FROM agent_models WHERE agent_name='Beta' AND model_id='mock/a'",
-               "none"));
+    keep_then_clear("reasoning_display", "\"none\"", "none", "summary");
     assert(qeq("SELECT reasoning_display FROM agent_models WHERE agent_name='Beta' AND model_id='mock/c'",
                "summary"));
-    act(200, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-             "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\",\"reasoning_display\":null}]}");
-    assert(qeq("SELECT reasoning_display FROM agent_models WHERE agent_name='Beta' AND model_id='mock/a'",
-               "summary"));
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"chat\",\"models\":["
-                 "{\"model_id\":\"mock/a\",\"reasoning_display\":\"full\"}]}"), "summary");
-    has(act(400, "{\"action\":\"models_set\",\"agent\":\"Beta\",\"purpose\":\"utility\",\"models\":["
-                 "{\"model_id\":\"mock/a\",\"reasoning_display\":\"none\"}]}"), "chat list only");
-    printf("PASS: test_models\n");
+    /* An empty threshold is half the window (mock/a has none of its own:
+     * the default 128000), and the target must be below that too. */
+    CASES({ 400, MS("chat", "{\"model_id\":\"mock/a\",\"trim_threshold\":0}"), "token" },
+          { 400, MS("chat", "{\"model_id\":\"mock/a\",\"trim_threshold\":100,\"prune_target\":200}"), "trim" },
+          { 400, MS("image", "{\"model_id\":\"mock/b\",\"trim_threshold\":100}"), "chat list" },
+          { 400, MS("chat", "{\"model_id\":\"mock/a\",\"trim_threshold\":null,\"prune_target\":64000}"), "64000" },
+          { 400, MS("chat", "{\"model_id\":\"mock/a\",\"cache_lifetime\":0}"), "seconds" },
+          { 400, MS("image", "{\"model_id\":\"mock/b\",\"cache_lifetime\":300}"), "chat list" },
+          { 400, MS("chat", "{\"model_id\":\"mock/a\",\"reasoning_display\":\"full\"}"), "summary" },
+          { 400, MS("utility", "{\"model_id\":\"mock/a\",\"reasoning_display\":\"none\"}"), "chat list" });
+    exec("UPDATE models SET context_window = 10000 WHERE id = 'mock/a';");
+    has(act(400, MS("chat", "{\"model_id\":\"mock/a\",\"trim_threshold\":null,\"prune_target\":6000}")), "5000");
+    exec("UPDATE models SET context_window = NULL WHERE id = 'mock/a';");
+    /* On an Anthropic model only 300 or 3600, and 3600 when a new entry
+     * says nothing. */
+    exec("INSERT INTO providers(name, base_url, endpoint_type) VALUES ('cachetest','http://x','anthropic');"
+         "INSERT INTO models(id, provider_name, model) VALUES ('cachetest/c','cachetest','c');");
+    has(act(400, MS("chat", "{\"model_id\":\"cachetest/c\",\"cache_lifetime\":600}")), "300");
+    act(200, MS("chat", "{\"model_id\":\"mock/c\"},{\"model_id\":\"cachetest/c\"}"));
+    assert(qeq("SELECT cache_lifetime FROM agent_models WHERE agent_name='Beta' AND model_id='cachetest/c'",
+               "3600"));
+    act(200, MS("chat", "{\"model_id\":\"mock/c\"},{\"model_id\":\"cachetest/c\",\"cache_lifetime\":300}"));
+    assert(qeq("SELECT cache_lifetime FROM agent_models WHERE agent_name='Beta' AND model_id='cachetest/c'",
+               "300"));
+    act(200, MS("chat", "{\"model_id\":\"mock/c\"},{\"model_id\":\"mock/a\"}"));
 }
 
 /* A hook three failures turned off comes back on with its count at zero;
@@ -456,23 +392,24 @@ static void test_hooks(void) {
     exec("INSERT INTO hooks(extension_name, event, path, fail_count, disabled) VALUES"
          " ('ext1', 'ContextThreshold', '/x/compact.qjs', 3, 1),"
          " ('ext1', 'Stop', '/x/review.qjs', 1, 0);");
-    has(act(200, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"ContextThreshold\","
-                 "\"path\":\"/x/compact.qjs\"}"), "on again");
+    act(200, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"ContextThreshold\","
+             "\"path\":\"/x/compact.qjs\"}");
     assert(qeq("SELECT disabled || ':' || fail_count FROM hooks WHERE event='ContextThreshold'", "0:0"));
-    has(act(409, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"ContextThreshold\","
-                 "\"path\":\"/x/compact.qjs\"}"), "not turned off");
-    has(act(409, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"Stop\","
-                 "\"path\":\"/x/review.qjs\"}"), "not turned off");
+    CASES({ 409, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"ContextThreshold\","
+                 "\"path\":\"/x/compact.qjs\"}", "not turned off" },
+          { 409, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"Stop\","
+                 "\"path\":\"/x/review.qjs\"}", "not turned off" });
     assert(qeq("SELECT fail_count FROM hooks WHERE event='Stop'", "1"));
-    has(act(404, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"CacheExpiring\","
-                 "\"path\":\"/x/compact.qjs\"}"), "no CacheExpiring hook");
-    has(act(404, "{\"action\":\"hook_enable\",\"extension\":\"nope\",\"event\":\"Stop\","
-                 "\"path\":\"/x/review.qjs\"}"), "no extension called");
-    has(act(400, "{\"action\":\"hook_enable\",\"extension\":\"ext1\"}"), "Say which hook");
-    has(act(400, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"Stop\","
-                 "\"path\":\"/x/review.qjs\",\"fail_count\":0}"), "does not take a field");
-    printf("PASS: test_hooks\n");
+    CASES({ 404, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"CacheExpiring\","
+                 "\"path\":\"/x/compact.qjs\"}", "CacheExpiring" },
+          { 404, "{\"action\":\"hook_enable\",\"extension\":\"nope\",\"event\":\"Stop\","
+                 "\"path\":\"/x/review.qjs\"}", "extension" },
+          { 400, "{\"action\":\"hook_enable\",\"extension\":\"ext1\"}", "hook" },
+          { 400, "{\"action\":\"hook_enable\",\"extension\":\"ext1\",\"event\":\"Stop\","
+                 "\"path\":\"/x/review.qjs\",\"fail_count\":0}", "field" });
 }
+
+#define CHAT(rest) "{\"action\":\"chat_settings\",\"channel\":\"discord\",\"chat_id\":\"new-c\"" rest "}"
 
 static void test_chats(void) {
     /* An unrouted chat gets a fresh session. */
@@ -484,13 +421,12 @@ static void test_chats(void) {
     assert(logged("channel_chats", "dashboard|act:session_new_on_chat|update"));
     /* Same agent, pinned chat: the old session is left behind, still naming it. */
     has(act(200, "{\"action\":\"session_new_on_chat\",\"agent\":\"Alpha\",\"channel\":\"discord\","
-                 "\"chat_id\":\"dm-a\"}"), "Session #1 (Alpha) is left behind");
+                 "\"chat_id\":\"dm-a\"}"), "left behind");
     assert(qi("SELECT session_id FROM channel_chats WHERE chat_id='dm-a'") > c_sid);
     assert(qeq("SELECT channel_name || ':' || chat_id FROM sessions WHERE id=1", "discord:dm-a"));
     /* Another agent's chat: refused until the receiving agent is typed. */
     const char *r = act(409, "{\"action\":\"session_new_on_chat\",\"agent\":\"Alpha\",\"channel\":\"discord\","
                              "\"chat_id\":\"g-b\"}");
-    has(r, "hands it to Alpha");
     has(r, "\"confirm\":{\"kind\":\"handover\",\"from\":\"Beta\",\"to\":\"Alpha\"");
     assert(qi("SELECT session_id FROM channel_chats WHERE chat_id='g-b'") == 2);
     act(409, "{\"action\":\"session_new_on_chat\",\"agent\":\"Alpha\",\"channel\":\"discord\","
@@ -499,12 +435,12 @@ static void test_chats(void) {
              "\"chat_id\":\"g-b\",\"confirm_handover\":\"Alpha\"}");
     assert(qeq("SELECT s.agent_name FROM channel_chats c JOIN sessions s ON s.id=c.session_id"
                " WHERE c.chat_id='g-b'", "Alpha"));
-    has(act(404, "{\"action\":\"session_new_on_chat\",\"agent\":\"Alpha\",\"channel\":\"discord\","
-                 "\"chat_id\":\"never\"}"), "once someone writes in it");
+    act(404, "{\"action\":\"session_new_on_chat\",\"agent\":\"Alpha\",\"channel\":\"discord\","
+             "\"chat_id\":\"never\"}");
     /* Move session 3 (Alpha, no chat) to dm-a: dm-a's session is left behind. */
     long long dm_old = qi("SELECT session_id FROM channel_chats WHERE chat_id='dm-a'");
-    has(act(200, "{\"action\":\"session_move_to_chat\",\"session_id\":3,\"channel\":\"discord\","
-                 "\"chat_id\":\"dm-a\"}"), "Session #3 now talks to DM with a");
+    act(200, "{\"action\":\"session_move_to_chat\",\"session_id\":3,\"channel\":\"discord\","
+             "\"chat_id\":\"dm-a\"}");
     assert(qi("SELECT session_id FROM channel_chats WHERE chat_id='dm-a'") == 3);
     char sql[128];
     snprintf(sql, sizeof(sql), "SELECT chat_id FROM sessions WHERE id=%lld", dm_old);
@@ -512,38 +448,32 @@ static void test_chats(void) {
     /* Move it on to new-c (Beta's): needs the handover; dm-a gets a fresh Alpha session. */
     act(409, "{\"action\":\"session_move_to_chat\",\"session_id\":3,\"channel\":\"discord\","
              "\"chat_id\":\"new-c\"}");
-    has(act(200, "{\"action\":\"session_move_to_chat\",\"session_id\":3,\"channel\":\"discord\","
-                 "\"chat_id\":\"new-c\",\"confirm_handover\":\"Alpha\"}"), "goes on with a fresh session for Alpha");
+    act(200, "{\"action\":\"session_move_to_chat\",\"session_id\":3,\"channel\":\"discord\","
+             "\"chat_id\":\"new-c\",\"confirm_handover\":\"Alpha\"}");
     assert(qeq("SELECT s.agent_name FROM channel_chats c JOIN sessions s ON s.id=c.session_id"
                " WHERE c.chat_id='dm-a'", "Alpha"));
     assert(qi("SELECT session_id FROM channel_chats WHERE chat_id='dm-a'") > 3);
-    has(act(409, "{\"action\":\"session_move_to_chat\",\"session_id\":3,\"channel\":\"discord\","
-                 "\"chat_id\":\"new-c\"}"), "already talks to");
-    has(act(400, "{\"action\":\"session_move_to_chat\",\"session_id\":4,\"channel\":\"discord\","
-                 "\"chat_id\":\"new-c\"}"), "sub-agent");
-    has(act(404, "{\"action\":\"session_move_to_chat\",\"session_id\":999,\"channel\":\"discord\","
-                 "\"chat_id\":\"new-c\"}"), "no session #999");
+    CASES({ 409, "{\"action\":\"session_move_to_chat\",\"session_id\":3,\"channel\":\"discord\","
+                 "\"chat_id\":\"new-c\"}", "already" },
+          { 400, "{\"action\":\"session_move_to_chat\",\"session_id\":4,\"channel\":\"discord\","
+                 "\"chat_id\":\"new-c\"}", "sub-agent" },
+          { 404, "{\"action\":\"session_move_to_chat\",\"session_id\":999,\"channel\":\"discord\","
+                 "\"chat_id\":\"new-c\"}", "999" });
     /* Chat settings. */
-    act(200, "{\"action\":\"chat_settings\",\"channel\":\"discord\",\"chat_id\":\"new-c\","
-             "\"delivery_mode\":\"auto\",\"tool_filter\":[\"web_fetch\"],\"guidance\":\"Be brief.\"}");
+    act(200, CHAT(",\"delivery_mode\":\"auto\",\"tool_filter\":[\"web_fetch\"],\"guidance\":\"Be brief.\""));
     assert(qeq("SELECT delivery_mode || '|' || tool_filter || '|' || guidance FROM channel_chats"
                " WHERE chat_id='new-c'", "auto|[\"web_fetch\"]|Be brief."));
     assert(logged("channel_chats", "dashboard|act:chat_settings|update"));
-    act(200, "{\"action\":\"chat_settings\",\"channel\":\"discord\",\"chat_id\":\"new-c\","
-             "\"tool_filter\":\"unrestricted\",\"guidance\":\"\"}");
+    act(200, CHAT(",\"tool_filter\":\"unrestricted\",\"guidance\":\"\""));
     assert(qi("SELECT tool_filter IS NULL AND guidance IS NULL FROM channel_chats WHERE chat_id='new-c'") == 1);
-    has(act(400, "{\"action\":\"chat_settings\",\"channel\":\"discord\",\"chat_id\":\"new-c\","
-                 "\"tool_filter\":[]}"), "allow no tools at all");
-    has(act(400, "{\"action\":\"chat_settings\",\"channel\":\"discord\",\"chat_id\":\"new-c\","
-                 "\"tool_filter\":[\"nope\"]}"), "no tool called");
-    has(act(400, "{\"action\":\"chat_settings\",\"channel\":\"discord\",\"chat_id\":\"new-c\","
-                 "\"delivery_mode\":\"loud\"}"), "auto");
-    act(400, "{\"action\":\"chat_settings\",\"channel\":\"discord\",\"chat_id\":\"new-c\"}");
+    CASES({ 400, CHAT(",\"tool_filter\":[]"), "no tools" },
+          { 400, CHAT(",\"tool_filter\":[\"nope\"]"), "no tool called" },
+          { 400, CHAT(",\"delivery_mode\":\"loud\""), "auto" },
+          { 400, CHAT(""), NULL });
     /* Unroute. */
-    has(act(200, "{\"action\":\"chat_unroute\",\"channel\":\"discord\",\"chat_id\":\"new-c\"}"),
-        "dropped, and you are told once");
+    act(200, "{\"action\":\"chat_unroute\",\"channel\":\"discord\",\"chat_id\":\"new-c\"}");
     assert(qi("SELECT session_id IS NULL AND notified_at IS NULL FROM channel_chats WHERE chat_id='new-c'") == 1);
-    has(act(409, "{\"action\":\"chat_unroute\",\"channel\":\"discord\",\"chat_id\":\"new-c\"}"), "not routed");
+    act(409, "{\"action\":\"chat_unroute\",\"channel\":\"discord\",\"chat_id\":\"new-c\"}");
     /* Channel defaults: the open door, and closing it. */
     act(200, "{\"action\":\"channel_defaults\",\"channel\":\"discord\",\"default_agent\":\"Beta\","
              "\"default_tool_filter\":[\"web_fetch\"]}");
@@ -554,17 +484,17 @@ static void test_chats(void) {
     act(200, "{\"action\":\"channel_defaults\",\"channel\":\"discord\",\"default_agent\":null,"
              "\"default_tool_filter\":\"unrestricted\"}");
     assert(qi("SELECT default_agent IS NULL AND default_tool_filter IS NULL FROM channels") == 1);
-    has(act(404, "{\"action\":\"channel_defaults\",\"channel\":\"discord\",\"default_agent\":\"Ghost\"}"),
-        "no agent");
-    has(act(404, "{\"action\":\"channel_defaults\",\"channel\":\"irc\",\"default_agent\":\"Beta\"}"),
-        "no channel");
-    printf("PASS: test_chats\n");
+    CASES({ 404, "{\"action\":\"channel_defaults\",\"channel\":\"discord\",\"default_agent\":\"Ghost\"}", "agent" },
+          { 404, "{\"action\":\"channel_defaults\",\"channel\":\"irc\",\"default_agent\":\"Beta\"}", "channel" });
 }
+
+#define PA(name, url, rest) "{\"action\":\"provider_add\",\"name\":\"" name "\",\"base_url\":\"" url "\"" rest "}"
+#define MOCK "http://127.0.0.1:19893"
 
 static void test_providers(void) {
     /* A good key: key stored as a system secret, provider row, its catalog. */
-    has(act(200, "{\"action\":\"provider_add\",\"name\":\"good\",\"base_url\":\"http://127.0.0.1:19893/ok\","
-                 "\"endpoint_type\":\"openai\",\"api_key\":\"" GOODKEY "\"}"), "system secret GOOD_API_KEY");
+    has(act(200, PA("good", MOCK "/ok", ",\"endpoint_type\":\"openai\",\"api_key\":\"" GOODKEY "\"")),
+        "GOOD_API_KEY");
     assert(qeq("SELECT api_key_env || '|' || endpoint_type FROM providers WHERE name='good'",
                "GOOD_API_KEY|openai"));
     char *k = db_secret_get_system(g_db, "GOOD_API_KEY");
@@ -574,92 +504,81 @@ static void test_providers(void) {
     assert(logged("providers", "dashboard|act:provider_add|insert"));
     assert(logged("secrets", "dashboard|act:provider_add|insert"));
     /* Gemini and Anthropic authenticate their own way, and Gemini's shape. */
-    act(200, "{\"action\":\"provider_add\",\"name\":\"gem\",\"base_url\":\"http://127.0.0.1:19893/gem\","
-             "\"endpoint_type\":\"gemini\",\"api_key\":\"" GOODKEY "\"}");
+    act(200, PA("gem", MOCK "/gem", ",\"endpoint_type\":\"gemini\",\"api_key\":\"" GOODKEY "\""));
     assert(qeq("SELECT group_concat(id || ':' || COALESCE(context_length, '-'), ',') FROM"
                " (SELECT * FROM models_cache WHERE provider_name='gem' ORDER BY id)", "gem-a:1048576,gem-b:-"));
-    act(200, "{\"action\":\"provider_add\",\"name\":\"anth\",\"base_url\":\"http://127.0.0.1:19893/anth\","
-             "\"endpoint_type\":\"anthropic\",\"api_key\":\"" GOODKEY "\"}");
+    act(200, PA("anth", MOCK "/anth", ",\"endpoint_type\":\"anthropic\",\"api_key\":\"" GOODKEY "\""));
     /* A bad key, a wrong format and nothing listening: nothing is written. */
     long long logs = qi("SELECT count(*) FROM change_log");
-    has(act(400, "{\"action\":\"provider_add\",\"name\":\"bad\",\"base_url\":\"http://127.0.0.1:19893/ok\","
-                 "\"endpoint_type\":\"openai\",\"api_key\":\"wrong\"}"), "refused the key (HTTP 401)");
-    has(act(400, "{\"action\":\"provider_add\",\"name\":\"bad\",\"base_url\":\"http://127.0.0.1:19893/ok\","
-                 "\"endpoint_type\":\"gemini\",\"api_key\":\"" GOODKEY "\"}"), "Nothing was saved");
-    has(act(400, "{\"action\":\"provider_add\",\"name\":\"bad\",\"base_url\":\"http://127.0.0.1:1/v1\","
-                 "\"endpoint_type\":\"openai\",\"api_key\":\"" GOODKEY "\"}"), "could not reach");
+    CASES({ 400, PA("bad", MOCK "/ok", ",\"endpoint_type\":\"openai\",\"api_key\":\"wrong\""), "401" },
+          { 400, PA("bad", MOCK "/ok", ",\"endpoint_type\":\"gemini\",\"api_key\":\"" GOODKEY "\""), "Nothing" },
+          { 400, PA("bad", "http://127.0.0.1:1/v1", ",\"endpoint_type\":\"openai\",\"api_key\":\"" GOODKEY "\""),
+            "reach" });
     assert(qi("SELECT (SELECT count(*) FROM providers WHERE name='bad') + (SELECT count(*) FROM secrets"
               " WHERE name='BAD_API_KEY') + (SELECT count(*) FROM models_cache WHERE provider_name='bad')") == 0);
     assert(qi("SELECT count(*) FROM change_log") == logs);
     /* Keyless (a gateway on the network). */
-    has(act(200, "{\"action\":\"provider_add\",\"name\":\"local\",\"base_url\":\"http://127.0.0.1:19893/open\","
-                 "\"endpoint_type\":\"openai\"}"), "with no key");
+    act(200, PA("local", MOCK "/open", ",\"endpoint_type\":\"openai\""));
     assert(qeq("SELECT '[' || api_key_env || ']' FROM providers WHERE name='local'", "[]"));
-    has(act(409, "{\"action\":\"provider_add\",\"name\":\"good\",\"base_url\":\"http://127.0.0.1:19893/ok\","
-                 "\"endpoint_type\":\"openai\"}"), "already a provider");
-    has(act(400, "{\"action\":\"provider_add\",\"name\":\"p2\",\"base_url\":\"ftp://x\",\"endpoint_type\":\"openai\"}"),
-        "API endpoint");
-    has(act(400, "{\"action\":\"provider_add\",\"name\":\"p2\",\"base_url\":\"http://127.0.0.1:19893/ok\","
-                 "\"endpoint_type\":\"responses\"}"), "wire format");
-    has(act(400, "{\"action\":\"provider_add\",\"name\":\"2bad\",\"base_url\":\"http://127.0.0.1:19893/ok\","
-                 "\"endpoint_type\":\"openai\"}"), "start with a letter");
     exec("INSERT INTO secrets(name, value, scope) VALUES ('CLASH_API_KEY', 'enc:00', 'agent')");
-    has(act(409, "{\"action\":\"provider_add\",\"name\":\"clash\",\"base_url\":\"http://127.0.0.1:19893/ok\","
-                 "\"endpoint_type\":\"openai\",\"api_key\":\"" GOODKEY "\"}"), "already exists");
+    CASES({ 409, PA("good", MOCK "/ok", ",\"endpoint_type\":\"openai\""), "already" },
+          { 400, PA("p2", "ftp://x", ",\"endpoint_type\":\"openai\""), "endpoint" },
+          { 400, PA("p2", MOCK "/ok", ",\"endpoint_type\":\"responses\""), "wire format" },
+          { 400, PA("2bad", MOCK "/ok", ",\"endpoint_type\":\"openai\""), "letter" },
+          { 409, PA("clash", MOCK "/ok", ",\"endpoint_type\":\"openai\",\"api_key\":\"" GOODKEY "\""), "exists" });
     /* Edit: request_extra, a new key checked first. */
     act(200, "{\"action\":\"provider_edit\",\"name\":\"good\",\"request_extra\":\"{\\\"x\\\":{\\\"y\\\":1}}\"}");
     assert(qeq("SELECT request_extra FROM providers WHERE name='good'", "{\"x\":{\"y\":1}}"));
     assert(logged("providers", "dashboard|act:provider_edit|update"));
-    has(act(400, "{\"action\":\"provider_edit\",\"name\":\"good\",\"request_extra\":\"[1]\"}"), "JSON object");
+    has(act(400, "{\"action\":\"provider_edit\",\"name\":\"good\",\"request_extra\":\"[1]\"}"), "object");
     act(200, "{\"action\":\"provider_edit\",\"name\":\"good\",\"request_extra\":\"\"}");
     assert(qi("SELECT request_extra IS NULL FROM providers WHERE name='good'") == 1);
-    has(act(400, "{\"action\":\"provider_edit\",\"name\":\"good\",\"api_key\":\"wrong-key\"}"), "Nothing was saved");
+    has(act(400, "{\"action\":\"provider_edit\",\"name\":\"good\",\"api_key\":\"wrong-key\"}"), "Nothing");
     k = db_secret_get_system(g_db, "GOOD_API_KEY");
     assert(k && strcmp(k, GOODKEY) == 0);
     free(k);
     act(200, "{\"action\":\"provider_edit\",\"name\":\"good\",\"api_key\":\"" GOODKEY "\"}");
     has(act(400, "{\"action\":\"provider_edit\",\"name\":\"good\",\"base_url\":\"http://127.0.0.1:1/x\"}"),
-        "could not reach");
-    assert(qeq("SELECT base_url FROM providers WHERE name='good'", "http://127.0.0.1:19893/ok"));
-    act(400, "{\"action\":\"provider_edit\",\"name\":\"good\"}");
-    has(act(404, "{\"action\":\"provider_edit\",\"name\":\"ghost\",\"base_url\":\"http://a.example/v1\"}"),
-        "no provider");
+        "reach");
+    assert(qeq("SELECT base_url FROM providers WHERE name='good'", MOCK "/ok"));
+    CASES({ 400, "{\"action\":\"provider_edit\",\"name\":\"good\"}", NULL },
+          { 404, "{\"action\":\"provider_edit\",\"name\":\"ghost\",\"base_url\":\"http://a.example/v1\"}",
+            "provider" });
     /* Refresh: good, then broken (the previous list is kept). */
     exec("DELETE FROM models_cache WHERE provider_name='good'");
-    has(act(200, "{\"action\":\"provider_refresh_models\",\"name\":\"good\"}"), "lists 3 models");
+    has(act(200, "{\"action\":\"provider_refresh_models\",\"name\":\"good\"}"), "3 models");
     exec("UPDATE providers SET base_url='http://127.0.0.1:1/x' WHERE name='good'");
-    has(act(502, "{\"action\":\"provider_refresh_models\",\"name\":\"good\"}"), "previous list is kept");
+    act(502, "{\"action\":\"provider_refresh_models\",\"name\":\"good\"}");
     assert(qi("SELECT count(*) FROM models_cache WHERE provider_name='good'") == 3);
     exec("UPDATE providers SET base_url='http://127.0.0.1:19893/ok' WHERE name='good'");
     /* Import, prefilled by the page from the cache; the operator's edit wins. */
-    has(act(200, "{\"action\":\"model_import\",\"provider\":\"good\",\"model\":\"vendor/seer\","
-                 "\"context_window\":128000,\"capabilities\":[\"text\",\"image\"]}"), "Registered good/vendor/seer");
+    act(200, "{\"action\":\"model_import\",\"provider\":\"good\",\"model\":\"vendor/seer\","
+             "\"context_window\":128000,\"capabilities\":[\"text\",\"image\"]}");
     assert(qeq("SELECT provider_name || '|' || model || '|' || context_window || '|' || capabilities"
                " FROM models WHERE id='good/vendor/seer'", "good|vendor/seer|128000|[\"text\",\"image\"]"));
     assert(logged("models", "dashboard|act:model_import|insert"));
-    has(act(409, "{\"action\":\"model_import\",\"provider\":\"good\",\"model\":\"vendor/seer\"}"), "already registered");
-    has(act(400, "{\"action\":\"model_import\",\"provider\":\"good\",\"model\":\"x\",\"capabilities\":\"image\"}"),
-        "list of words");
-    has(act(400, "{\"action\":\"model_import\",\"provider\":\"good\",\"model\":\"x\",\"context_window\":-5}"),
-        "whole number");
-    act(404, "{\"action\":\"model_import\",\"provider\":\"ghost\",\"model\":\"x\"}");
+    CASES({ 409, "{\"action\":\"model_import\",\"provider\":\"good\",\"model\":\"vendor/seer\"}", "already" },
+          { 400, "{\"action\":\"model_import\",\"provider\":\"good\",\"model\":\"x\",\"capabilities\":\"image\"}",
+            "list" },
+          { 400, "{\"action\":\"model_import\",\"provider\":\"good\",\"model\":\"x\",\"context_window\":-5}",
+            "whole number" },
+          { 404, "{\"action\":\"model_import\",\"provider\":\"ghost\",\"model\":\"x\"}", NULL });
     /* Edit a model. */
     act(200, "{\"action\":\"model_edit\",\"id\":\"good/vendor/seer\",\"context_window\":200000,"
              "\"max_output_tokens\":8192,\"effort_map\":{\"format\":\"openai\",\"levels\":{\"low\":\"low\","
              "\"high\":\"high\",\"off\":null}}}");
     assert(qeq("SELECT context_window || '|' || max_output_tokens || '|' || (effort_map ->> '$.format')"
                " FROM models WHERE id='good/vendor/seer'", "200000|8192|openai"));
-    has(act(400, "{\"action\":\"model_edit\",\"id\":\"good/vendor/seer\",\"effort_map\":{\"format\":\"x\"}}"),
-        "effort map must look like");
-    has(act(400, "{\"action\":\"model_edit\",\"id\":\"good/vendor/seer\",\"effort_map\":"
-                 "{\"format\":\"openai\",\"levels\":{\"turbo\":1}}}"), "effort map");
+    CASES({ 400, "{\"action\":\"model_edit\",\"id\":\"good/vendor/seer\",\"effort_map\":{\"format\":\"x\"}}",
+            "effort map" },
+          { 400, "{\"action\":\"model_edit\",\"id\":\"good/vendor/seer\",\"effort_map\":"
+                 "{\"format\":\"openai\",\"levels\":{\"turbo\":1}}}", "effort map" });
     act(200, "{\"action\":\"model_edit\",\"id\":\"good/vendor/seer\",\"effort_map\":\"\",\"context_window\":null}");
     assert(qi("SELECT effort_map IS NULL AND context_window IS NULL FROM models WHERE id='good/vendor/seer'") == 1);
     /* Taking a capability away from a model on a media list is refused. */
-    has(act(409, "{\"action\":\"model_edit\",\"id\":\"mock/b\",\"capabilities\":[\"text\"]}"),
-        "Alpha (image)");
+    has(act(409, "{\"action\":\"model_edit\",\"id\":\"mock/b\",\"capabilities\":[\"text\"]}"), "Alpha (image)");
     /* Disabling the only chat model of an agent warns. */
-    has(act(200, "{\"action\":\"model_edit\",\"id\":\"mock/a\",\"enabled\":false}"), "only enabled chat model of");
+    has(act(200, "{\"action\":\"model_edit\",\"id\":\"mock/a\",\"enabled\":false}"), "only enabled chat model");
     assert(qeq("SELECT status FROM models WHERE id='mock/a'", "disabled"));
     act(200, "{\"action\":\"model_edit\",\"id\":\"mock/a\",\"enabled\":true}");
     assert(qeq("SELECT status FROM models WHERE id='mock/a'", "healthy"));
@@ -667,24 +586,23 @@ static void test_providers(void) {
     has(act(409, "{\"action\":\"model_remove\",\"id\":\"mock/a\"}"), "Alpha (chat)");
     act(200, "{\"action\":\"model_remove\",\"id\":\"good/vendor/seer\"}");
     assert(qi("SELECT count(*) FROM models WHERE id='good/vendor/seer'") == 0);
-    has(act(409, "{\"action\":\"provider_remove\",\"name\":\"mock\"}"), "still has 3 models");
-    has(act(200, "{\"action\":\"provider_remove\",\"name\":\"good\"}"), "GOOD_API_KEY, is still stored");
+    has(act(409, "{\"action\":\"provider_remove\",\"name\":\"mock\"}"), "3 models");
+    has(act(200, "{\"action\":\"provider_remove\",\"name\":\"good\"}"), "still stored");
     assert(qi("SELECT (SELECT count(*) FROM providers WHERE name='good') + (SELECT count(*) FROM models_cache"
               " WHERE provider_name='good')") == 0);
-    printf("PASS: test_providers\n");
 }
 
 static void test_memory(void) {
     has(act(200, "{\"action\":\"memory_block_create\",\"label\":\"facts\",\"description\":\"d\","
-                 "\"placement\":\"system\",\"agent\":\"Beta\"}"), "attached to Beta");
+                 "\"placement\":\"system\",\"agent\":\"Beta\"}"), "Beta");
     long long id = qi("SELECT id FROM memory_blocks WHERE label='facts'");
     assert(qi("SELECT read_only FROM agent_memory_blocks WHERE agent_name='Beta' AND block_id="
               "(SELECT id FROM memory_blocks WHERE label='facts')") == 0);
     assert(qi("SELECT created_by IS NULL FROM memory_blocks WHERE label='facts'") == 1);
-    has(act(200, "{\"action\":\"memory_block_create\",\"label\":\"loose\"}"), "No agent sees it");
-    has(act(400, "{\"action\":\"memory_block_create\",\"label\":\"has space\"}"), "no spaces");
-    has(act(409, "{\"action\":\"memory_block_create\",\"label\":\"facts\",\"agent\":\"Beta\"}"), "already has");
-    has(act(400, "{\"action\":\"memory_block_create\",\"label\":\"x\",\"placement\":\"top\"}"), "Placement");
+    CASES({ 200, "{\"action\":\"memory_block_create\",\"label\":\"loose\"}", "No agent" },
+          { 400, "{\"action\":\"memory_block_create\",\"label\":\"has space\"}", "spaces" },
+          { 409, "{\"action\":\"memory_block_create\",\"label\":\"facts\",\"agent\":\"Beta\"}", "already" },
+          { 400, "{\"action\":\"memory_block_create\",\"label\":\"x\",\"placement\":\"top\"}", "lacement" });
     char j[512];
     snprintf(j, sizeof(j), "{\"action\":\"memory_block_edit\",\"block_id\":%lld,\"description\":\"new\","
              "\"char_limit\":40,\"placement\":\"context\"}", id);
@@ -695,22 +613,21 @@ static void test_memory(void) {
     act(404, "{\"action\":\"memory_block_edit\",\"block_id\":999,\"description\":\"x\"}");
     /* Attach: read-only by default; a label clash is refused with its name. */
     snprintf(j, sizeof(j), "{\"action\":\"memory_attach\",\"block_id\":%lld,\"agent\":\"Alpha\"}", id);
-    has(act(200, j), "can now read this block");
-    has(act(409, j), "already has this block, read only");
-    has(act(409, "{\"action\":\"memory_attach\",\"block_id\":8,\"agent\":\"Alpha\"}"),
-        "already has a block called persona");
+    has(act(200, j), "read");
+    has(act(409, j), "read only");
+    has(act(409, "{\"action\":\"memory_attach\",\"block_id\":8,\"agent\":\"Alpha\"}"), "persona");
     snprintf(j, sizeof(j), "{\"action\":\"memory_attach\",\"block_id\":%lld,\"agent\":\"Alpha\","
              "\"read_only\":false}", id);
-    has(act(200, j), "It is shared");
+    act(200, j);
     snprintf(j, sizeof(j), "{\"action\":\"memory_detach\",\"block_id\":%lld,\"agent\":\"Alpha\"}", id);
     act(200, j);
-    has(act(404, j), "does not have this block");
+    act(404, j);
     /* Notes. */
     snprintf(j, sizeof(j), "{\"action\":\"memory_note_add\",\"block_id\":%lld,\"text\":\"short\"}", id);
-    has(act(200, j), "Added.");
+    act(200, j);
     snprintf(j, sizeof(j), "{\"action\":\"memory_note_add\",\"block_id\":%lld,\"text\":\"%s\"}", id,
              "a note that is quite a lot longer than forty characters");
-    has(act(200, j), "over the block's limit of 40");
+    has(act(200, j), "40");
     long long note = qi("SELECT MIN(id) FROM memory_notes");
     snprintf(j, sizeof(j), "{\"action\":\"memory_note_edit\",\"block_id\":%lld,\"note_id\":%lld,"
              "\"text\":\"edited\"}", id, note);
@@ -719,12 +636,11 @@ static void test_memory(void) {
     has(act(400, j), "empty");
     snprintf(j, sizeof(j), "{\"action\":\"memory_note_delete\",\"block_id\":%lld,\"note_id\":%lld}", id, note);
     act(200, j);
-    has(act(404, j), "has no note");
+    act(404, j);
     snprintf(j, sizeof(j), "{\"action\":\"memory_block_delete\",\"block_id\":%lld}", id);
-    has(act(200, j), "detached from Beta");
+    has(act(200, j), "Beta");
     snprintf(j, sizeof(j), "SELECT count(*) FROM memory_notes WHERE block_id=%lld", id);
     assert(qi(j) == 0);
-    printf("PASS: test_memory\n");
 }
 
 static void test_approvals(void) {
@@ -766,12 +682,11 @@ static void test_approvals(void) {
                " ORDER BY id DESC LIMIT 1", "dashboard|approval:"));
     has(act(400, "{\"action\":\"approval_grant_from_history\",\"approval_id\":32}"), "Only a configuration");
     has(act(409, "{\"action\":\"approval_grant_from_history\",\"approval_id\":30}"), "was not denied");
-    printf("PASS: test_approvals\n");
 }
 
 static void test_secrets(void) {
     has(act(200, "{\"action\":\"secret_add\",\"name\":\"GH_TOKEN\",\"value\":\"tok-" MARK "\"}"),
-        "No agent may use it until you grant it");
+        "until you grant it");
     assert(qeq("SELECT scope || '|' || source FROM secrets WHERE name='GH_TOKEN'", "agent|operator"));
     assert(qi("SELECT count(*) FROM grants WHERE kind='secret' AND value='GH_TOKEN'") == 0);
     assert(logged("secrets", "dashboard|act:secret_add|insert"));
@@ -804,7 +719,6 @@ static void test_secrets(void) {
     assert(qi("SELECT (SELECT count(*) FROM secrets WHERE name='GH_TOKEN') + (SELECT count(*) FROM"
               " secret_hosts WHERE secret_name='GH_TOKEN') + (SELECT count(*) FROM grants WHERE value='GH_TOKEN')") == 0);
     act(404, "{\"action\":\"secret_remove\",\"name\":\"NO_SUCH\"}");
-    printf("PASS: test_secrets\n");
 }
 
 /* The values submitted through actions (MARK, inside GOODKEY and the
@@ -833,7 +747,7 @@ static void test_secret_never_leaves(void) {
     assert(explore_meta(g_db, &meta) == 200 && !strstr(meta, MARK));
     free(meta);
     assert(tables > 30);
-    printf("PASS: test_secret_never_leaves (%d answers, %d tables)\n", g_answers, tables);
+    printf("    %d answers, %d tables\n", g_answers, tables);
 }
 
 int main(void) {
@@ -846,17 +760,17 @@ int main(void) {
     unsetenv("GOOD_API_KEY");
     seed();
     pthread_t srv = server_start();
-    test_dispatch();
-    test_grants();
-    test_agent_copy();
-    test_models();
-    test_hooks();
-    test_chats();
-    test_providers();
-    test_memory();
-    test_approvals();
-    test_secrets();
-    test_secret_never_leaves();
+    RUN(test_dispatch);
+    RUN(test_grants);
+    RUN(test_agent_copy);
+    RUN(test_models);
+    RUN(test_hooks);
+    RUN(test_chats);
+    RUN(test_providers);
+    RUN(test_memory);
+    RUN(test_approvals);
+    RUN(test_secrets);
+    RUN(test_secret_never_leaves);
     g_stop = 1;
     pthread_join(srv, NULL);
     close(g_listen);

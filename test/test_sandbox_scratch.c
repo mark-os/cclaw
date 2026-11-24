@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include "../src/config.h"
 #include "test_run_tool_shell.h"
+#include "test_util.h"
 
 #define ROOT "/tmp/cclaw_scratch_test"
 #define WS   ROOT "/ws"
@@ -59,7 +60,6 @@ static void test_creates_owned_0700(void) {
     /* Idempotent — a second call on the existing tree must succeed, or every
      * tool call after the first fails. */
     assert(scratch_dir_ensure("Agent", ROOT, out, sizeof(out)) != NULL);
-    printf("  PASS creates_owned_0700\n");
 }
 
 static void test_per_agent_isolation(void) {
@@ -67,7 +67,6 @@ static void test_per_agent_isolation(void) {
     assert(scratch_dir_ensure("Alpha", ROOT, a, sizeof(a)) != NULL);
     assert(scratch_dir_ensure("Beta", ROOT, b, sizeof(b)) != NULL);
     assert(strcmp(a, b) != 0);
-    printf("  PASS per_agent_isolation\n");
 }
 
 /* A symlink planted at the per-uid base must be refused, not followed — /tmp is
@@ -85,7 +84,6 @@ static void test_refuses_symlinked_base(void) {
 
     char out[PATH_MAX];
     assert(scratch_dir_ensure("Agent", sub, out, sizeof(out)) == NULL);
-    printf("  PASS refuses_symlinked_base\n");
 }
 
 /* A world-writable base is refused too: another user could then drop files into
@@ -102,7 +100,6 @@ static void test_refuses_wrong_mode(void) {
 
     char out[PATH_MAX];
     assert(scratch_dir_ensure("Agent", sub, out, sizeof(out)) == NULL);
-    printf("  PASS refuses_wrong_mode\n");
 }
 
 /* Abandoned namespace roots are reaped opportunistically. The old code leaked
@@ -121,7 +118,6 @@ static void test_reaps_abandoned_ns_roots(void) {
 
     assert(scratch_dir_ensure("Agent", ROOT, out, sizeof(out)) != NULL);
     assert(stat(stale, &st) != 0);          /* and the next call reaped it */
-    printf("  PASS reaps_abandoned_ns_roots\n");
 }
 
 /* ── end to end, through the real --run-tool broker ──────────────────── */
@@ -163,22 +159,19 @@ static void test_tmp_persists_and_is_private(void) {
     snprintf(marker, sizeof(marker), "%s/marker.txt", tmp_dir);
     struct stat st;
     assert(stat(marker, &st) == 0);
-    printf("  PASS tmp_persists_and_is_private\n");
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    printf("test_sandbox_scratch\n");
+    TEST_INIT();
     setup();
 
-    test_creates_owned_0700();
-    test_per_agent_isolation();
-    test_refuses_symlinked_base();
-    test_refuses_wrong_mode();
-    test_reaps_abandoned_ns_roots();
-    test_tmp_persists_and_is_private();
+    RUN(test_creates_owned_0700);
+    RUN(test_per_agent_isolation);
+    RUN(test_refuses_symlinked_base);
+    RUN(test_refuses_wrong_mode);
+    RUN(test_reaps_abandoned_ns_roots);
+    RUN(test_tmp_persists_and_is_private);
 
     cleanup();
-    printf("All scratch-dir tests passed\n");
     return 0;
 }

@@ -7,76 +7,53 @@
 #include <string.h>
 #include <unistd.h>
 
-static void test_valid_transitions(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
-    int64_t sid = session_create(db, "t", NULL, -1, 0);
-    assert(sid > 0);
-
-    /* idle → llm_running */
-    assert(session_set_state(db, sid, "llm_running") == 0);
-    /* llm_running → idle */
-    assert(session_set_state(db, sid, "idle") == 0);
-
-    /* idle → llm_running → error → idle */
-    assert(session_set_state(db, sid, "llm_running") == 0);
-    assert(session_set_state(db, sid, "idle") == 0);
-
-    /* idle → tool_running → idle */
-    assert(session_set_state(db, sid, "tool_running") == 0);
-    assert(session_set_state(db, sid, "idle") == 0);
-
-    db_close(db);
-    printf("  PASS test_valid_transitions\n");
+/* Each row walks one fresh (idle) session through its steps; every step
+ * names the result session_set_state must give. A busy state moves to
+ * another busy state, a waiting state is reachable only from a busy one, and
+ * idle -> idle is refused. Deleted states (awaiting_agent, compacting) and
+ * the legacy "running" are unknown names now. */
+static void test_transitions(void) {
+    static const struct {
+        const char *name;
+        struct { const char *state; int rc; } steps[6];
+    } cases[] = {
+        { "idle <-> busy", { {"llm_running", 0}, {"idle", 0},
+                             {"tool_running", 0}, {"idle", 0} } },
+        { "busy -> busy",  { {"llm_running", 0}, {"tool_running", 0},
+                             {"llm_running", 0}, {"idle", 0} } },
+        { "idle -> idle",              { {"idle", -1} } },
+        { "idle -> error",             { {"error", -1} } },
+        { "idle -> awaiting_approval", { {"awaiting_approval", -1} } },
+        { "unknown names",             { {"awaiting_agent", -1}, {"compacting", -1},
+                                         {"running", -1} } },
+        { "approval then idle",  { {"llm_running", 0}, {"tool_running", 0},
+                                   {"awaiting_approval", 0}, {"idle", 0} } },
+        /* approval resolved: the turn resumes */
+        { "approval then resume", { {"llm_running", 0}, {"awaiting_approval", 0},
+                                    {"tool_running", 0}, {"idle", 0} } },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("    %s\n", cases[i].name);
+        sqlite3 *db = test_db_open(":memory:");
+        assert(db);
+        int64_t sid = session_create(db, "t", NULL, -1, 0);
+        assert(sid > 0);
+        for (int j = 0; j < 6 && cases[i].steps[j].state; j++)
+            assert(session_set_state(db, sid, cases[i].steps[j].state) == cases[i].steps[j].rc);
+        db_close(db);
+    }
 }
 
-static void test_invalid_transitions(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
-    int64_t sid = session_create(db, "t", NULL, -1, 0);
-    assert(sid > 0);
-
-    /* idle → idle (no-op, rejected) */
-    assert(session_set_state(db, sid, "idle") == -1);
-    /* awaiting_agent was deleted: it is now just an unknown state name */
-    assert(session_set_state(db, sid, "awaiting_agent") == -1);
-    /* idle → error (invalid) */
-    assert(session_set_state(db, sid, "error") == -1);
-    /* idle → awaiting_approval (only reachable from a busy state) */
-    assert(session_set_state(db, sid, "awaiting_approval") == -1);
-
-    /* busy → busy is valid: a turn moves llm_running → tool_running →
-     * llm_running */
-    assert(session_set_state(db, sid, "llm_running") == 0);
-    assert(session_set_state(db, sid, "tool_running") == 0);
-    assert(session_set_state(db, sid, "llm_running") == 0);
-    assert(session_set_state(db, sid, "idle") == 0);
-    /* compacting was deleted with the C compaction: an unknown name now */
-    assert(session_set_state(db, sid, "compacting") == -1);
-
-    /* unknown state names are rejected */
-    assert(session_set_state(db, sid, "running") == -1);
-
-    db_close(db);
-    printf("  PASS test_invalid_transitions\n");
-}
-
+/* Two different sessions can both be busy: the guard is per session. */
 static void test_concurrent_acquire(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t s1 = session_create(db, "a", NULL, -1, 0);
     int64_t s2 = session_create(db, "b", NULL, -1, 0);
     assert(s1 > 0 && s2 > 0);
-
-    /* Two different sessions can both go llm_running */
     assert(session_set_state(db, s1, "llm_running") == 0);
     assert(session_set_state(db, s2, "llm_running") == 0);
-
-    /* Legacy state name is rejected */
-    assert(session_set_state(db, s1, "running") == -1);
-
     db_close(db);
-    printf("  PASS test_concurrent_acquire\n");
 }
 
 static void test_turn_iteration(void) {
@@ -103,29 +80,6 @@ static void test_turn_iteration(void) {
     assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", sid, -1) == 0);
 
     db_close(db);
-    printf("  PASS test_turn_iteration\n");
-}
-
-static void test_waiting_transition(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
-    int64_t sid = session_create(db, "t", NULL, -1, 0);
-    assert(sid > 0);
-
-    /* idle → llm_running → tool_running → awaiting_approval → idle */
-    assert(session_set_state(db, sid, "llm_running") == 0);
-    assert(session_set_state(db, sid, "tool_running") == 0);
-    assert(session_set_state(db, sid, "awaiting_approval") == 0);
-    assert(session_set_state(db, sid, "idle") == 0);
-
-    /* awaiting_approval → tool_running (approval resolved, turn resumes) */
-    assert(session_set_state(db, sid, "llm_running") == 0);
-    assert(session_set_state(db, sid, "awaiting_approval") == 0);
-    assert(session_set_state(db, sid, "tool_running") == 0);
-    assert(session_set_state(db, sid, "idle") == 0);
-
-    db_close(db);
-    printf("  PASS test_waiting_transition\n");
 }
 
 /* H1/H4/H5: startup crash recovery resets every transient/waiting state to
@@ -210,7 +164,6 @@ static void test_startup_recovery(void) {
     assert(res_run == 1);
 
     db_close(db);
-    printf("  PASS test_startup_recovery\n");
 }
 
 static char *get_owner(sqlite3 *db, int64_t sid) {
@@ -246,7 +199,6 @@ static void test_owner_instance_stamping(void) {
     /* Reset global for other tests */
     db_set_instance_id(NULL);
     db_close(db);
-    printf("  PASS test_owner_instance_stamping\n");
 }
 
 static void test_recovery_owner_scoped(void) {
@@ -301,20 +253,16 @@ static void test_recovery_owner_scoped(void) {
 
     process_unregister(db, live_id);
     db_close(db);
-    printf("  PASS test_recovery_owner_scoped\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_session_state:\n");
-    test_valid_transitions();
-    test_invalid_transitions();
-    test_concurrent_acquire();
-    test_turn_iteration();
-    test_waiting_transition();
-    test_startup_recovery();
-    test_owner_instance_stamping();
-    test_recovery_owner_scoped();
-    printf("All session state tests passed.\n");
+    RUN(test_transitions);
+    RUN(test_concurrent_acquire);
+    RUN(test_turn_iteration);
+    RUN(test_startup_recovery);
+    RUN(test_owner_instance_stamping);
+    RUN(test_recovery_owner_scoped);
     return 0;
 }

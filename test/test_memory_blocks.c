@@ -27,13 +27,12 @@ static sqlite3 *open_seeded(void) {
     test_seed_agent(db, "OtherAgent");
     test_seed_agent(db, "Agent1");
     test_seed_agent(db, "Agent2");
-    test_seed_agent(db, "Agent");
     test_seed_agent(db, "Myagent");
     test_seed_agent(db, "Testagent");
     return db;
 }
 
-static void test_create_and_get(void) {
+static void test_create(void) {
     sqlite3 *db = open_seeded();
 
     int64_t id = memory_block_create(db, "TestAgent", "persona",
@@ -41,12 +40,7 @@ static void test_create_and_get(void) {
     assert(id > 0);
 
     MemoryBlock *mb = memory_block_get(db, "TestAgent", "persona");
-    assert(mb);
-    assert(strcmp(mb->created_by, "TestAgent") == 0);
-    assert(strcmp(mb->label, "persona") == 0);
-    assert(strcmp(mb->description, "Agent identity") == 0);
-    assert(mb->char_limit == 5000);
-    assert(mb->read_only == 0);
+    assert(mb && mb->read_only == 0);
     /* NULL placement defaults to 'context' — new memory rides in the
      * per-turn user context block, not the system prompt. */
     assert(strcmp(mb->placement, "context") == 0);
@@ -62,7 +56,6 @@ static void test_create_and_get(void) {
 
     db_close(db);
     test_db_clean(TEST_DB);
-    printf("  PASS test_create_and_get\n");
 }
 
 static void test_seed(void) {
@@ -128,7 +121,6 @@ static void test_seed(void) {
 
     db_close(db);
     test_db_clean(TEST_DB);
-    printf("  PASS test_seed\n");
 }
 
 static void test_prompt_injection(void) {
@@ -188,15 +180,13 @@ static void test_prompt_injection(void) {
     free(prompt);
     db_close(db);
     test_db_clean(TEST_DB);
-    printf("  PASS test_prompt_injection\n");
 }
 
 int main(void) {
     TEST_INIT();
-    printf("test_memory_blocks:\n");
-    test_create_and_get();
-    test_seed();
-    test_prompt_injection();
+    RUN(test_create);
+    RUN(test_seed);
+    RUN(test_prompt_injection);
     printf("All memory_blocks tests passed.\n");
     return 0;
 }

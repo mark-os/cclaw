@@ -77,7 +77,6 @@ static void test_promote_rejects_bad_name(void) {
     /* Nothing parked, nothing registered. */
     assert(scalar("SELECT COUNT(*) FROM approvals") == 0);
     assert(scalar("SELECT COUNT(*) FROM extensions") == 0);
-    printf("  PASS test_promote_rejects_bad_name\n");
 }
 
 static void test_promote_invalid_bundle_errors(void) {
@@ -89,7 +88,6 @@ static void test_promote_invalid_bundle_errors(void) {
     assert(r && strstr(r, "error: promote failed"));
     free(r);
     assert(scalar("SELECT COUNT(*) FROM approvals") == 0);
-    printf("  PASS test_promote_invalid_bundle_errors\n");
 }
 
 static void test_promote_parks_apply_approval(void) {
@@ -179,7 +177,6 @@ static void test_promote_parks_apply_approval(void) {
     const char *sstate = (const char *)sqlite3_column_text(st, 0);
     assert(sstate && strcmp(sstate, "awaiting_approval") == 0);
     sqlite3_finalize(st);
-    printf("  PASS test_promote_parks_apply_approval\n");
 }
 
 static void test_publish_owner_only(void) {
@@ -196,7 +193,6 @@ static void test_publish_owner_only(void) {
     assert(r && strstr(r, "error:"));
     free(r);
     assert(scalar("SELECT published FROM extensions WHERE name='theirs'") == 0);
-    printf("  PASS test_publish_owner_only\n");
 }
 
 static void test_attach_visibility_boundary(void) {
@@ -220,7 +216,6 @@ static void test_attach_visibility_boundary(void) {
     r = call("extension_attach", "{\"name\":\"mine\"}");
     assert(r && strstr(r, "attached extension 'mine'"));
     free(r);
-    printf("  PASS test_attach_visibility_boundary\n");
 }
 
 static void test_list_scopes_to_visible(void) {
@@ -230,7 +225,6 @@ static void test_list_scopes_to_visible(void) {
     assert(strstr(r, "\"mine\""));      /* owned */
     assert(strstr(r, "\"hidden\"") == NULL);   /* neither */
     free(r);
-    printf("  PASS test_list_scopes_to_visible\n");
 }
 
 /* Materialize `agent`'s extension tools exactly as the dispatcher does — the
@@ -332,12 +326,10 @@ static void test_subagent_draft_never_globally_callable(void) {
     g_ctx.session_id = root_sid;
     g_ctx.agent_name = root_agent;
     g_ctx.workspace = root_ws;
-    printf("  PASS test_subagent_draft_never_globally_callable\n");
 }
 
 int main(void) {
     TEST_INIT();
-    alarm(15);
     printf("test_tool_extension:\n");
     test_db_clean(TEST_DB);
     char cmd[256];
@@ -359,13 +351,13 @@ int main(void) {
     g_ctx.current_tool_call_id = "tc_ext_1";
     assert(tool_extension_register(&g_reg, &g_ctx) == 0);
 
-    test_promote_rejects_bad_name();
-    test_promote_invalid_bundle_errors();
-    test_promote_parks_apply_approval();
-    test_publish_owner_only();
-    test_attach_visibility_boundary();
-    test_list_scopes_to_visible();
-    test_subagent_draft_never_globally_callable();
+    RUN(test_promote_rejects_bad_name);
+    RUN(test_promote_invalid_bundle_errors);
+    RUN(test_promote_parks_apply_approval);
+    RUN(test_publish_owner_only);
+    RUN(test_attach_visibility_boundary);
+    RUN(test_list_scopes_to_visible);
+    RUN(test_subagent_draft_never_globally_callable);
 
     tools_free(&g_reg);
     db_close(g_db);

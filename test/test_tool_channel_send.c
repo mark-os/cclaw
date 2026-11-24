@@ -17,15 +17,6 @@
 
 static const char *DB_PATH = "/tmp/test_tool_channel_send.db";
 
-static int qcount(sqlite3 *db, const char *sql) {
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
-    int c = -1;
-    if (sqlite3_step(s) == SQLITE_ROW) c = sqlite3_column_int(s, 0);
-    sqlite3_finalize(s);
-    return c;
-}
-
 static char *call(ToolRegistry *reg, ToolChannelSendCtx *ctx,
                   const char *agent, int64_t sid, const char *args) {
     snprintf(ctx->agent_name, sizeof(ctx->agent_name), "%s", agent);
@@ -68,71 +59,61 @@ int main(void) {
     ToolChannelSendCtx ctx = {.db = db, .db_path = NULL};
     assert(tool_channel_send_register(&reg, &ctx) == 0);
 
-    /* Unrouted target → default-deny. */
-    printf("  deny_unrouted... ");
-    char *r = call(&reg, &ctx, "Alice", 11,
-        "{\"channel\":\"telegram\",\"chat_id\":\"999\",\"message\":\"hi\"}");
-    assert(r && strstr(r, "not a chat routed to you"));
-    free(r);
-    printf("PASS\n");
-
-    /* channels.default_agent grants no send authority. */
-    printf("  deny_default_agent... ");
-    r = call(&reg, &ctx, "Alice", 11,
-        "{\"channel\":\"telegram\",\"chat_id\":\"888\",\"message\":\"hi\"}");
-    assert(r && strstr(r, "not a chat routed to you"));
-    free(r);
-    printf("PASS\n");
-
-    /* Another agent's route → denied. */
-    printf("  deny_other_agent... ");
-    r = call(&reg, &ctx, "Alice", 11,
-        "{\"channel\":\"telegram\",\"chat_id\":\"77\",\"message\":\"hi\"}");
-    assert(r && strstr(r, "not a chat routed to you"));
-    free(r);
-    printf("PASS\n");
+    /* Default-deny: an unrouted chat, one only channels.default_agent
+     * reaches (no send authority), another agent's route. */
+    printf("  deny_not_routed_to_you\n");
+    static const char *deny[] = {
+        "{\"channel\":\"telegram\",\"chat_id\":\"999\",\"message\":\"hi\"}",
+        "{\"channel\":\"telegram\",\"chat_id\":\"888\",\"message\":\"hi\"}",
+        "{\"channel\":\"telegram\",\"chat_id\":\"77\",\"message\":\"hi\"}",
+    };
+    char *r;
+    for (size_t i = 0; i < sizeof(deny) / sizeof(deny[0]); i++) {
+        r = call(&reg, &ctx, "Alice", 11, deny[i]);
+        if (!r || !strstr(r, "not a chat routed to you")) {
+            fprintf(stderr, "deny row %zu: %s\n", i, r ? r : "(null)");
+            assert(0);
+        }
+        free(r);
+    }
 
     /* Own route, not origin session → queued + outbox row. */
-    printf("  send_queued... ");
+    printf("  send_queued\n");
     r = call(&reg, &ctx, "Alice", 11,
         "{\"channel\":\"telegram\",\"chat_id\":\"42\",\"message\":\"hello\"}");
     assert(r && strstr(r, "queued, outbox id"));
     free(r);
-    assert(qcount(db,
+    assert((int)test_qi(db,
         "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='telegram'"
         " AND json_extract(payload,'$.chat_id')='42'"
         " AND json_extract(payload,'$.text')='hello'") == 1);
-    printf("PASS\n");
 
     /* Origin chat + auto route → dedup short-circuit, no row. */
-    printf("  dedup_auto_origin... ");
+    printf("  dedup_auto_origin\n");
     r = call(&reg, &ctx, "Alice", 10,
         "{\"channel\":\"telegram\",\"chat_id\":\"42\",\"message\":\"again\"}");
     assert(r && strstr(r, "already delivers"));
     free(r);
-    assert(qcount(db,
+    assert((int)test_qi(db,
         "SELECT COUNT(*) FROM channel_outbox"
         " WHERE json_extract(payload,'$.text')='again'") == 0);
-    printf("PASS\n");
 
     /* Origin chat but explicit route → the tool IS the path; queued. */
-    printf("  explicit_origin_sends... ");
+    printf("  explicit_origin_sends\n");
     r = call(&reg, &ctx, "Bob", 12,
         "{\"channel\":\"telegram\",\"chat_id\":\"77\",\"message\":\"deliberate\"}");
     assert(r && strstr(r, "queued, outbox id"));
     free(r);
-    printf("PASS\n");
 
     /* A chat pinned to another of the agent's sessions. */
-    printf("  pinned_session_route... ");
+    printf("  pinned_session_route\n");
     r = call(&reg, &ctx, "Alice", 11,
         "{\"channel\":\"telegram\",\"chat_id\":\"-500\",\"message\":\"group msg\"}");
     assert(r && strstr(r, "queued, outbox id"));
     free(r);
-    printf("PASS\n");
 
     /* action=list: Alice sees 42 and -500 (her pinned sessions), not 77. */
-    printf("  list_targets... ");
+    printf("  list_targets\n");
     r = call(&reg, &ctx, "Alice", 11, "{\"action\":\"list\"}");
     assert(r && strstr(r, "\"42\"") && strstr(r, "\"-500\""));
     assert(!strstr(r, "\"77\"") && !strstr(r, "\"*\""));
@@ -141,45 +122,40 @@ int main(void) {
     assert(strstr(r, "\"name\":\"#general @ My Server\""));
     assert(strstr(r, "\"name\":null"));
     free(r);
-    printf("PASS\n");
 
     /* No target named → defaults to the session's own bound chat. */
-    printf("  default_own_chat... ");
+    printf("  default_own_chat\n");
     r = call(&reg, &ctx, "Bob", 12, "{\"message\":\"speak here\"}");
     assert(r && strstr(r, "queued, outbox id"));
     free(r);
-    assert(qcount(db,
+    assert((int)test_qi(db,
         "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='telegram'"
         " AND json_extract(payload,'$.chat_id')='77'"
         " AND json_extract(payload,'$.text')='speak here'") == 1);
-    printf("PASS\n");
 
     /* Unbound session (no channel/chat) cannot default → error, no row. */
-    printf("  default_unbound_errors... ");
+    printf("  default_unbound_errors\n");
     r = call(&reg, &ctx, "Alice", 11, "{\"message\":\"nowhere\"}");
     assert(r && strstr(r, "error:"));
     free(r);
-    assert(qcount(db,
+    assert((int)test_qi(db,
         "SELECT COUNT(*) FROM channel_outbox"
         " WHERE json_extract(payload,'$.text')='nowhere'") == 0);
-    printf("PASS\n");
 
     /* Missing args → error. */
-    printf("  missing_args... ");
+    printf("  missing_args\n");
     r = call(&reg, &ctx, "Alice", 11, "{\"channel\":\"telegram\"}");
     assert(r && strstr(r, "error:"));
     free(r);
-    printf("PASS\n");
 
     /* A successful send is not a failed tool call. */
-    printf("  success_is_not_an_error... ");
+    printf("  success_is_not_an_error\n");
     int failed = 0;   /* the dispatcher presets it; a handler only ever sets it */
     ToolEntry *te = tools_lookup(&reg, "channel_send");
     r = te->handler("{\"channel\":\"telegram\",\"chat_id\":\"-500\",\"message\":\"ok\"}",
                     te->user_data, &failed);
     assert(r && strstr(r, "queued") && failed == 0);
     free(r);
-    printf("PASS\n");
 
     /* review-7 regression: the own-chat dedup and the turn boundary read one
      * value. It used to read the route's template while delivery ran on a
@@ -188,7 +164,7 @@ int main(void) {
      * and the boundary, still frozen explicit, delivered nothing — the reply
      * was lost both ways. Now: whichever way the chat is set, exactly one of
      * the two posts. */
-    printf("  dedup_and_delivery_agree... ");
+    printf("  dedup_and_delivery_agree\n");
     const char *posted = "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='telegram'"
                          " AND json_extract(payload,'$.chat_id')='-500'"
                          " AND json_extract(payload,'$.text')='%s'";
@@ -200,7 +176,7 @@ int main(void) {
     entry_append_with_iteration(db, 13, &am, db_next_iteration_id(db, 13));
     assert(advance_deliver_boundary(db, 13, 0, 1) == 0);
     snprintf(q, sizeof(q), posted, "turn one");
-    assert(qcount(db, q) == 0);
+    assert((int)test_qi(db, q) == 0);
     /* flipped to auto: channel_send to the own chat is refused, and the
      * next boundary posts the final message — once. */
     assert(sqlite3_exec(db, "UPDATE channel_chats SET delivery_mode='auto'"
@@ -212,9 +188,9 @@ int main(void) {
     entry_append_with_iteration(db, 13, &am, db_next_iteration_id(db, 13));
     assert(advance_deliver_boundary(db, 13, 0, 1) == 1);
     snprintf(q, sizeof(q), posted, "turn two");
-    assert(qcount(db, q) == 1);
+    assert((int)test_qi(db, q) == 1);
     assert(advance_sweep_undelivered(db) == 0);
-    assert(qcount(db, q) == 1);
+    assert((int)test_qi(db, q) == 1);
     /* and back: channel_send sends, the boundary does not. */
     assert(sqlite3_exec(db, "UPDATE channel_chats SET delivery_mode='explicit'"
                             " WHERE chat_id='-500';", NULL, NULL, NULL) == SQLITE_OK);
@@ -225,8 +201,7 @@ int main(void) {
     entry_append_with_iteration(db, 13, &am, db_next_iteration_id(db, 13));
     assert(advance_deliver_boundary(db, 13, 0, 1) == 0);
     snprintf(q, sizeof(q), posted, "turn three");
-    assert(qcount(db, q) == 1);                       /* the channel_send row only */
-    printf("PASS\n");
+    assert((int)test_qi(db, q) == 1);                       /* the channel_send row only */
 
     /* ── file: a workspace file, copied into the channel's media spool ── */
     static const unsigned char png[] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
@@ -242,14 +217,14 @@ int main(void) {
     ctx.workspace = WS;
     ctx.db_path = DB_PATH;
 
-    printf("  file_queued_as_spool_copy... ");
+    printf("  file_queued_as_spool_copy\n");
     r = call(&reg, &ctx, "Alice", 11,
         "{\"channel\":\"telegram\",\"chat_id\":\"42\",\"file\":\"sub/my pic.png\","
         "\"message\":\"look\"}");
     assert(r && strstr(r, "queued, outbox id") && strstr(r, "image/png"));
     free(r);
     /* caption, not text: a handler that predates files must fail the row */
-    assert(qcount(db,
+    assert((int)test_qi(db,
         "SELECT COUNT(*) FROM channel_outbox WHERE"
         " json_extract(payload,'$.caption')='look'"
         " AND json_extract(payload,'$.text') IS NULL"
@@ -266,21 +241,19 @@ int main(void) {
     size_t gn = fread(got, 1, sizeof(got), sf);
     fclose(sf);
     assert(gn == sizeof(png) && memcmp(got, png, gn) == 0);
-    printf("PASS\n");
 
     /* The agent's own auto-mode chat: text would double-post, a file would
      * not — the reply never carries one. */
-    printf("  file_to_own_auto_chat... ");
+    printf("  file_to_own_auto_chat\n");
     r = call(&reg, &ctx, "Alice", 10, "{\"file\":\"sub/my pic.png\"}");
     assert(r && strstr(r, "queued, outbox id"));
     free(r);
-    printf("PASS\n");
 
     /* Outside the workspace, by any spelling: the check is on the file that
      * was opened, so a symlink (to a file, or as a directory on the way) and
      * a plain absolute path are all the same refusal. Nothing is queued. */
-    printf("  file_outside_workspace_refused... ");
-    int before = qcount(db, "SELECT COUNT(*) FROM channel_outbox");
+    printf("  file_outside_workspace_refused\n");
+    int before = (int)test_qi(db, "SELECT COUNT(*) FROM channel_outbox");
     const char *outside[] = {
         "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"leak.txt\"}",
         "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"etc/hostname\"}",
@@ -306,10 +279,9 @@ int main(void) {
         "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"absent.png\"}");
     assert(r && strstr(r, "cannot open"));
     free(r);
-    assert(qcount(db, "SELECT COUNT(*) FROM channel_outbox") == before);
-    printf("PASS\n");
+    assert((int)test_qi(db, "SELECT COUNT(*) FROM channel_outbox") == before);
 
-    printf("  file_over_limit_refused... ");
+    printf("  file_over_limit_refused\n");
     assert(sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value)"
                             " VALUES('channel_send_file_max_bytes','4');",
                         NULL, NULL, NULL) == SQLITE_OK);
@@ -317,10 +289,9 @@ int main(void) {
         "{\"chat_id\":\"42\",\"channel\":\"telegram\",\"file\":\"sub/my pic.png\"}");
     assert(r && strstr(r, "the limit is 4"));
     free(r);
-    printf("PASS\n");
 
     /* The spool copy lives exactly as long as its row can still be sent. */
-    printf("  spool_copy_removed_when_row_settles... ");
+    printf("  spool_copy_removed_when_row_settles\n");
     ChannelCtx *cc = channel_ctx_open(DB_PATH, "telegram");
     assert(cc && access(spool, F_OK) == 0);
     int64_t fid = db_scalar_i64(db,
@@ -337,12 +308,10 @@ int main(void) {
            access(spool2, F_OK) != 0);
     channel_ctx_free(cc);
     free(spool); free(spool2);
-    printf("PASS\n");
     assert(system("rm -rf /tmp/test_tool_channel_send_ws") == 0);
 
     tools_free(&reg);
     db_close(db);
     test_db_clean(DB_PATH);
-    printf("all channel_send tests passed\n");
     return 0;
 }

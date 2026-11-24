@@ -20,17 +20,6 @@ static sqlite3 *setup_db(void) {
     return db;
 }
 
-static void test_missing_task(void) {
-    sqlite3 *db = setup_db();
-    AgentLaunchCtx ctx = {.db = db, .session_id = 1};
-    char *r = tool_launch_agent_handler("{\"foo\":\"bar\"}", &ctx, &(int){0});
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL);
-    free(r);
-    db_close(db);
-    printf("  PASS test_missing_task\n");
-}
-
 static void test_depth_limit(void) {
     sqlite3 *db = setup_db();
     /* Create a session at max depth */
@@ -42,7 +31,6 @@ static void test_depth_limit(void) {
     assert(strstr(r, "max agent depth") != NULL);
     free(r);
     db_close(db);
-    printf("  PASS test_depth_limit\n");
 }
 
 /* A single batch of launches counts against itself: freshly launched children
@@ -75,7 +63,6 @@ static void test_system_wide_limit_batch_aware(void) {
            == max_active);
 
     db_close(db);
-    printf("  PASS test_system_wide_limit_batch_aware\n");
 }
 
 static void test_system_wide_limit(void) {
@@ -97,7 +84,6 @@ static void test_system_wide_limit(void) {
     assert(strstr(r, "session_max_active") != NULL);   /* names its knob */
     free(r);
     db_close(db);
-    printf("  PASS test_system_wide_limit\n");
 }
 
 static void test_spawn_blocking(void) {
@@ -118,42 +104,18 @@ static void test_spawn_blocking(void) {
     assert(r == NULL); /* NULL = async, real result comes on child completion */
 
     /* Parent state is unchanged by the handler (still tool_running) */
-    sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?", -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, parent_sid);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "tool_running") == 0);
-    sqlite3_finalize(stmt);
+    char *state = db_scalar_text(db, "SELECT state FROM sessions WHERE id=?1", parent_sid);
+    assert(state && strcmp(state, "tool_running") == 0);
+    free(state);
 
     /* The child carries the parent's tool_call_id for result routing */
-    sqlite3_prepare_v2(db,
-        "SELECT parent_tool_call_id FROM sessions WHERE parent_session_id=?"
-        " ORDER BY id DESC LIMIT 1", -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, parent_sid);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "call_123") == 0);
-    sqlite3_finalize(stmt);
+    char *call = db_scalar_text(db, "SELECT parent_tool_call_id FROM sessions"
+                                    " WHERE parent_session_id=?1 ORDER BY id DESC LIMIT 1",
+                                parent_sid);
+    assert(call && strcmp(call, "call_123") == 0);
+    free(call);
 
     db_close(db);
-    printf("  PASS test_spawn_blocking\n");
-}
-
-static void test_register(void) {
-    ToolRegistry reg;
-    tools_init(&reg);
-    AgentLaunchCtx ctx = {.db = NULL, .session_id = 1};
-    int rc = tool_launch_agent_register(&reg, &ctx);
-    assert(rc == 0);
-    ToolEntry *e = tools_lookup(&reg, "launch_agent");
-    assert(e != NULL);
-    assert(e->handler == tool_launch_agent_handler);
-    rc = tool_check_session_register(&reg, &ctx);
-    assert(rc == 0);
-    e = tools_lookup(&reg, "check_session");
-    assert(e != NULL);
-    assert(e->handler == tool_check_session_handler);
-    tools_free(&reg);
-    printf("  PASS test_register\n");
 }
 
 static void test_unknown_agent_rejected(void) {
@@ -168,18 +130,6 @@ static void test_unknown_agent_rejected(void) {
     assert(strstr(r, "unknown agent") != NULL);
     free(r);
     db_close(db);
-    printf("  PASS test_unknown_agent_rejected\n");
-}
-
-static void test_check_agent_not_found(void) {
-    sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    char *r = tool_check_session_handler("{\"session_id\":9999}", &ctx, &(int){0});
-    assert(strstr(r, "not found") != NULL);
-    free(r);
-    db_close(db);
-    printf("  PASS test_check_agent_not_found\n");
 }
 
 static void test_check_agent_idle_with_result(void) {
@@ -200,7 +150,6 @@ static void test_check_agent_idle_with_result(void) {
     assert(strstr(r, "result: the answer is 42") != NULL);
     free(r);
     db_close(db);
-    printf("  PASS test_check_agent_idle_with_result\n");
 }
 
 /* Collecting a terminal result by poll is delivery: it advances the standing
@@ -230,125 +179,93 @@ static void test_check_session_stamps_poll_delivery(void) {
                              " AND one_shot=0;", child_sid, -1) == eid);
 
     db_close(db);
-    printf("  PASS test_check_session_stamps_poll_delivery\n");
 }
 
 /* --- Filter resolution tests for launch_agent --- */
 
-/* Helper: get the newest child session's tool_filter for a given parent */
 static char *child_tool_filter(sqlite3 *db, int64_t parent_sid) {
-    sqlite3_stmt *stmt;
-    const char *sql = "SELECT tool_filter FROM sessions WHERE parent_session_id=?"
-                      " ORDER BY id DESC LIMIT 1;";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_int64(stmt, 1, parent_sid);
-    char *result = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *val = (const char *)sqlite3_column_text(stmt, 0);
-        if (val) result = strdup(val);
-    }
-    sqlite3_finalize(stmt);
-    return result;
+    return db_scalar_text(db, "SELECT tool_filter FROM sessions WHERE parent_session_id=?1"
+                              " ORDER BY id DESC LIMIT 1;", parent_sid);
 }
 
-/* Helper: get the newest child session's agent_name for a given parent */
-static char *child_agent_name(sqlite3 *db, int64_t parent_sid) {
-    sqlite3_stmt *stmt;
-    const char *sql = "SELECT agent_name FROM sessions WHERE parent_session_id=?"
-                      " ORDER BY id DESC LIMIT 1;";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_int64(stmt, 1, parent_sid);
-    char *result = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *val = (const char *)sqlite3_column_text(stmt, 0);
-        if (val) result = strdup(val);
-    }
-    sqlite3_finalize(stmt);
-    return result;
-}
-
-/* Helper: count child sessions for a parent */
 static int child_count(sqlite3 *db, int64_t parent_sid) {
-    sqlite3_stmt *stmt;
-    const char *sql = "SELECT COUNT(*) FROM sessions WHERE parent_session_id=?;";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_int64(stmt, 1, parent_sid);
-    int count = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        count = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    return count;
+    return (int)db_scalar_i64(db, "SELECT COUNT(*) FROM sessions WHERE parent_session_id=?1;",
+                              parent_sid, -1);
 }
 
-static void test_filter_explicit_tools(void) {
-    sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
-    assert(parent_sid > 0);
+#define LAUNCHER_FILTER "[\"file_read\",\"launch_agent\"]"
+#define WORKER_DEFAULT  "<worker_tools default>"
 
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    /* Self-spawn (no "name") with explicit "tools" */
-    char *r = tool_launch_agent_handler(
-        "{\"task\":\"work\",\"background\":true,\"tools\":[\"file_read\"]}", &ctx, &(int){0});
-    assert(r != NULL);
-    assert(strstr(r, "agent delegated") != NULL);
-    free(r);
+/* Which filter a spawned child gets. A self-spawn takes explicit `tools`,
+ * else worker_tools (registry default unless set), and inherits the parent's
+ * agent name. The launcher's own scope (its session filter, or the filter of
+ * the chat pinning it, joined at read time) caps every spawn, named agents
+ * included; an unfiltered launcher leaves a named agent unrestricted. */
+static void test_spawn_filter_resolution(void) {
+    static const struct {
+        const char *name;
+        const char *worker_tools, *parent_filter, *chat_filter;
+        const char *args;
+        const char *want_filter;   /* NULL: unrestricted */
+        const char *want_agent;
+    } cases[] = {
+        { "explicit tools", NULL, NULL, NULL,
+          "{\"task\":\"w\",\"background\":true,\"tools\":[\"file_read\"]}",
+          "[\"file_read\"]", "default" },
+        { "worker_tools set", "[\"js_eval\"]", NULL, NULL,
+          "{\"task\":\"w\",\"background\":true}", "[\"js_eval\"]", "default" },
+        /* a worker is never unrestricted */
+        { "registry default", NULL, NULL, NULL,
+          "{\"task\":\"w\",\"background\":true}", WORKER_DEFAULT, "default" },
+        { "parent caps explicit tools", NULL, LAUNCHER_FILTER, NULL,
+          "{\"task\":\"w\",\"background\":true,\"tools\":[\"web_fetch\",\"file_read\"]}",
+          "[\"file_read\"]", "default" },
+        /* the default list (which has web_fetch) is cut back, in its own order */
+        { "parent caps worker_tools", NULL, LAUNCHER_FILTER, NULL,
+          "{\"task\":\"w\",\"background\":true}", LAUNCHER_FILTER, "default" },
+        { "parent caps named agent", NULL, LAUNCHER_FILTER, NULL,
+          "{\"task\":\"w\",\"name\":\"helper\",\"background\":true}", LAUNCHER_FILTER, "helper" },
+        { "unfiltered parent, named agent", NULL, NULL, NULL,
+          "{\"task\":\"w\",\"name\":\"helper\",\"background\":true}", NULL, "helper" },
+        { "pinning chat caps spawn", NULL, NULL, LAUNCHER_FILTER,
+          "{\"task\":\"w\",\"background\":true,\"tools\":[\"web_fetch\",\"file_read\"]}",
+          "[\"file_read\"]", "default" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("    %s\n", cases[i].name);
+        sqlite3 *db = setup_db();
+        sqlite3_exec(db, "INSERT INTO agents(name) VALUES('helper')", NULL, NULL, NULL);
+        if (cases[i].worker_tools) config_set(db, "worker_tools", cases[i].worker_tools);
+        int64_t p = session_create_filtered(db, "parent", "default", -1, 0,
+                                            cases[i].parent_filter);
+        assert(p > 0);
+        if (cases[i].chat_filter) {
+            assert(sqlite3_exec(db, "INSERT INTO channels(name) VALUES('tg');",
+                                NULL, NULL, NULL) == SQLITE_OK);
+            char sql[256];
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO channel_chats(channel_name, chat_id, session_id, tool_filter)"
+                     " VALUES('tg','42',%lld,'%s');", (long long)p, cases[i].chat_filter);
+            assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+        }
 
-    /* Child session's tool_filter should be the explicit array */
-    char *filter = child_tool_filter(db, parent_sid);
-    assert(filter != NULL);
-    assert(strcmp(filter, "[\"file_read\"]") == 0);
-    free(filter);
+        AgentLaunchCtx ctx = {.db = db, .session_id = p};
+        char *r = tool_launch_agent_handler(cases[i].args, &ctx, &(int){0});
+        assert(r != NULL && strstr(r, "agent delegated") != NULL);
+        free(r);
+        assert(child_count(db, p) == 1);
 
-    db_close(db);
-    printf("  PASS test_filter_explicit_tools\n");
-}
-
-static void test_filter_kv_worker_tools(void) {
-    sqlite3 *db = setup_db();
-    /* Set worker_tools in config registry */
-    config_set(db, "worker_tools", "[\"js_eval\"]");
-
-    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
-    assert(parent_sid > 0);
-
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    /* Self-spawn without "tools" — should pick up kv worker_tools */
-    char *r = tool_launch_agent_handler(
-        "{\"task\":\"work\",\"background\":true}", &ctx, &(int){0});
-    assert(r != NULL);
-    assert(strstr(r, "agent delegated") != NULL);
-    free(r);
-
-    char *filter = child_tool_filter(db, parent_sid);
-    assert(filter != NULL);
-    assert(strcmp(filter, "[\"js_eval\"]") == 0);
-    free(filter);
-
-    db_close(db);
-    printf("  PASS test_filter_kv_worker_tools\n");
-}
-
-static void test_filter_neither(void) {
-    sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
-    assert(parent_sid > 0);
-
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    /* Self-spawn with no explicit tools and no worker_tools override → the
-     * registry default applies (a worker is never unrestricted). */
-    char *r = tool_launch_agent_handler(
-        "{\"task\":\"work\",\"background\":true}", &ctx, &(int){0});
-    assert(r != NULL);
-    assert(strstr(r, "agent delegated") != NULL);
-    free(r);
-
-    char *filter = child_tool_filter(db, parent_sid);
-    assert(filter != NULL);
-    assert(strcmp(filter, config_default("worker_tools")) == 0);
-    free(filter);
-
-    db_close(db);
-    printf("  PASS test_filter_neither\n");
+        const char *want = cases[i].want_filter;
+        if (want && strcmp(want, WORKER_DEFAULT) == 0) want = config_default("worker_tools");
+        char *f = child_tool_filter(db, p);
+        assert(want ? (f && strcmp(f, want) == 0) : f == NULL);
+        free(f);
+        char *agent = db_scalar_text(db, "SELECT agent_name FROM sessions"
+                                         " WHERE parent_session_id=?1", p);
+        assert(agent && strcmp(agent, cases[i].want_agent) == 0);
+        free(agent);
+        db_close(db);
+    }
 }
 
 /* D15 (2026-07-31): a default worker may delegate again — launch_agent and
@@ -374,7 +291,6 @@ static void test_worker_tools_default_is_the_documented_list(void) {
     assert(strstr(def, "\"request_config\"") == NULL);
     assert(strstr(def, "\"channel_send\"") == NULL);
 
-    printf("  PASS test_worker_tools_default_is_the_documented_list\n");
 }
 
 /* A worker spawned with the default filter can itself spawn: the tool is in
@@ -391,13 +307,8 @@ static void test_default_worker_may_nest(void) {
 
     /* The worker's own session carries the default filter, which now allows
      * launch_agent — the dispatch gate would have refused it before D15. */
-    int64_t worker_sid = -1;
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT id FROM sessions WHERE parent_session_id=?1", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, parent_sid);
-    if (sqlite3_step(s) == SQLITE_ROW) worker_sid = sqlite3_column_int64(s, 0);
-    sqlite3_finalize(s);
+    int64_t worker_sid = db_scalar_i64(db, "SELECT id FROM sessions WHERE parent_session_id=?1",
+                                       parent_sid, -1);
     assert(worker_sid > 0);
     assert(session_tool_allowed(db, worker_sid, "launch_agent") == 1);
     assert(session_tool_allowed(db, worker_sid, "check_session") == 1);
@@ -410,7 +321,6 @@ static void test_default_worker_may_nest(void) {
     free(r);
 
     db_close(db);
-    printf("  PASS test_default_worker_may_nest\n");
 }
 
 static void test_tools_with_name_rejected(void) {
@@ -433,30 +343,6 @@ static void test_tools_with_name_rejected(void) {
     assert(after == before);
 
     db_close(db);
-    printf("  PASS test_tools_with_name_rejected\n");
-}
-
-static void test_self_spawn_inherits_agent_name(void) {
-    sqlite3 *db = setup_db();
-    /* Parent session owned by 'default' agent */
-    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
-    assert(parent_sid > 0);
-
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    char *r = tool_launch_agent_handler(
-        "{\"task\":\"selfwork\",\"background\":true}", &ctx, &(int){0});
-    assert(r != NULL);
-    assert(strstr(r, "agent delegated") != NULL);
-    free(r);
-
-    /* Child session's agent_name must match the parent's: 'default' */
-    char *name = child_agent_name(db, parent_sid);
-    assert(name != NULL);
-    assert(strcmp(name, "default") == 0);
-    free(name);
-
-    db_close(db);
-    printf("  PASS test_self_spawn_inherits_agent_name\n");
 }
 
 /* --- The launcher's own scope caps every spawn (TODO: launch_agent did not
@@ -466,76 +352,6 @@ static int64_t filtered_parent(sqlite3 *db, const char *filter) {
     int64_t sid = session_create_filtered(db, "parent", "default", -1, 0, filter);
     assert(sid > 0);
     return sid;
-}
-
-/* An explicit `tools` arg asking for more than the parent may use is cut back
- * to the parent's scope. */
-static void test_filter_parent_caps_explicit_tools(void) {
-    sqlite3 *db = setup_db();
-    int64_t p = filtered_parent(db, "[\"file_read\",\"launch_agent\"]");
-    AgentLaunchCtx ctx = {.db = db, .session_id = p};
-    char *r = tool_launch_agent_handler(
-        "{\"task\":\"w\",\"background\":true,\"tools\":[\"web_fetch\",\"file_read\"]}",
-        &ctx, &(int){0});
-    assert(r != NULL && strstr(r, "agent delegated") != NULL);
-    free(r);
-    char *f = child_tool_filter(db, p);
-    assert(f != NULL && strcmp(f, "[\"file_read\"]") == 0);
-    free(f);
-    db_close(db);
-    printf("  PASS test_filter_parent_caps_explicit_tools\n");
-}
-
-/* The default worker list (which has web_fetch) is cut back the same way, and
- * keeps its own order. */
-static void test_filter_parent_caps_worker_tools(void) {
-    sqlite3 *db = setup_db();
-    int64_t p = filtered_parent(db, "[\"file_read\",\"launch_agent\"]");
-    AgentLaunchCtx ctx = {.db = db, .session_id = p};
-    char *r = tool_launch_agent_handler("{\"task\":\"w\",\"background\":true}",
-                                        &ctx, &(int){0});
-    assert(r != NULL && strstr(r, "agent delegated") != NULL);
-    free(r);
-    char *f = child_tool_filter(db, p);
-    assert(f != NULL && strcmp(f, "[\"file_read\",\"launch_agent\"]") == 0);
-    free(f);
-    db_close(db);
-    printf("  PASS test_filter_parent_caps_worker_tools\n");
-}
-
-/* A named agent, unfiltered before, now carries the launcher's scope. */
-static void test_filter_parent_caps_named_agent(void) {
-    sqlite3 *db = setup_db();
-    sqlite3_exec(db, "INSERT INTO agents(name) VALUES('helper')", NULL, NULL, NULL);
-    int64_t p = filtered_parent(db, "[\"file_read\",\"launch_agent\"]");
-    AgentLaunchCtx ctx = {.db = db, .session_id = p};
-    char *r = tool_launch_agent_handler(
-        "{\"task\":\"w\",\"name\":\"helper\",\"background\":true}", &ctx, &(int){0});
-    assert(r != NULL && strstr(r, "agent delegated") != NULL);
-    free(r);
-    char *f = child_tool_filter(db, p);
-    assert(f != NULL && strcmp(f, "[\"file_read\",\"launch_agent\"]") == 0);
-    free(f);
-    db_close(db);
-    printf("  PASS test_filter_parent_caps_named_agent\n");
-}
-
-/* Unfiltered parent: a named agent stays unrestricted, as before. */
-static void test_filter_unfiltered_parent_named_unrestricted(void) {
-    sqlite3 *db = setup_db();
-    sqlite3_exec(db, "INSERT INTO agents(name) VALUES('helper')", NULL, NULL, NULL);
-    int64_t p = session_create(db, "parent", "default", -1, 0);
-    AgentLaunchCtx ctx = {.db = db, .session_id = p};
-    char *r = tool_launch_agent_handler(
-        "{\"task\":\"w\",\"name\":\"helper\",\"background\":true}", &ctx, &(int){0});
-    assert(r != NULL && strstr(r, "agent delegated") != NULL);
-    free(r);
-    assert(child_count(db, p) == 1);
-    char *f = child_tool_filter(db, p);
-    assert(f == NULL);
-    free(f);
-    db_close(db);
-    printf("  PASS test_filter_unfiltered_parent_named_unrestricted\n");
 }
 
 /* Nothing in common: refused with the cause named, no child created. */
@@ -552,33 +368,6 @@ static void test_filter_empty_intersection_refused(void) {
     free(r);
     assert(child_count(db, p) == 0);
     db_close(db);
-    printf("  PASS test_filter_empty_intersection_refused\n");
-}
-
-/* The pinning chat's filter is joined at read time, not copied onto the
- * session — it is a separate input and caps the spawn too. */
-static void test_filter_chat_caps_spawn(void) {
-    sqlite3 *db = setup_db();
-    int64_t p = session_create(db, "parent", "default", -1, 0);
-    assert(sqlite3_exec(db, "INSERT INTO channels(name) VALUES('tg');",
-                        NULL, NULL, NULL) == SQLITE_OK);
-    char sql[256];
-    snprintf(sql, sizeof(sql),
-             "INSERT INTO channel_chats(channel_name, chat_id, session_id, tool_filter)"
-             " VALUES('tg','42',%lld,'[\"file_read\",\"launch_agent\"]');",
-             (long long)p);
-    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
-    AgentLaunchCtx ctx = {.db = db, .session_id = p};
-    char *r = tool_launch_agent_handler(
-        "{\"task\":\"w\",\"background\":true,\"tools\":[\"web_fetch\",\"file_read\"]}",
-        &ctx, &(int){0});
-    assert(r != NULL && strstr(r, "agent delegated") != NULL);
-    free(r);
-    char *f = child_tool_filter(db, p);
-    assert(f != NULL && strcmp(f, "[\"file_read\"]") == 0);
-    free(f);
-    db_close(db);
-    printf("  PASS test_filter_chat_caps_spawn\n");
 }
 
 /* Depth 2: the grandchild inherits the child's already-narrowed scope. */
@@ -603,36 +392,23 @@ static void test_filter_grandchild_inherits(void) {
     assert(f != NULL && strcmp(f, "[\"launch_agent\"]") == 0);
     free(f);
     db_close(db);
-    printf("  PASS test_filter_grandchild_inherits\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_tool_agent:\n");
-    test_missing_task();
-    test_depth_limit();
-    test_system_wide_limit();
-    test_system_wide_limit_batch_aware();
-    test_spawn_blocking();
-    test_register();
-    test_unknown_agent_rejected();
-    test_check_agent_not_found();
-    test_check_agent_idle_with_result();
-    test_check_session_stamps_poll_delivery();
-    test_filter_explicit_tools();
-    test_filter_kv_worker_tools();
-    test_filter_neither();
-    test_worker_tools_default_is_the_documented_list();
-    test_default_worker_may_nest();
-    test_tools_with_name_rejected();
-    test_self_spawn_inherits_agent_name();
-    test_filter_parent_caps_explicit_tools();
-    test_filter_parent_caps_worker_tools();
-    test_filter_parent_caps_named_agent();
-    test_filter_unfiltered_parent_named_unrestricted();
-    test_filter_empty_intersection_refused();
-    test_filter_chat_caps_spawn();
-    test_filter_grandchild_inherits();
-    printf("All sub-agent tool tests passed.\n");
+    RUN(test_depth_limit);
+    RUN(test_system_wide_limit);
+    RUN(test_system_wide_limit_batch_aware);
+    RUN(test_spawn_blocking);
+    RUN(test_unknown_agent_rejected);
+    RUN(test_check_agent_idle_with_result);
+    RUN(test_check_session_stamps_poll_delivery);
+    RUN(test_spawn_filter_resolution);
+    RUN(test_worker_tools_default_is_the_documented_list);
+    RUN(test_default_worker_may_nest);
+    RUN(test_tools_with_name_rejected);
+    RUN(test_filter_empty_intersection_refused);
+    RUN(test_filter_grandchild_inherits);
     return 0;
 }

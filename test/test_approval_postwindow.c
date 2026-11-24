@@ -11,12 +11,8 @@
 
 #define DB_PATH "/tmp/cclaw_test_approval_postwindow.db"
 
-static void clean_db(void) {
-    test_db_clean(DB_PATH);
-}
-
 static sqlite3 *fresh_db(void) {
-    clean_db();
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db != NULL);
     return db;
@@ -42,7 +38,7 @@ static void test_postwindow_outcomes(void) {
         { APPROVAL_PW_EXPIRED,        NULL,        "expired"         },
     };
 
-    for (int i = 0; i < 8; i++) {
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         int64_t sid = session_create(db, "test", "bot", -1, 0);
         assert(sid > 0);
 
@@ -58,24 +54,25 @@ static void test_postwindow_outcomes(void) {
         assert(inbox_id > 0);
         approval_free(a);
 
-        /* Verify inbox row */
         int count = 0;
         InboxItem *items = inbox_peek(db, sid, 10, &count);
         assert(count == 1);
         assert(strcmp(items[0].source, "approval") == 0);
+        if (!strstr(items[0].payload, cases[i].substr))
+            fprintf(stderr, "row %zu: want '%s' in: %s\n", i, cases[i].substr,
+                    items[0].payload);
         assert(strstr(items[0].payload, cases[i].substr) != NULL);
         inbox_items_free(items, count);
     }
 
     db_close(db);
-    clean_db();
-    printf("  PASS test_postwindow_outcomes\n");
+    test_db_clean(DB_PATH);
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_approval_postwindow:\n");
-    test_postwindow_outcomes();
+    RUN(test_postwindow_outcomes);
     printf("all approval postwindow tests passed\n");
     return 0;
 }

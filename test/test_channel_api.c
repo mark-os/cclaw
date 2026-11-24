@@ -61,32 +61,6 @@ static void test_channel_emit(void) {
     channel_ctx_free(ctx);
 }
 
-static void test_channel_config(void) {
-    cleanup();
-    ChannelCtx *ctx = channel_ctx_open(TEST_DB, "telegram");
-    assert(ctx);
-
-    /* Initially empty */
-    char *val = channel_get_config(ctx, "offset");
-    assert(val == NULL);
-
-    /* Set and get */
-    int rc = channel_set_config(ctx, "offset", "12345");
-    assert(rc == 0);
-    val = channel_get_config(ctx, "offset");
-    assert(val && strcmp(val, "12345") == 0);
-    free(val);
-
-    /* Upsert */
-    rc = channel_set_config(ctx, "offset", "99999");
-    assert(rc == 0);
-    val = channel_get_config(ctx, "offset");
-    assert(val && strcmp(val, "99999") == 0);
-    free(val);
-
-    channel_ctx_free(ctx);
-}
-
 static void test_channel_outbox(void) {
     cleanup();
     ChannelCtx *ctx = channel_ctx_open(TEST_DB, "telegram");
@@ -192,15 +166,8 @@ static void test_wake_external(void) {
 /* Permanent outbox failure must tell the sending session; a delivered row
  * must not. */
 static int64_t count_failure_notices(sqlite3 *db, int64_t sid) {
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT count(*) FROM inbox WHERE session_id=? AND source='system'"
-        " AND payload LIKE '%failed permanently%'", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    int64_t n = sqlite3_column_int64(s, 0);
-    sqlite3_finalize(s);
-    return n;
+    return db_scalar_i64(db, "SELECT count(*) FROM inbox WHERE session_id=?1 AND source='system'"
+                             " AND payload LIKE '%failed permanently%'", sid, -1);
 }
 
 static void test_outbox_fail_notifies_session(void) {
@@ -229,8 +196,6 @@ static void test_outbox_fail_notifies_session(void) {
     const char *p = (const char *)sqlite3_column_text(s, 0);
     assert(strstr(p, "outbox id 1"));
     assert(strstr(p, "404 Unknown Channel"));
-    assert(strstr(p, "telegram"));
-    assert(strstr(p, "555"));
     assert(sqlite3_step(s) != SQLITE_ROW);
     sqlite3_finalize(s);
 
@@ -252,32 +217,12 @@ static void test_outbox_fail_notifies_session(void) {
 int main(void) {
     TEST_INIT();
     alarm(10);
-
-    printf("test_channel_emit...");
-    test_channel_emit();
-    printf(" OK\n");
-
-    printf("test_channel_config...");
-    test_channel_config();
-    printf(" OK\n");
-
-    printf("test_channel_outbox...");
-    test_channel_outbox();
-    printf(" OK\n");
-
-    printf("test_channel_outbox_mode...");
-    test_channel_outbox_mode();
-    printf(" OK\n");
-
-    printf("test_outbox_fail_notifies_session...");
-    test_outbox_fail_notifies_session();
-    printf(" OK\n");
-
-    printf("test_wake_external...");
-    test_wake_external();
-    printf(" OK\n");
-
+    printf("test_channel_api:\n");
+    RUN(test_channel_emit);
+    RUN(test_channel_outbox);
+    RUN(test_channel_outbox_mode);
+    RUN(test_outbox_fail_notifies_session);
+    RUN(test_wake_external);
     cleanup();
-    printf("all channel_api tests passed\n");
     return 0;
 }

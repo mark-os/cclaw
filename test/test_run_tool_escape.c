@@ -19,7 +19,6 @@
 #define BINARY "./build/cclaw"
 
 static char workspace[256];
-static int ns_available = 1;
 
 static void setup(void) {
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_escape_%d", getpid());
@@ -140,100 +139,74 @@ static char *run_tool_request(const char *tool_name, const char *arguments) {
     return result;
 }
 
-/* Detect namespace availability */
-static void test_ns_detect(void) {
+/* The refusal text varies with where the sandbox stops the call (mount view,
+ * open(), path check); any of these means the read did not reach the target. */
+static int refused(const char *r) {
+    return strstr(r, "error") || strstr(r, "cannot open") ||
+           strstr(r, "No such file") || strstr(r, "outside workspace");
+}
+
+static void expect_refused(const char *tool, const char *args) {
+    char *r = run_tool_request(tool, args);
+    assert(r);
+    if (!refused(r)) { printf("    not refused: %s %s -> %s\n", tool, args, r); assert(0); }
+    free(r);
+}
+
+/* Positive control: a sandboxed read of the workspace works, so the
+ * refusals below are the sandbox and not a broken spawn. */
+static int ns_detect(void) {
     char *r = run_tool_request("file_read", "{\"path\":\"hello.txt\"}");
     assert(r);
-    if (strstr(r, "namespace sandbox unavailable")) {
-        ns_available = 0;
-        printf("  SKIP (namespaces unavailable)\n");
-    } else {
-        assert(strcmp(r, "hello from workspace") == 0);
-        printf("  PASS test_ns_detect\n");
-    }
+    int ok = strstr(r, "namespace sandbox unavailable") == NULL;
+    if (ok) assert(strcmp(r, "hello from workspace") == 0);
     free(r);
+    return ok;
 }
 
-/* 3.1: Symlink escape — symlink to /etc/hostname must fail */
+/* Symlink in the workspace pointing at a host file outside the mount set */
 static void test_symlink_escape(void) {
-    if (!ns_available) { printf("  SKIP test_symlink_escape\n"); return; }
-    char *r = run_tool_request("file_read", "{\"path\":\"escape_link\"}");
-    assert(r);
-    /* Must get an error — symlink target is outside the mount set */
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL ||
-           strstr(r, "No such file") != NULL);
-    printf("  PASS test_symlink_escape\n");
-    free(r);
+    expect_refused("file_read", "{\"path\":\"escape_link\"}");
 }
 
-/* 3.2: Path traversal — attempt to reach a path outside the mount set */
+/* Relative traversal to /home, which is not mounted */
 static void test_traversal_escape(void) {
-    if (!ns_available) { printf("  SKIP test_traversal_escape\n"); return; }
-    /* /home is not in sys_dirs, not bind-mounted — unreachable in sandbox */
-    char *r = run_tool_request("file_read", "{\"path\":\"../../../../home\"}");
-    assert(r);
-    /* Must not succeed — /home doesn't exist in the sandbox */
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL ||
-           strstr(r, "outside workspace") != NULL);
-    printf("  PASS test_traversal_escape\n");
-    free(r);
+    expect_refused("file_read", "{\"path\":\"../../../../home\"}");
 }
 
-/* 3.2b: absolute path outside the mount set must fail */
 static void test_absolute_escape(void) {
-    if (!ns_available) { printf("  SKIP test_absolute_escape\n"); return; }
-    char *r = run_tool_request("file_read", "{\"path\":\"/root/.bashrc\"}");
-    assert(r);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
-    printf("  PASS test_absolute_escape\n");
-    free(r);
+    expect_refused("file_read", "{\"path\":\"/root/.bashrc\"}");
 }
 
-/* 3.2c: write traversal outside the workspace must fail */
+/* Write traversal into /etc: read-only in the sandbox, and must not land */
 static void test_write_escape(void) {
-    if (!ns_available) { printf("  SKIP test_write_escape\n"); return; }
     char *r = run_tool_request("file_write",
         "{\"path\":\"../../etc/cclaw_evil.txt\",\"content\":\"bad\"}");
     assert(r);
-    /* /etc is read-only in the sandbox; the write must not succeed */
     assert(strstr(r, "error") != NULL || strstr(r, "cannot") != NULL);
     assert(access("/etc/cclaw_evil.txt", F_OK) != 0);
-    printf("  PASS test_write_escape\n");
     free(r);
 }
 
-/* 3.3: /proc absence — /proc must not be accessible */
+/* No /proc in the mount view */
 static void test_proc_absent(void) {
-    if (!ns_available) { printf("  SKIP test_proc_absent\n"); return; }
-    /* Try to list /proc */
-    char *r = run_tool_request("file_list", "{\"path\":\"/proc\"}");
-    assert(r);
-    /* Must get error (no /proc in mount view) */
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL ||
-           strstr(r, "No such file") != NULL || strstr(r, "outside workspace") != NULL);
-    printf("  PASS test_proc_absent (file_list /proc)\n");
-    free(r);
-
-    /* Try to read /proc/1/cmdline */
-    r = run_tool_request("file_read", "{\"path\":\"/proc/1/cmdline\"}");
-    assert(r);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL ||
-           strstr(r, "outside workspace") != NULL);
-    printf("  PASS test_proc_absent (file_read /proc/1/cmdline)\n");
-    free(r);
+    expect_refused("file_list", "{\"path\":\"/proc\"}");
+    expect_refused("file_read", "{\"path\":\"/proc/1/cmdline\"}");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_run_tool_escape:\n");
     setup();
-    test_ns_detect();
-    test_symlink_escape();
-    test_traversal_escape();
-    test_absolute_escape();
-    test_write_escape();
-    test_proc_absent();
+    if (!ns_detect()) {
+        printf("  SKIP (namespaces unavailable)\n");
+    } else {
+        RUN(test_symlink_escape);
+        RUN(test_traversal_escape);
+        RUN(test_absolute_escape);
+        RUN(test_write_escape);
+        RUN(test_proc_absent);
+    }
     cleanup();
-    printf("  ALL PASSED\n");
     return 0;
 }

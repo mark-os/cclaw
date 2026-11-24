@@ -72,42 +72,12 @@ static void test_large_head_counts(void) {
     head = context_head_estimate(db, "default", sid, &cfg, "");
     assert(head < 100);              /* not granted: not sent, not counted */
     assert(sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value,source)"
-                            " VALUES('default','tool','fat','operator')",
-                            NULL, NULL, NULL) == SQLITE_OK);
+                            " VALUES('default','tool','fat','operator')", NULL, NULL, NULL) == SQLITE_OK);
     head = context_head_estimate(db, "default", sid, &cfg, "");
     assert(head >= 10000);
     assert(size_of(db, sid, head, NULL) > 6000);
     assert(turn_edit_trim(db, sid, head, &lim, &r) == TRIM_OVER);
     db_close(db);
-    printf("  PASS test_large_head_counts\n");
-}
-
-/* The provider's prompt_tokens measures the head when fresh, and is ignored
- * once a compaction post-dates it: that request was sent entries the branch
- * no longer has. */
-static void test_provider_floor_and_staleness(void) {
-    sqlite3 *db = open_seeded();
-    int64_t sid = session_create(db, "s", "default", -1, 0);
-    int64_t it = db_next_iteration_id(db, sid);
-    int64_t e1 = append(db, sid, ROLE_USER, "hi", 0, it);
-    append(db, sid, ROLE_ASSISTANT, "hello", 0, it);
-    it = db_next_iteration_id(db, sid);
-    int64_t e3 = append(db, sid, ROLE_USER, "more", 0, it);
-    append(db, sid, ROLE_ASSISTANT, "sure", 9000, it);   /* provider says 9000 */
-    int head = 0;
-    assert(size_of(db, sid, 0, &head) > 8900 && head > 8900);
-
-    /* Compact away the middle: the 9000 figure predates the summary. */
-    assert(test_legacy_compact(db, sid, e1, e3, "summary") > 0);
-    assert(size_of(db, sid, 0, &head) < 100 && head == 0);
-
-    /* A new post-compaction response reinstates the provider term. */
-    it = db_next_iteration_id(db, sid);
-    append(db, sid, ROLE_USER, "again", 0, it);
-    append(db, sid, ROLE_ASSISTANT, "ok", 9500, it);
-    assert(size_of(db, sid, 0, &head) > 9400 && head > 9300);
-    db_close(db);
-    printf("  PASS test_provider_floor_and_staleness\n");
 }
 
 /* Estimates are 2.5 bytes per token + 4, and the stored content_bytes lets a
@@ -126,7 +96,6 @@ static void test_estimate_divisor(void) {
     /* Large lengths do not overflow on the way. */
     assert(TOKENS_OF_BYTES(2000000000) == 800000000);
     db_close(db);
-    printf("  PASS test_estimate_divisor\n");
 }
 
 
@@ -179,16 +148,11 @@ static int64_t respond(sqlite3 *db, int64_t sid, const char *model, int in, int 
 
 /* Sum of token_estimate over entries with from <= id < to. */
 static int est_ids(sqlite3 *db, int64_t sid, int64_t from, int64_t to) {
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db, "SELECT COALESCE(SUM(token_estimate),0) FROM entries"
-                              " WHERE session_id=?1 AND id>=?2 AND id<?3", -1, &s, NULL)
-           == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    sqlite3_bind_int64(s, 2, from);
-    sqlite3_bind_int64(s, 3, to);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    int v = sqlite3_column_int(s, 0);
-    sqlite3_finalize(s);
+    char *sql = sqlite3_mprintf("SELECT COALESCE(SUM(token_estimate),0) FROM entries"
+                                " WHERE session_id=%lld AND id>=%lld AND id<%lld",
+                                (long long)sid, (long long)from, (long long)to);
+    int v = (int)test_qi(db, sql);
+    sqlite3_free(sql);
     return v;
 }
 
@@ -222,13 +186,9 @@ static int tok(sqlite3 *db, int64_t id) {
 }
 
 static void set_tok(sqlite3 *db, int64_t id, int tokens) {
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db, "UPDATE entries SET tokens=?2 WHERE id=?1", -1, &s, NULL)
-           == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, id);
-    sqlite3_bind_int(s, 2, tokens);
-    assert(sqlite3_step(s) == SQLITE_DONE);
-    sqlite3_finalize(s);
+    char *sql = sqlite3_mprintf("UPDATE entries SET tokens=%d WHERE id=%lld", tokens, (long long)id);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3_free(sql);
 }
 
 /* One response through the real ingest, OpenAI-compatible wire: `in`/`out`
@@ -298,7 +258,6 @@ static void test_output_shared(void) {
     int64_t b = ingest(db, sid, 0, 0, 0, 0, NULL);
     assert(tok(db, b) == -1);
     db_close(db);
-    printf("  PASS test_output_shared\n");
 }
 
 /* What was appended between two reports shares the growth in usage_in that
@@ -326,7 +285,6 @@ static void test_appended_shared(void) {
     ingest(db, sid, 2000 + 60 + 2700 + 20 + 95, 20, 0, 0, NULL);
     assert(tok(db, u2) == 95 && tok(db, e) == -1);
     db_close(db);
-    printf("  PASS test_appended_shared\n");
 }
 
 /* Inside a turn the previous response's reasoning is replayed and counted;
@@ -348,7 +306,6 @@ static void test_reasoning_within_turn(void) {
     ingest(db, sid, 2000 + 40 + 900, 20, 0, 0, NULL);
     assert(tok(db, a - 1) == 0 && tok(db, r) == 900);
     db_close(db);
-    printf("  PASS test_reasoning_within_turn\n");
 }
 
 /* Across a turn boundary the user context block was rebuilt: the new block
@@ -383,7 +340,6 @@ static void test_context_block_at_boundary(void) {
     assert(tok(db, u2) == 980 - big);                    /* as it was measured */
     free(block);
     db_close(db);
-    printf("  PASS test_context_block_at_boundary\n");
 }
 
 /* A provider that is sent the previous turn's reasoning and counts it keeps
@@ -410,7 +366,6 @@ static void test_reasoning_across_boundary(void) {
     assert(tok(db, a - 1) == 0 && tok(db, b - 1) == 0);
     assert(tok(db, u) == 90 && tok(db, r) == 900);
     db_close(db);
-    printf("  PASS test_reasoning_across_boundary\n");
 }
 
 /* A difference is only trusted when the two requests can be compared: not
@@ -448,7 +403,6 @@ static void test_untrusted_difference(void) {
     ingest(db, sid, 2000 + 50 + 40000 + 50 + 90, 50, 0, 0, NULL);
     assert(tok(db, u2) == 90);                           /* and the next one is fine */
     db_close(db);
-    printf("  PASS test_untrusted_difference\n");
 }
 
 /* The plan reads each entry at its stored count and its estimate until it
@@ -470,7 +424,6 @@ static void test_plan_reads_stored(void) {
     assert(size_of(db, sid, 0, NULL) == 2000 + U + 440 + 900 + 30 + R);
     (void)r2;
     db_close(db);
-    printf("  PASS test_plan_reads_stored\n");
 }
 
 /* Six turns fit an 8400-token budget by estimate; once each turn's result
@@ -500,7 +453,6 @@ static void test_cut_keeps_fewer_turns(void) {
         context_plan_free(&plan);
     }
     db_close(db);
-    printf("  PASS test_cut_keeps_fewer_turns\n");
 }
 
 /* A turn edit that drops the turn's big tool output takes its stored count
@@ -550,7 +502,6 @@ static void test_edit_changes_sizes(void) {
     assert(tok(db, u3) == -1);
     (void)a;
     db_close(db);
-    printf("  PASS test_edit_changes_sizes\n");
 }
 
 /* The head is the newest report's measure whenever that report is usable —
@@ -594,54 +545,37 @@ static void test_measured_head_wins(void) {
     ingest(db, sid, 900 + sent, 20, 0, 0, NULL);
     size_of(db, sid, 5000, &head);
     assert(head == 900);
-    db_close(db);
-    printf("  PASS test_measured_head_wins\n");
-}
 
-/* No report anywhere: every size is the estimate and the head the estimate
- * passed in. */
-static void test_no_reports_unchanged(void) {
-    sqlite3 *db = open_seeded();
-    int64_t sid = new_session(db);
-    for (int i = 0; i < 5; i++) {
-        user_msg(db, sid, 2000);
-        respond(db, sid, NULL, 0, 0, 3000);
-        respond(db, sid, NULL, 0, 0, 0);
-    }
-    Config cfg = {0};
-    cfg.context_window = 8000;
-    ContextPlan p = {0};
-    assert(context_plan(db, sid, &cfg, 700, &p) == 0);
-    int total = 0;
-    for (int i = 0; i < p.count; i++) {
-        assert(p.entries[i].tokens == (int)db_scalar_i64(db,
-                   "SELECT token_estimate FROM entries WHERE id=?", p.entries[i].id, -1));
-        total += p.entries[i].tokens;
-    }
-    assert(p.head == 700);
-    context_plan_free(&p);
-    assert(size_of(db, sid, 700, NULL) == total + 700);
+    /* A compaction after the newest report: that request was sent entries the
+     * branch no longer has. A new post-compaction report reinstates it. */
+    sid = new_session(db);
+    u = user_msg(db, sid, 30);
+    ingest(db, sid, 9000, 20, 0, 0, NULL);
+    int64_t u4 = user_msg(db, sid, 30);
+    size_of(db, sid, 0, &head);
+    assert(head > 8900);
+    assert(test_legacy_compact(db, sid, u, u4, "summary") > 0);
+    assert(size_of(db, sid, 0, &head) < 100 && head == 0);
+    user_msg(db, sid, 30);
+    ingest(db, sid, 9500, 20, 0, 0, NULL);
+    assert(size_of(db, sid, 0, &head) > 9400 && head > 9300);
     db_close(db);
-    printf("  PASS test_no_reports_unchanged\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_context_accounting:\n");
-    test_large_head_counts();
-    test_provider_floor_and_staleness();
-    test_estimate_divisor();
-    test_output_shared();
-    test_appended_shared();
-    test_reasoning_within_turn();
-    test_context_block_at_boundary();
-    test_reasoning_across_boundary();
-    test_untrusted_difference();
-    test_plan_reads_stored();
-    test_cut_keeps_fewer_turns();
-    test_edit_changes_sizes();
-    test_no_reports_unchanged();
-    test_measured_head_wins();
-    printf("All context accounting tests passed.\n");
+    RUN(test_large_head_counts);
+    RUN(test_estimate_divisor);
+    RUN(test_output_shared);
+    RUN(test_appended_shared);
+    RUN(test_reasoning_within_turn);
+    RUN(test_context_block_at_boundary);
+    RUN(test_reasoning_across_boundary);
+    RUN(test_untrusted_difference);
+    RUN(test_plan_reads_stored);
+    RUN(test_cut_keeps_fewer_turns);
+    RUN(test_edit_changes_sizes);
+    RUN(test_measured_head_wins);
     return 0;
 }

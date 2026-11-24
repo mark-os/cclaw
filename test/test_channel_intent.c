@@ -9,6 +9,7 @@
 #include <assert.h>
 #include "channel_intent.h"
 #include "approval.h"
+#include "test_util.h"
 
 /* channel_intent.o references resolve_approval (execution concern, unused
  * here). The spy pre-satisfies the reference so resolve.o is never pulled —
@@ -51,7 +52,6 @@ static void test_parse_decide(void) {
     /* Exactness: "/approvals" is the extension's listing command, not ours. */
     it = channel_intent_from_text("/approvals");
     assert(it.kind == CHANNEL_INTENT_NONE);
-    printf("PASS\n");
 }
 
 static void test_parse_sessions(void) {
@@ -80,7 +80,6 @@ static void test_parse_sessions(void) {
     it = channel_intent_from_text("/admin please");
     assert(it.kind == CHANNEL_INTENT_ADMIN);
     assert(channel_intent_from_text("/admins").kind == CHANNEL_INTENT_NONE);
-    printf("PASS\n");
 }
 
 static void test_parse_none(void) {
@@ -89,7 +88,6 @@ static void test_parse_none(void) {
     assert(channel_intent_from_text(NULL).kind == CHANNEL_INTENT_NONE);
     assert(channel_intent_from_text("approve 12").kind == CHANNEL_INTENT_NONE);
     assert(channel_intent_from_text("/approved 12").kind == CHANNEL_INTENT_NONE);
-    printf("PASS\n");
 }
 
 static void test_parse_decision_event(void) {
@@ -161,15 +159,13 @@ static void test_parse_decision_event(void) {
     assert(channel_intent_from_decision_event(db, "not json", &it) == -1);
 
     sqlite3_close(db);
-    printf("PASS\n");
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    test_parse_decide();
-    test_parse_sessions();
-    test_parse_none();
-    test_parse_decision_event();
-    printf("All channel_intent tests passed\n");
+    TEST_INIT();
+    RUN(test_parse_decide);
+    RUN(test_parse_sessions);
+    RUN(test_parse_none);
+    RUN(test_parse_decision_event);
     return 0;
 }

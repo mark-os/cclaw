@@ -121,7 +121,6 @@ static void test_resolution(void) {
     expect_chain(db, "Main", 1, "ext_a:r.qjs:1 ext_b:z.qjs:1 ext_c:r.qjs:1");
 
     db_close(db);
-    printf("  PASS test_resolution\n");
 }
 
 /* A finished turn on a new session of `agent`: one tool call whose result is
@@ -204,7 +203,6 @@ static void test_eligibility(void) {
     expect_due(db, bare, "Bare", 0, "no hook");
 
     db_close(db);
-    printf("  PASS test_eligibility\n");
 }
 
 static int fail_count(sqlite3 *db, const char *path) {
@@ -258,7 +256,6 @@ static void test_failure_count(void) {
     #undef DISABLED
 
     db_close(db);
-    printf("  PASS test_failure_count\n");
 }
 
 static void expect_state(sqlite3 *db, int64_t sid, const char *want) {
@@ -314,7 +311,6 @@ static void test_state_guard(void) {
         assert(session_set_state(db, sid, "settling") != 0);
     }
     db_close(db);
-    printf("  PASS test_state_guard\n");
 }
 
 /* A hold whose owner died (daemon killed mid-hold): recovery returns the
@@ -344,7 +340,6 @@ static void test_recovery(void) {
                              " AND consumed=0", sid, -1) == 1);
 
     db_close(db);
-    printf("  PASS test_recovery\n");
 }
 
 /* A session held for a hook holds a resource for session_max_concurrent,
@@ -361,7 +356,6 @@ static void test_resource_holder(void) {
     assert(session_set_state(db, a, "idle") == 0);
     assert(session_count_resource_holders(db, b) == 0);
     db_close(db);
-    printf("  PASS test_resource_holder\n");
 }
 
 /* The events a manifest may name: the four this build fires; the ones it
@@ -377,7 +371,6 @@ static void test_events(void) {
     assert(strstr(hook_event_refusal("turnSettled"), "not an event"));
     assert(strstr(hook_event_refusal("stop"), "not an event"));
     assert(hook_event_refusal(NULL) != NULL);
-    printf("  PASS test_events\n");
 }
 
 /* hooks.input as the hook runs with it: what a row names, each option it
@@ -412,20 +405,19 @@ static void test_input(void) {
         }
     }
     db_close(db);
-    printf("  PASS test_input\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_hook:\n");
-    test_events();
-    test_resolution();
-    test_input();
-    test_eligibility();
-    test_failure_count();
-    test_state_guard();
-    test_recovery();
-    test_resource_holder();
+    RUN(test_events);
+    RUN(test_resolution);
+    RUN(test_input);
+    RUN(test_eligibility);
+    RUN(test_failure_count);
+    RUN(test_state_guard);
+    RUN(test_recovery);
+    RUN(test_resource_holder);
     test_db_clean(DB_PATH);
     printf("All hook tests passed.\n");
     return 0;

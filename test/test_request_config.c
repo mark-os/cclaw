@@ -14,12 +14,45 @@
 #include <string.h>
 #include <assert.h>
 
-/* ── helpers ────────────────────────────────────────────────────────── */
+/* ── fixture ────────────────────────────────────────────────────────── */
 
-static char *call_handler(ToolRegistry *reg, const char *args) {
-    ToolEntry *e = tools_lookup(reg, "request_config");
+/* The registry holds &f->ctx, so a Fx must not move after fx_open. */
+typedef struct {
+    sqlite3 *db;
+    int64_t sid;
+    RequestConfigCtx ctx;
+    ToolRegistry reg;
+} Fx;
+
+static void fx_open(Fx *f, const char *path) {
+    f->db = test_db_open_seeded(path);
+    assert(f->db);
+    config_registry_sync(f->db);
+    db_agent_upsert(f->db, "test", NULL, NULL);
+    f->sid = session_create(f->db, "t", "test", -1, 0);
+    assert(f->sid > 0);
+    f->ctx = (RequestConfigCtx){ .db = f->db, .agent_name = "test",
+                                 .session_id = f->sid, .agents_dir = NULL,
+                                 .current_tool_call_id = "c0" };
+    tools_init(&f->reg);
+    assert(tool_request_config_register(&f->reg, &f->ctx) == 0);
+}
+
+static void fx_close(Fx *f) {
+    tools_free(&f->reg);
+    db_close(f->db);
+}
+
+/* Invoke the handler as tool call `call_id`. NULL = parked. */
+static char *call(Fx *f, const char *call_id, const char *args) {
+    f->ctx.current_tool_call_id = call_id;
+    ToolEntry *e = tools_lookup(&f->reg, "request_config");
     assert(e != NULL);
     return e->handler(args, e->user_data, &(int){0});
+}
+
+static void exec_ok(sqlite3 *db, const char *sql) {
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
 }
 
 /* Make a credential name resolve, so the config-time key check passes. The
@@ -29,1274 +62,508 @@ static void seed_key(sqlite3 *db, const char *name) {
     snprintf(sql, sizeof(sql),
         "INSERT OR IGNORE INTO secrets(name, value, scope)"
         " VALUES('%s','x','system')", name);
-    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+    exec_ok(db, sql);
 }
 
-/* Approve-and-apply the newest parked document for this session. */
-static void apply_latest(sqlite3 *db, int64_t sid, char **receipt_out) {
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT args_json FROM approvals WHERE session_id=?1"
-        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    char *args = strdup((const char *)sqlite3_column_text(s, 0));
-    sqlite3_finalize(s);
-    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, receipt_out) == 0);
+/* The newest parked document for this session (caller frees). */
+static char *last_args(sqlite3 *db, int64_t sid) {
+    char *a = db_scalar_text(db, "SELECT args_json FROM approvals WHERE session_id=?1"
+                                 " ORDER BY id DESC LIMIT 1", sid);
+    assert(a);
+    return a;
+}
+
+/* Approve-and-apply the newest parked document; returns the apply rc. */
+static int apply_latest(sqlite3 *db, int64_t sid, char **receipt_out) {
+    char *args = last_args(db, sid);
+    int rc = request_config_changes_apply(db, "test", args, 0, 0, 0, receipt_out);
     free(args);
+    return rc;
 }
 
-/* 1 iff sql yields at least one row. */
-static int row_exists(sqlite3 *db, const char *sql) {
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
-    int hit = sqlite3_step(s) == SQLITE_ROW;
-    sqlite3_finalize(s);
-    return hit;
+/* Assert a one-column text read (sid bound to ?1) equals want. */
+static void expect_text(sqlite3 *db, const char *sql, int64_t sid, const char *want) {
+    char *got = db_scalar_text(db, sql, sid);
+    if (!got || strcmp(got, want) != 0)
+        fprintf(stderr, "expect_text: %s\n  want '%s' got '%s'\n",
+                sql, want, got ? got : "(null)");
+    assert(got && strcmp(got, want) == 0);
+    free(got);
 }
 
-/* Seed a registered config key so the handler allows it. */
-static void seed_config_key(sqlite3 *db, const char *key) {
-    char sql[256];
-    snprintf(sql, sizeof(sql),
-        "INSERT OR IGNORE INTO config(key, default_value, description)"
-        " VALUES('%s','0','test knob')", key);
-    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
-}
+#define DS "openrouter/deepseek/deepseek-v4.1-flash"
 
 /* ── tests ──────────────────────────────────────────────────────────── */
 
-static void test_register(void) {
-    ToolRegistry reg;
-    tools_init(&reg);
-    int rc = tool_request_config_register(&reg, NULL);
-    assert(rc == 0);
-
-    ToolEntry *e = tools_lookup(&reg, "request_config");
-    assert(e != NULL);
-    assert(strcmp(e->name, "request_config") == 0);
-    assert(e->handler != NULL);
-
-    tools_free(&reg);
-    printf("  PASS test_register\n");
-}
-
-
-/* With NULL context, handler returns unavailable error. */
-static void test_handler_unavailable(void) {
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, NULL);
-
-    char *result = call_handler(&reg,
-        "{\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}");
-    assert(result != NULL);
-    assert(strstr(result, "error") != NULL);
-    free(result);
-
-    tools_free(&reg);
-    printf("  PASS test_handler_unavailable\n");
-}
-
-/* 1. Park a tools grant; verify approvals row and session state. */
+/* Park a tools grant; verify approvals row and session state. */
 static void test_park_tools_grant(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-    assert(sid > 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "call_1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
+    Fx f;
+    fx_open(&f, ":memory:");
     /* awaiting_approval is only reachable from a busy state — in production
      * the dispatcher holds tool_running while the handler parks. */
-    assert(session_set_state(db, sid, "tool_running") == 0);
-    char *result = call_handler(&reg,
-        "{\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}");
-    assert(result == NULL); /* parked */
-
-    /* Verify approvals row. */
-    sqlite3_stmt *s;
-    int rc = sqlite3_prepare_v2(db,
-        "SELECT park_reason, json_extract(args_json,'$.changes.grants.tools[0]')"
+    assert(session_set_state(f.db, f.sid, "tool_running") == 0);
+    assert(call(&f, "call_1",
+        "{\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}") == NULL);
+    expect_text(f.db, "SELECT park_reason || ':' ||"
+        " json_extract(args_json,'$.changes.grants.tools[0]')"
         " FROM approvals WHERE session_id=?1 AND tool_name='request_config'",
-        -1, &s, NULL);
-    assert(rc == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "approval_required") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1), "shell_exec") == 0);
-    sqlite3_finalize(s);
-
-    /* Verify session state. */
-    rc = sqlite3_prepare_v2(db,
-        "SELECT state FROM sessions WHERE id=?1", -1, &s, NULL);
-    assert(rc == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "awaiting_approval") == 0);
-    sqlite3_finalize(s);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_park_tools_grant\n");
+        f.sid, "approval_required:shell_exec");
+    expect_text(f.db, "SELECT state FROM sessions WHERE id=?1", f.sid,
+                "awaiting_approval");
+    fx_close(&f);
 }
 
-
-/* 2. Error cases — missing changes, empty doc, unknown section, unknown
- *    grants key, non-array, relative path, unknown config key, provider
- *    errors. */
-static void test_error_missing_changes(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "e1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
-    /* No 'changes' field at all. */
-    char *err = call_handler(&reg, "{}");
-    assert(err != NULL && strstr(err, "changes") != NULL);
-    free(err);
-
-    /* Empty changes document (no sections). */
-    ctx.current_tool_call_id = "e2";
-    err = call_handler(&reg, "{\"changes\":{}}");
-    assert(err != NULL && strstr(err, "nothing to request") != NULL);
-    free(err);
-
-    /* Unknown section name. */
-    ctx.current_tool_call_id = "e3";
-    err = call_handler(&reg,
-        "{\"changes\":{\"tokens\":{\"a\":1}}}");
-    assert(err != NULL && strstr(err, "unknown changes section") != NULL);
-    free(err);
-
-    /* Unknown grants key. */
-    ctx.current_tool_call_id = "e4";
-    err = call_handler(&reg,
-        "{\"changes\":{\"grants\":{\"networks\":[\"x\"]}}}");
-    assert(err != NULL && strstr(err, "unknown grants key") != NULL);
-    free(err);
-
-    /* Grants value not an array. */
-    ctx.current_tool_call_id = "e5";
-    err = call_handler(&reg,
-        "{\"changes\":{\"grants\":{\"tools\":\"shell_exec\"}}}");
-    assert(err != NULL && strstr(err, "array") != NULL);
-    free(err);
-
-    /* Array entry empty string. */
-    ctx.current_tool_call_id = "e6";
-    err = call_handler(&reg,
-        "{\"changes\":{\"grants\":{\"tools\":[\"\"]}}}");
-    assert(err != NULL && strstr(err, "non-empty") != NULL);
-    free(err);
-
-    /* Relative path grant. */
-    ctx.current_tool_call_id = "e7";
-    err = call_handler(&reg,
-        "{\"changes\":{\"grants\":{\"read_paths\":[\"relative/dir\"]}}}");
-    assert(err != NULL && strstr(err, "absolute") != NULL);
-    free(err);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_error_missing_changes\n");
-}
-
-
-static void test_error_config_keys(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "ck1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
-    /* Unknown config key. */
-    char *err = call_handler(&reg,
-        "{\"changes\":{\"config\":{\"no_such_key\":\"1\"}}}");
-    assert(err != NULL && strstr(err, "unknown config key") != NULL);
-    assert(strstr(err, "search_config") != NULL);
-    free(err);
-
-    /* Config value not a string. */
-    ctx.current_tool_call_id = "ck2";
-    err = call_handler(&reg,
-        "{\"changes\":{\"config\":{\"web_port\":123}}}");
-    assert(err != NULL && strstr(err, "string") != NULL);
-    free(err);
-
-    /* Secret-flagged config key. */
-    assert(sqlite3_exec(db,
+/* Every document the handler refuses before parking. One fixture carries
+ * the state the refusals need; a refusal never parks, so rows are
+ * independent. */
+static void test_refusals(void) {
+    Fx f;
+    fx_open(&f, ":memory:");
+    db_agent_upsert(f.db, "Other", NULL, NULL);
+    exec_ok(f.db,
         "INSERT OR IGNORE INTO config(key, default_value, description, secret)"
-        " VALUES('my_secret_key','','a secret',1)", NULL, NULL, NULL) == SQLITE_OK);
-    ctx.current_tool_call_id = "ck3";
-    err = call_handler(&reg,
-        "{\"changes\":{\"config\":{\"my_secret_key\":\"x\"}}}");
-    assert(err != NULL && strstr(err, "secret") != NULL);
-    free(err);
+        " VALUES('my_secret_key','','a secret',1);"
+        "INSERT INTO extensions(name,path) VALUES('tgext','/x');"
+        "INSERT INTO channels(name,extension_name) VALUES('tg','tgext');"
+        "INSERT INTO secrets(name,value,scope) VALUES"
+        " ('ALPACA_KEY','enc:00','agent'),('SYS_KEY','enc:00','system');"
+        "UPDATE models SET context_window=100000 WHERE id='" DS "';"
+        "INSERT INTO providers(name, base_url, endpoint_type) VALUES"
+        " ('anthx','http://a','anthropic');"
+        "INSERT INTO models(id, provider_name, model) VALUES ('anthx/c','anthx','c');");
+    assert(channel_pin_new_session(f.db, "tg", "-500", "Other", "o") > 0);
 
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_error_config_keys\n");
+#define AGM(entry) "{\"changes\":{\"agent\":{\"models\":[" entry "]}}}"
+#define DSM(keys) AGM("{\"id\":\"" DS "\"," keys "}")
+#define SB(val) "{\"changes\":{\"secret_bindings\":{" val "}}}"
+    static const struct { const char *doc, *needle, *absent; } cases[] = {
+        /* document shape */
+        {"{}", "changes", NULL},
+        {"{\"changes\":{}}", "nothing to request", NULL},
+        {"{\"changes\":{\"tokens\":{\"a\":1}}}", "unknown changes section", NULL},
+        /* grants */
+        {"{\"changes\":{\"grants\":{\"networks\":[\"x\"]}}}", "unknown grants key", NULL},
+        {"{\"changes\":{\"grants\":{\"tools\":\"shell_exec\"}}}", "array", NULL},
+        {"{\"changes\":{\"grants\":{\"tools\":[\"\"]}}}", "non-empty", NULL},
+        {"{\"changes\":{\"grants\":{\"read_paths\":[\"relative/dir\"]}}}", "absolute", NULL},
+        /* config */
+        {"{\"changes\":{\"config\":{\"no_such_key\":\"1\"}}}", "search_config", NULL},
+        {"{\"changes\":{\"config\":{\"web_port\":123}}}", "string", NULL},
+        {"{\"changes\":{\"config\":{\"my_secret_key\":\"x\"}}}", "secret", NULL},
+        /* provider */
+        {"{\"changes\":{\"provider\":{}}}", "required", NULL},
+        {"{\"changes\":{\"provider\":{\"provider\":\"myllm\"}}}", "base_url", NULL},
+        {"{\"changes\":{\"provider\":{\"provider\":\"myllm\","
+         "\"base_url\":\"ftp://x.com/v1\"}}}", "http", NULL},
+        {"{\"changes\":{\"provider\":{\"provider\":\"openrouter\","
+         "\"api_key_env\":\"sk-or-v1-secret\"}}}", "api_key_env", NULL},
+        /* A model belongs in the models section — the provider doc is
+         * transport. (Registering a model by re-submitting a provider doc is
+         * the trap that took prod's gateway down.) */
+        {"{\"changes\":{\"provider\":{\"provider\":\"openrouter\","
+         "\"model\":\"some/model\"}}}", "models", NULL},
+        /* models section: provider must exist first, canonical ids only,
+         * typo-hostile keys, two statuses */
+        {"{\"changes\":{\"models\":[{\"id\":\"m1@ghostprov\"}]}}", "ghostprov", NULL},
+        {"{\"changes\":{\"models\":[{\"id\":\"just-a-name\"}]}}", "model@provider", NULL},
+        {"{\"changes\":{\"models\":[{\"id\":\"x@openrouter\",\"ctx\":1}]}}", "'ctx'", NULL},
+        {"{\"changes\":{\"models\":[{\"id\":\"x@openrouter\","
+         "\"status\":\"retired\"}]}}", "healthy", NULL},
+        /* agent section: a bare name gets a did-you-mean naming the id;
+         * nothing like it registered gets no invented suggestion */
+        {AGM("\"deepseek/deepseek-v4.1-flash\""), DS, NULL},
+        {AGM("\"ghost\""), "unknown model 'ghost'", "Did you mean"},
+        {"{\"changes\":{\"agent\":{\"sandbox_profile\":\"host\"}}}", "unknown agent key", NULL},
+        {"{\"changes\":{\"agent\":{\"max_iterations\":0}}}", "positive integer", NULL},
+        /* agent.models entries */
+        {DSM("\"effort\":\"max\""), "effort 'max'", NULL},
+        {DSM("\"reasoning\":\"high\""), "'reasoning'", NULL},
+        {AGM("7"), "{id, effort}", NULL},
+        {AGM("{\"effort\":\"high\"}"), "canonical model id", NULL},
+        {AGM("\"" DS "\",{\"id\":\"" DS "\",\"effort\":\"low\"}"), "duplicate", NULL},
+        {DSM("\"trim_threshold\":0"), "trim_threshold", NULL},
+        {DSM("\"prune_target\":\"9\""), "prune_target", NULL},
+        {DSM("\"trim_threshold\":5000,\"prune_target\":5000"), "below its trim_threshold", NULL},
+        /* no threshold = half the window (100000) */
+        {DSM("\"prune_target\":50000"), "half the model's window", NULL},
+        {DSM("\"cache_lifetime\":-5"), "cache_lifetime", NULL},
+        {AGM("{\"id\":\"anthx/c\",\"cache_lifetime\":600}"), "Anthropic", NULL},
+        {AGM("{\"id\":\"anthx/c\",\"reasoning_display\":\"full\"}"), "reasoning_display", NULL},
+        {AGM("{\"id\":\"anthx/c\",\"reasoning_display\":true}"), "reasoning_display", NULL},
+        /* routes: shape, unknown channel, wildcard, foreign owner */
+        {"{\"changes\":{\"routes\":[\"tg\"]}}", "'channel:chat_id'", NULL},
+        {"{\"changes\":{\"routes\":[\"nochan:1\"]}}", "unknown channel", NULL},
+        {"{\"changes\":{\"routes\":[\"tg:*\"]}}", "wildcard", NULL},
+        {"{\"changes\":{\"routes\":[\"tg:-500\"]}}", "already owned", NULL},
+        /* secret_bindings: a binding request is not where a secret is born;
+         * system secrets never interpolate; host shape; array value */
+        {SB("\"NOPE\":[\"api.example.com\"]"), "unknown secret", NULL},
+        {SB("\"SYS_KEY\":[\"api.example.com\"]"), "unknown secret", NULL},
+        {SB("\"ALPACA_KEY\":[\"*.example.com\"]"), "not a valid hostname", NULL},
+        {SB("\"ALPACA_KEY\":[\".com\"]"), "not a valid hostname", NULL},
+        {SB("\"ALPACA_KEY\":[\"localhost\"]"), "not a valid hostname", NULL},
+        {SB("\"ALPACA_KEY\":\"api.example.com\""), "must be an array", NULL},
+    };
+#undef AGM
+#undef DSM
+#undef SB
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char id[16];
+        snprintf(id, sizeof(id), "e%zu", i);
+        char *r = call(&f, id, cases[i].doc);
+        int ok = r && strstr(r, "error") && strstr(r, cases[i].needle)
+                 && !(cases[i].absent && strstr(r, cases[i].absent));
+        if (!ok)
+            fprintf(stderr, "row %zu: %s\n  want '%s', got: %s\n", i,
+                    cases[i].doc, cases[i].needle, r ? r : "(parked)");
+        assert(ok);
+        free(r);
+    }
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM approvals") == 0);
+    fx_close(&f);
 }
 
-static void test_error_provider(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "pv1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
-    /* Provider name missing. */
-    char *err = call_handler(&reg,
-        "{\"changes\":{\"provider\":{}}}");
-    assert(err != NULL && strstr(err, "provider") != NULL && strstr(err, "required") != NULL);
-    free(err);
-
-    /* Unknown provider without base_url. */
-    ctx.current_tool_call_id = "pv2";
-    err = call_handler(&reg,
-        "{\"changes\":{\"provider\":{\"provider\":\"myllm\"}}}");
-    assert(err != NULL && strstr(err, "base_url") != NULL);
-    free(err);
-
-    /* Non-http base_url (ftp://). */
-    ctx.current_tool_call_id = "pv3";
-    err = call_handler(&reg,
-        "{\"changes\":{\"provider\":"
-        "{\"provider\":\"myllm\",\"base_url\":\"ftp://x.com/v1\"}}}");
-    assert(err != NULL && strstr(err, "http") != NULL);
-    free(err);
-
-    /* Bad api_key_env — contains lowercase / looks like key material. */
-    ctx.current_tool_call_id = "pv4";
-    err = call_handler(&reg,
-        "{\"changes\":{\"provider\":"
-        "{\"provider\":\"openrouter\",\"api_key_env\":\"sk-or-v1-secret\"}}}");
-    assert(err != NULL && strstr(err, "api_key_env") != NULL);
-    free(err);
-
-    /* A model belongs in the models section — the provider doc is transport.
-     * (Registering a model by re-submitting a provider doc is the trap that
-     * took prod's gateway down.) */
-    ctx.current_tool_call_id = "pv5";
-    err = call_handler(&reg,
-        "{\"changes\":{\"provider\":"
-        "{\"provider\":\"openrouter\",\"model\":\"some/model\"}}}");
-    assert(err != NULL && strstr(err, "models") != NULL);
-    free(err);
-
-    /* Config-time key check: the credential this provider would use exists
-     * neither in env nor as a system secret. Refuse now, while the agent can
-     * still fix it — not silently at request time (A8). */
-    ctx.current_tool_call_id = "pv6";
-    err = call_handler(&reg,
-        "{\"changes\":{\"provider\":"
+/* The provider key check (A8) and the provider key's provenance: a missing
+ * credential is refused while the agent can still fix it; a captured agent
+ * secret becomes a system key on approval; a host-bound tool credential or
+ * another agent's secret never becomes one. */
+static void test_provider_keys(void) {
+    Fx f;
+    fx_open(&f, ":memory:");
+    char *err = call(&f, "pv6", "{\"changes\":{\"provider\":"
         "{\"provider\":\"nokey\",\"base_url\":\"https://n.example/v1\"}}}");
-    assert(err != NULL && strstr(err, "NOKEY_API_KEY") != NULL
-                       && strstr(err, "save_secret") != NULL);
+    assert(err && strstr(err, "NOKEY_API_KEY") && strstr(err, "save_secret"));
     free(err);
 
-    /* A secret the asking agent captured is accepted, and approval makes it
-     * the provider's key: system scope, no agent grant left. */
-    assert(sqlite3_exec(db,
+    exec_ok(f.db,
         "INSERT INTO secrets(name, value, source, scope) VALUES('NOKEY_API_KEY','x','captured','agent');"
-        "INSERT INTO grants(agent_name, kind, value, source) VALUES('test','secret','NOKEY_API_KEY','capture');",
-        NULL, NULL, NULL) == SQLITE_OK);
+        "INSERT INTO grants(agent_name, kind, value, source) VALUES('test','secret','NOKEY_API_KEY','capture');");
     /* Binding the same secret in the same document contradicts that. */
-    ctx.current_tool_call_id = "pv6a";
-    err = call_handler(&reg,
-        "{\"changes\":{\"provider\":"
+    err = call(&f, "pv6a", "{\"changes\":{\"provider\":"
         "{\"provider\":\"nokey\",\"base_url\":\"https://n.example/v1\"},"
         "\"secret_bindings\":{\"NOKEY_API_KEY\":[\"n.example\"]}}}");
-    assert(err != NULL && strstr(err, "takes no") != NULL);
+    assert(err && strstr(err, "takes no"));
     free(err);
-    ctx.current_tool_call_id = "pv6b";
-    char *park = call_handler(&reg,
-        "{\"changes\":{\"provider\":"
-        "{\"provider\":\"nokey\",\"base_url\":\"https://n.example/v1\"}}}");
-    assert(park == NULL);
-    assert(row_exists(db, "SELECT 1 FROM secrets WHERE name='NOKEY_API_KEY' AND scope='agent'"));
-    apply_latest(db, ctx.session_id, NULL);
-    assert(row_exists(db, "SELECT 1 FROM secrets WHERE name='NOKEY_API_KEY' AND scope='system'"));
-    assert(!row_exists(db, "SELECT 1 FROM grants WHERE kind='secret' AND value='NOKEY_API_KEY'"));
-    assert(row_exists(db, "SELECT 1 FROM providers WHERE name='nokey' AND api_key_env='NOKEY_API_KEY'"));
+    assert(call(&f, "pv6b", "{\"changes\":{\"provider\":"
+        "{\"provider\":\"nokey\",\"base_url\":\"https://n.example/v1\"}}}") == NULL);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM secrets WHERE name='NOKEY_API_KEY' AND scope='agent'") == 1);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM secrets WHERE name='NOKEY_API_KEY' AND scope='system'") == 1);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM grants WHERE kind='secret' AND value='NOKEY_API_KEY'") == 0);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM providers WHERE name='nokey' AND api_key_env='NOKEY_API_KEY'") == 1);
 
-    /* A secret already bound to a host is a tool credential. A provider
-     * document may not carry it to a new address, nor one held by another. */
-    assert(sqlite3_exec(db,
+    exec_ok(f.db,
         "INSERT INTO secrets(name, value, source, scope) VALUES('TOOL_TOKEN','x','captured','agent');"
-        "INSERT INTO grants(agent_name, kind, value, source) VALUES('test','secret','TOOL_TOKEN','capture');",
-        NULL, NULL, NULL) == SQLITE_OK);
-    assert(db_secret_host_bind(db, "TOOL_TOKEN", "api.example.com") == 0);
-    ctx.current_tool_call_id = "pv6c";
-    err = call_handler(&reg,
-        "{\"changes\":{\"provider\":"
+        "INSERT INTO grants(agent_name, kind, value, source) VALUES('test','secret','TOOL_TOKEN','capture');");
+    assert(db_secret_host_bind(f.db, "TOOL_TOKEN", "api.example.com") == 0);
+    err = call(&f, "pv6c", "{\"changes\":{\"provider\":"
         "{\"provider\":\"evil\",\"base_url\":\"https://e.example/v1\","
         "\"api_key_env\":\"TOOL_TOKEN\"}}}");
-    assert(err != NULL && strstr(err, "cannot become a provider key") != NULL);
+    assert(err && strstr(err, "cannot become a provider key"));
     free(err);
-    db_agent_upsert(db, "someone_else", NULL, NULL);
-    assert(sqlite3_exec(db,
+    db_agent_upsert(f.db, "someone_else", NULL, NULL);
+    exec_ok(f.db,
         "INSERT INTO secrets(name, value, source, scope) VALUES('OTHERS_KEY','x','captured','agent');"
-        "INSERT INTO grants(agent_name, kind, value, source) VALUES('someone_else','secret','OTHERS_KEY','capture');",
-        NULL, NULL, NULL) == SQLITE_OK);
-    ctx.current_tool_call_id = "pv6d";
-    err = call_handler(&reg,
-        "{\"changes\":{\"provider\":"
+        "INSERT INTO grants(agent_name, kind, value, source) VALUES('someone_else','secret','OTHERS_KEY','capture');");
+    err = call(&f, "pv6d", "{\"changes\":{\"provider\":"
         "{\"provider\":\"evil\",\"base_url\":\"https://e.example/v1\","
         "\"api_key_env\":\"OTHERS_KEY\"}}}");
-    assert(err != NULL && strstr(err, "cannot become a provider key") != NULL);
+    assert(err && strstr(err, "cannot become a provider key"));
     free(err);
 
     /* Keyless is legal, but it has to be said out loud. */
-    ctx.current_tool_call_id = "pv7";
-    char *ok = call_handler(&reg,
-        "{\"changes\":{\"provider\":"
+    assert(call(&f, "pv7", "{\"changes\":{\"provider\":"
         "{\"provider\":\"nokey\",\"base_url\":\"https://n.example/v1\","
-        "\"api_key_env\":\"\"}}}");
-    assert(ok == NULL);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_error_provider\n");
+        "\"api_key_env\":\"\"}}}") == NULL);
+    fx_close(&f);
 }
 
-
-/* 3. reason propagates to $.reason in the parked approval. */
-static void test_reason_propagates(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "r1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
-    char *result = call_handler(&reg,
-        "{"
-        "\"changes\":{\"grants\":{\"hosts\":[\"api.example.com\"]}},"
-        "\"reason\":\"need the API\"}");
-    assert(result == NULL);
-
-    sqlite3_stmt *s;
-    int rc = sqlite3_prepare_v2(db,
-        "SELECT json_extract(args_json,'$.reason')"
-        " FROM approvals WHERE session_id=?1 AND tool_name='request_config'",
-        -1, &s, NULL);
-    assert(rc == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "need the API") == 0);
-    sqlite3_finalize(s);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_reason_propagates\n");
-}
-
-/* 4. Provider defaults fill — openrouter with only the name gets the
- *    three canonical defaults in parked JSON. */
+/* Provider defaults fill: openrouter with only the name gets its canonical
+ * base_url and key name in the parked JSON. */
 static void test_provider_defaults(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "pd1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-    seed_key(db, "OPENROUTER_API_KEY");
-
-    char *result = call_handler(&reg,
-        "{\"changes\":{\"provider\":{\"provider\":\"openrouter\"}}}");
-    assert(result == NULL);
-
-    sqlite3_stmt *s;
-    int rc = sqlite3_prepare_v2(db,
-        "SELECT json_extract(args_json,'$.changes.provider.base_url'),"
-        "       json_extract(args_json,'$.changes.provider.api_key_env')"
-        " FROM approvals WHERE session_id=?1 AND park_reason='approval_required'"
-        " ORDER BY id DESC LIMIT 1", -1, &s, NULL);
-    assert(rc == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                 "https://openrouter.ai/api/v1") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1),
-                 "OPENROUTER_API_KEY") == 0);
-    sqlite3_finalize(s);
+    Fx f;
+    fx_open(&f, ":memory:");
+    seed_key(f.db, "OPENROUTER_API_KEY");
+    assert(call(&f, "pd1", "{\"changes\":{\"provider\":{\"provider\":\"openrouter\"}}}") == NULL);
+    expect_text(f.db, "SELECT json_extract(args_json,'$.changes.provider.base_url') || ' ' ||"
+        " json_extract(args_json,'$.changes.provider.api_key_env')"
+        " FROM approvals WHERE session_id=?1 ORDER BY id DESC LIMIT 1",
+        f.sid, "https://openrouter.ai/api/v1 OPENROUTER_API_KEY");
 
     /* A7 regression: a deliberately keyless provider survives a provider
      * document. The old canonicalizer re-derived <PROVIDER>_API_KEY whenever
      * api_key_env was absent, and the phantom name made routing drop every
      * one of that provider's models without a word. */
-    assert(sqlite3_exec(db,
-        "INSERT INTO providers(name, base_url, api_key_env)"
-        " VALUES('gateway','http://127.0.0.1:8080/v1','')",
-        NULL, NULL, NULL) == SQLITE_OK);
-    ctx.current_tool_call_id = "pd2";
-    result = call_handler(&reg,
-        "{\"changes\":{\"provider\":"
-        "{\"provider\":\"gateway\",\"base_url\":\"http://127.0.0.1:9090/v1\"}}}");
-    assert(result == NULL);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT json_extract(args_json,'$.changes.provider.api_key_env')"
-        " FROM approvals WHERE session_id=?1 ORDER BY id DESC LIMIT 1",
-        -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "") == 0);
-    sqlite3_finalize(s);
+    exec_ok(f.db, "INSERT INTO providers(name, base_url, api_key_env)"
+                  " VALUES('gateway','http://127.0.0.1:8080/v1','')");
+    assert(call(&f, "pd2", "{\"changes\":{\"provider\":"
+        "{\"provider\":\"gateway\",\"base_url\":\"http://127.0.0.1:9090/v1\"}}}") == NULL);
+    expect_text(f.db, "SELECT json_extract(args_json,'$.changes.provider.api_key_env')"
+        " FROM approvals WHERE session_id=?1 ORDER BY id DESC LIMIT 1", f.sid, "");
 
-    /* …and it stays empty through the apply, too. */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT args_json FROM approvals WHERE session_id=?1"
-        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    char *args = strdup((const char *)sqlite3_column_text(s, 0));
-    sqlite3_finalize(s);
+    /* …and it stays empty through the apply, too. The receipt is a re-read:
+     * it names the endpoint now stored. */
     char *receipt = NULL;
-    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, &receipt) == 0);
-    free(args);
-    /* The receipt is a re-read: it names the endpoint now stored. */
-    assert(receipt && strstr(receipt, "provider gateway -> "
-                                      "http://127.0.0.1:9090/v1 (key: none)"));
+    assert(apply_latest(f.db, f.sid, &receipt) == 0);
+    assert(receipt && strstr(receipt, "http://127.0.0.1:9090/v1 (key: none)"));
     free(receipt);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT api_key_env FROM providers WHERE name='gateway'",
-        -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "") == 0);
-    sqlite3_finalize(s);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_provider_defaults\n");
+    expect_text(f.db, "SELECT api_key_env FROM providers WHERE name='gateway'", 0, "");
+    fx_close(&f);
 }
 
 /* The models section: register on an existing provider, update in place,
- * disable — and refuse a model whose provider does not exist. */
+ * disable. */
 static void test_models_section(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-    seed_key(db, "OPENROUTER_API_KEY");
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "ms1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
-    /* The inverted dependency: a model needs its provider to exist first. */
-    char *r = call_handler(&reg,
-        "{\"changes\":{\"models\":"
-        "[{\"id\":\"m1@ghostprov\"}]}}");
-    assert(r && strstr(r, "provider 'ghostprov' is not registered"));
-    free(r);
-
-    /* A bare id is refused with the canonical form spelled out. */
-    ctx.current_tool_call_id = "ms2";
-    r = call_handler(&reg,
-        "{\"changes\":{\"models\":"
-        "[{\"id\":\"just-a-name\"}]}}");
-    assert(r && strstr(r, "model@provider"));
-    free(r);
-
-    /* Register with metadata onto the seeded provider, then apply. */
-    ctx.current_tool_call_id = "ms3";
-    r = call_handler(&reg,
-        "{\"changes\":{\"models\":"
+    Fx f;
+    fx_open(&f, ":memory:");
+    seed_key(f.db, "OPENROUTER_API_KEY");
+    assert(call(&f, "ms3", "{\"changes\":{\"models\":"
         "[{\"id\":\"newmodel@openrouter\",\"context_window\":200000,"
-        "\"max_output_tokens\":8192,\"capabilities\":[\"text\",\"image\"]}]}}");
-    assert(r == NULL);
+        "\"max_output_tokens\":8192,\"capabilities\":[\"text\",\"image\"]}]}}") == NULL);
     char *receipt = NULL;
-    apply_latest(db, sid, &receipt);
-    assert(receipt && strstr(receipt, "model newmodel@openrouter (healthy, "
-                                      "context 200000)"));
+    assert(apply_latest(f.db, f.sid, &receipt) == 0);
+    assert(receipt && strstr(receipt, "context 200000"));
     free(receipt);
-
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT provider_name, model, context_window, max_output_tokens,"
-        "       capabilities, status FROM models"
-        " WHERE id='newmodel@openrouter'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "openrouter") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1), "newmodel") == 0);
-    assert(sqlite3_column_int(s, 2) == 200000);
-    assert(sqlite3_column_int(s, 3) == 8192);
-    assert(strstr((const char *)sqlite3_column_text(s, 4), "image") != NULL);
-    assert(strcmp((const char *)sqlite3_column_text(s, 5), "healthy") == 0);
-    sqlite3_finalize(s);
+    assert(test_qi(f.db, "SELECT provider_name='openrouter' AND model='newmodel'"
+        " AND context_window=200000 AND max_output_tokens=8192"
+        " AND capabilities LIKE '%image%' AND status='healthy'"
+        " FROM models WHERE id='newmodel@openrouter'") == 1);
 
     /* Update: only the fields present move; the rest keep their values. */
-    ctx.current_tool_call_id = "ms4";
-    r = call_handler(&reg,
-        "{\"changes\":{\"models\":"
-        "[{\"id\":\"newmodel@openrouter\",\"context_window\":64000}]}}");
-    assert(r == NULL);
-    apply_latest(db, sid, NULL);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT context_window, max_output_tokens, status"
-        " FROM models WHERE id='newmodel@openrouter'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(sqlite3_column_int(s, 0) == 64000);
-    assert(sqlite3_column_int(s, 1) == 8192);      /* untouched */
-    assert(strcmp((const char *)sqlite3_column_text(s, 2), "healthy") == 0);
-    sqlite3_finalize(s);
+    assert(call(&f, "ms4", "{\"changes\":{\"models\":"
+        "[{\"id\":\"newmodel@openrouter\",\"context_window\":64000}]}}") == NULL);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
+    assert(test_qi(f.db, "SELECT context_window=64000 AND max_output_tokens=8192"
+        " AND status='healthy' FROM models WHERE id='newmodel@openrouter'") == 1);
 
-    /* Disable — a first-class verb now, not a DELETE nobody could request. */
-    ctx.current_tool_call_id = "ms5";
-    r = call_handler(&reg,
-        "{\"changes\":{\"models\":"
-        "[{\"id\":\"newmodel@openrouter\",\"status\":\"disabled\"}]}}");
-    assert(r == NULL);
-    apply_latest(db, sid, NULL);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT status, context_window FROM models"
-        " WHERE id='newmodel@openrouter'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "disabled") == 0);
-    assert(sqlite3_column_int(s, 1) == 64000);
-    sqlite3_finalize(s);
-
-    /* Typo-hostile like every other section. */
-    ctx.current_tool_call_id = "ms6";
-    r = call_handler(&reg,
-        "{\"changes\":{\"models\":"
-        "[{\"id\":\"newmodel@openrouter\",\"ctx\":1}]}}");
-    assert(r && strstr(r, "unknown models key 'ctx'"));
-    free(r);
-    ctx.current_tool_call_id = "ms7";
-    r = call_handler(&reg,
-        "{\"changes\":{\"models\":"
-        "[{\"id\":\"newmodel@openrouter\",\"status\":\"retired\"}]}}");
-    assert(r && strstr(r, "'healthy' or 'disabled'"));
-    free(r);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_models_section\n");
+    /* Disable — a first-class verb, not a DELETE nobody could request. */
+    assert(call(&f, "ms5", "{\"changes\":{\"models\":"
+        "[{\"id\":\"newmodel@openrouter\",\"status\":\"disabled\"}]}}") == NULL);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
+    assert(test_qi(f.db, "SELECT status='disabled' AND context_window=64000"
+        " FROM models WHERE id='newmodel@openrouter'") == 1);
+    fx_close(&f);
 }
 
-/* A bare model name in the agent section gets a did-you-mean, not a shrug —
- * the canonical-id rule is only teachable if the error names the id. */
-static void test_bare_model_name_teaching(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "bn1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
-    /* 'deepseek/deepseek-v4.1-flash' is seeded, under a canonical id. */
-    char *r = call_handler(&reg,
-        "{\"changes\":{\"agent\":"
-        "{\"models\":[\"deepseek/deepseek-v4.1-flash\"]}}}");
-    assert(r && strstr(r, "bare model name"));
-    assert(r && strstr(r, "openrouter/deepseek/deepseek-v4.1-flash"));
-    free(r);
-
-    /* Nothing like it registered → no invented suggestion. */
-    ctx.current_tool_call_id = "bn2";
-    r = call_handler(&reg,
-        "{\"changes\":{\"agent\":"
-        "{\"models\":[\"ghost\"]}}}");
-    assert(r && strstr(r, "unknown model 'ghost'"));
-    assert(r && !strstr(r, "Did you mean"));
-    free(r);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_bare_model_name_teaching\n");
-}
-
-
-/* 5. Dedup: same doc twice while pending => "already sent"; after marking
- *    first denied, the same doc parks again; a different doc parks while
- *    first is pending. */
+/* Dedup: same doc twice while pending => "already sent"; a different doc
+ * parks while the first is pending; expiry is not a denial; a human denial
+ * refuses the same changes doc whatever the reason says. */
 static void test_dedup(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
+    Fx f;
+    fx_open(&f, ":memory:");
+    const char *doc = "{\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}";
 
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "dd1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
-    const char *doc = "{"
-        "\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}";
-
-    /* First request parks. */
-    char *r = call_handler(&reg, doc);
-    assert(r == NULL);
-
-    /* Same doc again while pending → error containing "already sent". */
-    ctx.current_tool_call_id = "dd2";
-    r = call_handler(&reg, doc);
+    assert(call(&f, "dd1", doc) == NULL);
+    char *r = call(&f, "dd2", doc);
     assert(r != NULL && strstr(r, "already sent") != NULL);
     free(r);
+    assert(call(&f, "dd3", "{\"changes\":{\"grants\":{\"hosts\":[\"example.com\"]}}}") == NULL);
 
-    /* A DIFFERENT doc parks fine while first is pending. */
-    ctx.current_tool_call_id = "dd3";
-    r = call_handler(&reg,
-        "{"
-        "\"changes\":{\"grants\":{\"hosts\":[\"example.com\"]}}}");
-    assert(r == NULL);
-
-    /* Mark the first approval as expired (auto:expired = nobody decided). */
-    assert(sqlite3_exec(db,
+    exec_ok(f.db,
         "UPDATE approvals SET state='denied', decided_via='auto:expired'"
         " WHERE park_reason='approval_required'"
-        " AND json_extract(args_json,'$.changes.grants.tools[0]')='shell_exec'",
-        NULL, NULL, NULL) == SQLITE_OK);
+        " AND json_extract(args_json,'$.changes.grants.tools[0]')='shell_exec'");
+    assert(call(&f, "dd4", doc) == NULL);
 
-    /* Same doc after expiry — must park (expiry is not a denial). */
-    ctx.current_tool_call_id = "dd4";
-    r = call_handler(&reg, doc);
-    assert(r == NULL);
-
-    /* Now a human denies it. */
-    assert(sqlite3_exec(db,
+    exec_ok(f.db,
         "UPDATE approvals SET state='denied', decided_via='channel:discord'"
         " WHERE state='pending'"
-        " AND json_extract(args_json,'$.changes.grants.tools[0]')='shell_exec'",
-        NULL, NULL, NULL) == SQLITE_OK);
-
-    /* Same doc after a human denial — refused inline, even with a fresh
-     * reason (the guard matches the changes doc, not the commentary). */
-    ctx.current_tool_call_id = "dd5";
-    r = call_handler(&reg,
-        "{"
-        "\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}},"
+        " AND json_extract(args_json,'$.changes.grants.tools[0]')='shell_exec'");
+    r = call(&f, "dd5",
+        "{\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}},"
         "\"reason\":\"different wording, same ask\"}");
     assert(r != NULL && strstr(r, "already denied") != NULL);
     free(r);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_dedup\n");
+    fx_close(&f);
 }
 
-
-/* 6. Batch: one doc with grants+config+provider parks exactly ONE approval;
- *    then call request_config_changes_apply and verify grants, config, and
- *    provider rows landed. */
+/* Batch: one doc with grants+config+provider parks exactly ONE approval,
+ * and applying it lands every section. */
 static void test_batch_apply(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-
-    /* Seed an extension-registered config key for the test. */
-    seed_config_key(db, "myext.knob");
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "ba1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
-    seed_key(db, "OPENROUTER_API_KEY");
-    char *r = call_handler(&reg,
-        "{\"changes\":{"
+    Fx f;
+    fx_open(&f, ":memory:");
+    exec_ok(f.db, "INSERT OR IGNORE INTO config(key, default_value, description)"
+                  " VALUES('myext.knob','0','test knob')");
+    seed_key(f.db, "OPENROUTER_API_KEY");
+    assert(call(&f, "ba1", "{\"changes\":{"
         "\"grants\":{\"tools\":[\"shell_exec\"],\"hosts\":[\"api.example.com\"],"
         "\"read_paths\":[\"/opt/data\"],\"write_paths\":[\"/tmp/out\"]},"
         "\"config\":{\"myext.knob\":\"42\"},"
-        "\"provider\":{\"provider\":\"openrouter\"}}}");
-    assert(r == NULL); /* parked */
-
-    /* Exactly one approval row. */
-    sqlite3_stmt *s;
-    int rc = sqlite3_prepare_v2(db,
-        "SELECT count(*) FROM approvals WHERE session_id=?1",
-        -1, &s, NULL);
-    assert(rc == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(sqlite3_column_int(s, 0) == 1);
-    sqlite3_finalize(s);
-
-    /* Retrieve the parked args_json and apply it. */
-    rc = sqlite3_prepare_v2(db,
-        "SELECT args_json FROM approvals WHERE session_id=?1 LIMIT 1",
-        -1, &s, NULL);
-    assert(rc == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    const char *args_json = (const char *)sqlite3_column_text(s, 0);
-    assert(args_json != NULL);
-    char *args_copy = strdup(args_json);
-    sqlite3_finalize(s);
+        "\"provider\":{\"provider\":\"openrouter\"}}}") == NULL);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM approvals") == 1);
 
     char *receipt = NULL;
-    rc = request_config_changes_apply(db, "test", args_copy, 0, 0, 0, &receipt);
-    assert(rc == 0);
-    /* The receipt is a re-read of every section: the grants that are live,
-     * the config value as stored, the provider row as it now stands. */
-    assert(receipt != NULL);
-    assert(strstr(receipt, "grants now: ") != NULL);
-    assert(strstr(receipt, "tool shell_exec") != NULL);
-    assert(strstr(receipt, "config now: myext.knob=42") != NULL);
-    assert(strstr(receipt, "provider openrouter -> "
-                           "https://openrouter.ai/api/v1 "
-                           "(key: OPENROUTER_API_KEY)") != NULL);
+    assert(apply_latest(f.db, f.sid, &receipt) == 0);
+    /* The receipt is a re-read of every section. */
+    assert(receipt && strstr(receipt, "tool shell_exec")
+           && strstr(receipt, "myext.knob=42")
+           && strstr(receipt, "(key: OPENROUTER_API_KEY)"));
     free(receipt);
-    free(args_copy);
 
-    /* Verify grants exist (agent_caps). */
     AgentCaps caps;
-    agent_caps_load(db, "test", &caps);
-    assert(caps.tool_count == 1);
-    assert(strcmp(caps.tools[0], "shell_exec") == 0);
-    assert(caps.host_count == 1);
-    assert(strcmp(caps.hosts[0], "api.example.com") == 0);
-    assert(caps.read_count == 1);
-    assert(strcmp(caps.read_paths[0], "/opt/data") == 0);
-    assert(caps.write_count == 1);
-    assert(strcmp(caps.write_paths[0], "/tmp/out") == 0);
+    agent_caps_load(f.db, "test", &caps);
+    assert(caps.tool_count == 1 && strcmp(caps.tools[0], "shell_exec") == 0);
+    assert(caps.host_count == 1 && strcmp(caps.hosts[0], "api.example.com") == 0);
+    assert(caps.read_count == 1 && strcmp(caps.read_paths[0], "/opt/data") == 0);
+    assert(caps.write_count == 1 && strcmp(caps.write_paths[0], "/tmp/out") == 0);
     agent_caps_free(&caps);
-
-    /* Verify config value landed. */
-    rc = sqlite3_prepare_v2(db,
-        "SELECT value FROM config WHERE key='myext.knob'", -1, &s, NULL);
-    assert(rc == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "42") == 0);
-    sqlite3_finalize(s);
-
-    /* Verify providers row exists with filled defaults. */
-    rc = sqlite3_prepare_v2(db,
-        "SELECT base_url, api_key_env"
-        " FROM providers WHERE name='openrouter'", -1, &s, NULL);
-    assert(rc == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                 "https://openrouter.ai/api/v1") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1),
-                 "OPENROUTER_API_KEY") == 0);
-    sqlite3_finalize(s);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_batch_apply\n");
+    expect_text(f.db, "SELECT value FROM config WHERE key='myext.knob'", 0, "42");
+    expect_text(f.db, "SELECT base_url || ' ' || api_key_env FROM providers"
+                      " WHERE name='openrouter'", 0,
+                "https://openrouter.ai/api/v1 OPENROUTER_API_KEY");
+    fx_close(&f);
 }
 
-
-/* 6b. agent + routes sections: eager validation and batch apply. */
-static void test_agent_routes_sections(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    db_agent_upsert(db, "Other", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-
-    /* A live channel plus a route already owned by another agent. */
-    assert(sqlite3_exec(db,
+/* agent + routes sections in one document: define a transport, register a
+ * model on it, adopt it, take routes; a route captured between park and
+ * apply rolls the whole document back. */
+static void test_agent_routes_apply(void) {
+    Fx f;
+    fx_open(&f, ":memory:");
+    db_agent_upsert(f.db, "Other", NULL, NULL);
+    exec_ok(f.db,
         "INSERT INTO extensions(name,path) VALUES('tgext','/x');"
         "INSERT INTO channels(name,extension_name) VALUES('tg','tgext');"
         /* a chat the gate saw but nobody routed, starting from a filter */
         "INSERT INTO channel_chats(channel_name,chat_id,tool_filter,title)"
-        " VALUES('tg','999','[\"web_fetch\"]','Lobby');", NULL, NULL, NULL) == SQLITE_OK);
-    assert(channel_pin_new_session(db, "tg", "-500", "Other", "o") > 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "ar1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-    assert(session_set_state(db, sid, "tool_running") == 0);
-
-    /* agent section: whitelist, integer bounds, model existence. */
-    char *r = call_handler(&reg,
-        "{\"changes\":"
-        "{\"agent\":{\"sandbox_profile\":\"host\"}}}");
-    assert(r && strstr(r, "unknown agent key"));
-    free(r);
-    r = call_handler(&reg,
-        "{\"changes\":"
-        "{\"agent\":{\"max_iterations\":0}}}");
-    assert(r && strstr(r, "positive integer"));
-    free(r);
-    r = call_handler(&reg,
-        "{\"changes\":"
-        "{\"agent\":{\"models\":[\"ghost-model\"]}}}");
-    assert(r && strstr(r, "unknown model"));
-    free(r);
-
-    /* routes section: shape, unknown channel, wildcard, foreign owner. */
-    r = call_handler(&reg,
-        "{\"changes\":{\"routes\":[\"tg\"]}}");
-    assert(r && strstr(r, "'channel:chat_id'"));
-    free(r);
-    r = call_handler(&reg,
-        "{\"changes\":{\"routes\":[\"nochan:1\"]}}");
-    assert(r && strstr(r, "unknown channel"));
-    free(r);
-    r = call_handler(&reg,
-        "{\"changes\":{\"routes\":[\"tg:*\"]}}");
-    assert(r && strstr(r, "no wildcard routes"));
-    free(r);
-    r = call_handler(&reg,
-        "{\"changes\":{\"routes\":[\"tg:-500\"]}}");
-    assert(r && strstr(r, "already owned"));
-    free(r);
-
-    /* One document, the whole chain: define the transport, register a model
-     * on it, adopt that model, take a route. */
-    seed_key(db, "GEMINI_API_KEY");
-    r = call_handler(&reg,
-        "{\"changes\":{"
+        " VALUES('tg','999','[\"web_fetch\"]','Lobby');");
+    assert(session_set_state(f.db, f.sid, "tool_running") == 0);
+    seed_key(f.db, "GEMINI_API_KEY");
+    assert(call(&f, "ar1", "{\"changes\":{"
         "\"provider\":{\"provider\":\"gemini\"},"
         "\"models\":[{\"id\":\"gemini-3.5-flash-lite@gemini\","
         "\"context_window\":1000000}],"
         "\"agent\":{\"models\":[\"gemini-3.5-flash-lite@gemini\"],"
         "\"max_iterations\":40},"
-        "\"routes\":[\"tg:777\",\"tg:999\"]}}");
-    assert(r == NULL); /* parked */
+        "\"routes\":[\"tg:777\",\"tg:999\"]}}") == NULL);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
 
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT args_json FROM approvals WHERE session_id=?1"
-        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    char *args_copy = strdup((const char *)sqlite3_column_text(s, 0));
-    sqlite3_finalize(s);
-
-    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, 0, NULL) == 0);
-    free(args_copy);
-
-    /* models row seeded → the adopted id resolves. */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT provider_name, model FROM models"
-        " WHERE id='gemini-3.5-flash-lite@gemini'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "gemini") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1), "gemini-3.5-flash-lite") == 0);
-    sqlite3_finalize(s);
-
+    assert(test_qi(f.db, "SELECT provider_name='gemini' AND model='gemini-3.5-flash-lite'"
+        " FROM models WHERE id='gemini-3.5-flash-lite@gemini'") == 1);
     /* routing list replaced; untouched scalar columns kept. */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT (SELECT model_id FROM agent_models"
-        "         WHERE agent_name='test' ORDER BY pos LIMIT 1),"
-        "       max_iterations, shell_timeout FROM agents"
-        " WHERE name='test'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                  "gemini-3.5-flash-lite@gemini") == 0);
-    assert(sqlite3_column_int(s, 1) == 40);
-    assert(sqlite3_column_int(s, 2) == 30); /* default untouched */
-    sqlite3_finalize(s);
-
-    /* route landed: pinned to an eagerly created session owned by this
-     * agent, explicit delivery (send authority only). */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT se.agent_name, r.delivery_mode, se.channel_name, se.chat_id"
+    assert(test_qi(f.db, "SELECT (SELECT model_id FROM agent_models"
+        "   WHERE agent_name='test' ORDER BY pos LIMIT 1)='gemini-3.5-flash-lite@gemini'"
+        " AND max_iterations=40 AND shell_timeout=30 FROM agents WHERE name='test'") == 1);
+    /* Routes pinned to sessions this agent owns, explicit delivery (send
+     * authority only); the seen chat keeps its filter and title. */
+    assert(test_qi(f.db, "SELECT se.agent_name='test' AND r.delivery_mode='explicit'"
+        " AND se.channel_name='tg' AND se.chat_id='777'"
         " FROM channel_chats r JOIN sessions se ON se.id=r.session_id"
-        " WHERE r.channel_name='tg' AND r.chat_id='777'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "test") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1), "explicit") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 2), "tg") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 3), "777") == 0);
-    sqlite3_finalize(s);
-    /* The seen-but-unrouted chat is routed in place: pinned, explicit, and
-     * still carrying the filter and title it had. */
-    assert(db_scalar_i64(db, "SELECT s.agent_name='test' AND c.delivery_mode='explicit'"
+        " WHERE r.channel_name='tg' AND r.chat_id='777'") == 1);
+    assert(test_qi(f.db, "SELECT s.agent_name='test' AND c.delivery_mode='explicit'"
         " AND c.tool_filter='[\"web_fetch\"]' AND c.title='Lobby'"
         " AND s.channel_name='tg' AND s.chat_id='999'"
         " FROM channel_chats c JOIN sessions s ON s.id=c.session_id"
-        " WHERE c.chat_id='999';", 0, -1) == 1);
+        " WHERE c.chat_id='999';") == 1);
 
     /* Route captured by another agent between park and apply → the whole
      * document rolls back (savepoint), including the agent section. */
-    r = call_handler(&reg,
-        "{\"changes\":{"
-        "\"agent\":{\"max_iterations\":99},\"routes\":[\"tg:888\"]}}");
-    assert(r == NULL);
-    assert(channel_pin_new_session(db, "tg", "888", "Other", "o2") > 0);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT args_json FROM approvals WHERE session_id=?1"
-        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    args_copy = strdup((const char *)sqlite3_column_text(s, 0));
-    sqlite3_finalize(s);
-    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, 0, NULL) == -1);
-    free(args_copy);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT max_iterations FROM agents WHERE name='test'",
-        -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(sqlite3_column_int(s, 0) == 40); /* rolled back, not 99 */
-    sqlite3_finalize(s);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_agent_routes_sections\n");
+    assert(call(&f, "ar2", "{\"changes\":{"
+        "\"agent\":{\"max_iterations\":99},\"routes\":[\"tg:888\"]}}") == NULL);
+    assert(channel_pin_new_session(f.db, "tg", "888", "Other", "o2") > 0);
+    assert(apply_latest(f.db, f.sid, NULL) == -1);
+    assert(test_qi(f.db, "SELECT max_iterations FROM agents WHERE name='test'") == 40);
+    fx_close(&f);
 }
 
-
-/* agent.models entries as {id, effort} objects: validation of the union
- * shape, effort landing in agent_models.reasoning_effort, and the whole-list
- * replace clearing effort when a later doc reverts to the bare-string form. */
+/* agent.models {id, effort} objects: effort lands on the routing row, a
+ * bare-string replacement clears it (whole-list replace), and only the chat
+ * list is replaced (v59). */
 static void test_agent_models_effort(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
+    Fx f;
+    fx_open(&f, ":memory:");
+    assert(session_set_state(f.db, f.sid, "tool_running") == 0);
+    assert(call(&f, "ef1", "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"" DS "\",\"effort\":\"high\"}]}}}") == NULL);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM agent_models WHERE agent_name='test'") == 1);
+    assert(test_qi(f.db, "SELECT model_id='" DS "' AND reasoning_effort='high'"
+        " FROM agent_models WHERE agent_name='test'") == 1);
 
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "ef1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-    assert(session_set_state(db, sid, "tool_running") == 0);
-
-    /* Shape errors: bad effort level, unknown object key, non-entry type,
-     * object without an id, duplicate id across the two spellings. */
-    char *r = call_handler(&reg,
-        "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"effort\":\"max\"}]}}}");
-    assert(r && strstr(r, "effort 'max' must be one of"));
-    free(r);
-    r = call_handler(&reg,
-        "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"reasoning\":\"high\"}]}}}");
-    assert(r && strstr(r, "unknown agent.models key 'reasoning'"));
-    free(r);
-    r = call_handler(&reg,
-        "{\"changes\":{\"agent\":{\"models\":[7]}}}");
-    assert(r && strstr(r, "model id string or an {id, effort} object"));
-    free(r);
-    r = call_handler(&reg,
-        "{\"changes\":{\"agent\":{\"models\":[{\"effort\":\"high\"}]}}}");
-    assert(r && strstr(r, "non-empty canonical model id"));
-    free(r);
-    r = call_handler(&reg,
-        "{\"changes\":{\"agent\":{\"models\":"
-        "[\"openrouter/deepseek/deepseek-v4.1-flash\","
-        "{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"effort\":\"low\"}]}}}");
-    assert(r && strstr(r, "duplicate entry"));
-    free(r);
-
-    /* Object form parks and applies: effort lands on the routing row. */
-    r = call_handler(&reg,
-        "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"effort\":\"high\"}]}}}");
-    assert(r == NULL); /* parked */
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT args_json FROM approvals WHERE session_id=?1"
-        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    char *args_copy = strdup((const char *)sqlite3_column_text(s, 0));
-    sqlite3_finalize(s);
-    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, 0, NULL) == 0);
-    free(args_copy);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT model_id, reasoning_effort FROM agent_models"
-        " WHERE agent_name='test' ORDER BY pos", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                  "openrouter/deepseek/deepseek-v4.1-flash") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1), "high") == 0);
-    assert(sqlite3_step(s) == SQLITE_DONE);
-    sqlite3_finalize(s);
-
-    /* agent.models is the chat list only (v59): a media list the operator
-     * set must survive the agent replacing its chat routing. */
-    assert(sqlite3_exec(db,
+    exec_ok(f.db,
         "INSERT INTO models(id, provider_name, model, capabilities)"
         " VALUES('ears@openrouter','openrouter','ears','[\"audio\"]');"
         "INSERT INTO agent_models(agent_name, purpose, model_id, pos)"
-        " VALUES('test','audio','ears@openrouter',0);", NULL, NULL, NULL) == SQLITE_OK);
-
-    /* Bare-string replacement clears the effort (whole-list replace). */
-    ctx.current_tool_call_id = "ef2";
-    r = call_handler(&reg,
-        "{\"changes\":{\"agent\":{\"models\":"
-        "[\"openrouter/deepseek/deepseek-v4.1-flash\"]}}}");
-    assert(r == NULL);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT args_json FROM approvals WHERE session_id=?1"
-        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    args_copy = strdup((const char *)sqlite3_column_text(s, 0));
-    sqlite3_finalize(s);
-    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, 0, NULL) == 0);
-    free(args_copy);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT reasoning_effort IS NULL FROM agent_models"
-        " WHERE agent_name='test'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(sqlite3_column_int(s, 0) == 1);
-    sqlite3_finalize(s);
-    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_models WHERE agent_name='test'"
-        " AND purpose='audio' AND model_id='ears@openrouter'", 0, -1) == 1);
-    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM agent_models WHERE agent_name='test'"
-        " AND purpose='chat'", 0, -1) == 1);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_agent_models_effort\n");
+        " VALUES('test','audio','ears@openrouter',0);");
+    assert(call(&f, "ef2", "{\"changes\":{\"agent\":{\"models\":[\"" DS "\"]}}}") == NULL);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
+    assert(test_qi(f.db, "SELECT reasoning_effort IS NULL FROM agent_models"
+        " WHERE agent_name='test' AND purpose='chat'") == 1);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM agent_models WHERE agent_name='test'"
+        " AND purpose='audio' AND model_id='ears@openrouter'") == 1);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM agent_models WHERE agent_name='test'"
+        " AND purpose='chat'") == 1);
+    fx_close(&f);
 }
 
-
-/* agent.models entries carry trim_threshold / prune_target: validated
- * (positive integers, prune below trim), applied to the routing row, and the
- * schema's window check reported by name when the threshold is too big. */
-static char *last_args(sqlite3 *db, int64_t sid) {
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT args_json FROM approvals WHERE session_id=?1"
-        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    char *a = strdup((const char *)sqlite3_column_text(s, 0));
-    sqlite3_finalize(s);
-    return a;
-}
-
+/* agent.models trim_threshold / prune_target / cache_lifetime /
+ * reasoning_display reach the routing row; a threshold over the model's
+ * window is refused by the schema at apply, said by name. */
 static void test_agent_models_trim(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    assert(sqlite3_exec(db, "UPDATE models SET context_window=100000"
-                            " WHERE id='openrouter/deepseek/deepseek-v4.1-flash';",
-                        NULL, NULL, NULL) == SQLITE_OK);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "tr1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-    assert(session_set_state(db, sid, "tool_running") == 0);
+    Fx f;
+    fx_open(&f, ":memory:");
+    exec_ok(f.db, "UPDATE models SET context_window=100000 WHERE id='" DS "';");
+    assert(session_set_state(f.db, f.sid, "tool_running") == 0);
+#define CHAT_COL(expr) "SELECT " expr " FROM agent_models" \
+                       " WHERE agent_name='test' AND purpose='chat'"
 
-    char *r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"trim_threshold\":0}]}}}");
-    assert(r && strstr(r, "trim_threshold must be a positive integer"));
-    free(r);
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"prune_target\":\"9\"}]}}}");
-    assert(r && strstr(r, "prune_target must be a positive integer"));
-    free(r);
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"trim_threshold\":5000,"
-        "\"prune_target\":5000}]}}}");
-    assert(r && strstr(r, "prune_target must be below its trim_threshold"));
-    free(r);
-    /* No threshold is half the window (100000): a target at it is refused in
-     * the explorer's words; one below it passes the check. */
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"prune_target\":50000}]}}}");
-    assert(r && strstr(r, "error: The prune target for openrouter/deepseek/deepseek-v4.1-flash"
-                          " (50000 tokens) must be below its trim threshold, which is empty"
-                          " and so half the model's window (50000 tokens). Lower the target,"
-                          " or set a threshold above it."));
-    free(r);
+    assert(call(&f, "tr1", "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"" DS "\",\"trim_threshold\":60000,\"prune_target\":20000}]}}}") == NULL);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
+    assert(test_qi(f.db, CHAT_COL("trim_threshold=60000 AND prune_target=20000")) == 1);
 
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"trim_threshold\":60000,"
-        "\"prune_target\":20000}]}}}");
-    assert(r == NULL); /* parked */
-    char *args = last_args(db, sid);
-    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, NULL) == 0);
-    free(args);
-    assert(db_scalar_i64(db, "SELECT trim_threshold*1000000 + prune_target FROM agent_models"
-                             " WHERE agent_name='test' AND purpose='chat'", 0, -1)
-           == 60000LL * 1000000 + 20000);
-
-    /* Over the model's window: refused by the schema, said by name. */
-    ctx.current_tool_call_id = "tr2";
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"trim_threshold\":200000}]}}}");
-    assert(r == NULL);
-    args = last_args(db, sid);
+    assert(call(&f, "tr2", "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"" DS "\",\"trim_threshold\":200000}]}}}") == NULL);
     char *detail = NULL;
-    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, &detail) == -1);
-    assert(detail && strstr(detail, "larger than the model's context window"));
+    assert(apply_latest(f.db, f.sid, &detail) == -1);
+    assert(detail && strstr(detail, "context window"));
     free(detail);
-    free(args);
-    assert(db_scalar_i64(db, "SELECT trim_threshold FROM agent_models"
-                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 60000);
+    assert(test_qi(f.db, CHAT_COL("trim_threshold")) == 60000);
 
-    /* cache_lifetime: seconds, applied; on an Anthropic model 300 or 3600,
-     * said at request time, and 3600 when the entry leaves it out. */
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"cache_lifetime\":-5}]}}}");
-    assert(r && strstr(r, "cache_lifetime must be a positive integer (seconds)"));
-    free(r);
-    ctx.current_tool_call_id = "tr3";
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"openrouter/deepseek/deepseek-v4.1-flash\",\"cache_lifetime\":600}]}}}");
-    assert(r == NULL);
-    args = last_args(db, sid);
-    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, NULL) == 0);
-    free(args);
-    assert(db_scalar_i64(db, "SELECT cache_lifetime FROM agent_models"
-                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 600);
-    assert(sqlite3_exec(db,
+    assert(call(&f, "tr3", "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"" DS "\",\"cache_lifetime\":600}]}}}") == NULL);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
+    assert(test_qi(f.db, CHAT_COL("cache_lifetime")) == 600);
+
+    /* An Anthropic model left without a lifetime gets 3600. */
+    exec_ok(f.db,
         "INSERT INTO providers(name, base_url, endpoint_type) VALUES"
         " ('anthx','http://a','anthropic');"
-        "INSERT INTO models(id, provider_name, model) VALUES ('anthx/c','anthx','c');",
-        NULL, NULL, NULL) == SQLITE_OK);
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"anthx/c\",\"cache_lifetime\":600}]}}}");
-    assert(r && strstr(r, "is an Anthropic model") && strstr(r, "300"));
-    free(r);
-    ctx.current_tool_call_id = "tr4";
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":[\"anthx/c\"]}}}");
-    assert(r == NULL);
-    args = last_args(db, sid);
-    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, NULL) == 0);
-    free(args);
-    assert(db_scalar_i64(db, "SELECT cache_lifetime FROM agent_models"
-                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 3600);
+        "INSERT INTO models(id, provider_name, model) VALUES ('anthx/c','anthx','c');");
+    assert(call(&f, "tr4", "{\"changes\":{\"agent\":{\"models\":[\"anthx/c\"]}}}") == NULL);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
+    assert(test_qi(f.db, CHAT_COL("cache_lifetime")) == 3600);
 
-    /* reasoning_display: summary or none, applied; left out is the default. */
-    assert(db_scalar_i64(db, "SELECT reasoning_display='summary' FROM agent_models"
-                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 1);
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"anthx/c\",\"reasoning_display\":\"full\"}]}}}");
-    assert(r && strstr(r, "reasoning_display is 'summary'"));
-    free(r);
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"anthx/c\",\"reasoning_display\":true}]}}}");
-    assert(r && strstr(r, "reasoning_display is 'summary'"));
-    free(r);
-    ctx.current_tool_call_id = "tr5";
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"anthx/c\",\"reasoning_display\":\"none\"}]}}}");
-    assert(r == NULL);
-    args = last_args(db, sid);
-    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, NULL) == 0);
-    free(args);
-    assert(db_scalar_i64(db, "SELECT reasoning_display='none' FROM agent_models"
-                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 1);
-    ctx.current_tool_call_id = "tr6";
-    r = call_handler(&reg, "{\"changes\":{\"agent\":{\"models\":"
-        "[{\"id\":\"anthx/c\",\"effort\":\"low\"}]}}}");
-    assert(r == NULL);
-    args = last_args(db, sid);
-    assert(request_config_changes_apply(db, "test", args, 0, 0, 0, NULL) == 0);
-    free(args);
-    assert(db_scalar_i64(db, "SELECT reasoning_display='summary' FROM agent_models"
-                             " WHERE agent_name='test' AND purpose='chat'", 0, -1) == 1);
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_agent_models_trim\n");
+    /* reasoning_display: summary by default, none applied, left out resets. */
+    assert(test_qi(f.db, CHAT_COL("reasoning_display='summary'")) == 1);
+    assert(call(&f, "tr5", "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"anthx/c\",\"reasoning_display\":\"none\"}]}}}") == NULL);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
+    assert(test_qi(f.db, CHAT_COL("reasoning_display='none'")) == 1);
+    assert(call(&f, "tr6", "{\"changes\":{\"agent\":{\"models\":"
+        "[{\"id\":\"anthx/c\",\"effort\":\"low\"}]}}}") == NULL);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
+    assert(test_qi(f.db, CHAT_COL("reasoning_display='summary'")) == 1);
+#undef CHAT_COL
+    fx_close(&f);
 }
 
-
-/* 7. Rollback: hand-craft args_json with an unregistered config key, call
- *    request_config_changes_apply, assert -1 AND none of the doc's grants
- *    landed. */
+/* A document with a valid grant and an unregistered config key (built by
+ * hand, past the handler) applies nothing. */
 static void test_apply_rollback(void) {
     sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
-
-    /* Hand-crafted args_json that has a valid tool grant AND an invalid
-     * config key (bypass handler validation by constructing the literal). */
-    const char *bad_args =
-        "{\"changes\":{"
-        "\"grants\":{\"tools\":[\"web_fetch\"]},"
-        "\"config\":{\"nonexistent_key_xyz\":\"boom\"}}}";
-
-    int rc = request_config_changes_apply(db, "test", bad_args, 0, 0, 0, NULL);
-    assert(rc == -1); /* config_set fails for unregistered key */
-
-    /* Verify the tool grant did NOT land (rollback). */
+    assert(request_config_changes_apply(db, "test",
+        "{\"changes\":{\"grants\":{\"tools\":[\"web_fetch\"]},"
+        "\"config\":{\"nonexistent_key_xyz\":\"boom\"}}}", 0, 0, 0, NULL) == -1);
     AgentCaps caps;
     agent_caps_load(db, "test", &caps);
     assert(caps.tool_count == 0);
     agent_caps_free(&caps);
-
     db_close(db);
-    printf("  PASS test_apply_rollback\n");
 }
-
-
 
 /* A path grant covering cclaw.db is refused at request time, with the reason —
  * it never parks, so no approver is ever shown a grant that would be inert.
@@ -1304,318 +571,140 @@ static void test_apply_rollback(void) {
  *
  * Positive control in the same function: an ordinary path grant still parks. */
 static void test_db_path_grant_refused(void) {
-    const char *dbp = "/tmp/cclaw_reqcfg_grantdb/cclaw.db";
-    system("rm -rf /tmp/cclaw_reqcfg_grantdb && mkdir -p /tmp/cclaw_reqcfg_grantdb");
-    sqlite3 *db = test_db_open_seeded(dbp);
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
+    assert(system("rm -rf /tmp/cclaw_reqcfg_grantdb && mkdir -p /tmp/cclaw_reqcfg_grantdb") == 0);
+    Fx f;
+    fx_open(&f, "/tmp/cclaw_reqcfg_grantdb/cclaw.db");
 
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "d1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-
-    /* Positive control: an unrelated path parks (NULL = parked, not an error). */
-    char *r = call_handler(&reg,
-        "{\"changes\":"
-        "{\"grants\":{\"read_paths\":[\"/usr/share\"]}}}");
+    char *r = call(&f, "d1", "{\"changes\":{\"grants\":{\"read_paths\":[\"/usr/share\"]}}}");
     assert(r == NULL || strstr(r, "error:") == NULL);
     free(r);
 
-    ctx.current_tool_call_id = "d2";
-    r = call_handler(&reg,
-        "{\"changes\":"
+    r = call(&f, "d2", "{\"changes\":"
         "{\"grants\":{\"read_paths\":[\"/tmp/cclaw_reqcfg_grantdb/cclaw.db\"]}}}");
     assert(r != NULL && strstr(r, "cclaw.db") != NULL);
     free(r);
 
     /* The containing directory is the realistic ask, and is refused too. */
-    ctx.current_tool_call_id = "d3";
-    r = call_handler(&reg,
-        "{\"changes\":"
+    r = call(&f, "d3", "{\"changes\":"
         "{\"grants\":{\"write_paths\":[\"/tmp/cclaw_reqcfg_grantdb\"]}}}");
     assert(r != NULL && strstr(r, "cclaw.db") != NULL);
     free(r);
 
-    tools_free(&reg);
-    db_close(db);
-    system("rm -rf /tmp/cclaw_reqcfg_grantdb");
-    printf("  PASS test_db_path_grant_refused\n");
+    fx_close(&f);
+    assert(system("rm -rf /tmp/cclaw_reqcfg_grantdb") == 0);
 }
 
 /* Redundant requests: fully-satisfied documents return a helpful result
  * instead of parking; partially-satisfied ones park only the remainder. */
 static void test_redundant_filtered(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-    assert(sid > 0);
-
-    assert(agent_config_grant(db, "test", "host", "api.tiingo.com", 0, GRANT_ORIGIN("operator", 0)) == 0);
-    assert(agent_config_grant(db, "test", "tool", "js_eval", 0, GRANT_ORIGIN("operator", 0)) == 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "r1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
-    assert(session_set_state(db, sid, "tool_running") == 0);
+    Fx f;
+    fx_open(&f, ":memory:");
+    assert(agent_config_grant(f.db, "test", "host", "api.tiingo.com", 0, GRANT_ORIGIN("operator", 0)) == 0);
+    assert(agent_config_grant(f.db, "test", "tool", "js_eval", 0, GRANT_ORIGIN("operator", 0)) == 0);
+    assert(session_set_state(f.db, f.sid, "tool_running") == 0);
 
     /* Fully redundant: no approval parked, session state untouched. */
-    char *result = call_handler(&reg,
-        "{\"changes\":"
+    char *result = call(&f, "r1", "{\"changes\":"
         "{\"grants\":{\"hosts\":[\"api.tiingo.com\"],\"tools\":[\"js_eval\"]}}}");
     assert(result != NULL && strstr(result, "already in effect") != NULL);
     free(result);
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM approvals WHERE session_id=?1", -1, &s, NULL)
-        == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 0);
-    sqlite3_finalize(s);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT state FROM sessions WHERE id=?1", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "tool_running") == 0);
-    sqlite3_finalize(s);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM approvals") == 0);
+    expect_text(f.db, "SELECT state FROM sessions WHERE id=?1", f.sid, "tool_running");
 
     /* Partially redundant: parked document keeps only the new host. */
-    ctx.current_tool_call_id = "r2";
-    result = call_handler(&reg,
-        "{\"changes\":"
-        "{\"grants\":{\"hosts\":[\"api.tiingo.com\",\"example.com\"]}}}");
-    assert(result == NULL); /* parked */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT json_extract(args_json,'$.changes.grants.hosts')"
-        " FROM approvals WHERE session_id=?1 AND state='pending'",
-        -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                  "[\"example.com\"]") == 0);
-    sqlite3_finalize(s);
+    assert(call(&f, "r2", "{\"changes\":"
+        "{\"grants\":{\"hosts\":[\"api.tiingo.com\",\"example.com\"]}}}") == NULL);
+    expect_text(f.db, "SELECT json_extract(args_json,'$.changes.grants.hosts')"
+        " FROM approvals WHERE session_id=?1 AND state='pending'", f.sid,
+        "[\"example.com\"]");
 
     /* Redundant grants alongside a live section: grants stripped, agent
      * section still parks. */
-    ctx.current_tool_call_id = "r3";
-    result = call_handler(&reg,
-        "{\"changes\":"
-        "{\"grants\":{\"tools\":[\"js_eval\"]},\"agent\":{\"max_iterations\":9}}}");
-    assert(result == NULL); /* parked */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT json_type(args_json,'$.changes.grants'),"
-        "       json_extract(args_json,'$.changes.agent.max_iterations')"
-        " FROM approvals WHERE session_id=?1 AND state='pending'"
-        " AND tool_call_id='r3'", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(sqlite3_column_type(s, 0) == SQLITE_NULL); /* grants removed */
-    assert(sqlite3_column_int(s, 1) == 9);
-    sqlite3_finalize(s);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_redundant_filtered\n");
+    assert(call(&f, "r3", "{\"changes\":"
+        "{\"grants\":{\"tools\":[\"js_eval\"]},\"agent\":{\"max_iterations\":9}}}") == NULL);
+    assert(test_qi(f.db, "SELECT json_type(args_json,'$.changes.grants') IS NULL"
+        " AND json_extract(args_json,'$.changes.agent.max_iterations')=9"
+        " FROM approvals WHERE state='pending' AND tool_call_id='r3'") == 1);
+    fx_close(&f);
 }
 
-/* secret_bindings section: validation rejections, park, apply mints
- * secret_hosts rows, redundancy filter. */
+/* secret_bindings: park, no rows while pending, apply mints secret_hosts
+ * rows, then the redundancy filter. */
 static void test_secret_bindings_section(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-    assert(sid > 0);
-    assert(sqlite3_exec(db,
-        "INSERT INTO secrets(name,value,scope) VALUES"
-        " ('ALPACA_KEY','enc:00','agent'),('SYS_KEY','enc:00','system')",
-        NULL, NULL, NULL) == SQLITE_OK);
+    Fx f;
+    fx_open(&f, ":memory:");
+    exec_ok(f.db, "INSERT INTO secrets(name,value,scope) VALUES ('ALPACA_KEY','enc:00','agent')");
 
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "sb1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
+    assert(call(&f, "sb1", "{\"changes\":{\"secret_bindings\":{\"ALPACA_KEY\":"
+        "[\"api.alpaca.markets\",\".example.com\"]}}}") == NULL);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM approvals WHERE state='pending'"
+        " AND json_type(args_json,'$.changes.secret_bindings') IS NOT NULL") == 1);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM secret_hosts") == 0);
 
-    /* Unknown secret name is refused — a binding request is not where a
-     * secret is born. */
-    char *r = call_handler(&reg,
-        "{\"changes\":{"
-        "\"secret_bindings\":{\"NOPE\":[\"api.example.com\"]}}}");
-    assert(r && strstr(r, "unknown secret 'NOPE'"));
-    free(r);
+    assert(apply_latest(f.db, f.sid, NULL) == 0);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM secret_hosts WHERE secret_name='ALPACA_KEY'"
+        " AND host IN ('api.alpaca.markets','.example.com')") == 2);
 
-    /* System-scoped secrets never interpolate — binding one is refused. */
-    r = call_handler(&reg,
-        "{\"changes\":{"
-        "\"secret_bindings\":{\"SYS_KEY\":[\"api.example.com\"]}}}");
-    assert(r && strstr(r, "unknown secret 'SYS_KEY'"));
-    free(r);
-
-    /* Host shape: no wildcards, no bare TLD, no single label. */
-    static const char *bad_hosts[] = {"*.example.com", ".com", "localhost"};
-    for (size_t i = 0; i < 3; i++) {
-        char args[192];
-        snprintf(args, sizeof(args),
-            "{\"changes\":{"
-            "\"secret_bindings\":{\"ALPACA_KEY\":[\"%s\"]}}}", bad_hosts[i]);
-        r = call_handler(&reg, args);
-        assert(r && strstr(r, "not a valid hostname"));
-        free(r);
-    }
-
-    /* Value must be an array. */
-    r = call_handler(&reg,
-        "{\"changes\":{"
-        "\"secret_bindings\":{\"ALPACA_KEY\":\"api.example.com\"}}}");
-    assert(r && strstr(r, "must be an array"));
-    free(r);
-
-    /* Valid document parks exactly one approval carrying the section. */
-    r = call_handler(&reg,
-        "{\"changes\":{"
-        "\"secret_bindings\":{\"ALPACA_KEY\":"
-        "[\"api.alpaca.markets\",\".example.com\"]}}}");
-    assert(r == NULL); /* parked */
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT args_json FROM approvals WHERE session_id=?1"
-        " AND state='pending' AND tool_call_id='sb1'", -1, &s, NULL)
-        == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    char *args_copy = strdup((const char *)sqlite3_column_text(s, 0));
-    assert(args_copy && strstr(args_copy, "secret_bindings"));
-    sqlite3_finalize(s);
-
-    /* No rows minted while the approval is merely pending. */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM secret_hosts", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 0);
-    sqlite3_finalize(s);
-
-    /* Apply mints both pairs, durably. */
-    assert(request_config_changes_apply(db, "test", args_copy, 0, 0, 0, NULL) == 0);
-    free(args_copy);
-    assert(sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM secret_hosts WHERE secret_name='ALPACA_KEY'"
-        " AND host IN ('api.alpaca.markets','.example.com')", -1, &s, NULL)
-        == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 2);
-    sqlite3_finalize(s);
-
-    /* Redundancy: the recorded pairs no longer park. */
-    ctx.current_tool_call_id = "sb2";
-    assert(session_set_state(db, sid, "tool_running") == 0);
-    r = call_handler(&reg,
-        "{\"changes\":{"
-        "\"secret_bindings\":{\"ALPACA_KEY\":[\"api.alpaca.markets\"]}}}");
+    assert(session_set_state(f.db, f.sid, "tool_running") == 0);
+    char *r = call(&f, "sb2", "{\"changes\":{\"secret_bindings\":"
+        "{\"ALPACA_KEY\":[\"api.alpaca.markets\"]}}}");
     assert(r && strstr(r, "already in effect"));
     free(r);
 
-    /* Partially redundant: parked document keeps only the new host. */
-    ctx.current_tool_call_id = "sb3";
-    r = call_handler(&reg,
-        "{\"changes\":{"
-        "\"secret_bindings\":{\"ALPACA_KEY\":"
-        "[\"api.alpaca.markets\",\"api.tiingo.com\"]}}}");
-    assert(r == NULL); /* parked */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT json_extract(args_json,'$.changes.secret_bindings.ALPACA_KEY')"
-        " FROM approvals WHERE session_id=?1 AND state='pending'"
-        " AND tool_call_id='sb3'", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                  "[\"api.tiingo.com\"]") == 0);
-    sqlite3_finalize(s);
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_secret_bindings_section\n");
+    assert(call(&f, "sb3", "{\"changes\":{\"secret_bindings\":{\"ALPACA_KEY\":"
+        "[\"api.alpaca.markets\",\"api.tiingo.com\"]}}}") == NULL);
+    expect_text(f.db, "SELECT json_extract(args_json,'$.changes.secret_bindings.ALPACA_KEY')"
+        " FROM approvals WHERE session_id=?1 AND state='pending' AND tool_call_id='sb3'",
+        f.sid, "[\"api.tiingo.com\"]");
+    fx_close(&f);
 }
 
 /* grants.remove — narrowing applies immediately and never parks. */
 static void test_grants_remove(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-    assert(agent_config_grant(db, "test", "host", "api.example.com", 0, GRANT_ORIGIN("operator", 0)) == 0);
-    assert(agent_config_grant(db, "test", "tool", "shell_exec", 0, GRANT_ORIGIN("operator", 0)) == 0);
-
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "rm1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
+    Fx f;
+    fx_open(&f, ":memory:");
+    assert(agent_config_grant(f.db, "test", "host", "api.example.com", 0, GRANT_ORIGIN("operator", 0)) == 0);
+    assert(agent_config_grant(f.db, "test", "tool", "shell_exec", 0, GRANT_ORIGIN("operator", 0)) == 0);
+#define HAS_SHELL "SELECT COUNT(*) FROM grants WHERE kind='tool' AND value='shell_exec'"
 
     /* Happy path: applied here and now, no approval row, receipt names it. */
-    char *r = call_handler(&reg,
+    char *r = call(&f, "rm1",
         "{\"changes\":{\"grants\":{\"remove\":{\"hosts\":[\"api.example.com\"]}}}}");
     assert(r != NULL && strstr(r, "api.example.com") && strstr(r, "removed"));
     free(r);
-    assert(!row_exists(db, "SELECT 1 FROM grants WHERE agent_name='test'"
-                           " AND kind='host' AND value='api.example.com'"));
-    assert(!row_exists(db, "SELECT 1 FROM approvals WHERE session_id > 0"));
-    /* Untouched kinds stay. */
-    assert(row_exists(db, "SELECT 1 FROM grants WHERE kind='tool'"
-                          " AND value='shell_exec'"));
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM grants WHERE agent_name='test'"
+                         " AND kind='host' AND value='api.example.com'") == 0);
+    assert(test_qi(f.db, "SELECT COUNT(*) FROM approvals") == 0);
+    assert(test_qi(f.db, HAS_SHELL) == 1);
 
     /* Unknown kind refuses — and cannot reach containment settings. */
-    ctx.current_tool_call_id = "rm2";
-    r = call_handler(&reg,
+    r = call(&f, "rm2",
         "{\"changes\":{\"grants\":{\"remove\":{\"sandbox_profile\":[\"host\"]}}}}");
     assert(r != NULL && strstr(r, "sandbox_profile") && strstr(r, "error"));
     free(r);
 
     /* A value that is not a live grant refuses, naming it. */
-    ctx.current_tool_call_id = "rm3";
-    r = call_handler(&reg,
+    r = call(&f, "rm3",
         "{\"changes\":{\"grants\":{\"remove\":{\"hosts\":[\"nope.example\"]}}}}");
     assert(r != NULL && strstr(r, "nope.example") && strstr(r, "not one of"));
     free(r);
-    assert(row_exists(db, "SELECT 1 FROM grants WHERE kind='tool'"
-                          " AND value='shell_exec'"));
+    assert(test_qi(f.db, HAS_SHELL) == 1);
 
     /* Mixed remove + widen: the removal lands now, the rest parks. */
-    ctx.current_tool_call_id = "rm4";
-    assert(session_set_state(db, sid, "tool_running") == 0);
-    r = call_handler(&reg,
-        "{\"changes\":{\"grants\":{\"hosts\":[\"new.example.com\"],"
-        "\"remove\":{\"tools\":[\"shell_exec\"]}}}}");
-    assert(r == NULL);                     /* parked */
-    assert(!row_exists(db, "SELECT 1 FROM grants WHERE kind='tool'"
-                           " AND value='shell_exec'"));
+    assert(session_set_state(f.db, f.sid, "tool_running") == 0);
+    assert(call(&f, "rm4", "{\"changes\":{\"grants\":{\"hosts\":[\"new.example.com\"],"
+        "\"remove\":{\"tools\":[\"shell_exec\"]}}}}") == NULL);
+    assert(test_qi(f.db, HAS_SHELL) == 0);
     /* The parked document carries the widening only; the removal already
      * happened and rides the approver-facing reason. */
-    assert(row_exists(db,
-        "SELECT 1 FROM approvals WHERE state='pending'"
+    assert(test_qi(f.db,
+        "SELECT COUNT(*) FROM approvals WHERE state='pending'"
         "   AND json_extract(args_json,'$.changes.grants.hosts[0]')"
         "       ='new.example.com'"
         "   AND json_extract(args_json,'$.changes.grants.remove') IS NULL"
-        "   AND json_extract(args_json,'$.reason') LIKE '%shell_exec%'"));
-
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_grants_remove\n");
+        "   AND json_extract(args_json,'$.reason') LIKE '%shell_exec%'") == 1);
+#undef HAS_SHELL
+    fx_close(&f);
 }
 
 /* grants.secrets (v60): an agent asks to USE a secret like any other grant.
@@ -1624,98 +713,70 @@ static void test_grants_remove(void) {
  * binding — never a system secret, never a name nothing stands behind. The
  * card names the secret plainly; the applied row records the approval. */
 static void test_grants_secrets(void) {
-    sqlite3 *db = test_db_open_seeded(":memory:");
-    assert(db);
-    config_registry_sync(db);
-    db_agent_upsert(db, "test", NULL, NULL);
-    int64_t sid = session_create(db, "t", "test", -1, 0);
-    assert(sid > 0);
-    assert(sqlite3_exec(db,
+    Fx f;
+    fx_open(&f, ":memory:");
+    exec_ok(f.db,
         "INSERT INTO secrets(name,value,scope) VALUES"
         " ('STORED_KEY','enc:00','agent'),('SYS_KEY','enc:00','system');"
-        "INSERT INTO secret_hosts(secret_name,host) VALUES('ENV_TOKEN','api.example.com');",
-        NULL, NULL, NULL) == SQLITE_OK);
-    RequestConfigCtx ctx = {
-        .db = db, .agent_name = "test", .session_id = sid,
-        .agents_dir = NULL, .current_tool_call_id = "gs1"
-    };
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_request_config_register(&reg, &ctx);
+        "INSERT INTO secret_hosts(secret_name,host) VALUES('ENV_TOKEN','api.example.com');");
 
-    char *r = call_handler(&reg, "{\"changes\":{\"grants\":{\"secrets\":[\"NOPE\"]}}}");
+    char *r = call(&f, "gs1", "{\"changes\":{\"grants\":{\"secrets\":[\"NOPE\"]}}}");
     assert(r && strstr(r, "grants.secrets names 'NOPE'"));
     free(r);
-    r = call_handler(&reg, "{\"changes\":{\"grants\":{\"secrets\":[\"SYS_KEY\"]}}}");
+    r = call(&f, "gs1", "{\"changes\":{\"grants\":{\"secrets\":[\"SYS_KEY\"]}}}");
     assert(r && strstr(r, "grants.secrets names 'SYS_KEY'"));
     free(r);
-    r = call_handler(&reg, "{\"changes\":{\"grants\":{\"secrets\":[7]}}}");
-    assert(r && strstr(r, "must be non-empty strings"));
+    r = call(&f, "gs1", "{\"changes\":{\"grants\":{\"secrets\":[7]}}}");
+    assert(r && strstr(r, "non-empty strings"));
     free(r);
 
-    r = call_handler(&reg, "{\"changes\":{\"grants\":{\"secrets\":"
-                           "[\"STORED_KEY\",\"ENV_TOKEN\"]}}}");
-    assert(r == NULL);   /* parked */
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db, "SELECT id FROM approvals WHERE session_id=?1"
-        " AND state='pending' AND tool_call_id='gs1'", -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    int64_t aid = sqlite3_column_int64(s, 0);
-    sqlite3_finalize(s);
-    Approval *a = approval_get_for_tool_call(db, sid, "gs1");
+    assert(call(&f, "gs1", "{\"changes\":{\"grants\":{\"secrets\":"
+                           "[\"STORED_KEY\",\"ENV_TOKEN\"]}}}") == NULL);
+    int64_t aid = db_scalar_i64(f.db, "SELECT id FROM approvals WHERE session_id=?1"
+        " AND state='pending' AND tool_call_id='gs1'", f.sid, -1);
+    assert(aid > 0);
+    Approval *a = approval_get_for_tool_call(f.db, f.sid, "gs1");
     assert(a);
-    char *card = approval_format_summary(db, a);
+    char *card = approval_format_summary(f.db, a);
     assert(card && strstr(card, "secret STORED_KEY (may use its value in tool calls)"));
     assert(strstr(card, "secret ENV_TOKEN (may use its value in tool calls)"));
     free(card);
-    assert(grants_contains(db, "test", "secret", "STORED_KEY") == 0);
-    assert(request_config_changes_apply(db, "test", a->args_json, 0, sid, aid, NULL) == 0);
+    assert(grants_contains(f.db, "test", "secret", "STORED_KEY") == 0);
+    assert(request_config_changes_apply(f.db, "test", a->args_json, 0, f.sid, aid, NULL) == 0);
     approval_free(a);
-    char q[256];
-    snprintf(q, sizeof(q), "SELECT COUNT(*) FROM grants WHERE agent_name='test'"
-             " AND kind='secret' AND source='approval' AND approval_id=%lld",
-             (long long)aid);
-    assert(db_scalar_i64(db, q, 0, -1) == 2);
+    assert(db_scalar_i64(f.db, "SELECT COUNT(*) FROM grants WHERE agent_name='test'"
+        " AND kind='secret' AND source='approval' AND approval_id=?1", aid, -1) == 2);
 
     /* Giving one back applies immediately, like any grant. */
-    ctx.current_tool_call_id = "gs2";
-    assert(session_set_state(db, sid, "tool_running") == 0);
-    r = call_handler(&reg, "{\"changes\":{\"grants\":{\"remove\":"
-                           "{\"secrets\":[\"ENV_TOKEN\"]}}}}");
+    assert(session_set_state(f.db, f.sid, "tool_running") == 0);
+    r = call(&f, "gs2", "{\"changes\":{\"grants\":{\"remove\":"
+                        "{\"secrets\":[\"ENV_TOKEN\"]}}}}");
     assert(r && strstr(r, "removed"));
     free(r);
-    assert(grants_contains(db, "test", "secret", "ENV_TOKEN") == 0);
-    assert(grants_contains(db, "test", "secret", "STORED_KEY") == 1);
-    tools_free(&reg);
-    db_close(db);
-    printf("  PASS test_grants_secrets\n");
+    assert(grants_contains(f.db, "test", "secret", "ENV_TOKEN") == 0);
+    assert(grants_contains(f.db, "test", "secret", "STORED_KEY") == 1);
+    fx_close(&f);
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_request_config:\n");
-    test_register();
-    test_handler_unavailable();
-    test_park_tools_grant();
-    test_error_missing_changes();
-    test_db_path_grant_refused();
-    test_error_config_keys();
-    test_error_provider();
-    test_reason_propagates();
-    test_provider_defaults();
-    test_models_section();
-    test_bare_model_name_teaching();
-    test_dedup();
-    test_batch_apply();
-    test_agent_routes_sections();
-    test_agent_models_effort();
-    test_agent_models_trim();
-    test_apply_rollback();
-    test_redundant_filtered();
-    test_secret_bindings_section();
-    test_grants_remove();
-    test_grants_secrets();
-    printf("\nAll request_config tests passed.\n");
+    RUN(test_park_tools_grant);
+    RUN(test_refusals);
+    RUN(test_db_path_grant_refused);
+    RUN(test_provider_keys);
+    RUN(test_provider_defaults);
+    RUN(test_models_section);
+    RUN(test_dedup);
+    RUN(test_batch_apply);
+    RUN(test_agent_routes_apply);
+    RUN(test_agent_models_effort);
+    RUN(test_agent_models_trim);
+    RUN(test_apply_rollback);
+    RUN(test_redundant_filtered);
+    RUN(test_secret_bindings_section);
+    RUN(test_grants_remove);
+    RUN(test_grants_secrets);
+    printf("All request_config tests passed.\n");
     return 0;
 }

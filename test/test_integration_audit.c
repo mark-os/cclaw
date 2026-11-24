@@ -1,10 +1,7 @@
+/* The provider's usage counts land on the assistant entry. */
 #define _POSIX_C_SOURCE 200809L
 #include "test_run_session.h"
-#include "mock_server.h"
-#include <assert.h>
 #include <unistd.h>
-#include <signal.h>
-#include "test_util.h"
 
 #define DB_PATH "/tmp/test_integ_audit.db"
 
@@ -15,51 +12,16 @@ static const char *MOCK_RESPONSE =
 int main(void) {
     TEST_INIT();
     alarm(10);
-    test_db_clean(DB_PATH);
-    sqlite3 *db = test_db_open(DB_PATH);
-    assert(db);
-
-    int port = mock_server_start();
-    assert(port > 0);
-
-    char url[64]; snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
-    setenv("CCLAW_DB_PATH", DB_PATH, 1);
-    setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
-    setenv("OPENROUTER_API_KEY", "test-key", 1);
-    setenv("CCLAW_MODEL", "test-model", 1);
-
-    db_agent_upsert(db, "default", NULL, NULL);
-    int64_t sid = session_create(db, "test", "default", -1, 0);
-    Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append_with_iteration(db, sid, &sys, 1);
-    Message user = {.role = ROLE_USER, .content = "hello"};
-    entry_append_with_iteration(db, sid, &user, 1);
+    TestTurn t;
+    test_turn_open(&t, DB_PATH, "hello");
 
     mock_server_enqueue(200, MOCK_RESPONSE);
 
-    Config *cfg = config_load(db);
-    AgentSetup setup;
-    agent_setup_init(&setup, db, sid, cfg, "default");
-    int rc = test_run_session(db, sid, &setup);
-    assert(rc == 0);
+    assert(test_turn_run(&t) == 0);
+    assert(db_scalar_i64(t.db, "SELECT COUNT(*) FROM entries WHERE session_id=?"
+                         " AND role=2 AND usage_in=42 AND usage_out=7", t.sid, -1) == 1);
 
-    /* Verify usage_in and usage_out on assistant entry (role=2 is ROLE_ASSISTANT) */
-    sqlite3_stmt *stmt;
-    int sr = sqlite3_prepare_v2(db,
-        "SELECT usage_in, usage_out FROM entries WHERE session_id=? AND role=2",
-        -1, &stmt, NULL);
-    assert(sr == SQLITE_OK);
-    sqlite3_bind_int64(stmt, 1, sid);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(sqlite3_column_int(stmt, 0) == 42);
-    assert(sqlite3_column_int(stmt, 1) == 7);
-    sqlite3_finalize(stmt);
-
-    agent_setup_destroy(&setup);
-    config_free(cfg);
-    mock_server_stop();
-    db_close(db);
-    test_db_clean(DB_PATH);
+    test_turn_close(&t);
     printf("PASS test_integration_audit\n");
     return 0;
 }

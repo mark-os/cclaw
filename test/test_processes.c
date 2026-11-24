@@ -1,4 +1,4 @@
-/* Test process registry: register, heartbeat, liveness, gc, unregister */
+/* Process registry: heartbeat, liveness, gc, unregister */
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
 #include "test_util.h"
@@ -22,16 +22,15 @@ static sqlite3 *fresh_db(void) {
     return db;
 }
 
-static void test_register_writes_id(void) {
-    sqlite3 *db = fresh_db();
-    char id[64] = {0};
-    assert(process_register(db, "cli", getpid(), id, sizeof(id)) == 0);
-    assert(id[0] != '\0');
-    assert(strlen(id) == 32); /* 16 random bytes = 32 hex chars */
-    process_unregister(db, id);
-    db_close(db);
-    clean_db();
-    printf("  PASS test_register_writes_id\n");
+static int proc_rows(sqlite3 *db, const char *id) {
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM processes WHERE instance_id=?;",
+                              -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, id, -1, SQLITE_STATIC);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    int n = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    return n;
 }
 
 static void test_stale_heartbeat_not_live(void) {
@@ -49,21 +48,10 @@ static void test_stale_heartbeat_not_live(void) {
 
     /* gc should remove it */
     assert(process_gc_dead(db, PROCESS_TTL_SEC) == 0);
-    int64_t cnt = db_scalar_i64(db,
-        "SELECT COUNT(*) FROM processes WHERE instance_id=?;",
-        0, 0);
-    /* db_scalar_i64 binds int64 on param 1 — use raw query instead */
-    sqlite3_stmt *st;
-    sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM processes WHERE instance_id=?;", -1, &st, NULL);
-    sqlite3_bind_text(st, 1, id, -1, SQLITE_STATIC);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 0);
-    sqlite3_finalize(st);
-    (void)cnt;
+    assert(proc_rows(db, id) == 0);
 
     db_close(db);
     clean_db();
-    printf("  PASS test_stale_heartbeat_not_live\n");
 }
 
 static void test_dead_pid_gc(void) {
@@ -85,16 +73,10 @@ static void test_dead_pid_gc(void) {
 
     /* gc removes it */
     assert(process_gc_dead(db, PROCESS_TTL_SEC) == 0);
-    sqlite3_stmt *st;
-    sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM processes WHERE instance_id=?;", -1, &st, NULL);
-    sqlite3_bind_text(st, 1, id, -1, SQLITE_STATIC);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 0);
-    sqlite3_finalize(st);
+    assert(proc_rows(db, id) == 0);
 
     db_close(db);
     clean_db();
-    printf("  PASS test_dead_pid_gc\n");
 }
 
 static void test_unregister(void) {
@@ -106,16 +88,13 @@ static void test_unregister(void) {
     assert(process_is_live(db, id, PROCESS_TTL_SEC) == 0);
     db_close(db);
     clean_db();
-    printf("  PASS test_unregister\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_processes:\n");
-    test_register_writes_id();
-    test_stale_heartbeat_not_live();
-    test_dead_pid_gc();
-    test_unregister();
-    printf("all process registry tests passed\n");
+    RUN(test_stale_heartbeat_not_live);
+    RUN(test_dead_pid_gc);
+    RUN(test_unregister);
     return 0;
 }

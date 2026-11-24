@@ -31,7 +31,7 @@ static sqlite3 *setup_db(void) {
 }
 
 /* create_agent parks an approval carrying the full definition */
-static int test_create_agent_parks(void) {
+static void test_create_agent_parks(void) {
     sqlite3 *db = setup_db();
     db_agent_upsert(db, "Bootstrap", NULL, NULL);
     int64_t sid = session_create(db, "t", "Bootstrap", -1, 0);
@@ -51,31 +51,22 @@ static int test_create_agent_parks(void) {
         e->user_data, &(int){0});
     assert(result == NULL); /* parked */
 
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
+    char *name = db_scalar_text(db,
         "SELECT json_extract(args_json,'$.name') FROM approvals"
-        " WHERE session_id=?1 AND tool_name='create_agent' AND state='pending'",
-        -1, &s, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(s, 1, sid);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "Helper") == 0);
-    sqlite3_finalize(s);
+        " WHERE session_id=?1 AND tool_name='create_agent' AND state='pending'", sid);
+    assert(name && strcmp(name, "Helper") == 0);
+    free(name);
 
     /* Agent must NOT exist yet — creation happens only on approval. */
-    assert(sqlite3_prepare_v2(db, "SELECT 1 FROM agents WHERE name='Helper'",
-                              -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_DONE);
-    sqlite3_finalize(s);
+    assert(test_qi(db, "SELECT COUNT(*) FROM agents WHERE name='Helper'") == 0);
 
     tools_free(&reg);
     db_close(db);
     cleanup();
-    printf("  PASS: test_create_agent_parks\n");
-    return 0;
 }
 
 /* create_agent rejects non-PascalCase names */
-static int test_create_agent_invalid_name(void) {
+static void test_create_agent_invalid_name(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
     tools_init(&reg);
@@ -83,33 +74,23 @@ static int test_create_agent_invalid_name(void) {
     tool_create_agent_register(&reg, &ctx);
 
     ToolEntry *e = tools_lookup(&reg, "create_agent");
-    char *result = e->handler("{\"name\":\"../evil\"}", e->user_data, &(int){0});
-    assert(result != NULL);
-    assert(strstr(result, "error") != NULL);
-    assert(strstr(result, "agent name must be PascalCase") != NULL);
-    free(result);
-
-    result = e->handler("{\"name\":\"a/b\"}", e->user_data, &(int){0});
-    assert(result != NULL);
-    assert(strstr(result, "error") != NULL);
-    assert(strstr(result, "agent name must be PascalCase") != NULL);
-    free(result);
-
-    result = e->handler("{\"name\":\"lowercase\"}", e->user_data, &(int){0});
-    assert(result != NULL);
-    assert(strstr(result, "error") != NULL);
-    assert(strstr(result, "agent name must be PascalCase") != NULL);
-    free(result);
+    static const char *bad[] = {
+        "{\"name\":\"../evil\"}", "{\"name\":\"a/b\"}", "{\"name\":\"lowercase\"}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        printf("    %s\n", bad[i]);
+        char *result = e->handler(bad[i], e->user_data, &(int){0});
+        assert(result && strstr(result, "error") && strstr(result, "PascalCase"));
+        free(result);
+    }
 
     tools_free(&reg);
     db_close(db);
     cleanup();
-    printf("  PASS: test_create_agent_invalid_name\n");
-    return 0;
 }
 
 /* create_agent requires name field */
-static int test_create_agent_missing_name(void) {
+static void test_create_agent_missing_name(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
     tools_init(&reg);
@@ -126,13 +107,11 @@ static int test_create_agent_missing_name(void) {
     tools_free(&reg);
     db_close(db);
     cleanup();
-    printf("  PASS: test_create_agent_missing_name\n");
-    return 0;
 }
 
 /* install_service: parks an 'apply' approval naming the exact command, or —
  * on a machine without systemd — refuses with the way that does work. */
-static int test_install_service(void) {
+static void test_install_service(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
     tools_init(&reg);
@@ -157,13 +136,11 @@ static int test_install_service(void) {
     tools_free(&reg);
     db_close(db);
     cleanup();
-    printf("  PASS: test_install_service\n");
-    return 0;
 }
 
 /* install_update: refuses without update.repo / a known release; parks an
  * 'apply' approval carrying the tag once both exist. */
-static int test_install_update(void) {
+static void test_install_update(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
     tools_init(&reg);
@@ -201,18 +178,15 @@ static int test_install_update(void) {
     tools_free(&reg);
     db_close(db);
     cleanup();
-    printf("  PASS: test_install_update\n");
-    return 0;
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_tool_bootstrap:\n");
-    int rc = 0;
-    rc |= test_create_agent_parks();
-    rc |= test_create_agent_invalid_name();
-    rc |= test_create_agent_missing_name();
-    rc |= test_install_update();
-    rc |= test_install_service();
-    return rc;
+    RUN(test_create_agent_parks);
+    RUN(test_create_agent_invalid_name);
+    RUN(test_create_agent_missing_name);
+    RUN(test_install_update);
+    RUN(test_install_service);
+    return 0;
 }

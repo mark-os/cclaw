@@ -115,7 +115,6 @@ static void test_under_threshold(void) {
     assert(r.turns == 0 && r.iterations == 0 && r.note_id == 0);
     assert(q1(db, "SELECT COUNT(*) FROM entries WHERE session_id=?", sid) == n);
     db_close(db);
-    printf("  PASS test_under_threshold\n");
 }
 
 /* ── Step 1: the oldest whole turns go, down to the target ────────── */
@@ -157,7 +156,6 @@ static void test_drop_turns(void) {
     assert(q1(db, "SELECT original_parent_id FROM entries WHERE id=?", t[3]) > 0);
     assert(q1(db, "SELECT original_parent_id IS NULL FROM entries WHERE id=?", t[1]) == 1);
     db_close(db);
-    printf("  PASS test_drop_turns\n");
 }
 
 /* ── Step 2: then the oldest iterations of the running turn ────────── */
@@ -204,7 +202,6 @@ static void test_drop_iterations(void) {
     /* The old turn left from the front: the first opener is the root now. */
     assert(q1(db, "SELECT parent_id FROM entries WHERE id=?", u1) == -1);
     db_close(db);
-    printf("  PASS test_drop_iterations\n");
 }
 
 /* A long turn trimmed again: the new note replaces the earlier one among the
@@ -248,7 +245,6 @@ static void test_notes_fold(void) {
     assert(q1(db, "SELECT json_extract(data,'$.turn_edits[0].dropped.iterations')"
                   " FROM entries WHERE id=?", r3.note_id) == 3);
     db_close(db);
-    printf("  PASS test_notes_fold\n");
 }
 
 /* ── Step 3: the record, on the note ───────────────────────────────── */
@@ -281,7 +277,6 @@ static void test_record(void) {
     /* Sent as an ordinary system note, the runtime's own words. */
     assert(q1(db, "SELECT role=0 AND iteration_id=0 FROM entries WHERE id=?", n) == 1);
     db_close(db);
-    printf("  PASS test_record\n");
 }
 
 /* ── Step 4: still over — the newest iteration alone is too big ────── */
@@ -307,7 +302,6 @@ static void test_still_over(void) {
     assert(r.turns == 0 && r.iterations == 0 && r.note_id == 0);
     assert(q1(db, "SELECT COUNT(*) FROM entries WHERE session_id=?", sid) == n);
     db_close(db);
-    printf("  PASS test_still_over\n");
 }
 
 /* ── An unfinished call blocks whatever holds it ───────────────────── */
@@ -351,7 +345,6 @@ static void test_unfinished_blocks(void) {
     assert(q1(db, "SELECT turn_id FROM entries WHERE id=?", r.note_id) ==
            q1(db, "SELECT turn_id FROM entries WHERE id=?", s0));
     db_close(db);
-    printf("  PASS test_unfinished_blocks\n");
 }
 
 /* ── It works whatever the two numbers are ─────────────────────────── */
@@ -367,7 +360,6 @@ static void test_any_numbers(void) {
     assert(turn_edit_trim(db, sid, 0, &l, &r) == TRIM_APPLIED);
     assert(r.turns == 1 && r.after <= total - 1);
     db_close(db);
-    printf("  PASS test_any_numbers\n");
 }
 
 /* ── The governing entry and its defaults ──────────────────────────── */
@@ -416,7 +408,6 @@ static void test_limits(void) {
     context_limits(db, "default", 128000, &l);
     assert(l.window == 200000 && l.threshold == 100000 && l.target == 50000);
     db_close(db);
-    printf("  PASS test_limits\n");
 }
 
 static void test_schema_refusals(void) {
@@ -443,7 +434,6 @@ static void test_schema_refusals(void) {
              " VALUES('default','p/nowin',1,5000000);");
     exec(db, "UPDATE agent_models SET trim_threshold=NULL, prune_target=NULL;");
     db_close(db);
-    printf("  PASS test_schema_refusals\n");
 }
 
 /* ── The C check at the end of an iteration (advance_session) ───────── */
@@ -490,7 +480,6 @@ static void test_advance_trims_mid_turn(void) {
               sid) == 1);
     assert(q1(db, "SELECT state='idle' FROM sessions WHERE id=?", sid) == 1);
     db_close(db);
-    printf("  PASS test_advance_trims_mid_turn\n");
 }
 
 /* ── Accounting: no difference across a trim ───────────────────────── */
@@ -533,7 +522,6 @@ static void test_no_difference_across_trim(void) {
     ingest(db, sid, 5000 + 20 + 1004, 0);
     assert(q1(db, "SELECT tokens IS NULL FROM entries WHERE id=?", r1) == 1);
     db_close(db);
-    printf("  PASS test_no_difference_across_trim\n");
 }
 
 /* The same for a script's edit between iterations, whatever it touches: an
@@ -567,25 +555,24 @@ static void test_no_difference_across_script_edit(void) {
         assert(q1(db, "SELECT tokens IS NULL FROM entries WHERE id=?", leaf) == 1);
         db_close(db);
     }
-    printf("  PASS test_no_difference_across_script_edit\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_trim:\n");
-    test_under_threshold();
-    test_drop_turns();
-    test_drop_iterations();
-    test_notes_fold();
-    test_record();
-    test_still_over();
-    test_unfinished_blocks();
-    test_any_numbers();
-    test_limits();
-    test_schema_refusals();
-    test_advance_trims_mid_turn();
-    test_no_difference_across_trim();
-    test_no_difference_across_script_edit();
+    RUN(test_under_threshold);
+    RUN(test_drop_turns);
+    RUN(test_drop_iterations);
+    RUN(test_notes_fold);
+    RUN(test_record);
+    RUN(test_still_over);
+    RUN(test_unfinished_blocks);
+    RUN(test_any_numbers);
+    RUN(test_limits);
+    RUN(test_schema_refusals);
+    RUN(test_advance_trims_mid_turn);
+    RUN(test_no_difference_across_trim);
+    RUN(test_no_difference_across_script_edit);
     printf("All trim tests passed.\n");
     return 0;
 }

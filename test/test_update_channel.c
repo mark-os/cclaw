@@ -4,6 +4,7 @@
  * directory with file:// URLs; https shares the same verify/parse path. */
 
 #define _GNU_SOURCE
+#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,12 +21,10 @@
 #define BINARY "./build/cclaw"
 #define ASSET  "cclaw-linux-test"
 
-static int tests_run = 0, tests_passed = 0;
-
+/* assert, naming the check that failed. */
 static void check(const char *name, int ok) {
-    tests_run++;
-    if (ok) { tests_passed++; printf("  PASS %s\n", name); }
-    else printf("  FAIL %s\n", name);
+    if (!ok) fprintf(stderr, "FAIL %s\n", name);
+    assert(ok);
 }
 
 static void hexs(const uint8_t *in, size_t n, char *out) {
@@ -276,12 +275,11 @@ static void test_notice_waits_for_session(void) {
 
 int main(void) {
     TEST_INIT();
-    printf("test_update_channel:\n");
-    test_tags();
-    test_parse_rejects();
-    test_publish_and_verify();
-    test_daemon_notice();
-    test_notice_waits_for_session();
-    printf("%d/%d passed\n", tests_passed, tests_run);
-    return tests_passed == tests_run ? 0 : 1;
+    RUN(test_tags);
+    RUN(test_parse_rejects);
+    RUN(test_publish_and_verify);
+    RUN(test_daemon_notice);
+    RUN(test_notice_waits_for_session);
+    printf("test_update_channel: all tests passed\n");
+    return 0;
 }

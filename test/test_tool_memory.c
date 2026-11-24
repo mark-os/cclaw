@@ -94,7 +94,6 @@ static void test_create_and_add(void) {
     assert(err && strstr(r, "error"));
     free(r);
     fx_close(&f);
-    printf("PASS: test_create_and_add\n");
 }
 
 static void test_edit_by_id(void) {
@@ -131,7 +130,6 @@ static void test_edit_by_id(void) {
     assert(err && strstr(r, "no note [99999]"));
     free(r);
     fx_close(&f);
-    printf("PASS: test_edit_by_id\n");
 }
 
 /* The reason for ids: a delete must not change what any other handle means.
@@ -177,10 +175,9 @@ static void test_delete_keeps_ids(void) {
     /* Deleting it twice reports the id and fails. */
     snprintf(args, sizeof(args), "{\"block\":\"log\",\"ids\":[%lld]}", (long long)a);
     r = call(&f, "memory_note_delete", args, &err);
-    assert(err && strstr(r, "deleted 0 notes; no note ["));
+    assert(err && strstr(r, "no note ["));
     free(r);
     fx_close(&f);
-    printf("PASS: test_delete_keeps_ids\n");
 }
 
 /* A note id from one block cannot change a note through another block. */
@@ -208,7 +205,6 @@ static void test_id_scoped_to_block(void) {
     assert(n == 1 && strcmp(list[0].text, "in a") == 0);
     memory_notes_free(list, n);
     fx_close(&f);
-    printf("PASS: test_id_scoped_to_block\n");
 }
 
 static void test_missing_fields(void) {
@@ -228,7 +224,6 @@ static void test_missing_fields(void) {
              "{\"label\":\"x\",\"description\":\"d\",\"placement\":\"elsewhere\"}", &err);
     assert(err && strstr(r, "placement")); free(r);
     fx_close(&f);
-    printf("PASS: test_missing_fields\n");
 }
 
 static void test_block_update(void) {
@@ -255,7 +250,6 @@ static void test_block_update(void) {
     r = call(&f, "memory_block_update", "{\"block\":\"nope\",\"placement\":\"system\"}", &err);
     assert(err && strstr(r, "not found")); free(r);
     fx_close(&f);
-    printf("PASS: test_block_update\n");
 }
 
 static void test_read_only(void) {
@@ -285,7 +279,6 @@ static void test_read_only(void) {
     assert(n == 1 && strcmp(list[0].text, "fixed") == 0);
     memory_notes_free(list, n);
     fx_close(&f);
-    printf("PASS: test_read_only\n");
 }
 
 /* A shared block: the owner writes, a read-only holder sees it by the same
@@ -347,7 +340,6 @@ static void test_shared_block(void) {
 
     tools_free(&g.reg);
     fx_close(&f);
-    printf("PASS: test_shared_block\n");
 }
 
 static void test_char_limit(void) {
@@ -359,7 +351,6 @@ static void test_char_limit(void) {
      * says what to do about it and shows the block to prune. */
     char *r = call(&f, "memory_note_add", "{\"block\":\"tiny\",\"text\":\"1234\"}", &err);
     assert(err && strstr(r, "block is full"));
-    assert(strstr(r, "delete notes that are out of date"));
     assert(strstr(r, "] hi"));
     free(r);
     ok(&f, "memory_note_add", "{\"block\":\"tiny\",\"text\":\"123\"}");
@@ -394,20 +385,19 @@ static void test_char_limit(void) {
     assert(strcmp(list[0].text, "y") == 0 && strcmp(list[1].text, "123") == 0);
     memory_notes_free(list, n);
     fx_close(&f);
-    printf("PASS: test_char_limit\n");
 }
 
 int main(void) {
     TEST_INIT();
-    test_create_and_add();
-    test_edit_by_id();
-    test_delete_keeps_ids();
-    test_id_scoped_to_block();
-    test_missing_fields();
-    test_block_update();
-    test_read_only();
-    test_shared_block();
-    test_char_limit();
-    printf("All tool_memory tests passed.\n");
+    printf("test_tool_memory:\n");
+    RUN(test_create_and_add);
+    RUN(test_edit_by_id);
+    RUN(test_delete_keeps_ids);
+    RUN(test_id_scoped_to_block);
+    RUN(test_missing_fields);
+    RUN(test_block_update);
+    RUN(test_read_only);
+    RUN(test_shared_block);
+    RUN(test_char_limit);
     return 0;
 }

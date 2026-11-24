@@ -51,25 +51,6 @@ static int64_t seed(sqlite3 *db, const char *base_url) {
     return session_create(db, "probe", "test", -1, 0);
 }
 
-static char *scalar(sqlite3 *db, const char *sql) {
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK);
-    char *out = NULL;
-    if (sqlite3_step(s) == SQLITE_ROW) {
-        const char *v = (const char *)sqlite3_column_text(s, 0);
-        out = test_strdup_(v ? v : "");
-    }
-    sqlite3_finalize(s);
-    return out;
-}
-
-static int count(sqlite3 *db, const char *sql) {
-    char *v = scalar(db, sql);
-    int n = v ? atoi(v) : -1;
-    free(v);
-    return n;
-}
-
 static const char *SWITCH_DOC =
     "{\"action\":\"request_changes\",\"changes\":"
     "{\"agent\":{\"models\":[\"model-b@mockp\"]}}}";
@@ -93,18 +74,17 @@ static void test_probe_success_applies(void) {
     assert(strstr(receipt, "served/model-b"));
     assert(mock_server_request_count() == 1);
 
-    char *pm = scalar(db, "SELECT model_id FROM agent_models"
-                          " WHERE agent_name='test' ORDER BY pos LIMIT 1");
+    char *pm = test_qs(db, "SELECT model_id FROM agent_models"
+                           " WHERE agent_name='test' ORDER BY pos LIMIT 1");
     assert(strcmp(pm, "model-b@mockp") == 0);
 
     /* A probe is not traffic: it archives, and touches nothing else. */
-    assert(count(db, "SELECT COUNT(*) FROM entries") == 0);
-    assert(count(db, "SELECT COUNT(*) FROM llm_responses WHERE status='probe_ok'") == 1);
-    assert(count(db, "SELECT COALESCE(SUM(total_requests),0) FROM models") == 0);
+    assert(test_qi(db, "SELECT COUNT(*) FROM entries") == 0);
+    assert(test_qi(db, "SELECT COUNT(*) FROM llm_responses WHERE status='probe_ok'") == 1);
+    assert(test_qi(db, "SELECT COALESCE(SUM(total_requests),0) FROM models") == 0);
 
     free(pm); free(receipt);
     db_close(db);
-    printf("  PASS test_probe_success_applies\n");
 }
 
 static void test_probe_failure_reverts(void) {
@@ -123,16 +103,15 @@ static void test_probe_failure_reverts(void) {
     assert(strstr(receipt, "http 404"));
     assert(strstr(receipt, "reverted to models=model-a@mockp"));
 
-    char *pm = scalar(db, "SELECT model_id FROM agent_models"
-                          " WHERE agent_name='test' ORDER BY pos LIMIT 1");
+    char *pm = test_qs(db, "SELECT model_id FROM agent_models"
+                           " WHERE agent_name='test' ORDER BY pos LIMIT 1");
     assert(strcmp(pm, "model-a@mockp") == 0);
-    assert(count(db, "SELECT COUNT(*) FROM entries") == 0);
-    assert(count(db, "SELECT COUNT(*) FROM llm_responses"
+    assert(test_qi(db, "SELECT COUNT(*) FROM entries") == 0);
+    assert(test_qi(db, "SELECT COUNT(*) FROM llm_responses"
                      " WHERE status='probe_http_404'") == 1);
 
     free(pm); free(receipt);
     db_close(db);
-    printf("  PASS test_probe_failure_reverts\n");
 }
 
 /* A model registration whose provider points somewhere that accepts the
@@ -170,17 +149,16 @@ static void test_probe_timeout_is_failure(void) {
     assert(receipt);
     assert(strstr(receipt, "probe failed: timed out"));
     assert(strstr(receipt, "reverted to models=model-a@mockp"));
-    char *pm = scalar(db, "SELECT model_id FROM agent_models"
-                          " WHERE agent_name='test' ORDER BY pos LIMIT 1");
+    char *pm = test_qs(db, "SELECT model_id FROM agent_models"
+                           " WHERE agent_name='test' ORDER BY pos LIMIT 1");
     assert(strcmp(pm, "model-a@mockp") == 0);
-    assert(count(db, "SELECT COUNT(*) FROM llm_responses"
+    assert(test_qi(db, "SELECT COUNT(*) FROM llm_responses"
                      " WHERE status='probe_timeout'") == 1);
 
     free(pm); free(receipt);
     db_close(db);
     pthread_join(th, NULL);
     close(lfd);
-    printf("  PASS test_probe_timeout_is_failure\n");
 }
 
 /* Grants and config values don't change who serves a request — no probe, and
@@ -199,11 +177,10 @@ static void test_grants_only_does_not_probe(void) {
     assert(receipt && strstr(receipt, "grants now"));
     assert(!strstr(receipt, "probed"));
     assert(mock_server_request_count() == 0);
-    assert(count(db, "SELECT COUNT(*) FROM llm_responses") == 0);
+    assert(test_qi(db, "SELECT COUNT(*) FROM llm_responses") == 0);
 
     free(receipt);
     db_close(db);
-    printf("  PASS test_grants_only_does_not_probe\n");
 }
 
 int main(void) {
@@ -212,10 +189,10 @@ int main(void) {
     if (s_port < 0) { printf("FAIL: mock server\n"); return 1; }
 
     printf("config probe integration tests:\n");
-    test_probe_success_applies();
-    test_probe_failure_reverts();
-    test_probe_timeout_is_failure();
-    test_grants_only_does_not_probe();
+    RUN(test_probe_success_applies);
+    RUN(test_probe_failure_reverts);
+    RUN(test_probe_timeout_is_failure);
+    RUN(test_grants_only_does_not_probe);
 
     mock_server_stop();
     printf("All config probe tests passed.\n");

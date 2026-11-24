@@ -70,7 +70,6 @@ static void test_declared_replaces_grants(void) {
     /* Replacement, not union: the agent's grant does not widen the tool. */
     assert(!host_covered(h, (size_t)n, "evil.example"));
     hosts_free(h, n);
-    printf("  PASS test_declared_replaces_grants\n");
 }
 
 static void test_undeclared_tool_uses_agent_grants(void) {
@@ -94,7 +93,6 @@ static void test_undeclared_tool_uses_agent_grants(void) {
     h = db_tool_declared_hosts(g_db, "get_forecast", &n);
     assert(h && n == 2);
     hosts_free(h, n);
-    printf("  PASS test_undeclared_tool_uses_agent_grants\n");
 }
 
 static void test_draft_declaration_is_inert(void) {
@@ -125,7 +123,6 @@ static void test_draft_declaration_is_inert(void) {
     h = db_tool_declared_hosts(g_db, "draft_tool", &n);
     assert(h && n == 1 && strcmp(h[0], "api.draft.test") == 0);
     hosts_free(h, n);
-    printf("  PASS test_draft_declaration_is_inert\n");
 }
 
 static void test_manifest_refuses_unpinned_hosts(void) {
@@ -162,7 +159,6 @@ static void test_manifest_refuses_unpinned_hosts(void) {
     err = NULL;
     assert(extension_manifest_validate(BUNDLE "2", &err) == 0);
     free(err);
-    printf("  PASS test_manifest_refuses_unpinned_hosts\n");
 }
 
 /* ── Q4: copy-on-promote ──────────────────────────────────────────── */
@@ -180,29 +176,21 @@ static void test_store_path_boundary(void) {
     /* Positive control: the real store path is accepted. */
     assert(extension_path_in_store(g_db,
         HOME_DIR "/extensions/weather/f.qjs"));
-    printf("  PASS test_store_path_boundary\n");
 }
 
 static void test_install_writes_store_paths(void) {
     /* The bundle lives in a workspace; after promotion every registered path
      * points at the store copy, never back at the editable draft. */
-    char *p = NULL;
-    sqlite3_stmt *st;
-    assert(sqlite3_prepare_v2(g_db,
+    char *p = test_qs(g_db,
         "SELECT e.path || '|' || t.path FROM extensions e JOIN tools t"
-        " ON t.extension_name=e.name WHERE e.name='drafty'",
-        -1, &st, NULL) == SQLITE_OK);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    p = test_strdup_((const char *)sqlite3_column_text(st, 0));
-    sqlite3_finalize(st);
+        " ON t.extension_name=e.name WHERE e.name='drafty'");
     assert(p && strstr(p, HOME_DIR "/extensions/drafty") == p);
     assert(!strstr(p, BUNDLE "/"));
     free(p);
-    printf("  PASS test_install_writes_store_paths\n");
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_tool_hosts:\n");
     test_db_clean(TEST_DB);
     mkdir(HOME_DIR, 0755);
@@ -210,15 +198,14 @@ int main(void) {
     assert(g_db);
     test_seed_agent(g_db, "Alice");
 
-    test_declared_replaces_grants();
-    test_undeclared_tool_uses_agent_grants();
-    test_draft_declaration_is_inert();
-    test_manifest_refuses_unpinned_hosts();
-    test_store_path_boundary();
-    test_install_writes_store_paths();
+    RUN(test_declared_replaces_grants);
+    RUN(test_undeclared_tool_uses_agent_grants);
+    RUN(test_draft_declaration_is_inert);
+    RUN(test_manifest_refuses_unpinned_hosts);
+    RUN(test_store_path_boundary);
+    RUN(test_install_writes_store_paths);
 
     db_close(g_db);
     test_db_clean(TEST_DB);
-    printf("All tool host declaration tests passed.\n");
     return 0;
 }

@@ -24,7 +24,6 @@ static char *build(sqlite3 *db, const char *agent) {
 
 int main(void) {
     TEST_INIT();
-    printf("test_dynamic_prompt:\n");
     test_db_clean(TEST_DB);
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
@@ -41,7 +40,6 @@ int main(void) {
         NULL, NULL, NULL) == SQLITE_OK);
 
     /* granted → Your Tools; ungranted → Requestable; disabled → absent */
-    printf("  sections... ");
     char *p = build(db, "Tester");
     char *yours = strstr(p, "## Your Tools");
     char *req = strstr(p, "## Requestable Tools");
@@ -52,17 +50,13 @@ int main(void) {
     assert(beta && beta > req);
     assert(!strstr(p, "gamma_tool"));
     assert(strstr(p, "request_config"));
-    printf("PASS\n");
 
     /* {workspace} renders as <agents_dir>/<agent>/workspace (F21) */
-    printf("  workspace_var... ");
     assert(strstr(p, "Workspace: /srv/agents/Tester/workspace"));
     assert(strstr(p, "You are Tester."));
     free(p);
-    printf("PASS\n");
 
     /* revoke → moves to requestable on the next build */
-    printf("  revoke_moves... ");
     assert(sqlite3_exec(db,
         "DELETE FROM grants WHERE agent_name='Tester' AND value='alpha_tool';",
         NULL, NULL, NULL) == SQLITE_OK);
@@ -71,10 +65,8 @@ int main(void) {
     req = strstr(p, "## Requestable Tools");
     assert(req && strstr(p, "- alpha_tool — does alpha") > req);
     free(p);
-    printf("PASS\n");
 
     /* expired grant counts as ungranted */
-    printf("  expired_grant... ");
     assert(sqlite3_exec(db,
         "INSERT INTO grants(agent_name, kind, value, expires_at,source)"
         " VALUES('Tester','tool','beta_tool', unixepoch()-10,'operator');",
@@ -82,19 +74,15 @@ int main(void) {
     p = build(db, "Tester");
     assert(!strstr(p, "## Your Tools"));
     free(p);
-    printf("PASS\n");
 
     /* determinism: two builds byte-identical */
-    printf("  deterministic... ");
     p = build(db, "Tester");
     char *q = build(db, "Tester");
     assert(strcmp(p, q) == 0);
     free(p); free(q);
-    printf("PASS\n");
 
     /* Two layers: the built-in rules open every prompt, the agent's own
      * text (its role) follows; an agent with no text gets the rules alone. */
-    printf("  layers... ");
     p = build(db, "Tester");
     char *rules = strstr(p, "## How You Work");
     char *role = strstr(p, "You are Tester.");
@@ -105,11 +93,9 @@ int main(void) {
     p = build(db, "Bare");
     assert(strstr(p, "## How You Work") && !strstr(p, "You are Tester."));
     free(p);
-    printf("PASS\n");
 
     /* A session's tool filter narrows Your Tools the way it narrows the
      * payload: a granted tool the filter drops is not listed at all. */
-    printf("  session_filter... ");
     assert(sqlite3_exec(db,
         "INSERT OR REPLACE INTO grants(agent_name, kind, value, source) VALUES"
         " ('Tester','tool','alpha_tool','operator'),"
@@ -131,11 +117,9 @@ int main(void) {
         assert(p && strstr(p, "- beta_tool") && !strstr(p, "alpha_tool"));
         free(p);
     }
-    printf("PASS\n");
 
     /* The Memory Blocks header says who maintains them: an agent holding a
      * memory tool is told it does; one holding none is told it cannot. */
-    printf("  memory_header... ");
     assert(memory_block_create(db, "Tester", "NOTES", "test block", 5000, "system") > 0);
     p = build(db, "Tester");
     assert(strstr(p, "## Memory Blocks") && strstr(p, "maintained for you"));
@@ -147,11 +131,9 @@ int main(void) {
     p = build(db, "Tester");
     assert(strstr(p, "You keep these current yourself") && !strstr(p, "maintained for you"));
     free(p);
-    printf("PASS\n");
 
     /* Installed, not tracked: a sync copies the build's text into value once
      * and never again, so a later build's default leaves it alone. */
-    printf("  seeded_once... ");
     assert(config_registry_sync(db) == 0);
     assert(sqlite3_exec(db,
         "UPDATE config SET default_value='NEWER BUILD' WHERE key='system_prompt';",
@@ -159,10 +141,8 @@ int main(void) {
     p = build(db, "Bare");
     assert(strstr(p, "## How You Work") && !strstr(p, "NEWER BUILD"));
     free(p);
-    printf("PASS\n");
 
     /* A changed base prompt reaches every agent. */
-    printf("  override... ");
     assert(sqlite3_exec(db,
         "INSERT INTO config(key, value) VALUES('system_prompt','RULES for {agent_name}')"
         " ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
@@ -174,7 +154,6 @@ int main(void) {
     p = build(db, "Bare");
     assert(strncmp(p, "RULES for Bare", 14) == 0);
     free(p);
-    printf("PASS\n");
 
     db_close(db);
     test_db_clean(TEST_DB);

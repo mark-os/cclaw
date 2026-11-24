@@ -1,10 +1,7 @@
+/* A 500 is retried and the retry's answer ends the turn. */
 #define _POSIX_C_SOURCE 200809L
 #include "test_run_session.h"
-#include "mock_server.h"
-#include <assert.h>
 #include <unistd.h>
-#include <signal.h>
-#include "test_util.h"
 
 #define DB_PATH "/tmp/test_integ_fallback_fixes.db"
 
@@ -17,53 +14,18 @@ static const char *SUCCESS_RESP =
 int main(void) {
     TEST_INIT();
     alarm(10);
-    test_db_clean(DB_PATH);
-    sqlite3 *db = test_db_open(DB_PATH);
-    assert(db);
+    TestTurn t;
+    test_turn_open(&t, DB_PATH, "hello");
 
-    int port = mock_server_start();
-    assert(port > 0);
-
-    char url[64]; snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
-    setenv("CCLAW_DB_PATH", DB_PATH, 1);
-    setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
-    setenv("OPENROUTER_API_KEY", "test-key", 1);
-    setenv("CCLAW_MODEL", "test-model", 1);
-
-    db_agent_upsert(db, "default", NULL, NULL);
-    int64_t sid = session_create(db, "test", "default", -1, 0);
-    Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append_with_iteration(db, sid, &sys, 1);
-    Message user = {.role = ROLE_USER, .content = "hello"};
-    entry_append_with_iteration(db, sid, &user, 1);
-
-    /* First request gets 500, second gets 200 */
     mock_server_enqueue(500, ERROR_RESP);
     mock_server_enqueue(200, SUCCESS_RESP);
 
-    Config *cfg = config_load(db);
-    AgentSetup setup;
-    agent_setup_init(&setup, db, sid, cfg, "default");
-    int rc = test_run_session(db, sid, &setup);
-    assert(rc == 0);
+    assert(test_turn_run(&t) == 0);
+    char *reply = test_turn_reply(&t);
+    assert(reply && strstr(reply, "recovered"));
+    free(reply);
 
-    /* Verify assistant response exists */
-    int count = 0;
-    Entry *branch = session_get_branch(db, sid, &count);
-    int found = 0;
-    for (int i = 0; i < count; i++) {
-        if (branch[i].message.role == ROLE_ASSISTANT &&
-            branch[i].message.content && strstr(branch[i].message.content, "recovered"))
-            found = 1;
-    }
-    assert(found);
-    entry_branch_free(branch, count);
-
-    agent_setup_destroy(&setup);
-    config_free(cfg);
-    mock_server_stop();
-    db_close(db);
-    test_db_clean(DB_PATH);
+    test_turn_close(&t);
     printf("PASS test_integration_fallback_fixes\n");
     return 0;
 }

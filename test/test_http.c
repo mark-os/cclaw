@@ -61,17 +61,12 @@ int main(void) {
     TEST_INIT();
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
-    printf("PASS: response_free_empty\n");
-
-    test_post_bad_url();
-    printf("PASS: post_bad_url\n");
+    RUN(test_post_bad_url);
 
     int port = mock_server_start();
     assert(port > 0);
     test_cap_truncates_not_errors(port);
-    printf("PASS: cap_truncates_not_errors\n");
     test_within_cap_not_truncated(port);
-    printf("PASS: within_cap_not_truncated\n");
     mock_server_stop();
 
     curl_global_cleanup();

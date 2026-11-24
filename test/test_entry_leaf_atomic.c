@@ -46,7 +46,6 @@ static void test_leaf_tracks_last_insert(void) {
         "SELECT MAX(iteration_id) FROM entries WHERE session_id=?;", sid, -1);
     assert(max_iter == 50);
     sqlite3_close(db);
-    printf("  test_leaf_tracks_last_insert OK\n");
 }
 
 /* entry_append_typed shares the same trigger path. */
@@ -58,7 +57,6 @@ static void test_typed_advances_leaf(void) {
     assert(id > 0);
     assert(leaf_of(db, sid) == id);
     sqlite3_close(db);
-    printf("  test_typed_advances_leaf OK\n");
 }
 
 /* Compaction entries are inserted mid-branch and must NOT move the leaf. */
@@ -77,15 +75,13 @@ static void test_compaction_does_not_move_leaf(void) {
     assert(c > 0);
     assert(leaf_of(db, sid) == b); /* unchanged */
     sqlite3_close(db);
-    printf("  test_compaction_does_not_move_leaf OK\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_entry_leaf_atomic\n");
-    test_leaf_tracks_last_insert();
-    test_typed_advances_leaf();
-    test_compaction_does_not_move_leaf();
-    printf("PASS\n");
+    RUN(test_leaf_tracks_last_insert);
+    RUN(test_typed_advances_leaf);
+    RUN(test_compaction_does_not_move_leaf);
     return 0;
 }

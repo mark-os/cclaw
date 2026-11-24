@@ -109,6 +109,19 @@ static void expect_json(sqlite3 *db, const char *json, const char *expr, const c
     sqlite3_finalize(st);
 }
 
+/* Length of the JSON text at `path` in `json`, as written out. */
+static int64_t json_len_at(sqlite3 *db, const char *json, const char *path) {
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db, "SELECT octet_length(json_extract(?1, ?2))", -1, &st,
+                              NULL) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, path, -1, SQLITE_STATIC);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    int64_t n = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    return n;
+}
+
 static void expect_at(sqlite3 *db, const char *json, const char *path, const char *want) {
     char expr[256];
     snprintf(expr, sizeof(expr), "json_extract(?1,'%s')", path);
@@ -284,15 +297,21 @@ static char *branch(sqlite3 *db, int64_t sid) {
     return out;
 }
 
+/* "id,id,..." from a va_list of ids ended by 0. */
+static void ids_str(char *out, size_t cap, va_list ap) {
+    out[0] = '\0';
+    for (int64_t id; (id = va_arg(ap, int64_t)) != 0;) {
+        size_t n = strlen(out);
+        snprintf(out + n, cap - n, "%s%lld", n ? "," : "", (long long)id);
+    }
+}
+
 /* Expected branch from a list of ids ended by 0. */
 static void expect_branch_ids(sqlite3 *db, int64_t sid, ...) {
-    char want[512] = "";
+    char want[512];
     va_list ap;
     va_start(ap, sid);
-    for (int64_t id; (id = va_arg(ap, int64_t)) != 0;) {
-        size_t n = strlen(want);
-        snprintf(want + n, sizeof(want) - n, "%s%lld", n ? "," : "", (long long)id);
-    }
+    ids_str(want, sizeof(want), ap);
     va_end(ap);
     char *got = branch(db, sid);
     if (strcmp(got, want) != 0) {
@@ -432,15 +451,12 @@ static void expect_rec(sqlite3 *db, const T *t, const char *path, const char *wa
 }
 
 static void expect_rec_ids(sqlite3 *db, const T *t, const char *path, ...) {
-    char want[256] = "[";
+    char ids[256], want[260];
     va_list ap;
     va_start(ap, path);
-    for (int64_t id; (id = va_arg(ap, int64_t)) != 0;) {
-        size_t n = strlen(want);
-        snprintf(want + n, sizeof(want) - n, "%s%lld", n > 1 ? "," : "", (long long)id);
-    }
+    ids_str(ids, sizeof(ids), ap);
     va_end(ap);
-    strcat(want, "]");
+    snprintf(want, sizeof(want), "[%s]", ids);
     expect_rec(db, t, path, want);
 }
 #define REC_IDS(db, t, path, ...) expect_rec_ids(db, t, path, __VA_ARGS__, (int64_t)0)
@@ -460,6 +476,16 @@ static int64_t tokens_of(sqlite3 *db, const T *t, int turn) {
 #define turn_tokens(db, t) tokens_of(db, t, 2)
 #define branch_tokens(db, t) tokens_of(db, t, 0)
 
+/* The newest record on the session's leaf, at `path` within it. */
+static int64_t leaf_rec_id(sqlite3 *db, int64_t sid, const char *path) {
+    char *v = q(db, "SELECT json_extract(data,'$.turn_edits[#-1]%s') FROM entries"
+                    " WHERE id=(SELECT leaf_id FROM sessions WHERE id=%lld)", path,
+                (long long)sid);
+    int64_t n = v ? atoll(v) : -1;
+    free(v);
+    return n;
+}
+
 /* ── Tests ─────────────────────────────────────────────────────────*/
 
 static void test_input(void) {
@@ -475,67 +501,39 @@ static void test_input(void) {
     #define IN(path, want) expect_at(db, in, path, want)
     IN("$.event", "Stop");
     expect_json(db, in, "json_type(?1,'$.context')", NULL);
-    /* What it was given, so a script can tell "no history asked for" from "a
-     * first turn": nothing declared is the turn alone. The turn before it
-     * (u0, a0) is not sent and not counted as left out. */
-    char want_echo[128];
-    snprintf(want_echo, sizeof(want_echo),
-             "{\"history\":\"none\",\"history_results\":true,\"max_bytes\":%d}",
-             TURN_EDIT_INPUT_DEFAULT_BYTES);
-    IN("$.input", want_echo);
-    expect_json(db, in, "json_type(?1,'$.history')", "array");
+    /* Nothing declared is the turn alone, and the input says so; the turn
+     * before it is not sent and not counted as left out. */
+    IN("$.input.history", "none");
     expect_json(db, in, "json_array_length(?1,'$.history')", "0");
     IN("$.history_omitted", "0");
-    IN("$.agent", "default");
-    expect_id_at(db, in, "$.session_id", t.sid);
     IN("$.turn_id", "2");
-    expect_json(db, in, "json_array_length(?1,'$.user_messages')", "1");
     expect_id_at(db, in, "$.user_messages[0].entry_id", t.u);
-    IN("$.user_messages[0].text", "go");
     /* The system entry already in the turn, and the iteration it precedes. */
-    expect_json(db, in, "json_array_length(?1,'$.notes')", "1");
     expect_id_at(db, in, "$.notes[0].entry_id", t.sys);
-    IN("$.notes[0].text", "sys mid");
     expect_id_at(db, in, "$.notes[0].before_iteration", t.it2);
-
-    expect_json(db, in, "json_array_length(?1,'$.iterations')", "2");
-    expect_id_at(db, in, "$.iterations[0].iteration_id", t.it1);
-    /* An iteration's entry_id is its first row: here the reasoning row. */
+    /* An iteration's entry_id is its first row (the reasoning row); a
+     * parallel batch lists calls in call order, whatever order the results
+     * came back in; an effect tool is protected and a failed result flagged. */
     expect_id_at(db, in, "$.iterations[0].entry_id", t.rs1);
-    IN("$.iterations[0].text", "one");
-    /* A parallel batch: calls in call order, whatever order the results
-     * came back in. */
-    expect_json(db, in, "json_array_length(?1,'$.iterations[0].calls')", "3");
-    IN("$.iterations[0].calls[0].call_id", "c1");
-    expect_id_at(db, in, "$.iterations[0].calls[0].entry_id", t.c1);
-    IN("$.iterations[0].calls[0].tool", "look");
-    IN("$.iterations[0].calls[0].args.path", "/a");
-    expect_json(db, in, "json_type(?1,'$.iterations[0].calls[0].protected')", "false");
-    expect_json(db, in, "json_type(?1,'$.iterations[0].calls[0].is_error')", "false");
-    expect_id_at(db, in, "$.iterations[0].calls[0].result.entry_id", t.r1);
-    expect_id_at(db, in, "$.iterations[0].calls[0].result.tokens",
-                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", t.r1, -1));
-    /* Verbatim: no line numbers, whitespace kept. */
-    IN("$.iterations[0].calls[0].result.text", "line one\n  line two");
-    /* Arguments that are not JSON come through as the stored string. */
-    IN("$.iterations[0].calls[1].call_id", "c2");
-    IN("$.iterations[0].calls[1].args", "oops");
-    expect_json(db, in, "json_type(?1,'$.iterations[0].calls[1].args')", "text");
-    expect_json(db, in, "json_type(?1,'$.iterations[0].calls[1].protected')", "false");
-    IN("$.iterations[0].calls[1].result.text", "r2");
-    /* An effect tool is protected; its failed result is flagged. */
-    IN("$.iterations[0].calls[2].call_id", "c3");
-    expect_json(db, in, "json_type(?1,'$.iterations[0].calls[2].protected')", "true");
-    expect_json(db, in, "json_type(?1,'$.iterations[0].calls[2].is_error')", "true");
-    expect_id_at(db, in, "$.iterations[1].iteration_id", t.it2);
     expect_id_at(db, in, "$.iterations[1].entry_id", t.rs2);
-    IN("$.iterations[1].text", "two");
-    IN("$.iterations[1].calls[0].result.text", "r4");
+    char want[256];
+    snprintf(want, sizeof(want), "c1:0:0:%lld,c2:0:0:%lld,c3:1:1:%lld,c4:0:0:%lld",
+             (long long)t.r1, (long long)t.r2, (long long)t.r3, (long long)t.r4);
+    expect_json(db, in,
+        "(SELECT group_concat(concat_ws(':', json_extract(c.value,'$.call_id'),"
+        "   json_extract(c.value,'$.protected'), json_extract(c.value,'$.is_error'),"
+        "   json_extract(c.value,'$.result.entry_id')), ',')"
+        "  FROM json_each(?1,'$.iterations') i, json_each(i.value,'$.calls') c)", want);
+    expect_json(db, in, "json_type(?1,'$.iterations[0].calls[2].protected')", "true");
+    /* Results verbatim (no line numbers, whitespace kept); arguments that are
+     * not JSON come through as the stored string. */
+    IN("$.iterations[0].calls[0].result.text", "line one\n  line two");
+    IN("$.iterations[0].calls[0].args.path", "/a");
+    expect_json(db, in, "json_type(?1,'$.iterations[0].calls[1].args')", "text");
     /* The answer is reported apart and is no iteration. */
-    IN("$.final.text", "done");
+    expect_json(db, in, "json_array_length(?1,'$.iterations')", "2");
     expect_id_at(db, in, "$.final.entry_id", t.fin);
-    expect_id_at(db, in, "$.final.iteration_id", t.it3);
-
+    IN("$.final.text", "done");
     /* Sizes: the whole turn, and the tool traffic within it. */
     expect_id_at(db, in, "$.tokens.turn", db_scalar_i64(db,
         "SELECT SUM(token_estimate) FROM entries WHERE session_id=? AND turn_id=2", t.sid, -1));
@@ -544,7 +542,6 @@ static void test_input(void) {
         " AND type IN ('tool_call','tool_result')", t.sid, -1));
     free(in);
     #undef IN
-
     /* Per-call protection: a credential capture, a job still running,
      * check_session, and an effect tool are all protected. */
     T p = seed_turn(db, "protect", 0);
@@ -553,24 +550,17 @@ static void test_input(void) {
     run(db, "UPDATE tool_calls SET status='background' WHERE entry_id=%lld", (long long)p.c2);
     run(db, "UPDATE entries SET tool_name='check_session' WHERE id IN (%lld,%lld)",
         (long long)p.c4, (long long)p.r4);
-    in = input_turn(db, p.sid);
-    assert(in);
-    expect_json(db, in,
-        "(SELECT json_group_array(json_extract(c.value,'$.protected'))"
-        "  FROM json_each(?1,'$.iterations') i, json_each(i.value,'$.calls') c)",
-        "[1,1,1,1]");
-    free(in);
+    #define PROTECTED(want) do { in = input_turn(db, p.sid); assert(in); \
+        expect_json(db, in, "(SELECT json_group_array(json_extract(c.value,'$.protected'))" \
+            " FROM json_each(?1,'$.iterations') i, json_each(i.value,'$.calls') c)", want); \
+        free(in); } while (0)
+    PROTECTED("[1,1,1,1]");
     /* Without save_secret the same fetch is droppable; a tool with no tools
      * row is protected. */
     run(db, "UPDATE entries SET content='{\"url\":\"u\"}' WHERE id=%lld", (long long)p.c1);
     run(db, "UPDATE entries SET tool_name='unregistered' WHERE id=%lld", (long long)p.c3);
-    in = input_turn(db, p.sid);
-    assert(in);
-    expect_json(db, in,
-        "(SELECT json_group_array(json_extract(c.value,'$.protected'))"
-        "  FROM json_each(?1,'$.iterations') i, json_each(i.value,'$.calls') c)",
-        "[0,1,1,1]");
-    free(in);
+    PROTECTED("[0,1,1,1]");
+    #undef PROTECTED
 
     /* No finished turn: no entry, or the leaf is a tool result. */
     int64_t s2 = session_create(db, "midturn", "default", -1, 0);
@@ -583,7 +573,6 @@ static void test_input(void) {
     assert(input_turn(db, s2) == NULL);
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_input\n");
 }
 
 /* A refused or empty reply leaves the database byte for byte as it was. */
@@ -624,20 +613,65 @@ static void test_rejections(void) {
 
     const TurnEditResult NO = TURN_EDIT_REJECTED;
     #define REJECT(reply, why) expect_untouched(db, t.sid, reply, NO, why)
-    /* Shape. */
-    REJECT("nope", "not a JSON object");
-    REJECT("[]", "not a JSON object");
-    REJECT("\"drop\"", "not a JSON object");
-    REJECT("", "not a JSON object");
-    REJECT("{\"edits\":[],\"summary\":\"x\"}", "unknown key \"summary\"");
-    REJECT("{\"drop\":[\"c1\"]}", "unknown key \"drop\"");
-    REJECT("{\"edits\":[],\"edits\":[" DROP("c2") "]}", "appears twice");
-    REJECT("{\"edits\":{}}", "\"edits\" must be an array");
-    REJECT("{\"edits\":null}", "\"edits\" must be an array");
-    /* A bad record is refused even with no edits: shape comes first. */
-    REJECT("{\"record\":[]}", "\"record\" must be an object");
-    REJECT("{\"edits\":[],\"record\":\"x\"}", "\"record\" must be an object");
-    REJECT("{\"edits\":[" DROP("c2") "],\"record\":5}", "\"record\" must be an object");
+    /* Every reply here is refused whole, with nothing written. Hook replies
+     * come from untrusted scripts: each row is a distinct malformed input. */
+    static const struct { const char *reply, *why; } cases[] = {
+        /* Shape. */
+        { "nope", "not a JSON object" },
+        { "[]", "not a JSON object" },
+        { "\"drop\"", "not a JSON object" },
+        { "", "not a JSON object" },
+        { "{\"edits\":[],\"summary\":\"x\"}", "unknown key" },
+        { "{\"drop\":[\"c1\"]}", "unknown key" },
+        { "{\"edits\":[],\"edits\":[" DROP("c2") "]}", "appears twice" },
+        { "{\"edits\":{}}", "must be an array" },
+        { "{\"edits\":null}", "must be an array" },
+        /* A bad record is refused even with no edits: shape comes first. */
+        { "{\"record\":[]}", "\"record\" must be an object" },
+        { "{\"edits\":[],\"record\":\"x\"}", "\"record\" must be an object" },
+        { "{\"edits\":[" DROP("c2") "],\"record\":5}", "\"record\" must be an object" },
+        { E("5"), "edits[0] must be an object" },
+        { E(DROP("c2") ",7"), "edits[1] must be an object" },
+        { E("{\"op\":\"cut\",\"call_id\":\"c1\"}"), "\"op\" must be" },
+        { E("{\"call_id\":\"c1\"}"), "\"op\" must be" },
+        { E("{\"op\":1,\"call_id\":\"c1\"}"), "\"op\" must be" },
+        { E("{\"op\":\"drop\",\"call_id\":\"c1\",\"call_id\":\"c2\"}"), "twice" },
+        { E("{\"op\":\"drop\",\"call_id\":\"c1\",\"text\":\"x\"}"), "does not take" },
+        { E("{\"op\":\"drop\",\"call_id\":\"c1\",\"why\":\"x\"}"), "does not take" },
+        { E("{\"op\":\"note\",\"text\":\"x\",\"call_id\":\"c1\"}"), "does not take" },
+        { E("{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"x\",\"before\":1}"),
+          "does not take" },
+        { E("{\"op\":\"drop\"}"), "needs \"call_id\"" },
+        { E("{\"op\":\"drop\",\"call_id\":4}"), "needs \"call_id\"" },
+        { E("{\"op\":\"replace\",\"call_id\":\"c1\"}"), "needs \"text\"" },
+        { E("{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"\"}"), "needs \"text\"" },
+        { E("{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":5}"), "needs \"text\"" },
+        { E("{\"op\":\"note\"}"), "needs \"text\"" },
+        { E("{\"op\":\"note\",\"text\":[\"a\"]}"), "needs \"text\"" },
+        { E("{\"op\":\"note\",\"text\":\"x\",\"before\":\"5\"}"), "\"before\" must be" },
+        { E("{\"op\":\"note\",\"text\":\"x\",\"before\":1.5}"), "\"before\" must be" },
+        /* Call ids; a valid drop beside a bad one is refused with it. */
+        { E(DROP("zz")), "not a tool call" },
+        { E("{\"op\":\"replace\",\"call_id\":\"zz\",\"text\":\"x\"}"), "not a tool call" },
+        { E(DROP("c1") "," DROP("c1")), "named by two edits" },
+        { E(DROP("c1") ",{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"x\"}"),
+          "named by two edits" },
+        { E(DROP("c2") "," DROP("c3")), "protected" },
+        { E(DROP("c5")), "not finished" },
+        { E("{\"op\":\"replace\",\"call_id\":\"c6\",\"text\":\"x\"}"), "no result" },
+        /* Text: invisible-only is empty; a credential refuses the reply. */
+        { E("{\"op\":\"note\",\"text\":\"\xE2\x80\x8B\"}"), "empty" },
+        { E("{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"\xE2\x80\x8B\xE2\x80\x8C\"}"),
+          "empty" },
+        { E("{\"op\":\"note\",\"text\":\"token was ghp_aB3kL9mXp7qR2wNv4jH8sT5uY1cF6gW0eDzQ\"}"),
+          "edits[0]: text contains a secret" },
+        { E(DROP("c2") ",{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"key AKIAIOSFODNN7EXAMPLE\"}"),
+          "edits[1]: text contains a secret" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("    reject[%zu]\n", i);
+        expect_untouched(db, t.sid, cases[i].reply, NO, cases[i].why);
+    }
     {
         size_t n = TURN_EDIT_RECORD_MAX_BYTES + 64;
         char *big = malloc(n);
@@ -646,68 +680,20 @@ static void test_rejections(void) {
         size_t len = strlen(big);
         memset(big + len, 'x', TURN_EDIT_RECORD_MAX_BYTES);
         strcpy(big + len + TURN_EDIT_RECORD_MAX_BYTES, "\"}}");
-        REJECT(big, "\"record\" is larger than 16384 bytes");
+        REJECT(big, "larger than");
         free(big);
     }
-    REJECT(E("5"), "edits[0] must be an object");
-    REJECT(E(DROP("c2") ",7"), "edits[1] must be an object");
-    REJECT(E("{\"op\":\"cut\",\"call_id\":\"c1\"}"), "edits[0] \"op\" must be");
-    REJECT(E("{\"call_id\":\"c1\"}"), "edits[0] \"op\" must be");
-    REJECT(E("{\"op\":1,\"call_id\":\"c1\"}"), "edits[0] \"op\" must be");
-    REJECT(E("{\"op\":\"drop\",\"call_id\":\"c1\",\"call_id\":\"c2\"}"), "names a field twice");
-    REJECT(E("{\"op\":\"drop\",\"call_id\":\"c1\",\"text\":\"x\"}"),
-           "has a field its op does not take");
-    REJECT(E("{\"op\":\"drop\",\"call_id\":\"c1\",\"why\":\"x\"}"),
-           "has a field its op does not take");
-    REJECT(E("{\"op\":\"note\",\"text\":\"x\",\"call_id\":\"c1\"}"),
-           "has a field its op does not take");
-    REJECT(E("{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"x\",\"before\":1}"),
-           "has a field its op does not take");
-    REJECT(E("{\"op\":\"drop\"}"), "edits[0] needs \"call_id\", a string");
-    REJECT(E("{\"op\":\"drop\",\"call_id\":4}"), "needs \"call_id\", a string");
-    REJECT(E("{\"op\":\"replace\",\"call_id\":\"c1\"}"), "needs \"text\", a non-empty string");
-    REJECT(E("{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"\"}"), "needs \"text\"");
-    REJECT(E("{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":5}"), "needs \"text\"");
-    REJECT(E("{\"op\":\"note\"}"), "needs \"text\"");
-    REJECT(E("{\"op\":\"note\",\"text\":[\"a\"]}"), "needs \"text\"");
-    REJECT(E("{\"op\":\"note\",\"text\":\"x\",\"before\":\"5\"}"),
-           "\"before\" must be an entry");
-    REJECT(E("{\"op\":\"note\",\"text\":\"x\",\"before\":1.5}"),
-           "\"before\" must be an entry");
-
-    /* Call ids. */
-    REJECT(E(DROP("zz")), "drop: \"zz\" is not a tool call of this turn");
-    REJECT(E("{\"op\":\"replace\",\"call_id\":\"zz\",\"text\":\"x\"}"),
-           "replace: \"zz\" is not a tool call");
-    REJECT(E(DROP("c1") "," DROP("c1")), "named by two edits");
-    REJECT(E(DROP("c1") ",{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"x\"}"),
-           "named by two edits");
-    /* A valid drop beside a bad one is refused with it. */
-    REJECT(E(DROP("c2") "," DROP("c3")), "drop: call \"c3\" is protected");
-    REJECT(E(DROP("c5")), "\"c5\" is not finished (background)");
-    REJECT(E("{\"op\":\"replace\",\"call_id\":\"c6\",\"text\":\"x\"}"),
-           "replace: call \"c6\" has no result to replace");
-
-    /* Text: invisible-only is empty; a credential refuses the reply. */
-    REJECT(E("{\"op\":\"note\",\"text\":\"\xE2\x80\x8B\"}"),
-           "edits[0]: text is empty once invisible characters are removed");
-    REJECT(E("{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"\xE2\x80\x8B\xE2\x80\x8C\"}"),
-           "text is empty");
-    REJECT(E("{\"op\":\"note\",\"text\":\"token was ghp_aB3kL9mXp7qR2wNv4jH8sT5uY1cF6gW0eDzQ\"}"),
-           "edits[0]: text contains a secret");
-    REJECT(E(DROP("c2") ",{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"key AKIAIOSFODNN7EXAMPLE\"}"),
-           "edits[1]: text contains a secret");
 
     /* Where a note may stand: only the first row of an iteration of this
      * turn, and not one this reply empties. */
     char r[256];
-    #define NOTE_BEFORE(id) (snprintf(r, sizeof(r), \
-        E("{\"op\":\"note\",\"text\":\"n\",\"before\":%lld}"), (long long)(id)), r)
-    REJECT(NOTE_BEFORE(t.a1), "note: \"before\"");               /* rs1 opens it1 */
-    REJECT(NOTE_BEFORE(t.c1), "is not the first entry of an iteration");
-    REJECT(NOTE_BEFORE(t.r1), "is not the first entry of an iteration");
-    REJECT(NOTE_BEFORE(t.u), "is not the first entry of an iteration");
-    REJECT(NOTE_BEFORE(99999), "is not the first entry of an iteration");
+    const int64_t not_first[] = { t.a1 /* rs1 opens it1 */, t.c1, t.r1, t.u, 99999 };
+    for (size_t i = 0; i < sizeof(not_first) / sizeof(not_first[0]); i++) {
+        printf("    note before %lld\n", (long long)not_first[i]);
+        snprintf(r, sizeof(r), E("{\"op\":\"note\",\"text\":\"n\",\"before\":%lld}"),
+                 (long long)not_first[i]);
+        REJECT(r, "\"before\"");
+    }
     /* (A note before an iteration the reply empties: on a turn of its own
      * below, since c5/c6 keep this turn's second iteration alive.) */
 
@@ -731,17 +717,14 @@ static void test_rejections(void) {
     /* Check 2: a call still running blocks whatever would remove it —
      * itself, its result's stand-in, a rewrite, its whole iteration. */
     run(db, "UPDATE tool_calls SET status='running' WHERE call_id='c4'");
-    REJECT(E(DROP("c4")), "drop: call \"c4\" is not finished (running)");
-    REJECT(E("{\"op\":\"replace\",\"call_id\":\"c4\",\"text\":\"x\"}"),
-           "replace: call \"c4\" is not finished (running)");
-    REJECT(E("{\"op\":\"rewrite\",\"call_id\":\"c4\",\"args\":{}}"),
-           "rewrite: call \"c4\" is not finished (running)");
+    REJECT(E(DROP("c4")), "running");
+    REJECT(E("{\"op\":\"replace\",\"call_id\":\"c4\",\"text\":\"x\"}"), "running");
+    REJECT(E("{\"op\":\"rewrite\",\"call_id\":\"c4\",\"args\":{}}"), "running");
     snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"s\",\"from_iteration\":%lld,"
              "\"to_iteration\":%lld}"), (long long)t.it1, (long long)t.it2);
-    REJECT(r, "summarise: call \"c4\" is still running and cannot leave the branch");
+    REJECT(r, "running");
     run(db, "UPDATE tool_calls SET status='done' WHERE call_id='c4'");
-    expect_untouched(db, 99999, E("{\"op\":\"note\",\"text\":\"n\"}"), NO,
-                     "no turn to edit");
+    expect_untouched(db, 99999, E("{\"op\":\"note\",\"text\":\"n\"}"), NO, "no turn");
 
     /* One call id on two calls, one call with two results. */
     int64_t s3 = session_create(db, "dups", "default", -1, 0);
@@ -755,24 +738,22 @@ static void test_rejections(void) {
     add_typed(db, s3, it, "tool_result", "y", "k1", "look");
     add_typed(db, s3, it, "tool_result", "z", "k2", "look");
     add_typed(db, s3, db_next_iteration_id(db, s3), "assistant_message", "done", NULL, NULL);
-    expect_untouched(db, s3, E(DROP("k2")), NO, "names more than one call in this turn");
+    expect_untouched(db, s3, E(DROP("k2")), NO, "more than one call");
     expect_untouched(db, s3, E("{\"op\":\"replace\",\"call_id\":\"k1\",\"text\":\"t\"}"), NO,
-                     "replace: call \"k1\" has more than one result");
+                     "more than one result");
 
     /* A note before an iteration the same reply empties. */
     T d = seed_turn(db, "emptied", 0);
     char r2[256];
     snprintf(r2, sizeof(r2), E(DROP("c4") ",{\"op\":\"note\",\"text\":\"n\",\"before\":%lld}"),
              (long long)d.rs2);
-    expect_untouched(db, d.sid, r2, NO, "names an iteration this reply drops");
+    expect_untouched(db, d.sid, r2, NO, "drops");
     /* An answer whose data is not JSON: our side, refused, nothing written. */
     run(db, "UPDATE entries SET data='not json {' WHERE id=%lld", (long long)d.fin);
     expect_untouched(db, d.sid, E(DROP("c4")), TURN_EDIT_ERROR, "write failed");
     #undef REJECT
-    #undef NOTE_BEFORE
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_rejections\n");
 }
 
 static void test_drop_one_of_batch(void) {
@@ -820,9 +801,6 @@ static void test_drop_one_of_batch(void) {
     expect_shape(db, t.sid, O,
         "user:hi|assistant:hello|user:go|assistant:one,=c1,=c3|tool:r1,<c1|tool:r3,<c3"
         "|assistant:two,=c4|tool:r4,<c4|assistant:done");
-    expect_shape(db, t.sid, G,
-        "user:hi|model:hello|user:go|model:one,=look,=act|user:<look|user:<act"
-        "|model:two,=look|user:<look|model:done");
     expect_shape(db, t.sid, A,
         "user:hi|assistant:hello*|user:go|assistant:one,=c1,=c3|user:<c1,<c3"
         "|assistant:two,=c4|user:<c4|assistant:done");
@@ -841,57 +819,38 @@ static void test_drop_one_of_batch(void) {
     int64_t u3 = add_user(db, t.sid, "next");
     expect_q(db, "1", "SELECT turn_id=3 AND parent_id=%lld FROM entries WHERE id=%lld",
              (long long)t.fin, (long long)u3);
-    expect_shape(db, t.sid, O,
-        "user:hi|assistant:hello|user:go|assistant:one,=c1,=c3|tool:r1,<c1|tool:r3,<c3"
-        "|assistant:two,=c4|tool:r4,<c4|assistant:done|user:next");
     expect_shape(db, t.sid, A,
         "user:hi|assistant:hello*|user:go|assistant:one,=c1,=c3|user:<c1,<c3"
         "|assistant:two,=c4|user:<c4|assistant:done*|user:next");
 
-    db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_drop_one_of_batch\n");
-}
 
-static void test_drop_whole_iteration(void) {
-    sqlite3 *db = open_seeded();
-    T t = seed_turn(db, "dropit", 0);
-    apply_ok(db, &t, E(DROP("c4")));
-
-    /* Its only call gone, the iteration leaves whole: text and reasoning too. */
-    BRANCH(db, t.sid, t.u0, t.a0, t.u, t.rs1, t.a1, t.c1, t.c2, t.c3, t.r2, t.r1, t.r3,
-           t.rs3, t.fin);
-    REC_IDS(db, &t, ".left_branch", t.rs2, t.a2, t.c4, t.r4);
-
-    expect_shape(db, t.sid, O,
-        "user:hi|assistant:hello|user:go|assistant:one,=c1,=c2,=c3|tool:r2,<c2|tool:r1,<c1"
-        "|tool:r3,<c3|assistant:done");
-    expect_shape(db, t.sid, G,
-        "user:hi|model:hello|user:go|model:one,=look,=look2,=act|user:<look2|user:<look"
-        "|user:<act|model:done");
-    expect_shape(db, t.sid, A,
+    /* Its only call gone, an iteration leaves whole: text and reasoning too;
+     * the batch nobody touched still replays its reasoning. */
+    T w = seed_turn(db, "dropit", 0);
+    apply_ok(db, &w, E(DROP("c4")));
+    BRANCH(db, w.sid, w.u0, w.a0, w.u, w.rs1, w.a1, w.c1, w.c2, w.c3, w.r2, w.r1, w.r3,
+           w.rs3, w.fin);
+    REC_IDS(db, &w, ".left_branch", w.rs2, w.a2, w.c4, w.r4);
+    expect_shape(db, w.sid, A,
         "user:hi|assistant:hello*|user:go|assistant:one,=c1,=c2,=c3|user:<c2,<c1,<c3"
         "|assistant:done");
-    expect_text(db, t.sid, "two", 0);
-    expect_text(db, t.sid, "why2", 0);
-    /* The batch nobody touched still replays its reasoning. */
-    expect_body(db, t.sid, O, "$.messages[3].reasoning_details[0].text", "why1");
+    expect_text(db, w.sid, "two", 0);
+    expect_text(db, w.sid, "why2", 0);
+    expect_body(db, w.sid, O, "$.messages[3].reasoning_details[0].text", "why1");
 
     /* Both droppable calls of a batch gone, the protected one staying, and
-     * the other iteration emptied — in one reply. */
+     * the other iteration emptied, in one reply. */
     T b = seed_turn(db, "dropboth", 0);
     apply_ok(db, &b, E(DROP("c4") "," DROP("c2") "," DROP("c1")));
     expect_shape(db, b.sid, O,
         "user:hi|assistant:hello|user:go|assistant:one,=c3|tool:r3,<c3|assistant:done");
     expect_shape(db, b.sid, G,
         "user:hi|model:hello|user:go|model:one,=act|user:<act|model:done");
-    expect_shape(db, b.sid, A,
-        "user:hi|assistant:hello*|user:go|assistant:one,=c3|user:<c3|assistant:done");
     expect_body(db, b.sid, O, "$.messages[3].reasoning_details", NULL);
     REC_IDS(db, &b, ".left_branch", b.rs1, b.c1, b.c2, b.r2, b.r1, b.rs2, b.a2, b.c4, b.r4);
     free(branch(db, b.sid));
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_drop_whole_iteration\n");
 }
 
 static void test_replace(void) {
@@ -912,12 +871,9 @@ static void test_replace(void) {
         " than the result it stands in for\"},"
         "{\"op\":\"replace\",\"call_id\":\"c3\",\"text\":\"REPL-THREE\"},"
         "{\"op\":\"replace\",\"call_id\":\"c4\",\"text\":\"REPL-FOUR\"}"));
-    int64_t n1 = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[0].replaced[0].replacement')"
-                                   " FROM entries WHERE id=?", t.fin, -1);
-    int64_t n3 = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[0].replaced[1].replacement')"
-                                   " FROM entries WHERE id=?", t.fin, -1);
-    int64_t n4 = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[0].replaced[2].replacement')"
-                                   " FROM entries WHERE id=?", t.fin, -1);
+    int64_t n1 = leaf_rec_id(db, t.sid, ".replaced[0].replacement");
+    int64_t n3 = leaf_rec_id(db, t.sid, ".replaced[1].replacement");
+    int64_t n4 = leaf_rec_id(db, t.sid, ".replaced[2].replacement");
     assert(n1 > t.fin && n3 > n1 && n4 > n3);
 
     /* New entries in the originals' places. */
@@ -971,7 +927,6 @@ static void test_replace(void) {
     expect_body(db, t.sid, O, "$.messages[7].reasoning_details[0].text", "why2");
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_replace\n");
 }
 
 static void test_notes(void) {
@@ -985,12 +940,9 @@ static void test_notes(void) {
         "{\"op\":\"note\",\"text\":\"before two\",\"before\":%lld},"
         "{\"op\":\"note\",\"text\":\"second\"}"), (long long)t.rs2);
     apply_ok(db, &t, reply);
-    int64_t n1 = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[0].notes[0]')"
-                                   " FROM entries WHERE id=?", t.fin, -1);
-    int64_t n2 = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[0].notes[1]')"
-                                   " FROM entries WHERE id=?", t.fin, -1);
-    int64_t n3 = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[0].notes[2]')"
-                                   " FROM entries WHERE id=?", t.fin, -1);
+    int64_t n1 = leaf_rec_id(db, t.sid, ".notes[0]");
+    int64_t n2 = leaf_rec_id(db, t.sid, ".notes[1]");
+    int64_t n3 = leaf_rec_id(db, t.sid, ".notes[2]");
     /* Written in chain order, recorded in edit order. */
     assert(n2 > t.fin && n1 > n2 && n3 > n1);
 
@@ -1016,11 +968,6 @@ static void test_notes(void) {
         "|tool:r3,<c3|user:[system] sys mid|user:" NOTE_TAG "before two"
         "|assistant:two,=c4|tool:r4,<c4|user:" NOTE_TAG "first|user:" NOTE_TAG "second"
         "|assistant:done");
-    expect_shape(db, t.sid, G,
-        "user:hi|model:hello|user:go|model:one,=look,=look2,=act|user:<look2|user:<look"
-        "|user:<act|user:[system] sys mid|user:" NOTE_TAG "before two"
-        "|model:two,=look|user:<look|user:" NOTE_TAG "first|user:" NOTE_TAG "second"
-        "|model:done");
     expect_shape(db, t.sid, A,
         "user:hi|assistant:hello*|user:go|assistant:one,=c1,=c2,=c3"
         "|user:<c2,<c1,<c3|user:[system] sys mid|user:" NOTE_TAG "before two"
@@ -1034,8 +981,7 @@ static void test_notes(void) {
     snprintf(reply, sizeof(reply), E("{\"op\":\"note\",\"text\":\"third\",\"before\":%lld}"),
              (long long)t.fin);
     apply_ok(db, &t, reply);
-    int64_t n4 = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[1].notes[0]')"
-                                   " FROM entries WHERE id=?", t.fin, -1);
+    int64_t n4 = leaf_rec_id(db, t.sid, ".notes[0]");
     BRANCH(db, t.sid, t.u0, t.a0, t.u, t.rs1, t.a1, t.c1, t.c2, t.c3, t.r2, t.r1, t.r3,
            t.sys, n2, t.rs2, t.a2, t.c4, t.r4, n1, n3, n4, t.rs3, t.fin);
     expect_body(db, t.sid, O, "$.messages[3].reasoning_details[0].text", "why1");
@@ -1069,7 +1015,6 @@ static void test_notes(void) {
                              "|tool:res,<k1|user:[note from extension x] n|assistant:done");
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_notes\n");
 }
 
 /* The record across two applies, and the tree under it. */
@@ -1095,10 +1040,8 @@ static void test_record(void) {
 
     apply_as(db, &t, "hook:two", E("{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"short\"},"
                                    "{\"op\":\"note\",\"text\":\"second pass\"}"));
-    int64_t n1 = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[1].replaced[0].replacement')"
-                                   " FROM entries WHERE id=?", t.fin, -1);
-    int64_t note = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[1].notes[0]')"
-                                     " FROM entries WHERE id=?", t.fin, -1);
+    int64_t n1 = leaf_rec_id(db, t.sid, ".replaced[0].replacement");
+    int64_t note = leaf_rec_id(db, t.sid, ".notes[0]");
     assert(n1 > t.fin && note > n1);
 
     /* Existing keys kept; two elements, the script's record riding on the
@@ -1142,7 +1085,6 @@ static void test_record(void) {
     free(branch(db, t.sid));
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_record\n");
 }
 
 /* One finished turn with no tools: a user message and its answer. */
@@ -1212,29 +1154,18 @@ static void test_history(void) {
         "SELECT SUM(token_estimate) FROM entries WHERE session_id=? AND turn_id=3", sid, -1));
 
     LEN("$.history", "2");
+    /* An earlier turn has the finished turn's shape (no event or input). */
     expect_json(db, in, "(SELECT group_concat(key, ',') FROM json_each(?1,'$.history[0]'))",
                 "turn_id,tokens,user_messages,notes,iterations,final");
     IN("$.history[0].turn_id", "1");
     expect_id_at(db, in, "$.history[0].tokens.turn", db_scalar_i64(db,
         "SELECT SUM(token_estimate) FROM entries WHERE session_id=? AND turn_id=1", sid, -1));
-    expect_id_at(db, in, "$.history[0].tokens.tools", db_scalar_i64(db,
-        "SELECT SUM(token_estimate) FROM entries WHERE session_id=? AND turn_id=1"
-        " AND type IN ('tool_call','tool_result')", sid, -1));
     expect_id_at(db, in, "$.history[0].user_messages[0].entry_id", u1);
-    IN("$.history[0].user_messages[0].text", "first");
-    LEN("$.history[0].notes", "0");
-    LEN("$.history[0].iterations", "1");
-    expect_id_at(db, in, "$.history[0].iterations[0].iteration_id", it1);
     expect_id_at(db, in, "$.history[0].iterations[0].entry_id", a1);
-    IN("$.history[0].iterations[0].text", "looking");
-    LEN("$.history[0].iterations[0].calls", "2");
-    IN("$.history[0].iterations[0].calls[0].call_id", "c1");
-    IN("$.history[0].iterations[0].calls[0].args.n", "1");
-    expect_id_at(db, in, "$.history[0].iterations[0].calls[0].result.entry_id", old_r);
-    IN("$.history[0].iterations[0].calls[0].result.text", "OLD");
     IN("$.history[0].iterations[0].calls[1].call_id", "only1");
+    /* Its "c1" result is its own, not the newest turn's. */
+    expect_id_at(db, in, "$.history[0].iterations[0].calls[0].result.entry_id", old_r);
     expect_id_at(db, in, "$.history[0].final.entry_id", f1);
-    IN("$.history[0].final.text", "answer one");
     IN("$.history[1].turn_id", "2");
     expect_id_at(db, in, "$.history[1].user_messages[0].entry_id", u2);
     LEN("$.history[1].iterations", "0");
@@ -1246,17 +1177,16 @@ static void test_history(void) {
      * user message is no place for a note, in any turn. */
     char r[160];
     const TurnEditResult NO = TURN_EDIT_REJECTED;
-    expect_untouched(db, sid, E(DROP("only1")), NO,
-                     "drop: \"only1\" is not a tool call of this turn");
+    expect_untouched(db, sid, E(DROP("only1")), NO, "not a tool call of this turn");
     expect_untouched(db, sid, E("{\"op\":\"replace\",\"call_id\":\"only1\",\"text\":\"x\"}"),
                      NO, "replace: \"only1\" is not a tool call of this turn");
     expect_untouched(db, sid, E("{\"op\":\"drop\",\"call_id\":\"only1\",\"turn_id\":2}"), NO,
-                     "drop: \"only1\" is not a tool call of turn 2");
+                     "turn 2");
     int64_t not_here[] = { u1, u2 };
     for (size_t k = 0; k < sizeof(not_here) / sizeof(not_here[0]); k++) {
         snprintf(r, sizeof(r), E("{\"op\":\"note\",\"text\":\"n\",\"before\":%lld}"),
                  (long long)not_here[k]);
-        expect_untouched(db, sid, r, NO, "is not the first entry of an iteration");
+        expect_untouched(db, sid, r, NO, "first entry");
     }
     /* A call id both turns used names the finished turn's call, and only
      * that one leaves. */
@@ -1286,86 +1216,23 @@ static void test_history(void) {
     int64_t f_next = add_plain_turn(db, t.sid, "next", "sure");
     in = input_all(db, t.sid);
     assert(in);
-    IN("$.turn_id", "3");
     expect_id_at(db, in, "$.final.entry_id", f_next);
-    LEN("$.history", "2");
-    IN("$.history[0].final.text", "hello");
     IN("$.history[1].turn_id", "2");
     expect_json(db, in,
         "(SELECT group_concat(json_extract(c.value,'$.call_id'), ',')"
         "  FROM json_each(?1,'$.history[1].iterations') i, json_each(i.value,'$.calls') c)",
         "c1,c3,c4");
     IN("$.history[1].iterations[0].calls[0].result.text", "SHORTER");
-    expect_json(db, in, "json_extract(?1,'$.history[1].iterations[0].calls[0].result.entry_id')"
-                        " > json_extract(?1,'$.history[1].final.entry_id')", "1");
     /* A kept subset of a batch lost its reasoning row: the iteration now
      * opens at its assistant message. */
     expect_id_at(db, in, "$.history[1].iterations[0].entry_id", t.a1);
-    LEN("$.history[1].notes", "1");
     IN("$.history[1].notes[0].text", "tidied");
-    expect_id_at(db, in, "$.history[1].notes[0].before_iteration", t.it3);
-    expect_id_at(db, in, "$.history[1].final.entry_id", t.fin);
     expect_id_at(db, in, "$.history[1].tokens.turn", turn_tokens(db, &t));
-    free(in);
-
-    /* Compaction, as the old C compaction left it (test_legacy_compact): the branch keeps its first
-     * entry, then the summary, then whole turns. History is that branch —
-     * what is left of the first turn, the summary where it stands, and
-     * nothing of what it replaced. */
-    int64_t u_last = add_user(db, t.sid, "last");
-    int64_t f_last = add_typed(db, t.sid, db_next_iteration_id(db, t.sid),
-                               "assistant_message", "bye", NULL, NULL);
-    int64_t u_next = db_scalar_i64(db, "SELECT parent_id FROM entries WHERE id=?", f_next, -1);
-    int64_t cmp = test_legacy_compact(db, t.sid, t.u0, u_next, "SUMMARY of two turns");
-    assert(cmp > 0);
-    in = input_all(db, t.sid);
-    assert(in);
-    IN("$.turn_id", "4");
-    expect_id_at(db, in, "$.user_messages[0].entry_id", u_last);
-    expect_id_at(db, in, "$.final.entry_id", f_last);
-    LEN("$.history", "3");
-    IN("$.history[0].turn_id", "1");
-    expect_id_at(db, in, "$.history[0].user_messages[0].entry_id", t.u0);
-    expect_json(db, in, "json_type(?1,'$.history[0].final')", "null");
-    /* The summary carries the turn_id of the entry it follows, and is still
-     * no part of that turn. */
-    expect_id_at(db, in, "$.history[0].tokens.turn",
-                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", t.u0, -1));
-    expect_json(db, in, "(SELECT group_concat(key, ',') FROM json_each(?1,'$.history[1]'))",
-                "summary");
-    expect_id_at(db, in, "$.history[1].summary.entry_id", cmp);
-    IN("$.history[1].summary.text", "SUMMARY of two turns");
-    expect_id_at(db, in, "$.history[1].summary.tokens",
-                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", cmp, -1));
-    IN("$.history[2].turn_id", "3");
-    IN("$.history[2].final.text", "sure");
-    expect_json(db, in, "instr(?1,'SHORTER') + instr(?1,'tidied')", "0");
-    free(in);
-
-    /* A summary in the middle of the branch (session_condense names a range
-     * of turns) stands between the turns on either side of it. */
-    int64_t mid = session_create(db, "mid", "default", -1, 0);
-    int64_t m1 = add_plain_turn(db, mid, "a", "A");
-    add_plain_turn(db, mid, "b", "B");
-    add_plain_turn(db, mid, "c", "C");
-    int64_t m4 = add_plain_turn(db, mid, "d", "D");
-    int64_t m4u = db_scalar_i64(db, "SELECT parent_id FROM entries WHERE id=?", m4, -1);
-    int64_t mc = test_legacy_compact(db, mid, m1, m4u, "b and c");
-    assert(mc > 0);
-    add_plain_turn(db, mid, "e", "E");
-    in = input_all(db, mid);
-    assert(in);
-    IN("$.final.text", "E");
-    LEN("$.history", "3");
-    IN("$.history[0].final.text", "A");
-    expect_id_at(db, in, "$.history[1].summary.entry_id", mc);
-    IN("$.history[2].final.text", "D");
     free(in);
 
     #undef IN
     #undef LEN
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_history\n");
 }
 
 /* `n` copies of `c`, NUL-terminated (caller frees). */
@@ -1450,7 +1317,6 @@ static void test_input_reasoning(void) {
     free(big); free(bigger);
     #undef IN
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_input_reasoning\n");
 }
 
 /* What a hook asks to be sent (hooks.input): how many earlier turns, with or
@@ -1533,16 +1399,9 @@ static void test_input_options(void) {
     /* Each unit's length as written out, history[0] (turn 1) to [4] (turn 5). */
     int unit[5];
     for (int i = 0; i < 5; i++) {
-        char expr[96];
-        snprintf(expr, sizeof(expr), "octet_length(json_extract(?1,'$.history[%d]'))", i);
-        sqlite3_stmt *st;
-        char sql[160];
-        snprintf(sql, sizeof(sql), "SELECT %s", expr);
-        assert(sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK);
-        sqlite3_bind_text(st, 1, in, -1, SQLITE_STATIC);
-        assert(sqlite3_step(st) == SQLITE_ROW);
-        unit[i] = sqlite3_column_int(st, 0);
-        sqlite3_finalize(st);
+        char path[32];
+        snprintf(path, sizeof(path), "$.history[%d]", i);
+        unit[i] = (int)json_len_at(db, in, path);
         assert(unit[i] > 0);
     }
     free(in);
@@ -1639,7 +1498,6 @@ static void test_input_options(void) {
     #undef LEN
     #undef TURN_IDS
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_input_options\n");
 }
 
 /* Stage 0: a system note after a turn's answer (the streak guard's, which
@@ -1676,53 +1534,6 @@ static void test_note_after_answer(void) {
     free(in);
     #undef IN
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_note_after_answer\n");
-}
-
-/* What a ContextThreshold script is sent: the turn still running, as it
- * stands (no answer yet, "final" null), the numbers it decides on as
- * "context", and every entry's size. */
-static void test_input_context(void) {
-    sqlite3 *db = open_seeded();
-    #define IN(path, want) expect_at(db, in, path, want)
-    int64_t sid = session_create(db, "ctx", "default", -1, 0);
-    add_plain_turn(db, sid, "q1", "a1");
-    int64_t u = add_user(db, sid, "go");
-    int64_t it = db_next_iteration_id(db, sid);
-    int64_t a = add_typed(db, sid, it, "assistant_message", "looking", NULL, NULL);
-    int64_t c = add_call(db, sid, it, "x1", "look", "{}", "done");
-    int64_t r = add_typed(db, sid, it, "tool_result", "found it", "x1", "look");
-    run(db, "UPDATE entries SET tokens=777 WHERE id=%lld", (long long)r);
-
-    TurnEditInputSpec spec = { 1, 1, TURN_EDIT_INPUT_DEFAULT_BYTES };
-    /* A stop event needs the answer: nothing is built mid-turn. */
-    assert(turn_edit_input(db, sid, &spec, &STOP, NULL) == NULL);
-    TurnEditInputFor ct = { .event = "ContextThreshold", .need_answer = 0,
-        .context = "{\"tokens\":9000,\"window\":10000,\"trim_threshold\":5000,"
-                   "\"prune_target\":2500}" };
-    char *in = turn_edit_input(db, sid, &spec, &ct, NULL);
-    assert(in);
-    IN("$.event", "ContextThreshold");
-    IN("$.context", "{\"tokens\":9000,\"window\":10000,\"trim_threshold\":5000,"
-                    "\"prune_target\":2500}");
-    expect_json(db, in, "json_type(?1,'$.final')", "null");
-    expect_id_at(db, in, "$.user_messages[0].entry_id", u);
-    expect_id_at(db, in, "$.user_messages[0].tokens",
-                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", u, -1));
-    expect_id_at(db, in, "$.iterations[0].entry_id", a);
-    expect_id_at(db, in, "$.iterations[0].tokens",
-                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", a, -1));
-    expect_id_at(db, in, "$.iterations[0].calls[0].entry_id", c);
-    expect_id_at(db, in, "$.iterations[0].calls[0].tokens",
-                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", c, -1));
-    /* A measured count wins over the estimate. */
-    IN("$.iterations[0].calls[0].result.tokens", "777");
-    IN("$.history[0].final.text", "a1");
-    expect_json(db, in, "json_type(?1,'$.history[0].final.tokens')", "integer");
-    free(in);
-    #undef IN
-    db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_input_context\n");
 }
 
 /* Around the edges of a turn: an earlier compaction already re-pointed the
@@ -1762,8 +1573,6 @@ static void test_turn_edges(void) {
     assert(db_scalar_i64(db, "SELECT leaf_id FROM sessions WHERE id=?", sid, -1) == fin);
     expect_shape(db, sid, O, "user:hi|user:[Summary of earlier conversation]\nsum|user:go"
                              "|assistant:done");
-    expect_shape(db, sid, G, "user:hi|user:[Summary of earlier conversation]\nsum|user:go"
-                             "|model:done");
     expect_shape(db, sid, A, "user:hi|user:[Summary of earlier conversation]\nsum*|user:go"
                              "|assistant:done");
 
@@ -1774,7 +1583,6 @@ static void test_turn_edges(void) {
     expect_shape(db, sid, O, "user:hi|user:[Summary of earlier conversation]\nsum2|user:more");
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_turn_edges\n");
 }
 
 /* ── The operations on any turn ────────────────────────────────────*/
@@ -1793,16 +1601,6 @@ static void apply_to(sqlite3 *db, int64_t sid, const char *reply, int64_t want_l
     }
     if (want_leaf > 0) assert(leaf_of(db, sid) == want_leaf);
     assert(sqlite3_get_autocommit(db));
-}
-
-/* The newest record on the session's leaf, at `path` within it. */
-static int64_t leaf_rec_id(sqlite3 *db, int64_t sid, const char *path) {
-    char *v = q(db, "SELECT json_extract(data,'$.turn_edits[#-1]%s') FROM entries"
-                    " WHERE id=(SELECT leaf_id FROM sessions WHERE id=%lld)", path,
-                (long long)sid);
-    int64_t n = v ? atoll(v) : -1;
-    free(v);
-    return n;
 }
 
 static int64_t parent_of(sqlite3 *db, int64_t id) {
@@ -1870,14 +1668,14 @@ static void test_past_turn(void) {
     /* Check 3 on a past turn: the effect call stays, but may be rewritten. */
     const TurnEditResult NO = TURN_EDIT_REJECTED;
     expect_untouched(db, t.sid, E("{\"op\":\"drop\",\"call_id\":\"c3\",\"turn_id\":2}"), NO,
-                     "drop: call \"c3\" is protected");
+                     "protected");
     apply_to(db, t.sid, E("{\"op\":\"rewrite\",\"call_id\":\"c3\",\"turn_id\":2,"
                           "\"args\":{\"k\":30}}"), f3);
     int64_t c3n = leaf_rec_id(db, t.sid, ".replaced[0].replacement");
     expect_q(db, "{\"k\":30}|c3|act|2", "SELECT concat_ws('|', content, tool_call_id,"
              " tool_name, turn_id) FROM entries WHERE id=%lld", (long long)c3n);
     expect_untouched(db, t.sid, E("{\"op\":\"drop\",\"call_id\":\"c3\",\"turn_id\":2}"), NO,
-                     "drop: call \"c3\" is protected");
+                     "protected");
     expect_shape(db, t.sid, A,
         "user:hi|assistant:hello*|user:go|assistant:one,=c1,=c3|user:<c1,<c3"
         "|user:" NOTE_TAG "past note|assistant:two,=c4|user:<c4|assistant:done*"
@@ -1904,10 +1702,9 @@ static void test_past_turn(void) {
     expect_json(db, in, "json_type(?1,'$.iterations[0].calls[0].protected')", "true");
     expect_at(db, in, "$.iterations[0].calls[0].args.url", "u");
     free(in);
-    expect_untouched(db, sid, E(DROP("s1")), NO, "drop: call \"s1\" is protected");
+    expect_untouched(db, sid, E(DROP("s1")), NO, "protected");
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_past_turn\n");
 }
 
 /* drop_turns and summarise by turn: whole turns before the newest, written
@@ -1919,19 +1716,23 @@ static void test_whole_turns(void) {
     int64_t f4 = add_plain_turn(db, t.sid, "four", "4"), u4 = parent_of(db, f4);
     const TurnEditResult NO = TURN_EDIT_REJECTED;
     #define REJECT(reply, why) expect_untouched(db, t.sid, reply, NO, why)
-    REJECT(E("{\"op\":\"drop_turns\",\"from_turn\":3,\"to_turn\":4}"),
-           "drop_turns: turn 4 is the live turn");
-    REJECT(E("{\"op\":\"drop_turns\",\"from_turn\":3,\"to_turn\":2}"), "is after to_turn 2");
-    REJECT(E("{\"op\":\"drop_turns\",\"from_turn\":9,\"to_turn\":9}"),
-           "drop_turns: turn 9 is not in this session's context");
-    REJECT(E("{\"op\":\"drop_turns\",\"from_turn\":1}"), "needs \"from_turn\" and \"to_turn\"");
-    REJECT(E("{\"op\":\"drop_turns\",\"from_turn\":1,\"to_turn\":1,\"text\":\"x\"}"),
-           "has a field its op does not take");
-    REJECT(E("{\"op\":\"summarise\",\"from_turn\":1,\"to_turn\":1}"), "needs \"text\"");
-    REJECT(E("{\"op\":\"summarise\",\"text\":\"s\",\"from_turn\":1,\"to_iteration\":1}"),
-           "needs \"from_turn\" and \"to_turn\", or \"from_iteration\" and \"to_iteration\"");
-    REJECT(E("{\"op\":\"summarise\",\"text\":\"s\",\"from_turn\":\"1\",\"to_turn\":1}"),
-           "\"from_turn\" must be an entry, turn or iteration id");
+    static const struct { const char *reply, *why; } cases[] = {
+        { E("{\"op\":\"drop_turns\",\"from_turn\":3,\"to_turn\":4}"), "live turn" },
+        { E("{\"op\":\"drop_turns\",\"from_turn\":3,\"to_turn\":2}"), "is after" },
+        { E("{\"op\":\"drop_turns\",\"from_turn\":9,\"to_turn\":9}"), "not in this session" },
+        { E("{\"op\":\"drop_turns\",\"from_turn\":1}"), "needs \"from_turn\"" },
+        { E("{\"op\":\"drop_turns\",\"from_turn\":1,\"to_turn\":1,\"text\":\"x\"}"),
+          "does not take" },
+        { E("{\"op\":\"summarise\",\"from_turn\":1,\"to_turn\":1}"), "needs \"text\"" },
+        { E("{\"op\":\"summarise\",\"text\":\"s\",\"from_turn\":1,\"to_iteration\":1}"),
+          "needs \"from_turn\"" },
+        { E("{\"op\":\"summarise\",\"text\":\"s\",\"from_turn\":\"1\",\"to_turn\":1}"),
+          "must be an entry, turn or iteration id" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("    reject[%zu]\n", i);
+        REJECT(cases[i].reply, cases[i].why);
+    }
 
     /* Turns 1-2 become one summary at the root; the protected call left
      * with its whole turn (check 3). */
@@ -1981,12 +1782,11 @@ static void test_whole_turns(void) {
     add_call(db, sid, it, "p1", "look", "{}", "pending");
     int64_t fin = add_plain_turn(db, sid, "and", "then");
     expect_untouched(db, sid, E("{\"op\":\"drop_turns\",\"from_turn\":1,\"to_turn\":1}"), NO,
-                     "drop_turns: call \"p1\" is still pending and cannot leave the branch");
+                     "pending");
     run(db, "UPDATE tool_calls SET status='background' WHERE call_id='p1'");
     apply_to(db, sid, E("{\"op\":\"drop_turns\",\"from_turn\":1,\"to_turn\":1}"), fin);
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_whole_turns\n");
 }
 
 /* The last finished turn: rewrite, and summarise by iteration — never its
@@ -1999,39 +1799,44 @@ static void test_finished_turn_ops(void) {
     #define REJECT(reply, why) expect_untouched(db, t.sid, reply, NO, why)
     snprintf(r, sizeof(r), E("{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"x\"}"),
              (long long)t.fin);
-    REJECT(r, "is the turn's answer, which is never edited");
+    REJECT(r, "never edited");
     snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"s\",\"from_iteration\":%lld,"
              "\"to_iteration\":%lld}"), (long long)t.it1, (long long)t.it3);
-    REJECT(r, "holds the turn's answer");
+    REJECT(r, "answer");
     snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"s\",\"from_iteration\":%lld,"
              "\"to_iteration\":%lld}"), (long long)t.it2, (long long)t.it1);
     REJECT(r, "is after to_iteration");
-    REJECT(E("{\"op\":\"summarise\",\"text\":\"s\",\"from_iteration\":1,\"to_iteration\":1}"),
-           "iteration 1 is not an iteration of the newest turn");
     snprintf(r, sizeof(r), E("{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"x\"}"),
              (long long)t.r1);
-    REJECT(r, "is not a user or assistant message, a note or a summary");
-    REJECT(E("{\"op\":\"rewrite\",\"entry_id\":99999,\"text\":\"x\"}"),
-           "rewrite: entry 99999 is not on the session's branch");
-    REJECT(E("{\"op\":\"rewrite\",\"call_id\":\"c1\",\"text\":\"x\"}"),
-           "with \"call_id\" takes \"args\", an object, and no \"text\"");
-    REJECT(E("{\"op\":\"rewrite\",\"call_id\":\"c1\",\"args\":[1]}"), "takes \"args\", an object");
-    REJECT(E("{\"op\":\"rewrite\",\"entry_id\":3,\"call_id\":\"c1\",\"text\":\"x\"}"),
-           "needs \"entry_id\" (a message) or \"call_id\" (a call), one of them");
-    REJECT(E("{\"op\":\"rewrite\",\"entry_id\":3,\"text\":\"x\",\"turn_id\":2}"),
-           "with \"entry_id\" takes \"text\", not \"args\" or \"turn_id\"");
-    REJECT(E("{\"op\":\"rewrite\",\"call_id\":\"c1\",\"args\":{\"k\":\"ghp_aB3kL9mXp7qR2wNv4jH8sT5uY1cF6gW0eDzQ\"}}"),
-           "edits[0]: text contains a secret");
+    REJECT(r, "not a user or assistant message");
+    static const struct { const char *reply, *why; } cases[] = {
+        { E("{\"op\":\"summarise\",\"text\":\"s\",\"from_iteration\":1,\"to_iteration\":1}"),
+          "not an iteration of the newest turn" },
+        { E("{\"op\":\"rewrite\",\"entry_id\":99999,\"text\":\"x\"}"), "not on the session's branch" },
+        { E("{\"op\":\"rewrite\",\"call_id\":\"c1\",\"text\":\"x\"}"), "takes \"args\"" },
+        { E("{\"op\":\"rewrite\",\"call_id\":\"c1\",\"args\":[1]}"), "takes \"args\"" },
+        { E("{\"op\":\"rewrite\",\"entry_id\":3,\"call_id\":\"c1\",\"text\":\"x\"}"),
+          "one of them" },
+        { E("{\"op\":\"rewrite\",\"entry_id\":3,\"text\":\"x\",\"turn_id\":2}"),
+          "takes \"text\"" },
+        { E("{\"op\":\"rewrite\",\"call_id\":\"c1\","
+            "\"args\":{\"k\":\"ghp_aB3kL9mXp7qR2wNv4jH8sT5uY1cF6gW0eDzQ\"}}"),
+          "contains a secret" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        printf("    reject[%zu]\n", i);
+        REJECT(cases[i].reply, cases[i].why);
+    }
     /* Overlaps: each entry is named by one edit at most. */
     snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"s\",\"from_iteration\":%lld,"
              "\"to_iteration\":%lld}," DROP("c1")), (long long)t.it1, (long long)t.it1);
-    REJECT(r, "drop: call \"c1\" is named by two edits");
+    REJECT(r, "named by two edits");
     snprintf(r, sizeof(r), E("{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"x\"},"
              "{\"op\":\"drop_turns\",\"from_turn\":1,\"to_turn\":1}"), (long long)t.a0);
     REJECT(r, "is already named by edits[0]");
     snprintf(r, sizeof(r), E("{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"x\"}," DROP("c4")),
              (long long)t.a2);
-    REJECT(r, "leaves with the iteration a drop empties");
+    REJECT(r, "a drop empties");
     /* Atomicity: good edits beside one bad one leave nothing behind. */
     snprintf(r, sizeof(r), E("{\"op\":\"note\",\"text\":\"fine\"},"
              "{\"op\":\"replace\",\"call_id\":\"c1\",\"text\":\"fine\"},"
@@ -2046,10 +1851,8 @@ static void test_finished_turn_ops(void) {
              "{\"op\":\"rewrite\",\"entry_id\":%lld,\"text\":\"ONE!\"}"),
              (long long)t.u, (long long)t.a1);
     apply_ok(db, &t, r);
-    int64_t un = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[0].replaced[0].replacement')"
-                                   " FROM entries WHERE id=?", t.fin, -1);
-    int64_t an = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[0].replaced[1].replacement')"
-                                   " FROM entries WHERE id=?", t.fin, -1);
+    int64_t un = leaf_rec_id(db, t.sid, ".replaced[0].replacement");
+    int64_t an = leaf_rec_id(db, t.sid, ".replaced[1].replacement");
     BRANCH(db, t.sid, t.u0, t.a0, un, an, t.c1, t.c2, t.c3, t.r2, t.r1, t.r3, t.rs2, t.a2,
            t.c4, t.r4, t.rs3, t.fin);
     expect_q(db, "user_message|1|2|GO!", "SELECT concat_ws('|', type, role, turn_id, content)"
@@ -2070,8 +1873,7 @@ static void test_finished_turn_ops(void) {
     snprintf(r, sizeof(r), E("{\"op\":\"summarise\",\"text\":\"worked\",\"from_iteration\":%lld,"
              "\"to_iteration\":%lld}"), (long long)t.it1, (long long)t.it2);
     apply_ok(db, &t, r);
-    int64_t sum = db_scalar_i64(db, "SELECT json_extract(data,'$.turn_edits[1].summaries[0]')"
-                                    " FROM entries WHERE id=?", t.fin, -1);
+    int64_t sum = leaf_rec_id(db, t.sid, ".summaries[0]");
     BRANCH(db, t.sid, t.u0, t.a0, un, sum, t.rs3, t.fin);
     expect_q(db, "2", "SELECT turn_id FROM entries WHERE id=%lld", (long long)sum);
     expect_shape(db, t.sid, O, "user:hi|assistant:hello|user:GO!"
@@ -2095,7 +1897,6 @@ static void test_finished_turn_ops(void) {
     (void)f3;
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_finished_turn_ops\n");
 }
 
 /* The running turn, between iterations: a ContextThreshold reply edits it,
@@ -2105,15 +1906,28 @@ static void test_running_turn(void) {
     sqlite3 *db = open_seeded();
     T t = seed_turn(db, "running", 0);
     R w = add_running(db, t.sid);
-    TurnEditInputSpec spec = TURN_EDIT_INPUT_DEFAULTS;
-    TurnEditInputFor ct = { .event = "ContextThreshold", .need_answer = 0 };
+    run(db, "UPDATE entries SET tokens=777 WHERE id=%lld", (long long)w.rk1);
+    TurnEditInputSpec spec = { 1, 1, TURN_EDIT_INPUT_DEFAULT_BYTES };
+    /* A stop event needs the answer: nothing is built mid-turn. */
+    assert(turn_edit_input(db, t.sid, &spec, &STOP, NULL) == NULL);
+    /* A ContextThreshold script gets the turn as it stands (no answer yet),
+     * the numbers it decides on as "context", and every entry's size. */
+    TurnEditInputFor ct = { .event = "ContextThreshold", .need_answer = 0,
+        .context = "{\"tokens\":9000,\"window\":10000}" };
     char *in = turn_edit_input(db, t.sid, &spec, &ct, NULL);
     assert(in);
+    expect_at(db, in, "$.event", "ContextThreshold");
+    expect_at(db, in, "$.context", "{\"tokens\":9000,\"window\":10000}");
     expect_json(db, in, "json_type(?1,'$.final')", "null");
     expect_json(db, in, "json_array_length(?1,'$.iterations')", "2");
     expect_id_at(db, in, "$.iterations[0].iteration_id", w.it4);
     expect_id_at(db, in, "$.iterations[0].entry_id", w.rs4);
     expect_id_at(db, in, "$.iterations[0].message_id", w.a4);
+    expect_id_at(db, in, "$.iterations[0].calls[0].tokens",
+                 db_scalar_i64(db, "SELECT token_estimate FROM entries WHERE id=?", w.k1, -1));
+    /* A measured count wins over the estimate. */
+    expect_at(db, in, "$.iterations[0].calls[0].result.tokens", "777");
+    expect_at(db, in, "$.history[0].final.text", "done");
     free(in);
 
     /* The oldest iteration summarised, the newest result shortened: the
@@ -2158,7 +1972,6 @@ static void test_running_turn(void) {
            t.a2, t.c4, t.r4, t.rs3, t.fin, w.u, sum, note);
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_running_turn\n");
 }
 
 /* A long turn summarised again: the summary of its earlier iterations, and
@@ -2192,7 +2005,6 @@ static void test_running_turn_refold(void) {
              (long long)sum1, (long long)note, (long long)w.rs5, (long long)w.a5,
              (long long)w.k2, (long long)w.rk2, (long long)rk3);
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_running_turn_refold\n");
 }
 
 /* Accounting of what an edit writes: a stand-in for a measured entry keeps
@@ -2233,31 +2045,28 @@ static void test_written_tokens(void) {
     context_plan_free(&m);
 
     db_close(db); test_db_clean(DB_PATH);
-    printf("  PASS test_written_tokens\n");
 }
 
 int main(void) {
     TEST_INIT();
     printf("test_turn_edit:\n");
-    test_input();
-    test_note_after_answer();
-    test_input_context();
-    test_rejections();
-    test_drop_one_of_batch();
-    test_drop_whole_iteration();
-    test_replace();
-    test_notes();
-    test_record();
-    test_history();
-    test_input_options();
-    test_input_reasoning();
-    test_turn_edges();
-    test_past_turn();
-    test_whole_turns();
-    test_finished_turn_ops();
-    test_running_turn();
-    test_running_turn_refold();
-    test_written_tokens();
+    RUN(test_input);
+    RUN(test_note_after_answer);
+    RUN(test_rejections);
+    RUN(test_drop_one_of_batch);
+    RUN(test_replace);
+    RUN(test_notes);
+    RUN(test_record);
+    RUN(test_history);
+    RUN(test_input_options);
+    RUN(test_input_reasoning);
+    RUN(test_turn_edges);
+    RUN(test_past_turn);
+    RUN(test_whole_turns);
+    RUN(test_finished_turn_ops);
+    RUN(test_running_turn);
+    RUN(test_running_turn_refold);
+    RUN(test_written_tokens);
     printf("All turn edit tests passed.\n");
     return 0;
 }

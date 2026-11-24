@@ -27,7 +27,7 @@ tool with selectable delivery (`background: true`).
 |---|---|---|---|
 | `EXEC_INLINE` | event-loop thread | control-flow tools (launch_agent, check_session, cancel, request_config, cron/extension/agent tools, channel_send) | synchronous unless the recipe's `null_kind` says otherwise |
 | `EXEC_THREAD` | detached thread | DB/session-only tools (memory_*, cron_list/remove, db_query, search_config/models) | call already `running`; completion writes the result |
-| `EXEC_SANDBOX` | fork+exec `--run-tool` child (`CHILD_MAX` 48) | file / shell / web / js tiers | result socket (a socketpair on fd 3) drained by the poll loop; reap completes the call |
+| `EXEC_SANDBOX` | fork+exec `--run-tool` child (`CHILD_MAX` 48) | file / shell / js tiers | result socket (a socketpair on fd 3) drained by the poll loop; reap completes the call |
 
 Two kinds of `--run-tool` child have no tool call in front of them and share
 the JS-tier vehicle (`script_child_spawn`, dispatch.c): a scheduled script
@@ -47,7 +47,7 @@ the safe defaults by construction.
 | Trait | Default | Meaning |
 |---|---|---|
 | `parallel_safe` | 0 (serial) | models emit ordered calls — shell especially — expecting sequential side effects; only independent self-contained delegations (launch_agent) opt in |
-| `needs_interp` | 0 | `{{SECRET:X}}` resolved to real values at exec time (shell_exec, web_fetch, js_eval) |
+| `needs_interp` | 0 | `{{SECRET:X}}` resolved to real values at exec time (shell_exec, js_eval; every JS extension tool gets it from its tier) |
 | `backgroundable` | 0 | accepts `background: true` (shell_exec, launch_agent) |
 | `null_kind` | `NULL_NONE` | EXEC_INLINE NULL-return protocol: `NULL_ASYNC` (sub-agent launched; continue per parallel_safe), `NULL_PARK` (approval gate) |
 

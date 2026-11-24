@@ -5,7 +5,6 @@
 #include "run_tool.h"
 #include "tool_file.h"
 #include "tool_js.h"
-#include "tool_web_fetch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -155,7 +154,6 @@ static inline int64_t test_legacy_compact(sqlite3 *db, int64_t session_id,
 static inline char *test_run_tier_status(int tier, const char *tool,
                                          const char *args_json,
                                          const FileReadCtx *fctx,
-                                         const WebFetchCtx *wctx,
                                          int *is_error) {
     int sink = 0;
     if (!is_error) is_error = &sink;
@@ -185,17 +183,9 @@ static inline char *test_run_tier_status(int tier, const char *tool,
         q.write_paths  = fctx->sb.write_paths;
         q.write_count  = fctx->sb.write_path_count;
     }
-    if (wctx) {
-        q.workspace = (char *)wctx->workspace;
-        q.cwd_path  = (char *)wctx->cwd_path;
-        q.host_rules = wctx->allowed_hosts;
-        q.host_count = wctx->allowed_host_count;
-        q.sandbox = wctx->host_mode ? 0 : 1;
-    }
     char *r = NULL;
     switch (tier) {
     case RUNTOOL_TIER_FILE: r = tool_file_tier_run(&q, is_error); break;
-    case RUNTOOL_TIER_WEB:  r = tool_web_tier_run(&q, is_error); break;
     case RUNTOOL_TIER_JS:   r = tool_js_tier_run(&q, is_error); break;
     }
     tool_wire_args_free(wa, wn);
@@ -206,23 +196,17 @@ static inline char *test_run_tier_status(int tier, const char *tool,
 /* Status-agnostic form for tests that only look at the text. */
 static inline char *test_run_tier(int tier, const char *tool,
                                   const char *args_json,
-                                  const FileReadCtx *fctx,
-                                  const WebFetchCtx *wctx) {
-    return test_run_tier_status(tier, tool, args_json, fctx, wctx, NULL);
+                                  const FileReadCtx *fctx) {
+    return test_run_tier_status(tier, tool, args_json, fctx, NULL);
 }
 
 static inline char *test_file_tool_run(const char *tool, const char *args_json,
                                        const FileReadCtx *ctx) {
-    return test_run_tier(RUNTOOL_TIER_FILE, tool, args_json, ctx, NULL);
-}
-
-static inline char *test_web_fetch_run(const char *args_json,
-                                       const WebFetchCtx *ctx) {
-    return test_run_tier(RUNTOOL_TIER_WEB, "web_fetch", args_json, NULL, ctx);
+    return test_run_tier(RUNTOOL_TIER_FILE, tool, args_json, ctx);
 }
 
 static inline char *test_js_eval_run_json(const char *args_json) {
-    return test_run_tier(RUNTOOL_TIER_JS, "js_eval", args_json, NULL, NULL);
+    return test_run_tier(RUNTOOL_TIER_JS, "js_eval", args_json, NULL);
 }
 
 #endif /* CCLAW_TEST_UTIL_H */

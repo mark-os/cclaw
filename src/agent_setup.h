@@ -18,7 +18,6 @@
 #include "tool_search_models.h"
 #include "tool_extension.h"
 #include "tool_cron.h"
-#include "tool_web_fetch.h"
 #include "tool_secret_create.h"
 #include "tool_channel_send.h"
 #include "tool_share.h"
@@ -55,7 +54,6 @@ typedef struct {
     /* Contexts that tools reference (must stay alive across the turn loop) */
     FileReadCtx file_read_ctx;
     JsEvalCtx js_eval_ctx;
-    WebFetchCtx web_ctx;
     ToolMemoryCtx mem_ctx;
     /* Daemon-mode only contexts */
     ToolBootstrapCtx bootstrap_ctx;

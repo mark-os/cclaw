@@ -814,7 +814,7 @@ Indexes: `idx_tool_calls_entry(entry_id)`, `idx_tool_calls_session(session_id, s
 
 ## tools
 
-Tool registry. Built-in C tools have NULL `extension_name`/`path`; JS tools point to a handler file in the shared extension store.
+Tool registry. Built-in C tools have NULL `extension_name`/`path`; JS tools point to a handler file in the shared extension store. A shipped (ownerless) extension's install takes over a C tool's row of the same name — how `web_fetch` became the `web-fetch` extension's tool on an existing DB with no patch; an agent's promote never does.
 
 | Column | Type | Notes |
 |--------|------|-------|

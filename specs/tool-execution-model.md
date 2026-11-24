@@ -1,7 +1,7 @@
 # Tool Execution Model — Unified `--run-tool` Entry, Tier Dispatch, Shared Network Broker
 
 Status: **as built.** The structure every sandboxed tool tier (file, shell,
-web, js) runs on: one re-exec'd `--run-tool` entry point, a tier descriptor,
+js) runs on: one re-exec'd `--run-tool` entry point, a tier descriptor,
 and one shared helper for the network tiers. The boundary itself is the
 containment backend ([portability.md](portability.md), layer 3;
 [sandbox-profiles.md](sandbox-profiles.md)); this note covers the processes
@@ -38,7 +38,6 @@ program:
 | Tier  | exec #1 (sterilize) | inner fork | inner exec (foreign program) | Total |
 |-------|---------------------|------------|------------------------------|-------|
 | file  | yes → `--run-tool`  | none       | none                         | **1** |
-| web   | yes → `--run-tool`  | yes (fork) | none — child runs OUR curl   | **1** |
 | js    | yes → `--run-tool`  | yes (fork) | none — child runs OUR qjs    | **1** |
 | shell | yes → `--run-tool`  | yes (fork) | yes — `execl /bin/sh`        | **2** |
 
@@ -49,9 +48,8 @@ Key consequences:
   `--broker` or `--web-fetch` mode** — the "broker" is a *role the `--run-tool`
   process plays for network tiers*, a code branch, NOT a process image. Becoming
   the broker costs **zero** extra execs.
-- **web and js sandbox children are plain `fork`s, not fork+exec.** They run
-  first-party C (web: `http_do` + `html_to_markdown`; js: `tool_js_eval_handler`
-  via QuickJS) and fork from the already-sterile `--run-tool` process
+- **js sandbox children are plain `fork`s, not fork+exec.** They run
+  first-party C (QuickJS, whose `http_request` is our curl) and fork from the already-sterile `--run-tool` process
   (single-threaded, clean locks), so the child fork is the safe
   single-threaded-fork case. No exec needed to run our own functions.
 - **shell is the ONLY tier with a second exec**, and only because `/bin/sh` is a
@@ -75,7 +73,7 @@ daemon poll loop
              setup_ns(desc.skip_pid_ns)      // no_net, scoped mount set
              result = desc.run_fn(blob)      // in-process, this image
              write result → fd 3; _exit
-         else:                               // WEB, JS, SHELL
+         else:                               // JS, SHELL
              serve_network_child(desc, blob) // shared helper, see §4
              write result → fd 3; _exit
   └─ daemon tracks ONE pid (the --run-tool process) via g_children[],
@@ -90,7 +88,7 @@ what makes "no key, no DB" true by construction; `run_tool_verify_clean` then pr
 
 ## 4. The shared network helper (the de-dup)
 
-The three network tiers (web, js, shell) differ on only a few small axes;
+The two network tiers (js, shell) differ on only a few small axes;
 everything else is shared in one helper (`serve_network_child`):
 
 ```
@@ -107,7 +105,7 @@ serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
         if desc.inner_exec:
             tool_shell_tier_exec(q)      // execs /bin/sh, never returns
         else:
-            desc.run_fn(q)               // ← in-process leaf (web/js)
+            desc.run_fn(q)               // ← in-process leaf (js)
         _exit(...)
     // parent (the --run-tool/broker process):
     proxy_serve(&proxy)                  // start accept thread AFTER the fork
@@ -119,14 +117,18 @@ serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
 
 Per-tier inputs to the helper:
 
-| Axis        | file            | web                          | js                           | shell                        |
-|-------------|-----------------|------------------------------|------------------------------|------------------------------|
-| skip_pid_ns | 1               | 1                            | 1                            | 0 (PID ns)                   |
-| needs_proxy | no              | yes                          | yes                          | yes                          |
-| inner_exec  | 0               | 0                            | 0                            | 1                            |
-| run_fn      | tool_file_tier_run (not via helper) | tool_web_tier_run (curl + html_to_markdown, **in-process**) | tool_js_tier_run (qjs eval, **in-process**) | NULL (`execl /bin/sh`, **inner exec**) |
-| /proc       | absent          | absent                       | absent                       | present (PID ns backs it)    |
-| proxy reach | n/a             | net_shim + HTTP_PROXY (curl is ours) | net_shim + HTTP_PROXY (qjs http_request uses curl) | net_shim + HTTP_PROXY; `connect` mode for ssh (untrusted subprocess tree) |
+| Axis        | file            | js                           | shell                        |
+|-------------|-----------------|------------------------------|------------------------------|
+| skip_pid_ns | 1               | 1                            | 0 (PID ns)                   |
+| needs_proxy | no              | yes                          | yes                          |
+| inner_exec  | 0               | 0                            | 1                            |
+| run_fn      | tool_file_tier_run (not via helper) | tool_js_tier_run (qjs eval, **in-process**) | NULL (`execl /bin/sh`, **inner exec**) |
+| /proc       | absent          | absent                       | present (PID ns backs it)    |
+| proxy reach | n/a             | net_shim + HTTP_PROXY (qjs http_request uses curl) | net_shim + HTTP_PROXY; `connect` mode for ssh (untrusted subprocess tree) |
+
+`web_fetch` is not a tier: it is the shipped `web-fetch` extension, a JS tool
+(`extensions/web-fetch/fetch.qjs`) whose `http_request` and
+`HTML.toMarkdown` run in the js tier like any extension tool's.
 
 Invariant restated: **/proc present IFF PID namespace present.** Every
 network tier gets the proxy socket bind-mounted at one fixed in-boundary path,
@@ -148,21 +150,20 @@ Do not scatter `if tier=="shell"` across call sites.
 typedef char *(*RunFn)(const RunToolParsed *q);
 
 typedef struct {
-    int   skip_pid_ns;   /* 1 = no CLONE_NEWPID (file/web/js); 0 = PID ns (shell) */
+    int   skip_pid_ns;   /* 1 = no CLONE_NEWPID (file/js); 0 = PID ns (shell) */
     int   needs_proxy;   /* 1 = bind/serve proxy + inner fork (network tiers) */
     int   inner_exec;    /* 1 = run_fn execs a foreign program (shell) */
     RunFn run_fn;        /* leaf result producer; NULL iff inner_exec */
 } TierDescriptor;
 ```
 
-`tier_descriptor(tier)` is a compile-time table mapping the four tiers to their
-axes. "What makes web different from shell" lives in this one table:
+`tier_descriptor(tier)` is a compile-time table mapping the three tiers to their
+axes. "What makes js different from shell" lives in this one table:
 
 ```c
 static const TierDescriptor table[] = {
     [RUNTOOL_TIER_FILE]  = { .skip_pid_ns = 1, .needs_proxy = 0, .inner_exec = 0, .run_fn = tool_file_tier_run },
     [RUNTOOL_TIER_SHELL] = { .skip_pid_ns = 0, .needs_proxy = 1, .inner_exec = 1, .run_fn = NULL },
-    [RUNTOOL_TIER_WEB]   = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = tool_web_tier_run },
     [RUNTOOL_TIER_JS]    = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = tool_js_tier_run },
 };
 ```
@@ -178,7 +179,7 @@ exceeds the cap). **Not JSON**: both ends are the same binary, so the format is
 a fixed-order sequence of primitives — `u32` (4-byte LE) and `str` (`u32`
 length + raw bytes, length 0 = NULL). No escaping, no key scan; secret values
 cross as raw bytes with no escape/unescape round-trip. The body opens with a
-tier byte (`0`=file, `1`=shell, `2`=web, `3`=js); `run_tool.c` is the canonical
+tier byte (`0`=file, `1`=shell, `2`=js); `run_tool.c` is the canonical
 field order. Fields by tier (additive over file):
 
 - all: `tier`, `tool_name`, `env_mode`, `rlimits{nproc,as_mb,cpu_sec}` (`as_mb` is
@@ -188,13 +189,15 @@ field order. Fields by tier (additive over file):
   the child can bind-mask `.cclaw_key` and the DB family out of any granted
   mount; see [security.md](security.md). Dropping it silently disables the
   mask, which is why `test/test_sandbox_key_mask.c` guards it.)
-- web/shell/js: `host_rules[]` (exact/suffix), `deny_rules[]` (sensitivity labels), `agent_dir` (for the proxy socket; the broker partitions grants into host/CIDR rules at `proxy_bind`)
+- shell/js: `host_rules[]` (exact/suffix), `deny_rules[]` (sensitivity labels), `agent_dir` (for the proxy socket; the broker partitions grants into host/CIDR rules at `proxy_bind`)
 - shell: `command` (with secrets already interpolated by the daemon parent), `secrets[]` (minimal name/value set for env injection)
-- shell/web/js: `timeout` — the call's budget in seconds. Each tool takes a
-  `timeout` argument (defaults 30 shell — config `shell_timeout` — / 60 web / 120 js), clamped by the
+- shell/js: `timeout` — the call's budget in seconds. Each tool takes a
+  `timeout` argument (defaults 30 shell — config `shell_timeout` — / 120 js,
+  which a JS tool may undercut for its own work: web_fetch gives its fetch
+  60), clamped by the
   parent to `TOOL_TIMEOUT_MAX_SEC` (600); the daemon's own backstop deadline is
   set margin-seconds past it so the broker's teardown wins in the normal case
-- file/web/js: `params[]` — the tool's arguments, pre-extracted by the parent
+- file/js: `params[]` — the tool's arguments, pre-extracted by the parent
   (`tool_args_extract`, SQLite JSON1 over the tool's schema) as
   `(key, kind, value)` where kind is text, opaque-JSON (js_eval's `args`,
   which QuickJS parses natively), or string-list (file_edit's edits,
@@ -283,6 +286,11 @@ and no DB. Only the proxy config + request blob cross fd 3.
    `js_eval` and JS-defined extension tools routes through the `SBX_JS` tier.
 4. file tier already on the exec'd path; shares `run_tool_verify_clean` and the
    tier-descriptor dispatch (no separate code path).
+5. ✅ **Fold web into js** (2026-11). `web_fetch` became the shipped
+   `web-fetch` extension; `html_to_markdown` became the `HTML.toMarkdown`
+   global, and `http_request` gained what web_fetch needed (`content_type`,
+   `truncated`, the denied-host hint). The web tier, its dispatch branch and
+   its wire byte are gone.
 
 ---
 

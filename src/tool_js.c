@@ -55,7 +55,7 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
                           "  var r = http_request('https://api.example.com/data'); var obj = JSON.parse(r.body);\n"
                           "  fs.writeFile('out.txt', result); // returns bytes written\n"
                           "http_request(url[, {method, body, headers:{Name:Value}, markdownify, timeout, save_to}]) "
-                          "is synchronous; returns {status, body, error}; "
+                          "is synchronous; returns {status, content_type, body, error}; "
                           "markdownify:true converts an HTML body to markdown; "
                           "timeout is seconds (default 30, max 600). "
                           "body is text only: to download an image, PDF or any other "
@@ -85,6 +85,7 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
                           "fast-xml-parser-style object: element names as keys, attributes "
                           "as '@_name', repeated siblings as arrays, text-only elements as "
                           "strings, mixed content under '#text'. "
+                          "HTML.toMarkdown(str) converts an HTML page to markdown. "
                           "All throw on error; all accept optional callback(err, result) as last arg. "
                           "Heap is 8MB by default (config js_heap_mb) — the parsed value costs "
                           "several times its source, so JSON.parse tops out near ~1MB of text "
@@ -179,7 +180,7 @@ int js_tool_resolve_request(const ToolEntry *te, JsEvalCtx **out_ctx,
 }
 
 char *tool_js_tier_run(const RunToolParsed *q, int *is_error) {
-    /* qjs runs in-process in the inner fork (web's twin): netns + proxy +
+    /* qjs runs in-process in the inner fork: netns + proxy +
      * mounts are already applied. code/filename/args arrive as pre-extracted
      * wire params; args is an opaque JSON blob QuickJS itself parses.
      * http_request's curl honors HTTP_PROXY → decide(); fs.* paths are real
@@ -210,10 +211,12 @@ char *tool_js_tier_run(const RunToolParsed *q, int *is_error) {
         }
         qjs_host_set_secrets(js_secrets, q->secret_count);
     }
+    qjs_host_set_egress(q->host_rules, q->host_count, q->sandbox);
     /* LLM() reaches the parent's bridge via CCLAW_LLM_SOCK (env, set during
      * sandbox setup from q->llm_sock) — nothing to hand the engine here. */
     char *r = qjs_eval_run(code, filename, args, ext_config, is_error);
     qjs_host_set_secrets(NULL, 0);
+    qjs_host_set_egress(NULL, 0, 0);
     free(js_secrets);
     return r ? r : tool_fail(is_error, "error: js_eval returned null");
 }

@@ -14,6 +14,7 @@
 #include "config.h"
 #include "db.h"
 #include "dispatch.h"
+#include "extension_manifest.h"
 #include "proc.h"
 #include "run_tool.h"
 #include "test_util.h"
@@ -98,7 +99,7 @@ static int run_call_as(const char *agent, int64_t sid, const char *tool,
 /* Using a secret is a grant (v60): before the agent holds a 'secret' grant,
  * naming the secret is refused inline — before any binding check, before
  * anything can park — and the refusal names the secret, the agent and the
- * way to ask. Covers both reference forms: {{SECRET:X}} on the web tier and
+ * way to ask. Covers both reference forms: {{SECRET:X}} in web_fetch's args and
  * $CCLAW_SECRET_X on the shell tier. Both secrets here are ENVIRONMENT
  * secrets (CCLAW_SECRET_*), which have no secrets row: the rule is by name. */
 static void test_ungranted_secret_refused(void) {
@@ -136,7 +137,7 @@ static void test_unbound_denies_inline(void) {
     assert(r != NULL);
     assert(strstr(r, "ALPACA_KEY has no host binding"));
     assert(strstr(r, "secret_bindings"));
-    assert(strstr(r, "api.x.test"));       /* web tier: the host is known */
+    assert(strstr(r, "api.x.test"));       /* the url argument names the host */
     assert(approvals_count() == 0);        /* the park class is gone */
     free(r);
 }
@@ -157,12 +158,16 @@ static void test_uncovered_host_denies(void) {
 /* Positive control: bound + covered passes the gate — the call is dispatched
  * (forked broker), not answered with a binding error. Whatever the child
  * then returns (proxy refusal, sandbox refusal on hosts without userns) is
- * downstream of the gate and not this test's concern. */
+ * downstream of the gate — except that it must have run: web_fetch's url
+ * travels inside the JSON `args` its script is evaluated with, and a secret
+ * holding a quote and a backslash, interpolated unescaped, ended that JSON
+ * string early (a SyntaxError, or script written by the secret's value). */
 static void test_bound_covered_passes(void) {
     assert(db_secret_host_bind(g_db, "ALPACA_KEY", "127.0.0.1") == 0);
+    assert(db_secret_host_bind(g_db, "QUOTED", "127.0.0.1") == 0);
     char *r = NULL;
     int rc = run_call("web_fetch",
-        "{\"url\":\"http://127.0.0.1:1/x\","
+        "{\"url\":\"http://127.0.0.1:1/x?q={{SECRET:QUOTED}}\","
         "\"headers\":\"k: {{SECRET:ALPACA_KEY}}\"}", &r);
     assert(rc != 1 && rc != 2);            /* dispatched, not denied/parked */
     assert(r == NULL);                     /* no result yet — child owns it */
@@ -181,6 +186,12 @@ static void test_bound_covered_passes(void) {
         if (done) break;
         usleep(100 * 1000);
     }
+    char q[160];
+    snprintf(q, sizeof(q), "SELECT content FROM entries WHERE session_id=%lld"
+             " AND role=3 ORDER BY id DESC LIMIT 1", (long long)g_sid);
+    char *out = test_qs(g_db, q);
+    assert(out && !strstr(out, "SyntaxError"));
+    free(out);
 }
 
 /* Runtime discovery (shell tier, no static target): the call runs narrowed,
@@ -292,6 +303,7 @@ int main(int argc, char *argv[]) {
     /* Loaded before agent_setup_init: shell_secrets_collect eats the env. */
     setenv("CCLAW_SECRET_ALPACA_KEY", "topsecret-value", 1);
     setenv("CCLAW_SECRET_GH_TOKEN", "another-secret", 1);
+    setenv("CCLAW_SECRET_QUOTED", "a\"b\\c", 1);
 
     g_db = test_db_open(DB_PATH);
     assert(g_db);
@@ -301,6 +313,8 @@ int main(int argc, char *argv[]) {
              "       ('bot','tool','shell_exec','operator');");
     g_sid = session_create(g_db, "t", "bot", -1, 0);
     assert(g_sid > 0);
+    /* web_fetch is the shipped web-fetch extension, attached on install. */
+    assert(extension_install_builtin(g_db, DB_PATH) == 0);
 
     Config *cfg = config_load(g_db);
     assert(cfg);
@@ -315,6 +329,8 @@ int main(int argc, char *argv[]) {
     assert(agent_config_grant(g_db, "bot", "secret", "ALPACA_KEY", 0,
                               GRANT_ORIGIN("operator", 0)) == 0);
     assert(agent_config_grant(g_db, "bot", "secret", "GH_TOKEN", 0,
+                              GRANT_ORIGIN("operator", 0)) == 0);
+    assert(agent_config_grant(g_db, "bot", "secret", "QUOTED", 0,
                               GRANT_ORIGIN("operator", 0)) == 0);
     RUN(test_unbound_denies_inline);
     RUN(test_uncovered_host_denies);

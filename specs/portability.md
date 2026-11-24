@@ -126,8 +126,8 @@ Not planned work. Recorded so the code leaves room for it.
 
 - **Egress for `web_fetch` and JS.** The proxy is ordinary socket code and
   needs no namespace; only *forcing* traffic through it does. cclaw's own
-  libcurl can simply be pointed at it, which would give these two tiers a real
-  host allowlist on any host. The shell cannot be forced this way: proxy
+  libcurl can simply be pointed at it, which would give the js tier (and so
+  web_fetch, a JS tool) a real host allowlist on any host. The shell cannot be forced this way: proxy
   environment variables are advice a program is free to ignore.
 - **Path policy in code.** One function deciding "may this call read / write
   this path" for file tools and JS `fs.*`, in place of relying on what is

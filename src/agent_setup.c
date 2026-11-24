@@ -1,7 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "agent_setup.h"
 #include "tool_shell.h"
-#include "tool_web_fetch.h"
 #include "tool_db_query.h"
 #include "tool_cron.h"
 #include "tool_request_config.h"
@@ -79,19 +78,12 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     tool_file_edit_register(&setup->reg, &setup->file_read_ctx);
     tool_file_grep_register(&setup->reg, &setup->file_read_ctx);
 
-    /* JS eval (SBX_JS broker): mirrors web/shell — qjs runs in-process in the
+    /* JS eval (SBX_JS broker): qjs runs in-process in the
      * fork+execve --run-tool child, egress via per-hop proxy decide(). */
     setup->js_eval_ctx.workspace = cfg->workspace;
     setup->js_eval_ctx.cwd_path = getenv("CCLAW_PATH");
     setup->js_eval_ctx.db_path = cfg->db_path;
     tool_js_eval_register(&setup->reg, &setup->js_eval_ctx);
-
-    /* web_fetch — sandboxed broker (SBX_WEB), egress via per-hop proxy decide().
-     * Shares the profile + workspace + host grants with shell. */
-    setup->web_ctx.workspace = cfg->workspace;
-    setup->web_ctx.cwd_path = getenv("CCLAW_PATH");
-    setup->web_ctx.db_path = cfg->db_path;
-    tool_web_fetch_register(&setup->reg, &setup->web_ctx);
 
     /* db_query */
     tool_db_query_register(&setup->reg, db);
@@ -249,9 +241,6 @@ static void containment_refresh(AgentSetup *setup, sqlite3 *db, const char *agen
     setup->js_eval_ctx.host_mode = profile.sandbox ? 0 : 1;
     setup->js_eval_ctx.sandbox_profile = profile_str;
 
-    setup->web_ctx.sb = profile;
-    setup->web_ctx.host_mode = profile.sandbox ? 0 : 1;
-
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
         ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
@@ -260,7 +249,7 @@ static void containment_refresh(AgentSetup *setup, sqlite3 *db, const char *agen
     }
 }
 
-/* Point every file/shell/js/web ctx at the advancing agent's own workspace.
+/* Point every file/shell/js ctx at the advancing agent's own workspace.
  * Without this one shared setup left every agent operating in the process
  * -global cfg->workspace (agents/default/workspace), so a daemon-run agent
  * saw an empty directory that was not its own. Created eagerly: the tools
@@ -280,7 +269,6 @@ static void workspace_refresh(AgentSetup *setup, const char *agent) {
 
     setup->file_read_ctx.workspace = setup->workspace_buf;
     setup->js_eval_ctx.workspace = setup->workspace_buf;
-    setup->web_ctx.workspace = setup->workspace_buf;
     /* Extension drafts live under <workspace>/extensions, so the draft →
      * promote flow has to follow the agent too — a draft written by one agent
      * must not become another's to promote. */
@@ -331,13 +319,6 @@ void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent)
         sc->sb.write_paths = setup->caps.write_paths;
         sc->sb.write_path_count = setup->caps.write_count;
     }
-
-    setup->web_ctx.allowed_hosts = setup->caps.hosts;
-    setup->web_ctx.allowed_host_count = setup->caps.host_count;
-    setup->web_ctx.sb.read_paths = setup->caps.read_paths;
-    setup->web_ctx.sb.read_path_count = setup->caps.read_count;
-    setup->web_ctx.sb.write_paths = setup->caps.write_paths;
-    setup->web_ctx.sb.write_path_count = setup->caps.write_count;
 }
 
 void agent_setup_destroy(AgentSetup *setup) {

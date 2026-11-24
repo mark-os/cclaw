@@ -45,9 +45,9 @@ typedef void (*ToolFreeFn)(void *user_data);
  *                 session state or mutate the registry: launch_agent,
  *                 check_session, request_config, extension_*).
  * EXEC_THREAD   — fire-and-forget detached thread; DB/session-only tools.
- * EXEC_SANDBOX  — fork+execve --run-tool child (file/shell/web/js). */
+ * EXEC_SANDBOX  — fork+execve --run-tool child (file/shell/js). */
 typedef enum { EXEC_INLINE, EXEC_THREAD, EXEC_SANDBOX } ExecVehicle;
-typedef enum { SBX_NONE, SBX_FILE, SBX_WEB, SBX_SHELL, SBX_JS } SandboxTier;
+typedef enum { SBX_NONE, SBX_FILE, SBX_SHELL, SBX_JS } SandboxTier;
 
 /* NULL-result protocol for EXEC_INLINE tools: a handler returning NULL means
  * it dispatched async work instead of finishing inline.

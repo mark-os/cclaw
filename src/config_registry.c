@@ -145,7 +145,7 @@ static const ConfigDef s_defs[] = {
        * the route allowlist is (default-deny per target, operator-managed). */
       "Baseline tool grants seeded for a newly created agent (JSON array)" },
     { "agent_default_extensions",
-      "[\"cclaw-docs\",\"compaction\"]",
+      "[\"cclaw-docs\",\"compaction\",\"web-fetch\"]",
       "Extensions attached to every newly created agent (JSON array)" },
     { "agent_approval_tools",
       "[\"extension_publish\"]",

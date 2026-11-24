@@ -122,8 +122,8 @@ A tool may declare the hosts it talks to. **Once promoted, the declaration
 REPLACES the agent's `host` grants for calls of that tool**: the tool reaches
 exactly the declared hosts, needs no agent grant to do so, and the agent's own
 grants neither widen nor gate it. A tool that declares nothing — every builtin
-(`shell_exec`, `web_fetch`, `js_eval`, the file tools) and every draft — runs
-under the agent's `host` grants, unchanged.
+(`shell_exec`, `js_eval`, the file tools, the shipped `web_fetch`) and every
+draft — runs under the agent's `host` grants, unchanged.
 
 This is the channel model (`egress_hosts` pinned by the runner) extended to
 tools: one rule everywhere. Mechanically it is a third input to
@@ -329,10 +329,11 @@ src/qjs_host_eval.c). Globals available to tool handlers (the
 
 | Global | Description |
 |--------|-------------|
-| `http_request(url[, opts])` | Blocking HTTP (host-allowlisted). `opts`: `{method, body, headers: {Name: Value}, markdownify}`. Returns `{status, body}`; on transport failure `{status: -1, body: "", error}` (never throws; `body` is always a string). `markdownify: true` converts an HTML body to markdown — a rendering aid, not a security boundary (untrusted-content wrapping happens at storage time via the entry's `network_hosts` tag). |
+| `http_request(url[, opts])` | Blocking HTTP (host-allowlisted; up to 5 redirects, each hop decided at the proxy). `opts`: `{method, body, headers: {Name: Value}, markdownify, timeout, save_to, max_bytes}`; a `User-Agent` header replaces the default `cclaw/1.0`. Returns `{status, content_type, body}`, plus `truncated: true` when the body was cut at 2 MB; on transport failure `{status: -1, body: "", error}` (never throws; `body` is always a string), and when the egress rules do not cover the URL's host, `error` names the grant to request and `denied: true` is set. `markdownify: true` converts an HTML body to markdown — a rendering aid, not a security boundary (untrusted-content wrapping happens at storage time via the entry's `network_hosts` tag). |
 | `getConfig(key)` | The owning extension's `config[]` value (registry key `<ext>.<key>`, prefix stripped) — string or `null`, read-only. Secret keys are excluded; config values are resolved parent-side and `{{SECRET:NAME}}` tokens in them arrive interpolated. Always bound (empty object for `js_eval`). |
 | `fs.readFile/writeFile/readdir/stat/lstat/cwd` (+ `…Sync` aliases) | Workspace-scoped filesystem. |
 | `XML.parse(str)` (alias `xml.parse`) | XML → JS tree in the fast-xml-parser shape: element names as keys, attributes as `@_name`, repeated siblings as arrays (a single occurrence is **not** an array), text-only elements collapsed to strings, mixed content under `#text`. Vendored yxml (`src/qjs_xml.c`); also bound in the channel runner. Nodes are NULL-prototype, so element names cannot collide with `Object.prototype` members. Entities are lenient by design — built-ins and numeric refs decode, common HTML names decode, unknown names and bare `&` survive as literal text, CDATA/comments untouched — because a conforming parser loses the whole document to one stray `&nbsp;`. Throws `SyntaxError` (per yxml failure code) or `InternalError: out of memory`; the tree costs ~3× the document against `js_heap_mb`, and nesting is capped at `XML_MAX_DEPTH` (128). Deliberate departures from fast-xml-parser, verified against 5.10.1: values stay **strings** (fxp coerces numerics), and entity leniency decodes the common HTML names where fxp leaves them literal. Matching fxp: last-wins on a duplicate attribute, namespace prefixes kept verbatim (no `xmlns` resolution), and mixed content concatenated under `#text` — so `<p>a<b>B</b>c</p>` loses the position of `<b>` (fxp needs `preserveOrder` for that, the option behind CVE-2026-27942; not worth adopting for feed work). |
+| `HTML.toMarkdown(str)` | HTML → markdown: script/style dropped, headings, list items and links to markdown markers, the common entities decoded, whitespace collapsed. C (`src/qjs_html.c`), bound only here — never in the parent or the channel runner. The converter `web_fetch` uses; not a security boundary either. |
 | `console.log/warn/error`, `print` | Buffered; emitted as the result when the handler returns `undefined`. |
 
 Secrets are referenced as `{{SECRET:NAME}}` — in handler *arguments* and
@@ -482,19 +483,26 @@ reads it.
 
 There is **one extension model**, not two. Extensions shipped in the binary
 (the `telegram`, `discord` and `whatsapp` channels, the `cclaw-docs` skills
-bundle, and the `compaction` hook bundle — `SHIPPED_BUNDLES` in the Makefile
-embeds `extensions/compaction`) are installed at every daemon start via
+bundle, the `compaction` hook bundle and the `web-fetch` tool bundle —
+`SHIPPED_BUNDLES` in the Makefile embeds `extensions/compaction` and
+`extensions/web-fetch`) are installed at every daemon start via
 `extension_install_builtin()`, which stages the embedded templates and runs
 them through the same `extension_install()` path as an agent's promote, with
 no owner: `extensions.owner_agent` is NULL (a declared FK to `agents` since
 v59; before that the string `'system'` stood in), and published. No owner
 means no grants and no cron rows are minted for one, and no attachment by
-ownership: `cclaw-docs` and `compaction` are attached to every existing agent
-by the install itself (`INSERT OR IGNORE`, so an attachment the operator set
-to `enabled = 0` stays off; `compaction` only on the install that first
-creates its row) and to new agents through `agent_default_extensions`.
-Reinstalling the hook bundle keeps the operator's `hooks.enabled`, and keeps
-`fail_count` and `disabled` while the bundle's version is unchanged. The agent-facing
+ownership: `cclaw-docs`, `compaction` and `web-fetch` are attached to every
+existing agent by the install itself (`INSERT OR IGNORE`, so an attachment the
+operator set to `enabled = 0` stays off; `compaction` and `web-fetch` only on
+the install that first creates their row) and to new agents through
+`agent_default_extensions`. Reinstalling either keeps the operator's
+`hooks.enabled` and `tools.enabled`, and keeps a hook's `fail_count` and
+`disabled` while the bundle's version is unchanged. Attachment only makes the
+tool loadable; using it still takes the `tool` grant (`web_fetch` is in
+`agent_default_tools`). A builtin may take over a tools row written for a C
+tool of the same name (no `extension_name`) — how `web_fetch` moved from C to
+JS without a schema patch, keeping its grants — and an agent's promote never
+can: it fails on the name like any collision. The agent-facing
 `extension_list` still shows such an extension as owned by `system`. They carry a real `extension.json`
 like any other bundle — no manifest synthesis, no `builtin` flag.
 

@@ -73,8 +73,7 @@
 /* Sandbox tier wire discriminator (first body byte). Mirrors SandboxTier. */
 #define RUNTOOL_TIER_FILE  0
 #define RUNTOOL_TIER_SHELL 1
-#define RUNTOOL_TIER_WEB   2
-#define RUNTOOL_TIER_JS    3
+#define RUNTOOL_TIER_JS    2
 
 /* A name/value secret for env injection (pre-filtered/resolved in parent).
  * `hosts` — space-joined bound-host rules (secret_hosts, resolved in the
@@ -108,7 +107,7 @@ typedef struct {
     int mount_cwd;
     const char **read_paths;  size_t read_count;
     const char **write_paths; size_t write_count;
-    /* network tiers (shell/web/js) */
+    /* network tiers (shell/js) */
     const char *agent_dir;
     const char **host_rules;  size_t host_count;
     const char **deny_rules;  size_t deny_count;
@@ -118,7 +117,7 @@ typedef struct {
     int timeout;
     const RunToolSecret *secrets; size_t secret_count;
     /* Pre-extracted tool params (tool_args_extract in the parent) — the
-     * child never parses argument JSON. file/web/js tiers. */
+     * child never parses argument JSON. file/js tiers. */
     const ToolWireArg *params; size_t param_count;
     /* Parent-composed advice for the proxy-deny summary — set when the call's
      * egress was narrowed to its secrets' bound hosts, so a denial names the

@@ -622,6 +622,46 @@ static void test_install_builtin_compaction(void) {
     db_close(db);
 }
 
+/* web_fetch was a C tool, so a v0.8.0 DB holds its row with no extension.
+ * The shipped web-fetch bundle takes that row over, keeping the operator's
+ * switch and every grant, and attaches to every agent: the tool survives the
+ * upgrade. Only a builtin may: an agent's promote of a tool named like a C
+ * tool is refused, never a takeover (it would shadow the builtin). */
+static void test_install_builtin_takes_over_c_tool(void) {
+    test_db_clean(TEST_DB);
+    rm_rf("/tmp/extensions/web-fetch");
+    setup_bundle();
+    sqlite3 *db = open_seeded();
+    assert(config_registry_sync(db) == 0);
+    assert(sqlite3_exec(db,
+        "INSERT OR REPLACE INTO tools(name, description, parameters_json, enabled,"
+        "  droppable) VALUES('web_fetch','old','{}',0,1),('db_query','q','{}',1,1);"
+        "INSERT INTO grants(agent_name, kind, value, source)"
+        "  VALUES('default','tool','web_fetch','operator');",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    write_file(BUNDLE "/extension.json",
+        "{\"name\":\"nws\",\"tools\":[{\"name\":\"db_query\",\"description\":\"d\","
+        "\"parameters\":{\"type\":\"object\"},\"handler\":\"forecast.qjs\"}]}");
+    char *err = NULL;
+    assert(extension_install(db, BUNDLE, "default", 0, &err) == -1);
+    free(err);
+    assert(test_qi(db, "SELECT extension_name IS NULL FROM tools WHERE name='db_query'") == 1);
+
+    for (int restart = 0; restart < 2; restart++) {
+        assert(extension_install_builtin(db, TEST_DB) == 0);
+        assert(test_qi(db, "SELECT extension_name='web-fetch' AND enabled=0"
+                        " AND droppable=1 AND path='/tmp/extensions/web-fetch/fetch.qjs'"
+                        " FROM tools WHERE name='web_fetch'") == 1);
+        assert(test_qi(db, "SELECT COUNT(*) FROM agents a WHERE NOT EXISTS (SELECT 1"
+                        " FROM agent_extensions ae WHERE ae.agent_name=a.name"
+                        " AND ae.extension_name='web-fetch' AND ae.enabled=1)") == 0);
+        assert(test_qi(db, "SELECT COUNT(*) FROM grants WHERE agent_name='default'"
+                        " AND kind='tool' AND value='web_fetch'") == 1);
+    }
+    db_close(db);
+}
+
 /* Several processes installing the builtins at once (a daemon and CLI runs
  * starting together) must all succeed: each stages in its own directory and
  * files reach the store by rename. With a shared staging path one process's
@@ -879,6 +919,7 @@ int main(void) {
     RUN(test_install_refuses_owner_takeover);
     RUN(test_install_builtin);
     RUN(test_install_builtin_compaction);
+    RUN(test_install_builtin_takes_over_c_tool);
     RUN(test_install_builtin_concurrent);
     RUN(test_manifest_agents);
     /* cleanup */

@@ -122,10 +122,10 @@ Every new agent is granted a baseline toolset; the rest it asks for with `reques
 | `cron_set` / `cron_list` / `cron_remove` | Schedule its own prompts and scripts | yes |
 | `launch_agent` / `check_session` | Delegate work and check on it | yes |
 | `shell_exec` | Run a shell command in the namespace sandbox | on request |
-| `web_fetch` | Fetch a URL (host-allowlisted: each new host is still a `request_config` grant) | yes |
+| `web_fetch` | Fetch a URL (host-allowlisted: each new host is still a `request_config` grant); a shipped JS extension, [extensions/web-fetch](extensions/web-fetch/fetch.qjs) | yes |
 | `db_query` | Query the SQLite database read-only | on request |
 
-The baseline list is the `agent_default_tools` config key. File tools are workspace-scoped; `file_find`/`file_grep` skip `.git` and `node_modules`. `js_eval` runs modern JavaScript (QuickJS — ES2023-class; no modules, no event loop, no top-level `await`, no `Atomics`) with the globals `fs.readFile/writeFile/readdir/stat/cwd`, `http_request`, `XML.parse`, and `LLM()` — see [specs/extensions.md](specs/extensions.md#js-dialect--globals).
+The baseline list is the `agent_default_tools` config key. File tools are workspace-scoped; `file_find`/`file_grep` skip `.git` and `node_modules`. `js_eval` runs modern JavaScript (QuickJS — ES2023-class; no modules, no event loop, no top-level `await`, no `Atomics`) with the globals `fs.readFile/writeFile/readdir/stat/cwd`, `http_request`, `XML.parse`, `HTML.toMarkdown`, and `LLM()` — see [specs/extensions.md](specs/extensions.md#js-dialect--globals).
 
 ## Extensible
 

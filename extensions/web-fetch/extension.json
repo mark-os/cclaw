@@ -1,0 +1,41 @@
+{
+  "name": "web-fetch",
+  "version": "1.0.0",
+  "description": "The web_fetch tool: one HTTP GET, HTML converted to markdown with HTML.toMarkdown. Shipped in the binary and attached to every agent; the tool is used only where it is granted. Reference example for a tool built on http_request.",
+  "tools": [
+    {
+      "name": "web_fetch",
+      "description": "Fetch a URL via HTTP GET and return content as markdown. Use raw:true to skip HTML-to-markdown (auto-skipped for JSON responses). A long page is truncated in the result and written whole to a file under the workspace — the path is named in the result, and you read or grep it with your file tools for the rest. Examples:\n  {\"url\":\"https://api.example.com/data\"} — JSON auto-detected, returned raw\n  {\"url\":\"https://example.com\",\"raw\":true} — skip HTML-to-markdown conversion",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "URL to fetch (HTTP GET)"
+          },
+          "raw": {
+            "type": "boolean",
+            "description": "Return raw response without HTML-to-markdown conversion (auto-skipped for JSON responses)"
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "Timeout in seconds (default 60, max 600)"
+          },
+          "save_secret": {
+            "type": "string",
+            "description": "Capture a credential from this response: NAME (^[A-Z][A-Z0-9_]*$) stores it encrypted and masks it to {{SECRET:NAME}} — the raw value never enters context"
+          },
+          "save_secret_path": {
+            "type": "string",
+            "description": "With save_secret: JSON path (e.g. $.token) selecting the credential field; omit to capture the whole trimmed response"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "handler": "fetch.qjs",
+      "droppable": true
+    }
+  ]
+}

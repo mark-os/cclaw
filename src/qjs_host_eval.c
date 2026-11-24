@@ -8,7 +8,7 @@
 #include "qjs_xml.h"
 #include "js_http_fetch.h"
 #include "host_match.h"
-#include "tool_web_fetch.h"
+#include "qjs_html.h"
 #include "tool_js.h"
 #include <dirent.h>
 #include <errno.h>
@@ -32,6 +32,19 @@ static size_t g_js_secret_count;
 void qjs_host_set_secrets(const JsHostSecret *secrets, size_t count) {
     g_js_secrets = secrets;
     g_js_secret_count = secrets ? count : 0;
+}
+
+/* The call's egress allow rules (wire blob host_rules) and whether the proxy
+ * enforces them — read only to phrase a refusal (js_http_denied_hint); the
+ * proxy is the enforcement. Set by tool_js_tier_run like the secrets. */
+static char **g_js_hosts;
+static size_t g_js_host_count;
+static int g_js_egress_enforced;
+
+void qjs_host_set_egress(char **rules, size_t count, int enforced) {
+    g_js_hosts = rules;
+    g_js_host_count = rules ? count : 0;
+    g_js_egress_enforced = enforced;
 }
 
 #define JS_SECRET_PREFIX "{{SECRET:"
@@ -98,34 +111,11 @@ static char *js_resolve_secrets(const char *s, unsigned char *used,
     return out;
 }
 
-/* Host part of url: after "://", after any userinfo '@', before
- * '/', '?', '#', or ':port'; IPv6 brackets stripped. */
-static int url_host_of(const char *url, char *out, size_t cap) {
-    const char *p = strstr(url, "://");
-    if (!p) return -1;
-    p += 3;
-    const char *end = p + strcspn(p, "/?#");
-    const char *at = memchr(p, '@', (size_t)(end - p));
-    if (at) p = at + 1;
-    if (*p == '[') {
-        const char *rb = memchr(p, ']', (size_t)(end - p));
-        if (!rb) return -1;
-        p++; end = rb;
-    } else {
-        const char *colon = memchr(p, ':', (size_t)(end - p));
-        if (colon) end = colon;
-    }
-    size_t n = (size_t)(end - p);
-    if (n == 0 || n >= cap) return -1;
-    memcpy(out, p, n);
-    out[n] = '\0';
-    return 0;
-}
-
 /* Every secret resolved into this request must be bound to the request's
  * host (secret_hosts, resolved parent-side into the wire blob) — same rule
- * the daemon enforces for web_fetch, so the js tier can't carry a bound
- * secret somewhere its binding doesn't allow. Fail-closed on unbound. */
+ * the daemon's dispatch gate enforces on a call's url argument, so the js
+ * tier can't carry a bound secret somewhere its binding doesn't allow.
+ * Fail-closed on unbound. */
 static void js_secret_binding_check(const char *url, const unsigned char *used,
                                     char *errbuf, size_t errcap) {
     int any = 0;
@@ -133,7 +123,7 @@ static void js_secret_binding_check(const char *url, const unsigned char *used,
         if (used && used[i]) { any = 1; break; }
     if (!any) return;
     char host[254];
-    if (url_host_of(url, host, sizeof(host)) != 0) {
+    if (js_http_url_host(url, host, sizeof(host)) != 0) {
         snprintf(errbuf, errcap,
                  "cannot determine the request host for the secret binding check");
         return;
@@ -280,6 +270,10 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
     JsHttpResult r = js_http_fetch_exec(r_url ? r_url : url, method,
                                         r_body ? r_body : body, hdr_ptrs, timeout,
                                         save_to, cap);
+    /* An ungranted host fails as opaque proxy/curl noise — say which grant
+     * would allow it instead. */
+    char *hint = (r.status < 0 && g_js_egress_enforced)
+        ? js_http_denied_hint(url, g_js_hosts, g_js_host_count) : NULL;
     free(r_url);
     free(r_body);
     free(used);
@@ -295,14 +289,18 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
 
     JSValue result = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, result, "status", JS_NewInt32(ctx, r.status));
+    JS_SetPropertyStr(ctx, result, "content_type", JS_NewString(ctx, r.content_type));
+    if (r.truncated) JS_SetPropertyStr(ctx, result, "truncated", JS_TRUE);
 
     if (r.status < 0) {
         /* Network/transport failure: return {status:-1, body:"", error} instead
          * of throwing, so callers branch on r.error/r.status without try/catch
          * and .body is always a string (no "not a function" on a missing body). */
-        JS_SetPropertyStr(ctx, result, "error",
-            JS_NewString(ctx, r.error ? r.error : "http_request failed"));
+        JS_SetPropertyStr(ctx, result, "error", JS_NewString(ctx,
+            hint ? hint : r.error ? r.error : "http_request failed"));
+        if (hint) JS_SetPropertyStr(ctx, result, "denied", JS_TRUE);
         JS_SetPropertyStr(ctx, result, "body", JS_NewString(ctx, ""));
+        free(hint);
         js_http_result_free(&r);
         return result;
     }
@@ -651,6 +649,7 @@ void qjs_register_eval_host_functions(JSContext *ctx, const char *config_json) {
 
     JS_FreeValue(ctx, global);
     qjs_register_xml(ctx);
+    qjs_register_html(ctx);
 }
 
 /* ── In-process eval driver (qjs_eval_run) ──────────────────────────────── */
@@ -685,7 +684,7 @@ static const char *QJS_EVAL_PRELUDE =
     "console.warn = console.log;\n"
     "console.error = console.log;\n"
     "var require = function() {\n"
-    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readdir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_request(url), XML.parse(str).');\n"
+    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readdir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_request(url), XML.parse(str), HTML.toMarkdown(str).');\n"
     "};\n"
     "var process = {};\n"
     "Object.defineProperty(process, 'env', {get: function() { throw new TypeError('process.env not available.'); }});\n"

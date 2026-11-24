@@ -33,6 +33,8 @@ typedef struct {
     char *error;      /* error message if status == -1 (heap-allocated) */
     int saved;        /* 1 = the body is in the save_to file, not in body */
     size_t saved_bytes;
+    int truncated;    /* 1 = the body was cut at JS_HTTP_BODY_MAX */
+    char content_type[128];   /* Content-Type header value, "" if absent */
 } JsHttpResult;
 
 /* Execute an HTTP fetch. Egress is enforced per-hop by the broker proxy
@@ -54,5 +56,16 @@ JsHttpResult js_http_fetch_exec(const char *url, const char *method,
 int js_http_body_is_binary(const char *body, size_t len);
 
 void js_http_result_free(JsHttpResult *r);
+
+/* Host part of an http(s) URL — after any userinfo, before the port; IPv6
+ * brackets stripped. Returns 0 on success. */
+int js_http_url_host(const char *url, char *out, size_t cap);
+
+/* After a failed fetch under egress enforcement: when url's host is not in
+ * the call's allowed-host rules, the request was refused at the proxy, so
+ * name the grant that would allow it. Message only — the proxy remains the
+ * enforcement, and a refused redirect hop still fails generically. Returns a
+ * malloc'd message, or NULL when the host is allowed or unparseable. */
+char *js_http_denied_hint(const char *url, char **rules, size_t n);
 
 #endif

@@ -40,8 +40,8 @@ pair (known-sensitive vs unknown-plus-credential); neither may be
    `secret_bindings` document). Enforcement is two-fold and fail-closed:
    the dispatch gate denies inline any call using a secret with zero
    bindings (any tier — the call would run narrowed to deny-all anyway)
-   or, on the web tier, a url host not covered by every used secret's
-   bindings; and a shell/js call carrying secrets has its egress *narrowed
+   or, for a call whose arguments name a `url` (web_fetch), a url host not
+   covered by every used secret's bindings; and a shell/js call carrying secrets has its egress *narrowed
    to the union of the bound hosts* — the proxy enforces the binding at
    the actual connection, unconditionally (no approval waives narrowing).
    Escalation is agent-initiated: the deny names the secret and (where
@@ -80,8 +80,9 @@ it as a grant. Concretely:
 - Gating a privileged tool (e.g. a future `secret_store_write`) is a
   `grants` row, never a profile check or a magic profile value. So is using a
   secret (`kind='secret'`).
-- `js_eval` today has exactly `web_fetch`'s reach (same proxy, same host
-  rules, same sensitivity deny and credential narrowing), so its grant cost
+- `js_eval` today has exactly `web_fetch`'s reach (web_fetch *is* a JS tool:
+  same tier, same proxy, same host rules, same sensitivity deny and
+  credential narrowing), so its grant cost
   already tracks its reach. When `cclaw.exec` lands (JS→shell bridge), that
   stops being true — **`cclaw.exec` must require the agent to also hold the
   `shell_exec` grant**, so granting `js_eval` never silently grants the

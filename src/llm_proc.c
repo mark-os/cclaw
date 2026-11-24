@@ -33,7 +33,7 @@
 #define JSLLM_TIMEOUT_MAX     600
 /* Generous ceiling on any provider response body — a real completion is a few
  * MB at most; this only bounds daemon OOM from a malicious/buggy provider
- * (web_fetch/js_http already cap their own). */
+ * (js http_request already caps its own). */
 #define LLM_RESP_MAX (32u * 1024 * 1024)
 /* Hard ceiling on the apply-time probe. It runs synchronously in the approval
  * path, so this is also the worst-case event-loop stall — deliberately short,

@@ -1,0 +1,75 @@
+// web_fetch — one HTTP GET, an HTML page returned as markdown.
+//
+// Egress is the proxy's: every hop, redirects included, is decided there,
+// so nothing here checks a host before asking. A {{SECRET:name}} in the url
+// was resolved by the parent before this ran, and save_secret is applied to
+// the result by the parent after; this script only fetches and formats.
+
+// Browser-like UA to satisfy sites that 403 non-browser clients. Deliberately
+// Firefox, NOT Chrome: some CDNs (ESPN/CloudFront) sinkhole any UA containing
+// the literal "Chrome/" token with an empty 202 challenge — verified 2026-07-06
+// that a "Chrome/" UA gets 202/0 while Firefox, Safari, curl and empty all get
+// 200. A spoofed "Chrome/" without Chrome's TLS/JS fingerprint is the cheapest
+// bot tell, so it's the most-challenged token; avoiding it sidesteps the trap.
+var BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) " +
+                 "Gecko/20100101 Firefox/133.0";
+
+var url = args.url;
+if (url == null || url === "") throw "missing or empty 'url' field";
+url = String(url);
+if (!/^https?:\/\//.test(url)) throw "url must start with http:// or https://";
+
+// The call's own budget (the parent holds the child to the same number)
+// minus a small margin, so the fetch gives up — and says why — first.
+var budget = args.timeout > 0 ? Math.min(Math.floor(args.timeout), 600) : 60;
+var opts = {
+    timeout: budget > 5 ? budget - 5 : budget,
+    headers: {
+        "User-Agent": BROWSER_UA,
+        "Accept": "text/markdown, text/html;q=0.9, */*;q=0.1",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+};
+
+function get() {
+    try {
+        return http_request(url, opts);
+    } catch (e) {
+        var msg = String((e && e.message) || e);
+        if (/binary/.test(msg))
+            throw "the response is binary, and web_fetch returns text — to keep " +
+                  "the bytes, fetch it with js_eval: http_request(url, {save_to: '<file>'})";
+        throw msg;
+    }
+}
+
+var r = get();
+
+// Anti-bot fallback: some CDNs hand a browser-like UA an empty challenge shell
+// (a 202, or a 2xx with no body) while serving a plain client the real page.
+// Retry once with http_request's own UA (cclaw/1.0). A page that is really
+// empty comes back empty again — one extra GET, never a loop.
+if (r.status >= 200 && r.status < 400 && r.body === "") {
+    delete opts.headers["User-Agent"];
+    r = get();
+}
+
+if (r.status < 0) {
+    // An ungranted host: http_request names the grant to ask for.
+    if (r.denied) return "error: " + r.error;
+    throw "HTTP request failed: " + r.error;
+}
+if (r.status >= 400) throw "HTTP " + r.status;
+
+// Markdown and JSON are already readable; raw asks for the bytes as served.
+var type = (r.content_type || "").toLowerCase();
+var asIs = args.raw == true || type.indexOf("text/markdown") === 0 ||
+           type.indexOf("application/json") === 0;
+var capped = r.truncated === true;
+var text = asIs ? r.body : HTML.toMarkdown(r.body);
+r = null;   // drop the page before building the result: the heap is small
+
+// The whole document goes back; an oversized result is truncated and spilled
+// to a workspace file on the way out, the same path every tool takes.
+return "[total=" + text.length + (capped ? " capped(source exceeded fetch limit)" : "") +
+    "]\n" + text;

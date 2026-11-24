@@ -35,7 +35,8 @@ cclaw                                 (CLI or --daemon)
 So a `shell_exec` call shows up as two `cclaw --run-tool` processes (the broker
 and the sandboxed child waiting on its PID-namespace init), `net_shim`, and the
 program. A `js_eval` or `web_fetch` call is the same minus the program: the
-second `cclaw --run-tool` runs QuickJS or curl itself. A file tool is a single
+second `cclaw --run-tool` runs QuickJS itself (web_fetch is a JS tool, and
+QuickJS's `http_request` is cclaw's own curl). A file tool is a single
 process. Why every child execs first, and the tier table, are in
 [specs/tool-execution-model.md](../specs/tool-execution-model.md).
 
@@ -218,7 +219,7 @@ need a rebuild.
 | JavaScript heap (`js_eval`, extension tools, scheduled scripts, hooks) | 8 MB per run | `js_heap_mb` (1–512) | an error result: `out of memory — heap limit is 8MB; …` with advice to parse less |
 | JavaScript heap (channel runners) | 8 MB | constant `CR_HEAP_SIZE` | nothing; the handler error goes to the log |
 | Shell timeout | 30 s | `shell_timeout`, per agent `agents.shell_timeout`; per call `timeout` | `[timeout after 30s — raise with the timeout parameter]` |
-| `web_fetch` / `js_eval` timeout | 60 s / 120 s | per call `timeout` | `error: tool timed out (…; raise with the timeout parameter)` |
+| `web_fetch` / `js_eval` timeout | 60 s / 120 s | per call `timeout` | `error: HTTP request failed: …timed out…` (web_fetch's fetch gives up 5 s inside its budget) / `error: tool timed out (…; raise with the timeout parameter)` |
 | Per-call timeout ceiling | 600 s | constant `TOOL_TIMEOUT_MAX_SEC` | the request is clamped |
 | Background job timeout | 600 s, ceiling 3600 s | per call `timeout`, `job_timeout_max` | a `job:timeout` notice next turn |
 | Tool output kept inline | 64 KB or 2000 lines | constant `RUNTOOL_RESULT_MAX` | over either, the head (about 60 KB or 1998 lines) and `[truncated — … Full output: <path>]`; the file holds all of it |

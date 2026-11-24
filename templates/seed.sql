@@ -75,7 +75,6 @@ INSERT OR IGNORE INTO tools(name, description) VALUES
   ('file_write', 'Write content to a file (path relative or absolute)'),
   ('shell_exec', 'Execute a shell command and return stdout+stderr'),
   ('js_eval', 'Run JavaScript in QuickJS (modern JS; no modules, no top-level await). http_request(url[, {method, body, headers:{Name:Value}, markdownify}]) is synchronous HTTP; returns {status, body} where body is a string ('''' on error, plus {error}); markdownify:true converts an HTML body to markdown. Use .body, e.g. http_request(url).body.match(/re/).'),
-  ('web_fetch', 'Fetch a URL via HTTP GET and return content as markdown. Large pages are truncated; page through with offset + max_chars, or read/grep the full copy saved under workspace .tool_results/ (path given in the result).'),
   ('memory_block_create', 'Create a memory block: a named container that holds notes. Args: label, description, placement.'),
   ('memory_block_update', 'Change a memory block''s description or placement. Args: block (label), description, placement.'),
   ('memory_note_add', 'Add a note to a memory block: a fact that changes what you do next time, not a record of what happened. Args: block (label), text. Returns the note''s id.'),

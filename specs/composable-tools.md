@@ -548,7 +548,7 @@ to settle before `email` — or any send-capable tool — ships.
 - Socketpair between parent and JS child
 - Request/response protocol: `{tool, args}` → `{result}`
 - Depth limit (4) enforced by parent
-- Enables JS tools calling other JS tools or C tools (web_fetch, file_read)
+- Enables JS tools calling other JS tools (web_fetch) or C tools (file_read)
 - Adds complexity; only implement if real use cases demand it
 
 ## Tool-scoped data

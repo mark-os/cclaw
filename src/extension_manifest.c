@@ -899,6 +899,15 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
 
     /* Idempotent re-install: clear this extension's prior tool/hook rows. */
     rc |= run_ingest(db, "DELETE FROM tools WHERE extension_name=:name", manifest, name, store, owner_agent);
+    /* A builtin (no owner) is shipped code, and may be a tool that used to
+     * be C: its row, written by tools_sync_to_db with no extension, is taken
+     * over rather than refused. Any other owner's name collision still fails
+     * the INSERT below. */
+    rc |= run_ingest(db,
+        "DELETE FROM tools WHERE :owner IS NULL AND extension_name IS NULL"
+        " AND name IN (SELECT json_extract(value,'$.name')"
+        "   FROM json_each(COALESCE(json_extract(:m,'$.tools'),'[]')))",
+        manifest, name, store, owner_agent);
     rc |= run_ingest(db, "DELETE FROM hooks WHERE extension_name=:name", manifest, name, store, owner_agent);
 
     /* extensions: upsert, preserving an existing published flag; the owner
@@ -1326,18 +1335,19 @@ static int install_channel_builtin(sqlite3 *db, const char *base, const char *na
     return rc;
 }
 
-/* Install a builtin bundle that brings hooks. A reinstall rewrites its hook
- * rows (extension_install), so what the runtime and the operator wrote on
- * them is carried across: the operator's on/off switch (hooks.enabled)
- * always, and the failure count with the flag three failures set
- * (decision 31) while the version is the same — a restart is not a new
- * script, a new version is. The first install — a fresh DB, or one this
- * bundle is new to — attaches it to every agent there is; agents created
- * later get it from agent_default_extensions. A detach is an operator's
- * act, and survives restarts: an agent opts out with enabled=0 on its
- * attachment, or by losing the row. */
-static int install_hook_builtin(sqlite3 *db, const char *base, const char *name,
-                                const BuiltinFile *files, size_t nfiles) {
+/* Install a builtin bundle that every agent carries (hooks, tools). A
+ * reinstall rewrites its hook and tool rows (extension_install), so what the
+ * runtime and the operator wrote on them is carried across: the operator's
+ * on/off switches (hooks.enabled, tools.enabled — the latter also from the
+ * C row a builtin tool takes over) always, and a hook's failure count with
+ * the flag three failures set (decision 31) while the version is the same —
+ * a restart is not a new script, a new version is. The first install — a
+ * fresh DB, or one this bundle is new to — attaches it to every agent there
+ * is; agents created later get it from agent_default_extensions. A detach is
+ * an operator's act, and survives restarts: an agent opts out with
+ * enabled=0 on its attachment, or by losing the row. */
+static int install_attached_builtin(sqlite3 *db, const char *base, const char *name,
+                                   const BuiltinFile *files, size_t nfiles) {
     if (builtin_row_foreign(db, name)) return 0;   /* never fight a foreign row */
     sqlite3_stmt *s;
     char *before = NULL;
@@ -1351,6 +1361,18 @@ static int install_hook_builtin(sqlite3 *db, const char *base, const char *name,
         if (sqlite3_step(s) == SQLITE_ROW) {
             const char *v = (const char *)sqlite3_column_text(s, 0);
             before = v ? strdup(v) : NULL;
+        }
+        sqlite3_finalize(s);
+    }
+    char *tools_before = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_group_array(json_object('name', name, 'enabled', enabled))"
+            " FROM tools WHERE extension_name=?1 OR extension_name IS NULL",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(s, 0);
+            tools_before = v ? strdup(v) : NULL;
         }
         sqlite3_finalize(s);
     }
@@ -1372,6 +1394,17 @@ static int install_hook_builtin(sqlite3 *db, const char *base, const char *name,
         if (sqlite3_step(s) != SQLITE_DONE) rc = -1;
         sqlite3_finalize(s);
     }
+    if (rc == 0 && tools_before && sqlite3_prepare_v2(db,
+            "UPDATE tools SET enabled = j.value ->> 'enabled'"
+            " FROM json_each(?2) j"
+            " WHERE tools.extension_name = ?1 AND tools.name = j.value ->> 'name'",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, tools_before, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) != SQLITE_DONE) rc = -1;
+        sqlite3_finalize(s);
+    }
+    free(tools_before);
     if (rc == 0 && !before && sqlite3_prepare_v2(db,
             "INSERT OR IGNORE INTO agent_extensions(agent_name, extension_name, enabled)"
             " SELECT name, ?1, 1 FROM agents", -1, &s, NULL) == SQLITE_OK) {
@@ -1410,6 +1443,10 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
         { "extension.json", TPL_EXT_COMPACTION_EXTENSION_JSON },
         { "compact.qjs",    TPL_EXT_COMPACTION_COMPACT_QJS },
     };
+    static const BuiltinFile web_fetch_files[] = {
+        { "extension.json", TPL_EXT_WEB_FETCH_EXTENSION_JSON },
+        { "fetch.qjs",      TPL_EXT_WEB_FETCH_FETCH_QJS },
+    };
     static const BuiltinFile docs_files[] = {
         { "extension.json", TPL_DOCS_MANIFEST_JSON },
         { "skills/configuring-cclaw/SKILL.md",    TPL_DOCS_CONFIGURING_CCLAW_MD },
@@ -1433,8 +1470,12 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
                                   sizeof(whatsapp_files)/sizeof(*whatsapp_files));
 
     /* ── compaction (the ContextThreshold and CacheExpiring hooks; source extensions/compaction) ── */
-    rc |= install_hook_builtin(db, base, "compaction", compaction_files,
-                               sizeof(compaction_files)/sizeof(*compaction_files));
+    rc |= install_attached_builtin(db, base, "compaction", compaction_files,
+                                   sizeof(compaction_files)/sizeof(*compaction_files));
+
+    /* ── web-fetch (the web_fetch tool; source extensions/web-fetch) ── */
+    rc |= install_attached_builtin(db, base, "web-fetch", web_fetch_files,
+                                   sizeof(web_fetch_files)/sizeof(*web_fetch_files));
 
     /* ── cclaw-docs (skills-only self-documentation) ── */
     if (!builtin_row_foreign(db, "cclaw-docs")) {

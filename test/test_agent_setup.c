@@ -36,7 +36,7 @@ static void test_all_tools_registered(void) {
      * present. */
     static const char *const want_tools[] = {
         "launch_agent", "check_session", "create_agent", "search_config",
-        "shell_exec", "file_read", "file_write", "js_eval", "web_fetch",
+        "shell_exec", "file_read", "file_write", "js_eval",
         "db_query", "memory_block_create" };
     for (size_t i = 0; i < sizeof(want_tools) / sizeof(want_tools[0]); i++) {
         if (!tools_lookup(&setup.reg, want_tools[i]))
@@ -55,7 +55,7 @@ static void test_all_tools_registered(void) {
         " WHERE droppable=1 AND extension_name IS NULL", 0);
     const char *want = "cron_list,db_query,extension_list,file_find,"
                        "file_grep,file_list,file_read,js_eval,search_config,"
-                       "search_models,shell_exec,web_fetch";
+                       "search_models,shell_exec";
     if (!droppable || strcmp(droppable, want) != 0)
         fprintf(stderr, "droppable tools: got %s\n", droppable ? droppable : "(null)");
     assert(droppable && strcmp(droppable, want) == 0);
@@ -102,7 +102,6 @@ static void test_workspace_follows_agent(void) {
     snprintf(want, sizeof(want), "%s/agents/Beta/workspace", root);
     assert(strcmp(setup.file_read_ctx.workspace, want) == 0);
     assert(strcmp(setup.js_eval_ctx.workspace, want) == 0);
-    assert(strcmp(setup.web_ctx.workspace, want) == 0);
     assert(strcmp(setup.ext_tool_ctx.workspace, want) == 0);
     ToolEntry *sh = tools_lookup(&setup.reg, "shell_exec");
     assert(sh && sh->user_data &&

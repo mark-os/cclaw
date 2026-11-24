@@ -11,7 +11,6 @@
 #include "run_tool.h"
 #include "tools.h"
 #include "tool_js.h"
-#include "tool_web_fetch.h"
 #include "secret_capture.h"
 #include "db.h"
 #include "secret.h"
@@ -66,7 +65,7 @@ static void test_unprefixed_failure_is_flagged(void) {
     int is_error = 0;
     char *r = test_run_tier_status(RUNTOOL_TIER_JS, "js_eval",
                                    "{\"code\":\"throw new Error('nope')\"}",
-                                   NULL, NULL, &is_error);
+                                   NULL, &is_error);
     assert(is_error == 1);
     free(r);
 
@@ -75,7 +74,7 @@ static void test_unprefixed_failure_is_flagged(void) {
     is_error = 1;
     r = test_run_tier_status(RUNTOOL_TIER_JS, "js_eval",
                              "{\"code\":\"'error: this is just text'\"}",
-                             NULL, NULL, &is_error);
+                             NULL, &is_error);
     assert(is_error == 0);
     assert(r && strstr(r, "error: this is just text") != NULL);
     free(r);
@@ -113,18 +112,6 @@ static void test_capture_skips_on_status(void) {
 }
 
 /* ── timeout parameter: honored, and capped ────────────────────────────── */
-
-static void test_timeout_schema(void) {
-    ToolRegistry reg;
-    tools_init(&reg);
-    WebFetchCtx wc = {0};
-    wc.workspace = WS;
-    assert(tool_web_fetch_register(&reg, &wc) == 0);
-    ToolEntry *e = tools_lookup(&reg, "web_fetch");
-    assert(e && e->parameters_json && strstr(e->parameters_json, "\"timeout\""));
-    assert(e && e->parameters_json && strstr(e->parameters_json, "600"));
-    tools_free(&reg);
-}
 
 static void test_js_timeout_schema(void) {
     ToolRegistry reg;
@@ -207,7 +194,6 @@ int main(void) {
     RUN(test_frame_status_error);
     RUN(test_unprefixed_failure_is_flagged);
     RUN(test_capture_skips_on_status);
-    RUN(test_timeout_schema);
     RUN(test_js_timeout_schema);
     RUN(test_timeout_clamp);
     RUN(test_timeout_honored);

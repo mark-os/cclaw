@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "js_http_fetch.h"
 #include "http.h"
+#include "host_match.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,6 +89,8 @@ JsHttpResult js_http_fetch_exec(const char *url, const char *method,
     r.status = status;
     r.body = resp.data;
     r.body_len = resp.len;
+    r.truncated = resp.truncated;
+    memcpy(r.content_type, resp.content_type, sizeof(r.content_type));
     /* Transfer ownership — don't free resp.data */
     return r;
 }
@@ -97,4 +100,40 @@ void js_http_result_free(JsHttpResult *r) {
     free(r->error);
     r->body = NULL;
     r->error = NULL;
+}
+
+int js_http_url_host(const char *url, char *out, size_t cap) {
+    const char *p = url ? strstr(url, "://") : NULL;
+    if (!p) return -1;
+    p += 3;
+    const char *end = p + strcspn(p, "/?#");
+    const char *at = memchr(p, '@', (size_t)(end - p));
+    if (at) p = at + 1;
+    if (*p == '[') {
+        const char *rb = memchr(p, ']', (size_t)(end - p));
+        if (!rb) return -1;
+        p++; end = rb;
+    } else {
+        const char *colon = memchr(p, ':', (size_t)(end - p));
+        if (colon) end = colon;
+    }
+    size_t n = (size_t)(end - p);
+    if (n == 0 || n >= cap) return -1;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return 0;
+}
+
+char *js_http_denied_hint(const char *url, char **rules, size_t n) {
+    char host[256];
+    if (js_http_url_host(url, host, sizeof(host)) != 0) return NULL;
+    if (host_match(rules, n, host)) return NULL;
+    size_t cap = 2 * strlen(host) + 192;
+    char *msg = malloc(cap);
+    if (!msg) return NULL;
+    snprintf(msg, cap,
+             "host '%s' is not in your allowed hosts — request it with "
+             "request_config {\"changes\":{\"grants\":{\"hosts\":[\"%s\"]}}}",
+             host, host);
+    return msg;
 }

@@ -61,6 +61,11 @@ typedef struct {
 } JsHostSecret;
 void qjs_host_set_secrets(const JsHostSecret *secrets, size_t count);
 
+/* The call's egress allow rules (borrowed) and whether the proxy enforces
+ * them (0 under the host profile). Only phrases http_request's refusal
+ * message — the proxy decides. (NULL, 0, 0) clears. */
+void qjs_host_set_egress(char **rules, size_t count, int enforced);
+
 /* In-process JS evaluator (SBX_JS run_fn + unit-test entry). Runs the eval
  * profile with host functions in THIS process — the caller is responsible for
  * any sandbox/namespace setup beforehand (the broker child does it; unit tests

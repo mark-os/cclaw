@@ -56,7 +56,7 @@ $(shell mkdir -p $(BUILDDIR) && echo "$(BUILD_TAG)" > $(BUILD_TAGFILE))
 TEMPLATES := $(wildcard templates/*)
 # Extension bundles compiled into the binary and installed at every start
 # (extension_install_builtin); the rest of extensions/ is copy-and-promote.
-SHIPPED_BUNDLES := extensions/compaction
+SHIPPED_BUNDLES := extensions/compaction extensions/web-fetch
 TEMPLATES += $(foreach d,$(SHIPPED_BUNDLES),$(wildcard $(d)/*))
 SRC      := $(filter-out src/net_shim.c $(filter-out src/contain_$(CONTAIN).c,$(wildcard src/contain_*.c)),$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))

@@ -727,18 +727,17 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
          * same shape as a proxy host denial (D17). An unbound secret denies
          * on every tier: the call would run narrowed to deny-all, so nothing
          * useful can happen with the credential anyway, and the secret never
-         * enters a child that couldn't use it. The web tier's static url
-         * host makes the uncovered-host case precise; shell/js runtime
-         * targets are enforced by the narrowing in call_egress_build and
-         * attributed by the proxy-deny note. */
+         * enters a child that couldn't use it. A call that names its target
+         * in a `url` argument (web_fetch) makes the uncovered-host case
+         * precise; targets chosen at runtime are enforced by the narrowing
+         * in call_egress_build and attributed by the proxy-deny note. */
         {
             size_t un = 0;
             char **names = used_secret_names(tc->arguments, secrets, secret_count, &un);
             if (names) {
                 char url_host[254] = "";
-                int have_url = (te->recipe.tier == SBX_WEB) &&
-                    web_args_url_host(proc_db(), tc->arguments, url_host,
-                                      sizeof(url_host));
+                int have_url = web_args_url_host(proc_db(), tc->arguments,
+                                                 url_host, sizeof(url_host));
                 char err[1024] = "";
                 for (size_t i = 0; i < un && !err[0]; i++) {
                     int bn = 0;
@@ -1320,7 +1319,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
     }
 
     /* {{SECRET:name}} gate: paths that interpolate placeholders into this
-     * call's values (inline needs_interp tools; shell/web/js sandbox tiers).
+     * call's values (inline needs_interp tools; shell/js sandbox tiers).
      * A name that matches no loaded secret is a hard error naming the typo —
      * never an enumeration of what does exist (see search_config
      * secret_bindings for that, through the sanctioned surface). The file
@@ -1461,7 +1460,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
     }
 
     /* ── Shell-tier re-exec path: fork+exec a clean --run-tool broker ────
-     * A broker is interposed IFF the tier needs gated egress (web, shell).
+     * A broker is interposed IFF the tier needs gated egress (js, shell).
      * The broker IS the --run-tool process — fork+exec, never fork-only.
      * Network-less tiers (file) spawn directly via spawn_run_tool_child.
      * Secrets: interpolated HERE in the daemon parent, blob carries resolved
@@ -1575,78 +1574,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         }
     }
 
-    /* ── Web-tier broker path (SBX_WEB): the same fork+execve --run-tool broker
-     * as shell, but the inner child runs OUR curl in-process (no inner exec).
-     * Egress is decided per-hop by the proxy — no pre-flight. Host mode rides the
-     * same path with sandbox=0 (no namespace, no proxy). */
-    if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_WEB &&
-        te->user_data) {
-        WebFetchCtx *wc = (WebFetchCtx *)te->user_data;
-        /* Caller-settable, like shell_exec's — the advice to "raise it with
-         * the timeout parameter" is only true if the parameter exists. */
-        int web_timeout = tool_call_timeout(tc->arguments, WEB_FETCH_DEFAULT_TIMEOUT);
-        if (!proc_is_daemon())
-            cli_print_tool_call(tc->name, tc->arguments);
-        session_set_state(proc_db(), session_id, "tool_running");
-
-        /* Decompose arguments in the parent, then interpolate {{SECRET:X}}
-         * per extracted value (a URL may carry a token). */
-        ToolWireArg *params = NULL;
-        size_t param_n = 0;
-        if (tool_args_extract(proc_db(), tc->name, te->parameters_json,
-                              tc->arguments, &params, &param_n) != 0)
-            return tool_inline_error(session_id, tc,
-                "error: invalid tool arguments", "bad_args");
-        wire_params_interpolate(params, param_n, secrets, secret_count);
-
-        char agent_dir[PATH_MAX];
-        agent_dir_resolve(wc->workspace, wc->db_path, agent_dir, sizeof(agent_dir));
-
-        size_t blob_len = 0;
-        RunToolReq req;
-        run_tool_req_init(&req, RUNTOOL_TIER_WEB, tc->name,
-                          &wc->sb, wc->workspace, wc->cwd_path,
-                          wc->db_path);
-        char scratch[PATH_MAX];
-        req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
-        char spill[PATH_MAX + 64];
-        if (spill_path_build(proc_db(), session_id, tc->call_id,
-                             spill, sizeof(spill)) == 0)
-            req.spill_path = spill;
-        req.params = params;
-        req.param_count = param_n;
-        req.agent_dir = agent_dir;
-        CallEgress se;
-        call_egress_build(&se, tc->name, tc->arguments,
-                          sens_once ? sens_host : NULL,
-                          wc->allowed_hosts, wc->allowed_host_count,
-                          secrets, secret_count);
-        req.host_rules = se.hosts;
-        req.host_count = se.hosts_n;
-        req.deny_rules = (const char **)se.deny;
-        req.deny_count = se.deny_n;
-        req.egress_note = se.note;
-        req.timeout = web_timeout;
-        char *blob = run_tool_serialize_request(&req, &blob_len);
-        call_egress_free(&se);
-        tool_wire_args_wipe_free(params, param_n);
-        if (!blob)
-            return tool_inline_error(session_id, tc,
-                "error: web request exceeds 32KB cap", NULL);
-        ChildProc *cp = spawn_run_tool_child(session_id, agent_name,
-                     tc->call_id, tc->name, tc->arguments,
-                     tc->iteration_id, tc->entry_id, blob, blob_len,
-                     web_timeout + 30);
-        explicit_bzero(blob, blob_len);
-        free(blob);
-        if (!cp)
-            return tool_inline_error(session_id, tc,
-                "error: spawn_run_tool_child failed", "fork_failed");
-        LOG_INFO_("tool fork tool=%s", tc->name);
-        return 0;
-    }
-
-    /* ── JS-tier broker path (SBX_JS): web's twin. The inner child evals qjs
+    /* ── JS-tier broker path (SBX_JS). The inner child evals qjs
      * in-process (no inner exec); http_request's curl reaches the proxy via
      * HTTP_PROXY → decide() per hop. fs.* paths are real bind-mounts; the shared
      * extension store is mounted read-only so promoted handler files resolve.
@@ -1660,9 +1588,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             return tool_inline_error(session_id, tc,
                 "error: js tool request resolution failed", NULL);
 
-        /* Same caller-settable timeout as shell_exec and web_fetch. An
-         * extension tool's own args have no `timeout` key, so it simply keeps
-         * the default. */
+        /* Same caller-settable timeout as shell_exec: a `timeout` key in the
+         * call's arguments, js_eval's or an extension tool's (web_fetch
+         * declares one), else the default. */
         int js_timeout = tool_call_timeout(tc->arguments, JSEVAL_DEFAULT_TIMEOUT);
 
         if (!proc_is_daemon())

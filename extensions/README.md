@@ -7,7 +7,7 @@ bundle survives a database rebuild and gets reviewed like the rest of the tree,
 without growing the binary for every deployment that does not want it.
 
 The exception is a bundle listed in `SHIPPED_BUNDLES` in the Makefile —
-today only [compaction](compaction/README.md). Its files (not its README) are
+today [compaction](compaction/README.md) and `web-fetch`. Its files (not its README) are
 compiled in, and every start installs them into the shared store with no
 owner, like the built-in channels in `templates/` (`channel_telegram.qjs` and
 friends). Editing such a bundle here changes the next build.
@@ -54,7 +54,7 @@ see what it did are in [turn-review/README.md](turn-review/README.md).
 
 ## compaction
 
-The one bundle on by default: a `ContextThreshold` and `CacheExpiring` hook.
+A bundle on by default: a `ContextThreshold` and `CacheExpiring` hook.
 When a session grows past its trim threshold, the oldest part of it — whole
 earlier turns first, then the oldest steps of the turn still running — is
 replaced by a summary the agent's own model writes, with the actions already
@@ -64,3 +64,16 @@ same way. Without it the runtime's trim drops the oldest part with a one-line
 note when the threshold is passed, and an idle session is left alone. It is
 the reference example for both events; switching it off for an agent, or
 replacing it, is in [compaction/README.md](compaction/README.md).
+
+## web-fetch
+
+The `web_fetch` tool, on by default: one HTTP GET with a browser user agent,
+an HTML page turned into markdown with `HTML.toMarkdown`, JSON and markdown
+returned as served, and one retry with a plain user agent when a CDN answers
+the browser with an empty page. It used to be C; it is a script now because
+everything it needs — the egress proxy, `{{SECRET:name}}` in the url,
+`save_secret`, spilling a long result — is the JS tier's anyway. Like
+compaction it is attached to every agent; the tool still needs its `tool`
+grant (`agent_default_tools` carries it). To turn it off for an agent, revoke
+the grant or set its `agent_extensions` row to `enabled = 0`; a restart keeps
+either.

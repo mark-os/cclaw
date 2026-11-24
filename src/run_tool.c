@@ -2,7 +2,6 @@
 #include "run_tool.h"
 #include "tool_file.h"
 #include "tool_shell.h"
-#include "tool_web_fetch.h"
 #include "tool_js.h"
 #include "proxy.h"
 #include "sandbox.h"
@@ -399,17 +398,17 @@ static void build_sandbox_cfg(const RunToolParsed *q, int skip_pid_ns,
 }
 
 /* ── Tier leaf run_fns ──────────────────────────────────────────────────
- * Each leaf is owned by its tool's own file (tool_file.c / tool_web_fetch.c /
- * tool_js.c) — the broker holds only these pointers and zero per-tool
+ * Each leaf is owned by its tool's own file (tool_file.c / tool_js.c) — the
+ * broker holds only these pointers and zero per-tool
  * knowledge. In-process tiers compute a result string. Shell is inner_exec
  * (run_fn == NULL) — the sandbox child calls tool_shell_tier_exec directly. */
 typedef char *(*RunFn)(const RunToolParsed *q, int *is_error);
 
 /* ── Tier descriptor (single source of truth) ────────────────────────────
- * Decode the tier byte ONCE into this; pass it down. "What makes web differ
+ * Decode the tier byte ONCE into this; pass it down. "What makes js differ
  * from shell" lives here, not scattered across call sites. */
 typedef struct {
-    int   skip_pid_ns;   /* 1 = no CLONE_NEWPID (file/web/js); 0 = PID ns (shell) */
+    int   skip_pid_ns;   /* 1 = no CLONE_NEWPID (file/js); 0 = PID ns (shell) */
     int   needs_proxy;   /* 1 = bind/serve proxy + inner fork (network tiers) */
     int   inner_exec;    /* 1 = run_fn execs a foreign program (shell) */
     RunFn run_fn;        /* leaf result producer; NULL iff inner_exec */
@@ -419,7 +418,6 @@ static const TierDescriptor *tier_descriptor(int tier) {
     static const TierDescriptor table[] = {
         [RUNTOOL_TIER_FILE]  = { .skip_pid_ns = 1, .needs_proxy = 0, .inner_exec = 0, .run_fn = tool_file_tier_run },
         [RUNTOOL_TIER_SHELL] = { .skip_pid_ns = 0, .needs_proxy = 1, .inner_exec = 1, .run_fn = NULL },
-        [RUNTOOL_TIER_WEB]   = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = tool_web_tier_run },
         [RUNTOOL_TIER_JS]    = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = tool_js_tier_run },
     };
     if (tier < 0 || tier >= (int)(sizeof(table) / sizeof(table[0])))
@@ -488,7 +486,7 @@ static void sandbox_child_main(const TierDescriptor *desc, RunToolParsed *q,
     if (desc->inner_exec)
         tool_shell_tier_exec(q);  /* execs /bin/sh, or _exit(127); never returns */
 
-    /* In-process tier (web/js): compute result, write to stdout (the pipe).
+    /* In-process tier (js): compute result, write to stdout (the pipe).
      * The tool's status rides back to the BROKER (our immediate parent, still
      * inside the sandbox boundary) as this inner child's exit code — the only
      * channel that stays out of the byte stream stdout and stderr share. The
@@ -765,7 +763,7 @@ static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
                                 unsigned char *body, size_t body_len) {
     if (q->timeout <= 0) q->timeout = 60;
 
-    /* Pipe for child stdout+stderr (or the in-process result for web/js). */
+    /* Pipe for child stdout+stderr (or the in-process result for js). */
     int pipefd[2];
     if (pipe(pipefd) != 0) die("error: net: pipe failed");
 

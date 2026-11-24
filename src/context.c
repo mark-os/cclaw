@@ -280,8 +280,8 @@ void context_plan_free(ContextPlan *plan) {
 
 void session_tmp_dir(sqlite3 *db, int64_t session_id, char *buf, size_t bufsz) {
     /* Spill into the agent workspace (natural lifetime, no symlink-prone
-     * world-writable /tmp), under the same .tool_results/ home web_fetch
-     * uses for its full copies — one place to look for full tool output.
+     * world-writable /tmp), under the same .tool_results/ home every tool
+     * spills to — one place to look for full tool output.
      *
      * The path is advertised to the model, so it must be one a sandboxed
      * tool child can actually read: the workspace is bind-mounted rw at the

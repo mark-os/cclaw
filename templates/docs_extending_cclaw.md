@@ -155,9 +155,12 @@ output becomes the result. No Node APIs, no `require`/`import`, no event loop,
 no `Atomics`; use the provided host bridges:
 
 - `http_request(url[, {method, body, headers:{Name:Value}, markdownify, timeout, save_to, max_bytes}])` —
-  synchronous HTTP, returns `{status, body}`; on transport failure it returns
-  `{status: -1, body: "", error}` instead of throwing (`body` is always a
-  string). `markdownify: true` converts an HTML
+  synchronous HTTP, returns `{status, content_type, body}` (and
+  `truncated: true` when the body passed 2 MB and was cut); on transport
+  failure it returns `{status: -1, body: "", error}` instead of throwing
+  (`body` is always a string) — when your host grants do not cover the URL,
+  `error` names the grant to request and `denied` is `true`. A `User-Agent`
+  header replaces the default `cclaw/1.0`. `markdownify: true` converts an HTML
   body to markdown for readability — it is a rendering aid, not a security
   boundary (network results are wrapped as untrusted content when sent to the
   model regardless).
@@ -182,6 +185,10 @@ no `Atomics`; use the provided host bridges:
   `images: ['photo.jpg']` attaches image files (JPEG, PNG, GIF, WebP) for the
   model to look at — this is how you see a picture you downloaded. Pick a
   model that can see with `model`.
+- `HTML.toMarkdown(str)` — convert an HTML page to markdown (scripts and
+  styles dropped, headings, lists and links kept). The converter `web_fetch`
+  uses; `web_fetch` itself is a shipped extension built on these globals
+  (`extensions/web-fetch/fetch.qjs` in the cclaw source).
 - `XML.parse(str)` (alias `xml.parse`) — parse XML/RSS/Atom/sitemaps into a
   plain object, the JSON.parse of XML. Reach for it instead of regex.
 

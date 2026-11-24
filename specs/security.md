@@ -28,7 +28,7 @@
 | Main process (CLI/daemon) | Full | Your binary, root of trust, holds encryption key |
 | Agent loop (same process) | High (self-constrained) | Your binary, but executes LLM-directed logic; respects DB + env config |
 | LLM output | Untrusted input | Adversarial by assumption (prompt injection, jailbreaks) |
-| --run-tool broker children | Untrusted | Re-exec'd for each tool call; contained by the backend (shell/web/js/file tiers), except under `host` |
+| --run-tool broker children | Untrusted | Re-exec'd for each tool call; contained by the backend (shell/js/file tiers), except under `host` |
 | JS runtime (in broker child) | Untrusted | Executes LLM-generated code; heap-capped, instruction-limited |
 | External HTTP responses | Untrusted | Wrapped at query time in `<UNTRUSTED_EXTERNAL_CONTENT id="…">` tags carrying a per-entry random id the content cannot know |
 
@@ -37,7 +37,7 @@
 The agent process is **your compiled code** — not a container running arbitrary payloads. The security model relies on the agent binary correctly implementing:
 
 1. **Config loading** — the main process reads cclaw.db with `CCLAW_*` env overrides. `--run-tool` children load no config (see below).
-2. **Egress decision** — the network tool children (shell, web, js) run inside a network namespace whose only route out is the credential proxy. `host_decide()` (`src/proxy.c`) checks each hop against the call's host rules, redirects included.
+2. **Egress decision** — the network tool children (shell, js) run inside a network namespace whose only route out is the credential proxy. `host_decide()` (`src/proxy.c`) checks each hop against the call's host rules, redirects included.
 3. **Tool dispatch** — grant, approval and sensitivity gates, tool timeouts, iteration limits. Path policy is not checked in dispatch: the mount namespace enforces it (portability.md, "As built").
 4. **Secret handling** — holds decrypted provider API keys in memory, never logs them, never passes them to tool children.
 
@@ -223,7 +223,7 @@ When a tool call arrives from the model, `dispatch_tool()` (`src/dispatch.c`) ev
 4. **tools.policy** — `policy_eval(args, policy_json)`. Per-argument restrict rules on the tool definition; DENY or ASK.
 5. **Sensitivity scan** — `host_in_text()` over the raw args against `sensitive_targets` (registered-domain+subdomain, lookalike-robust). Match → ASK, approval tagged `action='sensitive'`.
 5a. **Secret grant check** — a `{{SECRET:X}}` placeholder (and, on the shell tier, a `$CCLAW_SECRET_X` reference) naming a secret this agent holds no live `kind='secret'` grant for → inline DENY naming the secret and the agent, pointing at `request_config` `grants.secrets`. Before anything can park. Only the granted subset of the per-call snapshot is used past this point (interpolation, env delivery, egress narrowing, the js child's blob); see [Using a secret is a grant](#using-a-secret-is-a-grant).
-6. **Credential-binding check** — `used_secret_names()` over the args. Any used secret with zero `secret_hosts` bindings, or (web tier) a url host not covered by every used secret's bindings → inline DENY naming the secret and host, pointing at `request_config` `secret_bindings`. No park, no approval class (D17) — the agent requests the binding like it requests a host grant.
+6. **Credential-binding check** — `used_secret_names()` over the args. Any used secret with zero `secret_hosts` bindings, or (a call whose arguments name a `url`, as web_fetch's do) a url host not covered by every used secret's bindings → inline DENY naming the secret and host, pointing at `request_config` `secret_bindings`. No park, no approval class (D17) — the agent requests the binding like it requests a host grant.
 7. **Approval park** — if gate == ASK: look up existing approval; if none or pending, park session (`awaiting_approval`). Resume on approve/deny.
 
 ### The two sensitivity-axis rules (specs/trust.md)
@@ -499,8 +499,8 @@ never enter the snapshot and no grant can name one.
 - **Where it is enforced.** `dispatch_tool()` takes the per-call snapshot
   (every loaded secret) and derives the agent's granted subset
   (`secrets_granted()`, `src/secret_store.c`, a fresh grants read per call).
-  Only that subset interpolates `{{SECRET:X}}` (inline tools and the shell,
-  web and js tiers), is delivered as `CCLAW_SECRET_X` to a shell child, narrows
+  Only that subset interpolates `{{SECRET:X}}` (inline tools and the shell
+  and js tiers), is delivered as `CCLAW_SECRET_X` to a shell child, narrows
   egress to bound hosts, and is shipped (with its bound hosts) to the js child
   for fetch-boundary resolution. Cron scripts get the subset for the job's
   agent. A call that names an ungranted secret is refused at the gate, before
@@ -602,7 +602,7 @@ Env-collected values live in process memory for the process lifetime. DB-loaded 
 
 Before a tool handler runs, `secret_interpolate()` replaces `{{SECRET:name}}` in the tool arguments with the real value. The interpolated string is a transient local passed to the handler and freed immediately; the persisted tool-call arguments (`tc->arguments`) keep the placeholder, so context/history never holds the value.
 
-Injection is restricted to tools that actually exec with credentials (`ToolRecipe.needs_interp` — `shell_exec`, `web_fetch`, `js_eval`). Tools that only read files or query the DB don't need it and don't get it. The js tier has a second, child-side resolution site for placeholders the parent can't see (file bodies, runtime-built strings) — see [JS-Tier Secret Resolution](#js-tier-secret-resolution-fetch-boundary).
+Injection is restricted to tools that actually exec with credentials (`ToolRecipe.needs_interp` and the shell and js tiers — `shell_exec`, `js_eval`, every JS extension tool including `web_fetch`). Tools that only read files or query the DB don't need it and don't get it. The js tier has a second, child-side resolution site for placeholders the parent can't see (file bodies, runtime-built strings) — see [JS-Tier Secret Resolution](#js-tier-secret-resolution-fetch-boundary).
 
 **Two delivery channels into a shell child** (both available; pick by quoting context):
 
@@ -662,8 +662,7 @@ All three credential tools run via the `--run-tool` broker (re-exec'd child, nam
 | Tool | sandbox tier | interp site | known-value token | base64/URL masked | re-referenceable |
 |------|--------------|-------------|-------------------|-------------------|------------------|
 | `shell_exec` | SBX_SHELL | parent | `{{SECRET:name}}` | yes | yes |
-| `web_fetch` | SBX_WEB | parent | `{{SECRET:name}}` | yes | yes |
-| `js_eval` | SBX_JS | parent (args) + child fetch boundary (file bodies) | `{{SECRET:name}}` | yes | yes |
+| `js_eval`, extension tools (`web_fetch`) | SBX_JS | parent (args) + child fetch boundary (file bodies) | `{{SECRET:name}}` | yes | yes |
 
 ### Chokepoints
 
@@ -741,12 +740,12 @@ User-provided credentials don't need to be listed in the system prompt — the u
 
 The js tier has **two resolution sites**, one rule:
 
-- **Tool arguments** (a `js_eval` call's `code`/`args`, an extension tool's arguments, extension `config` values) — interpolated by the daemon parent before the child is spawned, exactly like `shell_exec` and `web_fetch`. Persisted args keep the placeholder.
+- **Tool arguments** (a `js_eval` call's `code`/`args`, an extension tool's arguments, extension `config` values) — interpolated by the daemon parent before the child is spawned, exactly like `shell_exec`. Persisted args keep the placeholder.
 - **Everything else** — placeholders in a `.qjs` **file body** (workspace scripts, promoted extension handlers, cron scripts), or in strings the script builds at runtime — resolve in the child **at the `http_request()` boundary**: url, headers, and body are scanned just before the request is handed to curl. File bytes are never rewritten on disk, and the resolved string exists only in the C call that sends it.
 
 Fail-loud, both sites: a placeholder naming no loaded secret is a hard error (parent gate for args; a thrown JS `TypeError` at the fetch call site for everything else) — never a literal pass-through, which is how a placeholder used to reach a remote API as the credential and misdiagnose as "invalid key" (the Aug 2026 Tiingo 403 / Alpaca 401 class).
 
-**Binding enforcement travels with the value.** Every secret resolved into a request must be bound (`secret_hosts`) to the request's host — the same rule the daemon enforces for `web_fetch`. The parent ships only the secrets the agent is granted, each with its bound-host list, in the `--run-tool` blob (the child has no DB) — so a file body naming an ungranted secret fails as an unknown name; an unbound secret or an unmatched host throws before anything is sent, pointing at `request_config` (`secret_bindings`). A loaded-but-unused secret constrains nothing.
+**Binding enforcement travels with the value.** Every secret resolved into a request must be bound (`secret_hosts`) to the request's host — the same rule the daemon's gate enforces on a call's `url` argument. The parent ships only the secrets the agent is granted, each with its bound-host list, in the `--run-tool` blob (the child has no DB) — so a file body naming an ungranted secret fails as an unknown name; an unbound secret or an unmatched host throws before anything is sent, pointing at `request_config` (`secret_bindings`). A loaded-but-unused secret constrains nothing.
 
 Writing a placeholder **into** a file (`file_write`) is always legal — a file is a document, not a resolution site; the placeholder resolves (or errors) later, when the script fetches. Shell script files are deliberately NOT covered: a `{{SECRET:x}}` inside a `.sh` file executed by `shell_exec` does not resolve — shell files use `$CCLAW_SECRET_X` env injection instead.
 
@@ -759,7 +758,7 @@ A `SECRET("name")` opaque-handle design (native binding returning a name-only ha
 ## Sandbox Profile Policy Bundles
 
 `agents.sandbox_profile` selects the containment bundle for every `--run-tool`
-tier (shell, web, js, file). The bundle table, the rationale and the
+tier (shell, js, file). The bundle table, the rationale and the
 fail-closed rule live in [sandbox-profiles.md](sandbox-profiles.md); this
 section keeps only the points that concern secrets.
 

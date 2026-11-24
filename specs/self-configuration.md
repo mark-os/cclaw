@@ -327,7 +327,7 @@ builtin, containing operational how-tos distilled from specs/:
 | `cclaw-secrets-memory` | `{{SECRET:}}`, save_secret / secret_create, bindings; memory blocks and placement |
 
 Distribution: registry key `agent_default_extensions` (default
-`["cclaw-docs","compaction"]`) is attached by `agent_definition_apply` at creation; the
+`["cclaw-docs","compaction","web-fetch"]`) is attached by `agent_definition_apply` at creation; the
 builtin install backfills `INSERT OR IGNORE INTO agent_extensions` for
 existing agents. Detachable per-agent like any extension — docs are a
 default, not a mandate.

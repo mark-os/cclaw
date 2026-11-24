@@ -361,7 +361,7 @@ static void layer_core(sqlite3 *db, const Config *cfg) {
     else print_ok("core", "database, config and a provider key");
 }
 
-/* Layers 2 and 4, per agent: every tool tier — file, web_fetch, js and shell
+/* Layers 2 and 4, per agent: every tool tier — file, js and shell
  * alike — runs in one contained child, so they stand or fall together, and
  * which it is depends on the agent's profile. */
 static void layer_tools(sqlite3 *db, int contained) {
@@ -383,7 +383,7 @@ static void layer_tools(sqlite3 *db, int contained) {
                      "with no file, secret or network boundary", name);
             print_warn("tools", d);
         } else if (contained) {
-            snprintf(d, sizeof(d), "%s (%s) — file, web_fetch, js and shell contained",
+            snprintf(d, sizeof(d), "%s (%s) — file, js and shell contained",
                      name, prof);
             print_ok("tools", d);
         } else {

@@ -323,17 +323,68 @@ static int tool_inline_notice(int64_t session_id, PendingToolCall *tc,
     return 1;
 }
 
+/* The secrets with each value JSON-string-escaped (json_quote minus its
+ * quotes), names borrowed. A JSON-kind param (js_eval's or an extension
+ * tool's `args`) is parsed by QuickJS after interpolation, and a placeholder
+ * can only sit inside a JSON string: a quote, backslash or newline in a
+ * secret must not end that string early — a broken call at best, a value
+ * that writes script at worst. NULL on failure (the caller interpolates
+ * nothing). Free with secrets_escaped_free. */
+static ShellSecret *secrets_json_escaped(const ShellSecret *secrets, size_t count) {
+    ShellSecret *esc = calloc(count, sizeof(*esc));
+    sqlite3_stmt *st = NULL;
+    if (!esc || sqlite3_prepare_v2(proc_db(), "SELECT json_quote(?1)", -1, &st,
+                                   NULL) != SQLITE_OK) {
+        free(esc);
+        return NULL;
+    }
+    int ok = 1;
+    for (size_t i = 0; i < count && ok; i++) {
+        esc[i].name = secrets[i].name;
+        sqlite3_bind_text(st, 1, secrets[i].value ? secrets[i].value : "", -1,
+                          SQLITE_STATIC);
+        const char *q = sqlite3_step(st) == SQLITE_ROW
+            ? (const char *)sqlite3_column_text(st, 0) : NULL;
+        int qn = sqlite3_column_bytes(st, 0);
+        ok = q && qn >= 2 && (esc[i].value = strndup(q + 1, (size_t)qn - 2));
+        sqlite3_reset(st);
+    }
+    sqlite3_finalize(st);
+    if (ok) return esc;
+    for (size_t i = 0; i < count; i++) free(esc[i].value);
+    free(esc);
+    return NULL;
+}
+
+static void secrets_escaped_free(ShellSecret *esc, size_t count) {
+    for (size_t i = 0; esc && i < count; i++)
+        if (esc[i].value) {
+            explicit_bzero(esc[i].value, strlen(esc[i].value));
+            free(esc[i].value);
+        }
+    free(esc);
+}
+
 /* Interpolate {{SECRET:name}} into extracted wire-param values (TEXT/JSON
- * kinds; LIST params are file_edit's — never secret-bearing). After this the
- * array carries plaintext: free with tool_wire_args_wipe_free. */
+ * kinds — JSON ones escaped, above; LIST params are file_edit's — never
+ * secret-bearing). After this the array carries plaintext: free with
+ * tool_wire_args_wipe_free. */
 static void wire_params_interpolate(ToolWireArg *params, size_t n,
                                     const ShellSecret *secrets, size_t count) {
     if (!params || count == 0) return;
+    ShellSecret *esc = NULL;
     for (size_t i = 0; i < n; i++) {
         if (params[i].kind == TOOL_ARG_LIST || !params[i].value) continue;
-        char *ip = secret_interpolate(params[i].value, secrets, count);
+        const ShellSecret *use = secrets;
+        if (params[i].kind == TOOL_ARG_JSON) {
+            if (!strstr(params[i].value, "{{SECRET:")) continue;
+            if (!esc && !(esc = secrets_json_escaped(secrets, count))) continue;
+            use = esc;
+        }
+        char *ip = secret_interpolate(params[i].value, use, count);
         if (ip) { free(params[i].value); params[i].value = ip; }
     }
+    secrets_escaped_free(esc, count);
 }
 
 /* First {{SECRET:name}} placeholder in args naming no loaded secret, or NULL.

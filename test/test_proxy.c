@@ -148,24 +148,39 @@ static void test_connect_denied(void) {
     proxy_stop(&ctx);
 }
 
+/* Malformed preambles, in both spellings (the bare line net_shim sends and
+ * the CONNECT request js's curl sends under NE_CODE): each gets a refusal in
+ * the spelling it was asked in, or the connection closed — never a tunnel.
+ * want NULL = closed with no answer. */
 static void test_connect_bad_preamble(void) {
+    static const struct { const char *req; const char *want; } t[] = {
+        { "badpreamble\n", "ERROR" },
+        { "host:0\n", "ERROR" },
+        { "host:http\n", "ERROR" },
+        { "CONNECT \r\n\r\n", "HTTP/1.1 400" },
+        { "CONNECT nocolon HTTP/1.1\r\n\r\n", "HTTP/1.1 400" },
+        { "CONNECT example.com:99999 HTTP/1.1\r\n\r\n", "HTTP/1.1 400" },
+        { "CONNECT example.com:80x HTTP/1.1\r\n\r\n", "HTTP/1.1 400" },
+        { "CONNECT [::1 HTTP/1.1\r\n\r\n", "HTTP/1.1 403" },
+        { "CONNECT evil.com:80 HTTP/1.1\r\nHost: evil.com:80\r\n\r\n", "HTTP/1.1 403" },
+        { "CONNECT evil.com:80 HTTP/1.1\r\nHost: x\r\n", NULL },  /* no blank line */
+        { "CONNECT evil.com:80 HTTP/1.1", NULL },                   /* no newline at all */
+    };
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, NULL, 0);
-    assert(rc == 0);
-
-    int fd = uds_connect(proxy_sock_path(&ctx));
-    assert(fd >= 0);
-
-    /* No colon = bad preamble */
-    const char *req = "badpreamble\n";
-    write(fd, req, strlen(req));
-
-    char resp[128];
-    int n = read_line(fd, resp, sizeof(resp));
-    assert(n > 0);
-    assert(strncmp(resp, "ERROR", 5) == 0);
-    close(fd);
-
+    assert(proxy_start(&ctx, tmpdir, NULL, 0) == 0);
+    for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+        int fd = uds_connect(proxy_sock_path(&ctx));
+        assert(fd >= 0);
+        write(fd, t[i].req, strlen(t[i].req));
+        shutdown(fd, SHUT_WR);
+        char resp[128] = "";
+        int n = read_line(fd, resp, sizeof(resp));
+        int ok = t[i].want ? n > 0 && strncmp(resp, t[i].want, strlen(t[i].want)) == 0
+                           : n <= 0;
+        if (!ok) printf("    row %zu: n=%d \"%s\"\n", i, n, resp);
+        assert(ok);
+        close(fd);
+    }
     proxy_stop(&ctx);
 }
 

@@ -10,6 +10,7 @@
 #include "host_match.h"
 #include "qjs_html.h"
 #include "tool_js.h"
+#include "sandbox.h"
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
@@ -34,17 +35,19 @@ void qjs_host_set_secrets(const JsHostSecret *secrets, size_t count) {
     g_js_secret_count = secrets ? count : 0;
 }
 
-/* The call's egress allow rules (wire blob host_rules) and whether the proxy
- * enforces them — read only to phrase a refusal (js_http_denied_hint); the
- * proxy is the enforcement. Set by tool_js_child_run like the secrets. */
+/* The call's egress (qjs_helpers.h). Set by tool_js_child_run like the
+ * secrets. */
 static char **g_js_hosts;
 static size_t g_js_host_count;
-static int g_js_egress_enforced;
+static int g_js_net_enforcer;
+static const char *g_js_proxy_sock;
 
-void qjs_host_set_egress(char **rules, size_t count, int enforced) {
+void qjs_host_set_egress(char **rules, size_t count, int net_enforcer,
+                         const char *proxy_sock) {
     g_js_hosts = rules;
     g_js_host_count = rules ? count : 0;
-    g_js_egress_enforced = enforced;
+    g_js_net_enforcer = net_enforcer;
+    g_js_proxy_sock = proxy_sock;
 }
 
 #define JS_SECRET_PREFIX "{{SECRET:"
@@ -165,6 +168,9 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
 
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "http_request: url argument required");
+    if (g_js_net_enforcer == NE_CODE && !g_js_proxy_sock)
+        return JS_ThrowTypeError(ctx, "http_request: this agent's containment"
+                                 " allows no network");
 
     const char *url = JS_ToCString(ctx, argv[0]);
     if (!url)
@@ -269,10 +275,12 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         ? JS_HTTP_SAVE_MAX_CEILING : (size_t)max_bytes;
     JsHttpResult r = js_http_fetch_exec(r_url ? r_url : url, method,
                                         r_body ? r_body : body, hdr_ptrs, timeout,
-                                        save_to, cap);
+                                        save_to, cap,
+                                        g_js_net_enforcer == NE_CODE ? g_js_proxy_sock : NULL);
     /* An ungranted host fails as opaque proxy/curl noise — say which grant
      * would allow it instead. */
-    char *hint = (r.status < 0 && g_js_egress_enforced)
+    char *hint = (r.status < 0 &&
+                  (g_js_net_enforcer == NE_CODE || g_js_net_enforcer == NE_NETNS))
         ? js_http_denied_hint(url, g_js_hosts, g_js_host_count) : NULL;
     free(r_url);
     free(r_body);
@@ -393,7 +401,7 @@ static JSValue js_fs_readFile(JSContext *ctx, JSValueConst this_val,
     if (!path) return JS_ThrowTypeError(ctx, "fs.readFile: path must be a string");
     JSValueConst cb = fs_get_cb(ctx, argc, argv, 1);
 
-    FILE *f = fopen(path, "rb");
+    FILE *f = contain_path_check(path, 0) == 0 ? fopen(path, "rb") : NULL;
     if (!f) { int e = errno; JS_FreeCString(ctx, path); return fs_return(ctx, cb, JS_NULL, e); }
     JS_FreeCString(ctx, path);
 
@@ -425,7 +433,7 @@ static JSValue js_fs_writeFile(JSContext *ctx, JSValueConst this_val,
     const char *content = JS_ToCStringLen(ctx, &clen, argv[1]);
     if (!content) { JS_FreeCString(ctx, path); return JS_ThrowTypeError(ctx, "fs.writeFile: content must be a string"); }
 
-    FILE *f = fopen(path, "wb");
+    FILE *f = contain_path_check(path, 1) == 0 ? fopen(path, "wb") : NULL;
     if (!f) { int e = errno; JS_FreeCString(ctx, path); JS_FreeCString(ctx, content); return fs_return(ctx, cb, JS_NULL, e); }
     JS_FreeCString(ctx, path);
     size_t written = fwrite(content, 1, clen, f);
@@ -455,7 +463,7 @@ static JSValue js_fs_readDir(JSContext *ctx, JSValueConst this_val,
     if (!path) return JS_ThrowTypeError(ctx, "fs.readdir: path must be a string");
     JSValueConst cb = fs_get_cb(ctx, argc, argv, 1);
 
-    DIR *d = opendir(path);
+    DIR *d = contain_path_check(path, 0) == 0 ? opendir(path) : NULL;
     if (!d) { int e = errno; JS_FreeCString(ctx, path); return fs_return(ctx, cb, JS_NULL, e); }
     JS_FreeCString(ctx, path);
 
@@ -487,7 +495,8 @@ static JSValue js_fs_stat_impl(JSContext *ctx, int argc, JSValueConst *argv,
     JSValueConst cb = fs_get_cb(ctx, argc, argv, 1);
 
     struct stat st;
-    int rc = use_lstat ? lstat(path, &st) : stat(path, &st);
+    int rc = contain_path_check(path, 0) != 0 ? -1
+           : use_lstat ? lstat(path, &st) : stat(path, &st);
     if (rc != 0) { int e = errno; JS_FreeCString(ctx, path); return fs_return(ctx, cb, JS_NULL, e); }
     JS_FreeCString(ctx, path);
 
@@ -761,7 +770,7 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
     if (code && code[0]) {
         eval_code = (char *)code;  /* borrowed */
     } else {
-        FILE *f = fopen(filename, "r");
+        FILE *f = contain_path_check(filename, 0) == 0 ? fopen(filename, "r") : NULL;
         if (!f) {
             size_t len = strlen(filename) + 32;
             char *r = malloc(len);

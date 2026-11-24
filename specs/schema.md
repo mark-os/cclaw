@@ -301,6 +301,25 @@ Shared extension registry. Each extension is a directory in the shared store `~/
 
 ---
 
+## containments
+
+How an agent's tool children are contained ([containment.md](containment.md)).
+The shipped rows (`standard`, `offline`, `basic`, `none`) are restored to
+their shipped values at every start (`CONTAIN_SHIPPED`, `src/sandbox.c`);
+rows an operator adds are left alone. No agent-facing verb writes it.
+`agents.containment` names a row; a name with no row refuses that agent's
+tool calls.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `name` | TEXT PRIMARY KEY | |
+| `files` | TEXT NOT NULL | `private` \| `confined` \| `open` (CHECK) |
+| `network` | TEXT NOT NULL | `none` \| `proxied` \| `advisory` \| `direct` (CHECK) |
+| `nproc` | INTEGER NOT NULL DEFAULT 0 | `RLIMIT_NPROC`; 0 = no cap |
+| `cpu_sec` | INTEGER NOT NULL DEFAULT 0 | `RLIMIT_CPU` seconds; 0 = no cap |
+
+---
+
 ## agents
 
 Agent identity and per-agent config. Name is the primary key — no integer id.
@@ -314,7 +333,7 @@ Agent identity and per-agent config. Name is the primary key — no integer id.
 | `max_output_tokens` | INTEGER | per-request cap |
 | `shell_timeout` | INTEGER DEFAULT 30 | seconds |
 | `shell_path` | TEXT | interpreter for shell_exec's `-c`; NULL = `/bin/sh` |
-| `containment` | TEXT DEFAULT 'standard' | none / standard / offline ([containment.md](containment.md)) |
+| `containment` | TEXT DEFAULT 'standard' | a `containments` row by name; no row = tool calls refused ([containment.md](containment.md)) |
 | `created_by` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; creating agent (`update_agent` authorization); NULL = operator |
 | `hold_until` | INTEGER | quiesce lease deadline (`cclaw rename-agent`); while in the future no new turn opens for this agent. NULL = no hold; expiry self-heals |
 | `hold_holder` | TEXT | who holds the lease (`cli:<pid>`) |

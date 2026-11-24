@@ -22,8 +22,7 @@ static void test_spill(void) {
     r.command = "i=0; while [ $i -lt 20000 ]; do echo \"line $i padding padding\"; i=$((i+1)); done";
     r.workspace = WS;
     r.spill_path = spill;
-    r.sandbox = 0;
-    r.net_mode = 1;
+    r.plan = TEST_PLAN_NONE;
     char *result = run_tool_shell(&r);
     assert(result);
     assert(strlen(result) <= RUNTOOL_RESULT_MAX + 512);

@@ -189,27 +189,28 @@ This is what CClaw *is for*, not an add-on. Agents extend themselves at runtime 
 See [specs/security.md](specs/security.md) for full details and [specs/trust.md](specs/trust.md) for the axis model (containment / authority / escalation / sensitivity).
 
 - **Agent process**: trusted binary, unsandboxed. Tool egress is decided at the credential proxy (`host_decide()`, default-deny).
-- **Tool children** (`--run-tool`: the shell, js and file vehicles): untrusted. `setrlimit` caps per containment. Namespace sandbox; the only route out is the egress proxy, reached through the `HTTP(S)_PROXY` variables (a program that ignores them has no network). See [specs/shell-networking.md](specs/shell-networking.md).
+- **Tool children** (`--run-tool`: the shell, js and file vehicles): untrusted. Each gets the plan the parent made for it: per level of its containment, the strongest enforcer this host has (namespace sandbox, or for file/js the path check and proxy-dialling curl in cclaw's own code), or the call is refused at dispatch. `setrlimit` caps per containment row. In the namespace the only route out is the egress proxy, reached through the `HTTP(S)_PROXY` variables (a program that ignores them has no network). See [specs/shell-networking.md](specs/shell-networking.md).
 - **Secrets**: encrypted in cclaw.db (ChaCha20-Poly1305). Decrypted at runtime in the parent, delivered to tool children by argument interpolation or `CCLAW_SECRET_*` env, never exposed to the model or logged.
 - **Secret scanner**: AC-based DLP scans all tool results and user messages for leaked credentials before they enter the context window. See [specs/security.md](specs/security.md#secret-scanner-ac-based-content-dlp).
 - **Secret interpolation**: LLMs reference secrets via `{{SECRET:name}}` — cclaw interpolates the real value before tool execution, the context never sees it.
-- **Containment**: `agents.containment` controls containment only (`none`, `standard`, `offline`) — authority always lives in `grants`, never on the containment. Every value except `none` *requires* the namespace sandbox — if it can't be established, the tool call refuses to run (fail-closed, exit 126). A host without a containment backend is described in [specs/portability.md](specs/portability.md). See [specs/containment.md](specs/containment.md).
+- **Containment**: `agents.containment` names a row of the `containments` table — a level for files (`private`/`confined`/`open`) and network (`none`/`proxied`/`advisory`/`direct`) plus rlimits — and controls containment only; authority always lives in `grants`. A level no enforcer on this host can keep refuses the call at dispatch with the reason and a containment that would work; a child that cannot apply its plan exits 126; nothing is silently weakened, and a name with no row is refused. `contain_caps()` probes what the host has (`CCLAW_CONTAIN_CAPS_MASK` masks it for tests). What each kind of host gets is in [specs/portability.md](specs/portability.md). See [specs/containment.md](specs/containment.md).
 
 ### Choosing a containment for new agents
 
-| Containment | Use for |
-|-------|---------|
-| `none` | **No sandbox at all** — skips *both* the namespace and the egress proxy (traffic goes direct, unfiltered). Use when the surrounding environment already provides isolation (inside a Docker container, behind a firewall) or on hosts where unprivileged userns is unavailable. `--no-containment` forces this. |
-| `standard` | **The default.** Clean env, network via proxy, workspace rw, no CWD mount — it cannot see the user's files or another agent's workspace without a grant. NPROC 256 as a fork-bomb backstop; no CPU cap. |
-| `offline` | Observer/audit agents — **no packets, ever** (kernel-enforced: no proxy socket in the child); still able to run real programs (workspace rw, bounded NPROC/CPU). File grants remain legal. |
+| Containment | files / network | Use for |
+|-------|---|---------|
+| `standard` | private / proxied | **The default.** Namespace sandbox, network via the proxy, workspace rw, no CWD — it cannot see the user's files or another agent's workspace without a grant. NPROC 256 as a fork-bomb backstop; no CPU cap. Needs unprivileged user namespaces. |
+| `offline` | private / none | Observer/audit agents — **no packets, ever** (no proxy socket in the child); still able to run real programs (workspace rw, NPROC 64, CPU 120 s). File grants remain legal. Needs user namespaces. |
+| `basic` | confined / advisory | Hosts **without** user namespaces (Docker, AppArmor-restricted Ubuntu). File tools and js keep paths in cclaw's code and js egress is forced through the proxy in code; the shell is refused until Landlock lands (4b). On a host with namespaces it runs in the sandbox like `standard`. |
+| `none` | open / direct | **No containment at all** — no namespace, no proxy (traffic goes direct, unfiltered). Use when the surrounding environment already provides isolation. `--no-containment` forces this. |
 
 Widening what an agent can see is the `grants` + approval path, never a side
-effect of a looser containment. `cclaw.db` and `.cclaw_key` are masked
-unconditionally under every sandboxed containment and a path grant naming either
+effect of a looser containment. `cclaw.db` and `.cclaw_key` are out of reach
+under every files level but `open` and a path grant naming either
 (or a directory containing them) is refused at grant time — `db_query` is the
 sanctioned way for an agent to inspect state. `$HOME` is set under
-every containment (the agent workspace when sandboxed, the real user home
-when uncontained), `PATH` includes both system and workspace-local bin dirs, and `/tmp` is
+every containment (the agent workspace under any files enforcer, the real user
+home under files `open`), `PATH` includes both system and workspace-local bin dirs, and `/tmp` is
 a bind of a persistent per-agent scratch dir on the host (so it inherits the
 host's own temp storage and cleaner, rather than a size policy of ours) — so
 `npm install`, `cargo build`, and `go build` work inside the sandbox. No containment sets `RLIMIT_AS`; see
@@ -315,7 +316,6 @@ make clean        # remove build/
 - **`make debug` uses clang, not gcc.** GCC-only `#pragma GCC diagnostic` directives must be guarded with `#if defined(__GNUC__) && !defined(__clang__)` — under `-Werror` clang turns an unknown warning group (e.g. `-Wformat-truncation`) into a hard error.
 - **`make test` builds `build/cclaw` first.** Several unit tests (`test_run_tool_escape`, `test_sandbox_mounts`, `test_shell_namespace`, `test_shell_secrets`, `test_workspace_isolation`) fork the main binary via the `--run-tool` path, so the `test` target depends on `$(BUILDDIR)/cclaw` — it's always rebuilt before the suite runs, even after `make clean`. (`make smoke` deliberately omits the dep: its curated subset has no fork-the-binary tests.)
 - **`build/` self-cleans on a mode switch.** A `.buildtag` sentinel (checked at parse time) wipes `build/` automatically when `CC`/`EXTRA_CFLAGS` change between invocations — e.g. a `make debug` followed by a plain `make test` no longer link-fails on undefined `__asan_*`/`__ubsan_*` symbols from stale instrumented objects; it just rebuilds clean.
-- **Sanitizer builds skip `RLIMIT_AS`** (`src/sandbox.c`, compile-time guard): ASan reserves terabytes of shadow VA and its allocator mmaps at runtime, so an address-space cap aborts the instrumented child with "Failed to mmap". No containment sets the cap today; the guard only matters if one ever does.
 
 ## Running
 

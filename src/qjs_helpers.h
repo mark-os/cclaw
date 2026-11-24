@@ -61,10 +61,13 @@ typedef struct {
 } JsHostSecret;
 void qjs_host_set_secrets(const JsHostSecret *secrets, size_t count);
 
-/* The call's egress allow rules (borrowed) and whether the proxy enforces
- * them (0 under containment none). Only phrases http_request's refusal
- * message — the proxy decides. (NULL, 0, 0) clears. */
-void qjs_host_set_egress(char **rules, size_t count, int enforced);
+/* The call's egress: its allow rules (borrowed; they only phrase
+ * http_request's refusal — the proxy decides), the plan's network enforcer
+ * (a NetEnforcer) and, under NE_CODE, the broker's proxy socket, which
+ * http_request's curl then dials itself; NE_CODE with no socket means no
+ * network, and http_request refuses. (NULL, 0, 0, NULL) clears. */
+void qjs_host_set_egress(char **rules, size_t count, int net_enforcer,
+                         const char *proxy_sock);
 
 /* In-process JS evaluator (EXEC_JS run_fn + unit-test entry). Runs the eval
  * profile with host functions in THIS process — the caller is responsible for

@@ -335,47 +335,55 @@ static void ensure_default_agent(const char *base_dir) {
     if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
 }
 
-/* A host that cannot contain a tool child refuses every tool call of a
- * sandboxed agent (exit 126). That is the right refusal and a bad first
- * impression: say so at startup, with the way out, instead of leaving the
- * operator to meet it one failed tool call at a time. `agent` NULL = every
- * agent (the daemon). Nothing is changed here — running uncontained stays the
- * operator's explicit choice. */
+/* An agent whose containment this host cannot keep has its tool calls
+ * refused at dispatch. That is the right refusal and a bad first impression:
+ * say so at startup, naming a shipped containment this host can keep,
+ * instead of leaving the operator to meet it one refused call at a time.
+ * `agent` NULL = every agent (the daemon). Nothing is changed here — the
+ * containment stays the operator's explicit choice. */
 static void warn_if_uncontained(sqlite3 *db, const char *agent, int daemon) {
-    const char *env = getenv("CCLAW_CONTAINMENT");
-    if (!daemon && env && strcmp(env, "none") == 0) return;
-    char who[256] = "";
+    const char *env = daemon ? NULL : getenv("CCLAW_CONTAINMENT");
+    char why[160], hint[320], who[256] = "";
+    unsigned caps = contain_caps(why, sizeof(why));
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "SELECT group_concat(name, ', ') FROM agents"
-            " WHERE COALESCE(containment,'standard') <> 'none'"
-            "   AND (?1 IS NULL OR name = ?1)", -1, &st, NULL) != SQLITE_OK)
+            "SELECT name, COALESCE(containment,'standard') FROM agents"
+            " WHERE ?1 IS NULL OR name = ?1 ORDER BY name", -1, &st, NULL) != SQLITE_OK)
         return;
     if (agent) sqlite3_bind_text(st, 1, agent, -1, SQLITE_STATIC);
-    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
-        snprintf(who, sizeof(who), "%s", (const char *)sqlite3_column_text(st, 0));
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        Containment c = {0};
+        containment_load(db, env ? env : (const char *)sqlite3_column_text(st, 1), &c);
+        if (contain_keepable(&c, caps)) continue;
+        size_t n = strlen(who);
+        snprintf(who + n, sizeof(who) - n, "%s%s (%s%s)", n ? ", " : "",
+                 (const char *)sqlite3_column_text(st, 0), c.name,
+                 c.known ? "" : ", no such row");
+    }
     sqlite3_finalize(st);
     if (!who[0]) return;
-    char why[160], hint[320];
-    if (contain_probe(why, sizeof(why))) return;
+    const char *alt = contain_suggest(caps);
     contain_hint(hint, sizeof(hint));
+    if (!why[0]) hint[0] = '\0';
     if (daemon) {
         /* The daemon's log is syslog: one line. */
-        LOG_ERROR_("daemon: this host cannot sandbox tool calls (%s: %s) — every"
-                   " tool call by %s will be refused. %s%sTo run without the sandbox"
-                   " instead, put CCLAW_CONTAINMENT=none in the daemon's"
-                   " environment; `cclaw --doctor` has more",
-                   contain_backend(), why, who, hint, hint[0] ? ". " : "");
+        LOG_ERROR_("daemon: this host cannot keep the containment of %s (%s%s%s) —"
+                   " tool calls it cannot keep are refused. %s%sA shipped"
+                   " containment this host can keep: '%s'; `cclaw --doctor` has more",
+                   who, contain_backend(), why[0] ? ": " : "", why,
+                   hint, hint[0] ? ". " : "", alt ? alt : "none");
         return;
     }
     fprintf(stderr,
-            "warning: this host cannot sandbox tool calls (%s: %s).\n"
-            "  Every tool call by a sandboxed agent (%s) will be refused.\n"
+            "warning: this host cannot keep the containment of %s (%s%s%s).\n"
+            "  Tool calls it cannot keep will be refused.\n"
             "%s%s%s"
-            "  To run without the sandbox instead, start cclaw with --no-containment —\n"
-            "  the machine itself is then the only boundary. `cclaw --doctor` has more.\n",
-            contain_backend(), why, who,
-            hint[0] ? "  " : "", hint, hint[0] ? "\n" : "");
+            "  A shipped containment this host can keep: '%s'%s.\n"
+            "  `cclaw --doctor` shows what each tool gets.\n",
+            who, contain_backend(), why[0] ? ": " : "", why,
+            hint[0] ? "  " : "", hint, hint[0] ? "\n" : "",
+            alt ? alt : "none",
+            alt && strcmp(alt, "none") == 0 ? " (--no-containment)" : "");
 }
 
 static int run_daemon(char *db_path) {

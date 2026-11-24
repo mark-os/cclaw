@@ -38,17 +38,20 @@ typedef struct {
 } JsHttpResult;
 
 /* Execute an HTTP fetch. Egress is enforced per-hop by the broker proxy
- * (HTTP_PROXY → net_shim → decide()), NOT a pre-flight allowlist — a single
- * check can't see redirects. Returns result struct; caller frees with
- * js_http_result_free(). */
+ * (HTTP_PROXY → net_shim → decide(), or proxy_unix), NOT a pre-flight
+ * allowlist — a single check can't see redirects. Returns result struct;
+ * caller frees with js_http_result_free(). */
 /* headers: NULL, or a NULL-terminated array of "Name: Value" strings.
  * save_to: NULL, or a file to stream a 2xx body into (max_bytes caps it; 0 =
  * JS_HTTP_SAVE_MAX_DEFAULT). The file exists afterwards only when saved=1:
- * a non-2xx answer, a failed transfer and an over-cap body all remove it. */
+ * a non-2xx answer, a failed transfer and an over-cap body all remove it.
+ * save_to passes the path check (contain_path_check) first.
+ * proxy_unix: NULL, or the broker's proxy socket, which every connection
+ * then goes through (NE_CODE; http.h). */
 JsHttpResult js_http_fetch_exec(const char *url, const char *method,
                                 const char *body, const char **headers,
                                 int timeout_secs, const char *save_to,
-                                size_t max_bytes);
+                                size_t max_bytes, const char *proxy_unix);
 
 /* 1 when the bytes cannot be a text body: a NUL never occurs in text of any
  * encoding a script could use as a string, and every common binary format

@@ -1,27 +1,28 @@
 /* Containment backend: none. For hosts and platforms where cclaw cannot
- * impose a boundary on a child itself (specs/portability.md). A contained
- * agent is refused exactly as on a Linux host without namespaces; only
- * containment `none` runs tools, and it never reaches this file. */
+ * impose a boundary on a child itself (specs/portability.md). It reports no
+ * capabilities, so the planner refuses every plan that needs one, exactly as
+ * on a Linux host without namespaces; what needs none (containment `none`,
+ * and file and js tools under `basic`) still runs. */
 #include "contain.h"
 #include <errno.h>
 #include <stdio.h>
 
 const char *contain_backend(void) { return "none"; }
 
-int contain_probe(char *why, size_t cap) {
+unsigned contain_caps(char *why, size_t cap) {
     if (why && cap) snprintf(why, cap, "this build has no containment backend");
     return 0;
 }
 
 void contain_hint(char *out, size_t cap) { if (out && cap) out[0] = '\0'; }
 
-int contain_enter(const char *workspace, const char *cwd_path,
-                  const char *db_path, const SandboxConfig *cfg) {
-    (void)workspace; (void)cwd_path; (void)db_path; (void)cfg;
+int contain_enter(const char *workspace, const char *db_path,
+                  const SandboxConfig *cfg) {
+    (void)workspace; (void)db_path; (void)cfg;
     errno = ENOSYS;
     return -1;
 }
 
-void contain_egress(const SandboxConfig *cfg) { (void)cfg; }
+int contain_egress(const SandboxConfig *cfg) { (void)cfg; return -1; }
 
 const char *contain_llm_sock_path(void) { return ""; }

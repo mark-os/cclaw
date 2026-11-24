@@ -152,7 +152,7 @@ static void test_edit_overlap(void) {
 static FileReadCtx sandboxed_ctx(void) {
     FileReadCtx c = {0};
     c.workspace = tmpdir;
-    c.sb.sandbox = 1;
+    c.fe = FE_MOUNTNS;
     return c;
 }
 
@@ -177,7 +177,7 @@ static void test_no_hint_inside_workspace(void) {
 static void test_no_hint_when_unsandboxed(void) {
     FileReadCtx hctx2 = {0};
     hctx2.workspace = tmpdir;
-    hctx2.sb.sandbox = 0;
+    hctx2.fe = FE_NONE;
     char *r = test_file_tool_run("file_read", "{\"path\":\"/definitely/not/granted/file.txt\"}", &hctx2);
     assert(strcmp(r, "error: cannot open file") == 0);
     free(r);

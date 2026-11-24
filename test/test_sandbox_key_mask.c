@@ -68,7 +68,7 @@ static char *read_state_files(const char *grant_path) {
     r.command = "cat " KEYF " 2>&1; cat " DB " 2>&1; cat " DECOY " 2>&1";
     r.workspace = WS;
     r.db_path = DB;
-    r.net_mode = 1;
+    r.plan = TEST_PLAN_OFFLINE;
     r.read_paths = reads;
     r.read_count = 2;
     return run_tool_shell(&r);
@@ -135,8 +135,7 @@ static char *file_read_via_broker(const char *path, const char *grant_path) {
     const char *reads[] = { grant_path };
     RunToolReq req = {
         .vehicle = EXEC_FILE, .tool_name = "file_read",
-        .env_mode = 1, .nproc = 64, .as_mb = 0, .cpu_sec = 60,
-        .sandbox = 1, .net_mode = 1,
+        .plan = TEST_PLAN_OFFLINE,
         .workspace = WS, .db_path = DB, .agent_dir = WS,
         .read_paths = reads, .read_count = 1,
         .params = &arg, .param_count = 1,
@@ -235,7 +234,7 @@ static void test_no_grant_exposes_nothing(void) {
     r.command = "cat " KEYF " 2>&1; cat " DB " 2>&1";
     r.workspace = WS;
     r.db_path = DB;
-    r.net_mode = 1;
+    r.plan = TEST_PLAN_OFFLINE;
     char *out = run_tool_shell(&r);
     printf("  no grant → %s\n", out);
     assert(strstr(out, KEY_MARK) == NULL);

@@ -96,7 +96,7 @@ serve_network_child(const VehicleDescriptor *desc, RunToolParsed *q,
                     unsigned char *body, size_t body_len):
     proxy_bind(&proxy, agent_dir, q->host_rules, q->deny_rules)
         // bind while single-threaded, BEFORE the fork below;
-        // skipped under containment none (no sandbox) and offline (no network)
+        // only for network proxied/advisory: none and direct have no proxy
     pid = fork()                         // safe: this image is sterile/1-thread
     if child:
         setpgid(0,0)
@@ -188,9 +188,12 @@ vehicle byte (the `ExecVehicle` value of `EXEC_FILE`, `EXEC_SHELL` or
 `EXEC_JS`); `run_tool.c` is the canonical field order. Fields by vehicle
 (additive over file):
 
-- all: `vehicle`, `tool_name`, `env_mode`, `rlimits{nproc,as_mb,cpu_sec}` (`as_mb` is
-  carried but no containment sets it — see [containment.md](containment.md))
-- file: `workspace`, `read_paths[]`, `write_paths[]`, `mount_cwd`, `cwd_path`, `tmp_dir`, `db_path`
+- all: `vehicle`, `tool_name`, the plan — files and network levels, `nproc`,
+  `cpu_sec`, and the files and network enforcer the parent chose
+  ([containment.md](containment.md)); an out-of-range value is a malformed
+  request
+- file: `workspace`, `read_paths[]`, `write_paths[]`, `cwd_path` (only under
+  files `open`), `tmp_dir`, `db_path`
   (`db_path` is a *path only* — the child never opens the DB. It is carried so
   the child can bind-mask `.cclaw_key` and the DB family out of any granted
   mount; see [security.md](security.md). Dropping it silently disables the

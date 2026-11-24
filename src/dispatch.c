@@ -1143,7 +1143,16 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
                                   const char *llm_source,
                                   int64_t session_id, int64_t iteration_id,
                                   LlmBridge **out_bridge,
-                                  size_t *out_len) {
+                                  size_t *out_len, char *why, size_t why_cap) {
+    if (out_bridge) *out_bridge = NULL;
+    RunToolReq req;
+    if (run_tool_req_init(&req, EXEC_JS, "js_eval",
+                          &jc->sb, jc->workspace, jc->cwd_path, jc->db_path,
+                          why, why_cap) != 0) {
+        tool_wire_args_wipe_free(params, param_n);
+        return NULL;
+    }
+    snprintf(why, why_cap, "error: the js request exceeds the 32KB wire cap");
     char agent_dir[PATH_MAX];
     agent_dir_resolve(jc->workspace, jc->db_path, agent_dir, sizeof(agent_dir));
 
@@ -1177,9 +1186,6 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
         }
     }
 
-    RunToolReq req;
-    run_tool_req_init(&req, EXEC_JS, "js_eval",
-                      &jc->sb, jc->workspace, jc->cwd_path, jc->db_path);
     char scratch[PATH_MAX];
     req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
 
@@ -1241,8 +1247,7 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
      * who parks it on the ChildProc so reap stops it. */
     LlmBridge *bridge = NULL;
     if (out_bridge) {
-        *out_bridge = NULL;
-        if (!jc->sb.net_mode &&
+        if (jc->sb.lv.net != NET_NONE &&
             (bridge = llm_bridge_start(agent_dir, jc->db_path, agent_name,
                                        llm_source, session_id, iteration_id)))
             req.llm_sock = llm_bridge_sock(bridge);
@@ -1371,9 +1376,6 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 cli_print_tool_call(tc->name, tc->arguments);
             session_set_state(proc_db(), session_id, "tool_running");
 
-            /* Uncontained (sandbox=0) rides the SAME broker path: the child sets
-             * up no namespace and runs the handler in-process,
-             * exactly as the (now-deleted) generic fork path did. */
             /* Decompose arguments HERE (trusted parent, SQLite JSON1) — the
              * child receives pre-extracted params and parses no JSON. */
             ToolWireArg *params = NULL;
@@ -1385,9 +1387,13 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 
             size_t blob_len = 0;
             RunToolReq req;
-            run_tool_req_init(&req, EXEC_FILE, tc->name,
-                              &fctx->sb, fctx->workspace, fctx->cwd_path,
-                              fctx->db_path);
+            char why[640];
+            if (run_tool_req_init(&req, EXEC_FILE, tc->name,
+                                  &fctx->sb, fctx->workspace, fctx->cwd_path,
+                                  fctx->db_path, why, sizeof(why)) != 0) {
+                tool_wire_args_free(params, param_n);
+                return tool_inline_error(session_id, tc, why, "contain_refused");
+            }
             char scratch[PATH_MAX];
             req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
             char spill[PATH_MAX + 64];
@@ -1468,12 +1474,18 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         te->user_data) {
         ShellConfig *sc = (ShellConfig *)te->user_data;
         if (sc->workspace) {
-            /* Uncontained (sandbox=0) rides the SAME broker path: the child execs
-             * /bin/sh with no namespace (sandbox is threaded into SandboxConfig),
-             * replacing the deleted uncontained fork-only branch. */
+            /* Every containment rides the same broker path; the plan says
+             * what the child sets up. Refused here, before anything forks,
+             * when this host cannot keep the agent's containment. */
             if (!proc_is_daemon())
                 cli_print_tool_call(tc->name, tc->arguments);
             session_set_state(proc_db(), session_id, "tool_running");
+            RunToolReq req;
+            char why[640];
+            if (run_tool_req_init(&req, EXEC_SHELL, tc->name,
+                                  &sc->sb, sc->workspace, sc->cwd_path,
+                                  sc->db_path, why, sizeof(why)) != 0)
+                return tool_inline_error(session_id, tc, why, "contain_refused");
 
             char *command = tool_args_str(proc_db(), tc->arguments, "command");
             if (!command)
@@ -1515,10 +1527,6 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             agent_dir_resolve(sc->workspace, sc->db_path, agent_dir, sizeof(agent_dir));
 
             size_t blob_len = 0;
-            RunToolReq req;
-            run_tool_req_init(&req, EXEC_SHELL, tc->name,
-                              &sc->sb, sc->workspace, sc->cwd_path,
-                              sc->db_path);
             char scratch[PATH_MAX];
             req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
             char spill[PATH_MAX + 64];
@@ -1644,16 +1652,16 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         char llm_source[80];
         snprintf(llm_source, sizeof(llm_source), "js:%s", tc->name);
         LlmBridge *bridge = NULL;
+        char why[640];
         char *blob = js_request_serialize(jc, agent_name, tc->name, tc->arguments,
                                           sens_once ? sens_host : NULL,
                                           secrets, secret_count,
                                           params, param_n, spill_p, js_timeout,
                                           llm_source, session_id,
                                           tc->iteration_id, &bridge,
-                                          &blob_len);
+                                          &blob_len, why, sizeof(why));
         if (!blob)
-            return tool_inline_error(session_id, tc,
-                "error: js request exceeds 32KB cap", NULL);
+            return tool_inline_error(session_id, tc, why, NULL);
         ChildProc *cp = spawn_run_tool_child(session_id, agent_name,
                      tc->call_id, tc->name, tc->arguments,
                      tc->iteration_id, tc->entry_id, blob, blob_len,
@@ -1896,12 +1904,11 @@ static ChildProc *script_child_spawn(ChildType type, const char *agent_name,
                                       NULL, ok, ok_n, params, param_n, NULL,
                                       js_timeout,
                                       llm_source, session_id, 0, &bridge,
-                                      &blob_len);
+                                      &blob_len, err, err_len);
     free(ok);
     secrets_snapshot_free(snap, snap_n);
     if (!blob) {
         if (arg_fd >= 0) close(arg_fd);
-        snprintf(err, err_len, "the script request exceeds the 32KB wire cap");
         return NULL;
     }
     ChildProc *c = spawn_run_tool_blob_fd(type, session_id, agent_name, blob,

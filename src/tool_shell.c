@@ -30,7 +30,6 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     sc->allowed_host_count = 0;
     sc->secrets = NULL;
     sc->secret_count = 0;
-    sc->sb.sandbox = 1;
     char params[2048];
     snprintf(params, sizeof(params), SHELL_PARAMS_JSON_FMT, sc->timeout);
     int rc = tools_register(reg, "shell_exec",

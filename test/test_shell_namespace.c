@@ -110,52 +110,6 @@ static void test_etc_shadow_inaccessible(void) {
     free(res);
 }
 
-/* CWD rw bind-mount in CLI mode — cwd_path accessible rw alongside workspace */
-static void test_cwd_path_rw(void) {
-
-    /* Create a separate "cwd" directory to simulate CLI CWD */
-    char cwd_dir[256];
-    snprintf(cwd_dir, sizeof(cwd_dir), "/tmp/cclaw_cwd_test_%d", getpid());
-    mkdir(cwd_dir, 0755);
-
-    /* Write a file in cwd_dir to read from sandbox */
-    char seed[512];
-    snprintf(seed, sizeof(seed), "%s/seed.txt", cwd_dir);
-    FILE *f = fopen(seed, "w");
-    fprintf(f, "cwd_content\n");
-    fclose(f);
-
-    ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.workspace = workspace;
-    r.cwd_path = cwd_dir;
-    r.mount_cwd = 1;
-
-    /* Read from cwd_path — should work */
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "cat %s/seed.txt", cwd_dir);
-    r.command = cmd;
-    char *res = run_tool_shell(&r);
-    assert(res != NULL);
-    assert(strstr(res, "[exit 0]") != NULL);
-    assert(strstr(res, "cwd_content") != NULL);
-    free(res);
-
-    /* Write to cwd_path — should work (rw mount) */
-    snprintf(cmd, sizeof(cmd),
-        "echo written > %s/out.txt && cat %s/out.txt", cwd_dir, cwd_dir);
-    r.command = cmd;
-    res = run_tool_shell(&r);
-    assert(res != NULL);
-    assert(strstr(res, "[exit 0]") != NULL);
-    assert(strstr(res, "written") != NULL);
-    free(res);
-
-    /* Cleanup */
-    char rm[512];
-    snprintf(rm, sizeof(rm), "rm -rf %s", cwd_dir);
-    system(rm);
-}
-
 /* Without cwd_path (daemon mode), CWD dir is NOT accessible */
 static void test_no_cwd_path_blocked(void) {
 
@@ -171,7 +125,7 @@ static void test_no_cwd_path_blocked(void) {
     /* No cwd_path — simulates daemon mode */
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.workspace = workspace;
-    /* cwd_path defaults to NULL, mount_cwd defaults to 0 */
+    /* cwd_path defaults to NULL */
 
     char cmd[1024];
     snprintf(cmd, sizeof(cmd), "cat %s/seed.txt 2>&1; echo rc=$?", cwd_dir);
@@ -191,7 +145,7 @@ static void test_no_cwd_path_blocked(void) {
 static void test_sandbox_none_skips_namespace(void) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.workspace = workspace;
-    r.sandbox = 0;
+    r.plan = TEST_PLAN_NONE;
 
     /* With sandbox=0, child should be able to write to /tmp directly (no pivot_root) */
     char cmd[256];
@@ -257,8 +211,7 @@ static void test_no_new_privs(void) {
         }
         ShellToolReq r = SHELL_REQ_DEFAULTS;
         r.workspace = workspace;
-        r.sandbox = cases[i].sandbox;
-        r.env_mode = cases[i].sandbox;
+        r.plan = cases[i].sandbox ? TEST_PLAN_STANDARD : TEST_PLAN_NONE;
         r.command = "grep NoNewPrivs /proc/self/status";
         char *res = run_tool_shell(&r);
         assert(res != NULL);
@@ -305,7 +258,6 @@ int main(void) {
         RUN(test_network_isolated);
         RUN(test_agent_db_inaccessible);
         RUN(test_etc_shadow_inaccessible);
-        RUN(test_cwd_path_rw);
         RUN(test_no_cwd_path_blocked);
         RUN(test_host_dev_not_shared);
         RUN(test_deep_agent_dir_proxy);

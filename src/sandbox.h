@@ -1,88 +1,121 @@
 #ifndef CCLAW_SANDBOX_H
 #define CCLAW_SANDBOX_H
 
-/* Sandbox policy and child setup: resolves a containment string into the
- * policy fields, plans the mounts, and prepares the tool child (environment,
- * rlimits, working directory). The boundary itself is the containment
- * backend's job (contain.h) — nothing here knows how it is built. Shared by
- * every --run-tool child. Fail-closed by design.
- */
+/* Containment policy and child setup (specs/containment.md). A containment is
+ * a row of levels; the parent turns it into a plan — the enforcer chosen for
+ * each level on this host, for one vehicle — or refuses the call. The child
+ * applies the plan and never picks a weaker enforcer on its own. How a
+ * boundary is built is the containment backend's job (contain.h). Shared by
+ * every --run-tool child. Fail-closed by design. */
 
 #include <limits.h>
 #include <stddef.h>
+#include <sqlite3.h>
+#include "tools.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
-/* A requested extra bind-mount (read_path/write_path grant). path is borrowed. */
-typedef struct { const char *path; int ro; } SandboxMountReq;
+/* Levels, loosest first: a larger value is a stronger promise. */
+typedef enum { FILES_OPEN, FILES_CONFINED, FILES_PRIVATE } FilesLevel;
+typedef enum { NET_DIRECT, NET_ADVISORY, NET_PROXIED, NET_NONE } NetLevel;
 
-/* Sandbox policy + grant-path bundle, shared by the file/shell/js tool
- * contexts. Filled once per agent in agent_setup (policy from the agent's
- * containment via containment_resolve; paths from the agent's grants) and embedded in
- * each tool ctx — one definition instead of three identical copies. The policy
- * half maps 1:1 to the matching SandboxConfig fields. Path pointers
- * borrow AgentCaps and are rebound on cap refresh. */
+/* Enforcers. FE_CODE: the path check in cclaw's own file and js code.
+ * NE_ENV: the proxy variables only. NE_CODE: cclaw's curl dials the proxy
+ * socket itself. 4b adds FE_LANDLOCK and NE_SECCOMP after the last value. */
+typedef enum { FE_NONE, FE_CODE, FE_MOUNTNS } FilesEnforcer;
+typedef enum { NE_NONE, NE_ENV, NE_CODE, NE_NETNS } NetEnforcer;
+
+/* One containments row. Limits: 0 = no cap. */
 typedef struct {
-    int sandbox;            /* 1 = namespace required, 0 = none (containment none) */
-    int env_mode;           /* 0 = inherit-present-env + scrub, 1 = clean allowlist */
-    int net_mode;           /* 0 = proxy available, 1 = no network */
-    int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
-    struct { int nproc, as_mb, cpu_sec; } rlimits; /* 0 = no limit */
-    char **read_paths;  size_t read_path_count;    /* extra bind-mounts from grants */
+    FilesLevel files;
+    NetLevel net;
+    int nproc, cpu_sec;
+} ContainLevels;
+
+/* The plan for one child: the levels it promises and how each is kept. It is
+ * what crosses the --run-tool wire. */
+typedef struct {
+    ContainLevels lv;
+    FilesEnforcer fe;
+    NetEnforcer ne;
+} ContainPlan;
+
+/* The shipped rows, re-seeded at every start (db_seed_defaults). */
+typedef struct { const char *name; ContainLevels lv; } ContainRow;
+extern const ContainRow CONTAIN_SHIPPED[];
+extern const size_t CONTAIN_SHIPPED_N;
+
+/* An agent's containment, per tool context. Filled per dispatch batch in
+ * agent_setup (containment_load; paths from the agent's grants). known=0: the
+ * agent names a containment with no row, and every child call is refused.
+ * Path pointers borrow AgentCaps and are rebound on cap refresh. */
+typedef struct {
+    char name[64];
+    int known;
+    ContainLevels lv;
+    char **read_paths;  size_t read_path_count;    /* path grants */
     char **write_paths; size_t write_path_count;
 } Containment;
 
-/* A planned bind-mount: canonical path + ro flag, owned inline. */
+/* A requested extra path (read_path/write_path grant). path is borrowed. */
+typedef struct { const char *path; int ro; } SandboxMountReq;
+
+/* A planned path: canonical path + ro flag, owned inline. */
 typedef struct { char path[PATH_MAX]; int ro; } SandboxMount;
 
-/* Child sandbox setup, shared by every --run-tool child (file, shell and js).
- * Establishes the namespace sandbox, scrubs the environment, applies rlimits,
- * and starts the in-sandbox proxy. All fields default to 0/NULL. */
+/* Child setup input, shared by every --run-tool child. All fields default to
+ * 0/NULL. */
 typedef struct {
-    const char *workspace;  /* agent workspace bind-mounted rw (NULL = none) */
-    const char *cwd_path;   /* CWD rw bind-mount in CLI mode (NULL in daemon) */
+    const char *workspace;  /* agent workspace, rw */
+    const char *cwd_path;   /* the CLI's CWD; only sent under files 'open' */
     const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key. Path only —
-                               never opened; used to locate both for masking. */
-    const char *proxy_sock; /* path to .proxy.sock (NULL if proxy not started) */
-    const char *llm_sock;   /* parent's LLM bridge UDS (NULL = no LLM());
-                             * bind-mounted + exported as CCLAW_LLM_SOCK */
-    const char *tmp_dir;    /* host dir bind-mounted as /tmp — persistent per-agent
-                             * scratch the parent created and owns. NULL = no bind;
-                             * /tmp then stays a dir on the tiny root tmpfs, which
-                             * is functional but too small to build in. */
-    int sandbox;            /* 1 = namespace required, 0 = none (containment none) */
-    int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
-    int net_mode;           /* 0 = proxy available, 1 = no network */
+                               never opened; used to keep both out of reach. */
+    const char *proxy_sock; /* the broker's proxy socket (NULL = none serving) */
+    const char *llm_sock;   /* parent's LLM bridge UDS (NULL = no LLM()) */
+    const char *tmp_dir;    /* the agent's persistent scratch dir, created and
+                             * owned by the parent: /tmp in the mount namespace,
+                             * TMPDIR under FE_CODE. NULL = none. */
+    ContainPlan plan;
     int skip_pid_ns;        /* 1 = omit CLONE_NEWPID (no inner fork); file, js */
-    int env_mode;           /* 0 = inherit-present-env + scrub secrets, 1 = clean
-                             * allowlist. NB: under the --run-tool re-exec model the
-                             * child starts from an empty environ (execve envp={NULL}),
-                             * so mode 0 yields only PATH + proxy vars, not the daemon's
-                             * environment — "inherit" means whatever the child was
-                             * given, which is currently nothing sensitive. */
-    struct { int nproc, as_mb, cpu_sec; } rlimits; /* 0 = no limit */
-    /* Layer 2: extra bind-mounts from read_path/write_path grants */
-    SandboxMountReq *extra_mounts;
+    SandboxMountReq *extra_mounts;   /* path grants */
     size_t extra_mount_count;
 } SandboxConfig;
 
 /* Run in the forked child before exec. Returns 0 on success, -1 on a hard
- * failure (caller must _exit). Fail-closed: when cfg->sandbox is set, a
- * namespace or read-only-remount failure returns -1 rather than running
- * unconfined. The in-sandbox proxy failing to start is soft (returns 0): no network. */
+ * failure (caller must _exit 126). Applies exactly the plan; any enforcer that
+ * cannot be applied is a failure, never a fallback. */
 int sandbox_child_setup(const SandboxConfig *cfg);
 
-/* Single source of truth: containment string → sandbox policy fields.
- * Fills cfg->sandbox, env_mode, net_mode, mount_cwd, rlimits. Does NOT touch workspace/db_path/proxy_sock/cwd_path/tmp_dir (the
- * caller sets those — they are paths, not containment policy). */
-void sandbox_policy_from_containment(const char *containment, SandboxConfig *cfg);
+/* The planner, pure: (levels, vehicle, host capabilities) → plan, or -1 with
+ * `why` naming the containment, the level, what the host lacks and a shipped
+ * containment it can keep. vehicle is EXEC_FILE, EXEC_JS or EXEC_SHELL. */
+int contain_plan(const Containment *c, ExecVehicle vehicle, unsigned caps,
+                 ContainPlan *out, char *why, size_t cap);
 
-/* Fill the policy half of a Containment (sandbox/env_mode/net_mode/mount_cwd/
- * rlimits) from the containment string. The caller sets the
- * grant-path fields separately (they come from AgentCaps, not the containment). */
-void containment_resolve(const char *containment, Containment *p);
+/* Every child vehicle can be planned for c on this host. */
+int contain_keepable(const Containment *c, unsigned caps);
+
+/* First shipped containment (strictest first) every child vehicle can keep
+ * with these capabilities, or NULL. */
+const char *contain_suggest(unsigned caps);
+
+/* Load the containments row `name` (NULL = 'standard', the column default)
+ * into c's name/known/lv; the path fields are untouched. Returns c->known. */
+int containment_load(sqlite3 *db, const char *name, Containment *c);
+
+/* Text names for logs, doctor and messages. */
+const char *files_level_name(FilesLevel l);
+const char *net_level_name(NetLevel l);
+const char *files_enforcer_name(FilesEnforcer e);
+const char *net_enforcer_name(NetEnforcer e);
+
+/* FE_CODE: may this process open `path` (write = for writing)? 0 when it
+ * may, or no path check is armed (FE_NONE, FE_MOUNTNS); -1 with errno=EACCES
+ * otherwise. Armed by sandbox_child_setup under FE_CODE; called by the file
+ * tools and the js fs/http/LLM globals before every open, stat or list. */
+int contain_path_check(const char *path, int write);
 
 /* Resolve extra-mount requests into a bind plan: canonicalize each path (drop
  * those whose realpath() fails), dedup by canonical path (rw wins over ro — a
@@ -90,5 +123,10 @@ void containment_resolve(const char *containment, Containment *p);
  * more-specific child mount binds after its parent and shadows it. out must
  * hold at least n entries; returns the deduped count. Pure — unit-testable. */
 size_t sandbox_plan_mounts(const SandboxMountReq *in, size_t n, SandboxMount *out);
+
+/* System directories a contained child reads: bound read-only in the mount
+ * namespace, readable under FE_CODE. NULL-terminated. (/proc is the backend's
+ * own business: only the shell, with its PID namespace, gets one.) */
+extern const char *const SANDBOX_SYS_DIRS[];
 
 #endif

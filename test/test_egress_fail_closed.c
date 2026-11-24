@@ -27,9 +27,7 @@ static char workspace[256];
 static int child_assert_networkless(const char *proxy_sock) {
     SandboxConfig cfg = {0};
     cfg.workspace  = workspace;
-    cfg.sandbox    = 1;
-    cfg.net_mode   = 0;            /* proxy expected — but its path is bogus */
-    cfg.env_mode   = 1;
+    cfg.plan       = TEST_PLAN_STANDARD;  /* proxy expected — but its path is bogus */
     cfg.proxy_sock = proxy_sock;
 
     if (sandbox_child_setup(&cfg) != 0)

@@ -16,7 +16,7 @@
  * it moved to the broker proxy's per-hop decide() (see test_proxy_decide.c).
  * The only validation left here is the scheme guard: http:// or https:// only. */
 static void test_invalid_scheme(void) {
-    JsHttpResult r = js_http_fetch_exec("ftp://example.com/file", "GET", NULL, NULL, 0, NULL, 0);
+    JsHttpResult r = js_http_fetch_exec("ftp://example.com/file", "GET", NULL, NULL, 0, NULL, 0, NULL);
     assert(r.status == -1);
     assert(r.error && strstr(r.error, "http://"));
     js_http_result_free(&r);

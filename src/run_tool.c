@@ -5,6 +5,7 @@
 #include "tool_js.h"
 #include "proxy.h"
 #include "sandbox.h"
+#include "contain.h"
 #include "db.h"
 #include "log.h"
 
@@ -26,6 +27,12 @@
 #include <unistd.h>
 
 #define FD_REQUEST RUNTOOL_FD_REQUEST
+
+#define CONTAIN_FAILED_MSG \
+    "error: the containment this call was planned with could not be applied " \
+    "on this host, so the tool refused to run (fail-closed). This is an " \
+    "environment problem, not something you can fix — report it to the " \
+    "operator; retrying will not help"
 
 /* ── Flat binary wire format ────────────────────────────────────────────
  * Both ends are the same binary, so the request is not JSON: there is no
@@ -84,16 +91,15 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
 
     w_u8(&b, (unsigned char)req->vehicle);
     w_str(&b, req->tool_name);
-    w_u32(&b, (uint32_t)req->env_mode);
-    w_u32(&b, (uint32_t)req->nproc);
-    w_u32(&b, (uint32_t)req->as_mb);
-    w_u32(&b, (uint32_t)req->cpu_sec);
-    w_u32(&b, (uint32_t)req->sandbox);
-    w_u32(&b, (uint32_t)req->net_mode);
+    w_u32(&b, (uint32_t)req->plan.lv.files);
+    w_u32(&b, (uint32_t)req->plan.lv.net);
+    w_u32(&b, (uint32_t)req->plan.lv.nproc);
+    w_u32(&b, (uint32_t)req->plan.lv.cpu_sec);
+    w_u32(&b, (uint32_t)req->plan.fe);
+    w_u32(&b, (uint32_t)req->plan.ne);
     w_str(&b, req->workspace);
-    w_str(&b, req->mount_cwd ? req->cwd_path : NULL);
+    w_str(&b, req->plan.lv.files == FILES_OPEN ? req->cwd_path : NULL);
     w_str(&b, req->db_path);
-    w_u32(&b, (uint32_t)req->mount_cwd);
     w_str(&b, req->tmp_dir);
     w_str_array(&b, req->read_paths, req->read_count);
     w_str_array(&b, req->write_paths, req->write_count);
@@ -129,27 +135,23 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     return (char *)blob;
 }
 
-void run_tool_req_init(RunToolReq *req, ExecVehicle vehicle, const char *tool_name,
-                       const Containment *sb,
-                       const char *workspace, const char *cwd_path,
-                       const char *db_path) {
+int run_tool_req_init(RunToolReq *req, ExecVehicle vehicle, const char *tool_name,
+                      const Containment *sb,
+                      const char *workspace, const char *cwd_path,
+                      const char *db_path, char *why, size_t why_cap) {
     memset(req, 0, sizeof(*req));
+    if (contain_plan(sb, vehicle, contain_caps(NULL, 0), &req->plan, why, why_cap) != 0)
+        return -1;
     req->vehicle = vehicle;
     req->tool_name = tool_name;
     req->db_path = db_path;
-    req->env_mode = sb->env_mode;
-    req->nproc   = sb->rlimits.nproc;
-    req->as_mb   = sb->rlimits.as_mb;
-    req->cpu_sec = sb->rlimits.cpu_sec;
-    req->sandbox  = sb->sandbox;
-    req->net_mode = sb->net_mode;
     req->workspace = workspace;
     req->cwd_path  = cwd_path;
-    req->mount_cwd    = sb->mount_cwd;
     req->read_paths = (const char **)sb->read_paths;
     req->read_count = sb->read_path_count;
     req->write_paths = (const char **)sb->write_paths;
     req->write_count = sb->write_path_count;
+    return 0;
 }
 
 /* ── Reader (child side) ── */
@@ -199,16 +201,20 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
     memset(q, 0, sizeof(*q));
     q->vehicle = (ExecVehicle)r_u8(r);
     q->tool_name = r_str(r);
-    q->env_mode  = (int)r_u32(r);
-    q->nproc     = (int)r_u32(r);
-    q->as_mb     = (int)r_u32(r);
-    q->cpu_sec   = (int)r_u32(r);
-    q->sandbox   = (int)r_u32(r);
-    q->net_mode  = (int)r_u32(r);
+    uint32_t files = r_u32(r), net = r_u32(r);
+    q->plan.lv.nproc   = (int)r_u32(r);
+    q->plan.lv.cpu_sec = (int)r_u32(r);
+    uint32_t fe = r_u32(r), ne = r_u32(r);
+    /* An enum out of range is a malformed request, never a default. */
+    if (files > FILES_PRIVATE || net > NET_NONE || fe > FE_MOUNTNS || ne > NE_NETNS)
+        r->err = 1;
+    q->plan.lv.files = (FilesLevel)files;
+    q->plan.lv.net   = (NetLevel)net;
+    q->plan.fe = (FilesEnforcer)fe;
+    q->plan.ne = (NetEnforcer)ne;
     q->workspace = r_str(r);
     q->cwd_path  = r_str(r);
     q->db_path   = r_str(r);
-    q->mount_cwd    = (int)r_u32(r);
     q->tmp_dir      = r_str(r);
     q->read_paths  = r_str_array(r, &q->read_count);
     q->write_paths = r_str_array(r, &q->write_count);
@@ -383,15 +389,9 @@ static void build_sandbox_cfg(const RunToolParsed *q, int skip_pid_ns,
     cfg->db_path      = q->db_path;
     cfg->proxy_sock   = proxy_sock;
     cfg->llm_sock     = q->llm_sock;
-    cfg->sandbox      = q->sandbox;
-    cfg->mount_cwd    = q->mount_cwd;
-    cfg->env_mode     = q->env_mode;
-    cfg->net_mode     = q->net_mode;
+    cfg->plan         = q->plan;
     cfg->skip_pid_ns  = skip_pid_ns;
-    cfg->tmp_dir         = q->tmp_dir;
-    cfg->rlimits.nproc   = q->nproc;
-    cfg->rlimits.as_mb   = q->as_mb;
-    cfg->rlimits.cpu_sec = q->cpu_sec;
+    cfg->tmp_dir      = q->tmp_dir;
     *n_extra = 0;
     *extra = build_extra_mounts(q->read_paths, q->read_count,
                                 q->write_paths, q->write_count, n_extra);
@@ -465,26 +465,15 @@ static void sandbox_child_main(const VehicleDescriptor *desc, RunToolParsed *q,
     dup2(pipefd[1], STDERR_FILENO);
     close(pipefd[1]);
 
-    /* Uncontained (sandbox=0): no namespace, no proxy (proxy_active is
-     * already gated on q->sandbox) — run_fn / exec runs on the bare host.
-     * The LLM bridge socket needs no namespace, so uncontained exports the
-     * real path directly (the sandboxed path is set in sandbox_child_setup). */
-    if (!q->sandbox && q->llm_sock && q->llm_sock[0])
-        setenv("CCLAW_LLM_SOCK", q->llm_sock, 1);
-    if (q->sandbox) {
-        SandboxConfig cfg;
-        SandboxMountReq *extra = NULL;
-        size_t n_extra = 0;
-        build_sandbox_cfg(q, desc->skip_pid_ns, psock, &cfg, &extra, &n_extra);
-
-        if (sandbox_child_setup(&cfg) != 0) {
-            fprintf(stderr, "error: the namespace sandbox could not be "
-                    "established on this host, so the tool refused to run "
-                    "(fail-closed). This is an environment problem, not "
-                    "something you can fix — report it to the operator; "
-                    "retrying will not help\n");
-            _exit(126);
-        }
+    /* Every plan goes through the setup — containment `none` too, for HOME,
+     * PATH and the row's limits. */
+    SandboxConfig cfg;
+    SandboxMountReq *extra = NULL;
+    size_t n_extra = 0;
+    build_sandbox_cfg(q, desc->skip_pid_ns, psock, &cfg, &extra, &n_extra);
+    if (sandbox_child_setup(&cfg) != 0) {
+        fprintf(stderr, "%s\n", CONTAIN_FAILED_MSG);
+        _exit(126);
     }
 
     if (desc->inner_exec)
@@ -695,7 +684,7 @@ static int drain_child(pid_t pid, int fd, int timeout, char *output,
 static const char *signal_attribution(const RunToolParsed *q, int status) {
     if (!WIFSIGNALED(status)) return NULL;
     int sig = WTERMSIG(status);
-    int limited = q && (q->as_mb > 0 || q->cpu_sec > 0 || q->nproc > 0);
+    int limited = q && (q->plan.lv.cpu_sec > 0 || q->plan.lv.nproc > 0);
     if (sig == SIGKILL && limited)
         return "\n[killed by SIGKILL — likely resource limit "
                "(memory/CPU/processes); reduce usage, don't just retry]";
@@ -771,11 +760,12 @@ static void serve_network_child(const VehicleDescriptor *desc, RunToolParsed *q,
     int pipefd[2];
     if (pipe(pipefd) != 0) die("error: net: pipe failed");
 
-    /* Proxy: bind while single-threaded (before the fork below).
-     * Skipped if no agent_dir, no sandbox, or net_mode==1 (no network). */
+    /* Proxy: bind while single-threaded (before the fork below). It runs
+     * for network 'proxied' and 'advisory'; 'none' and 'direct' have none. */
     ProxyContext proxy;
     int proxy_active = 0;
-    if (q->agent_dir && !q->net_mode && q->sandbox) {
+    if (q->agent_dir &&
+        (q->plan.lv.net == NET_PROXIED || q->plan.lv.net == NET_ADVISORY)) {
         if (proxy_bind(&proxy, q->agent_dir, q->host_rules, q->host_count,
                        q->deny_rules, q->deny_count) != 0) {
             /* Running on with no proxy would be a call that silently has no
@@ -977,23 +967,15 @@ int run_tool_main(void) {
     /* The file vehicle (no network): sandbox THIS process, run the handler in-process. */
     if (!q.workspace) die("error: missing workspace");
 
-    /* net_mode forced to "no network"; uncontained (sandbox=0) runs the handler
-     * on the bare host. Nothing in the file tools confines a path — the mount
-     * namespace is the only workspace boundary — so uncontained they open
-     * whatever the user can (specs/portability.md). */
-    q.net_mode = 1;
-    if (q.sandbox) {
-        SandboxConfig cfg;
-        SandboxMountReq *extra = NULL;
-        size_t n_extra = 0;
-        build_sandbox_cfg(&q, desc->skip_pid_ns, NULL, &cfg, &extra, &n_extra);
-
-        if (sandbox_child_setup(&cfg) != 0)
-            die("error: the namespace sandbox could not be established on "
-                "this host, so the tool refused to run (fail-closed). This "
-                "is an environment problem, not something you can fix — "
-                "report it to the operator; retrying will not help");
-    }
+    /* No proxy: the file vehicle opens no socket. Under FE_CODE the file
+     * tools' own path check is the boundary; under files 'open' they reach
+     * whatever the user can (specs/containment.md). */
+    SandboxConfig cfg;
+    SandboxMountReq *extra = NULL;
+    size_t n_extra = 0;
+    build_sandbox_cfg(&q, desc->skip_pid_ns, NULL, &cfg, &extra, &n_extra);
+    if (sandbox_child_setup(&cfg) != 0)
+        die(CONTAIN_FAILED_MSG);
 
     int is_error = 0;
     char *result = desc->run_fn(&q, &is_error);

@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <sched.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -26,17 +27,26 @@ int main(void) {
     assert(contain_backend() && contain_backend()[0]);
 
     char why[160] = "stale";
-    int ok = contain_probe(why, sizeof(why));
+    unsigned caps = contain_caps(why, sizeof(why));
+    int ok = (caps & CONTAIN_CAP_MOUNTNS) != 0;
     if (strcmp(contain_backend(), "linux-ns") == 0)
         assert(ok == really_contains());
     else
-        assert(ok == 0);
+        assert(caps == 0);
     assert(ok ? why[0] == '\0' : why[0] != '\0');   /* a reason only on failure */
-    printf("  backend=%s contained=%d%s%s\n", contain_backend(), ok,
+    printf("  backend=%s caps=%#x%s%s\n", contain_backend(), caps,
            ok ? "" : " why=", ok ? "" : why);
 
-    /* It runs in a throwaway child, so asking twice gives the same answer. */
-    assert(contain_probe(NULL, 0) == ok);
+    /* Cached, and the caller's own process is never changed by the probe. */
+    assert(contain_caps(NULL, 0) == caps);
+
+    /* The test/diagnostic mask only ever takes capabilities away. */
+    setenv("CCLAW_CONTAIN_CAPS_MASK", "0", 1);
+    assert(contain_caps(why, sizeof(why)) == 0);
+    assert(!ok || strstr(why, "CCLAW_CONTAIN_CAPS_MASK"));
+    setenv("CCLAW_CONTAIN_CAPS_MASK", "0xffffffff", 1);
+    assert(contain_caps(NULL, 0) == caps);
+    unsetenv("CCLAW_CONTAIN_CAPS_MASK");
 
     return 0;
 }

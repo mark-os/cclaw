@@ -249,9 +249,13 @@ shell and js `RunToolReq`, in this order:
 3. **Sensitivity** — deny labels ride alongside and are checked first, minus a
    one-call approved exception.
 
-Under `offline` none of this reaches the wire: the child gets no proxy
-socket, so a declared-hosts tool still egresses nothing. Containment is
-kernel-enforced and beats every declaration.
+Under network `none` (`offline`) none of this reaches the wire: the child gets
+no proxy socket, so a declared-hosts tool still egresses nothing. Containment
+beats every declaration. The same rule set governs js under network
+`proxied`/`advisory` on a host with no namespace: its curl dials the proxy's
+socket itself ([shell-networking.md](shell-networking.md)), so narrowing,
+deny labels and the metadata block hold there too; a shell under `advisory`
+is subject to them only when it honors the proxy variables.
 
 ### grants.approval_mode
 
@@ -541,7 +545,7 @@ never enter the snapshot and no grant can name one.
 | Granted | `grants` kind `secret` | which agents may *use* it? |
 | Bound | `secret_hosts` | which hosts may it be *sent to*? |
 
-`agents.containment` governs sandbox strictness (env scrub, network, rlimits) — what a compromised agent can *do*, not which secrets it may use. The axes compose (an `offline` agent granted a secret still reaches no host) but must stay independent: never gate secret access on the containment.
+`agents.containment` governs containment (files, network, rlimits) — what a compromised agent can *do*, not which secrets it may use. The axes compose (an `offline` agent granted a secret still reaches no host) but must stay independent: never gate secret access on the containment.
 
 ### Storage providers (design — not yet implemented)
 
@@ -756,13 +760,14 @@ Keeping values out of the QuickJS heap is **not a goal**. The trust model's hard
 
 A `SECRET("name")` opaque-handle design (native binding returning a name-only handle, C-side `crypto.hmac` primitives, a grant-gated `.reveal()`) was fully specced and **rejected** (2026-08-22): it existed to serve a heap-avoidance goal the trust model does not have, at the cost of new API surface and vendored crypto. If a signing scheme (SigV4, webhook HMAC) ever needs a raw key inside a computation, interpolate it via args — sanctioned — or extend the proxy to sign at the network boundary, which would be the one mechanism that genuinely denies the child the plaintext.
 
-## Containment Policy Bundles
+## Containment
 
-`agents.containment` selects the policy bundle for every `--run-tool`
-child (shell, js, file). The bundle table, the rationale and the
-fail-closed rule live in [containment.md](containment.md); this
-section keeps only the points that concern secrets.
+`agents.containment` names a row of the `containments` table (levels for
+files and network, plus limits) that every `--run-tool` child (shell, js,
+file) is planned against. The model, the planner and the fail-closed rule live
+in [containment.md](containment.md); this section keeps only the points that
+concern secrets.
 
 - It governs containment only. It never gates a tool, a host or a secret ([trust.md](trust.md#the-invariant)).
-- Unknown values fall through to `standard` in `sandbox_policy_from_containment()` (`src/sandbox.c`). `containment_resolve()` copies the result into the `Containment` once, in `agent_setup_init()`.
-- **`.cclaw_key` and the DB family are outside every sandboxed containment's mount set**, so no sandboxed child can read the secret key or the DB ciphertext. Both are masked unconditionally, and a path grant that would expose either is refused at grant time. Containment `none` (no sandbox) is exposed by construction. See [Secret Storage](#secret-storage).
+- A name with no row is refused (`containment_load`, `src/sandbox.c`; the planner refuses every child call), never read as `standard`.
+- **`.cclaw_key` and the DB family are out of reach under every files level but `open`**: outside the mount set, masked if a bind would show them, and under the path check (`FE_CODE`) refused by resolved path and by inode. A path grant that would expose either is refused at grant time. Files `open` (containment `none`) is exposed by construction. See [Secret Storage](#secret-storage).

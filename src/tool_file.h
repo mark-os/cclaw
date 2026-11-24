@@ -10,7 +10,8 @@ typedef struct {
     const char *workspace;
     const char *cwd_path;       /* CWD rw mount (CLI mode, NULL in daemon) */
     const char *db_path;        /* cclaw.db path for masking */
-    Containment sb;             /* trust-derived policy + grant paths */
+    Containment sb;             /* the agent's containment + grant paths */
+    FilesEnforcer fe;           /* child side: the plan's files enforcer */
 } FileReadCtx;
 
 /* Register the six file tools (all EXEC_FILE; registry entries carry

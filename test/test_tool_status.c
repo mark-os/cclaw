@@ -34,8 +34,7 @@ static void test_frame_status_ok(void) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.command = "echo ok";
     r.workspace = WS;
-    r.sandbox = 0;      /* no namespace needed — this is a framing test */
-    r.net_mode = 1;
+    r.plan = TEST_PLAN_NONE;      /* no namespace needed — this is a framing test */
     char *res = run_tool_shell_full(&r, NULL, &status);
     assert(status == 0);
     assert(res && strstr(res, "ok") != NULL);
@@ -50,8 +49,7 @@ static void test_frame_status_error(void) {
     r.command = "sleep 5";
     r.timeout = 1;
     r.workspace = WS;
-    r.sandbox = 0;
-    r.net_mode = 1;
+    r.plan = TEST_PLAN_NONE;
     char *res = run_tool_shell_full(&r, NULL, &status);
     assert(status == 1);
     assert(res && strncmp(res, "error:", 6) != 0);
@@ -141,8 +139,7 @@ static void test_timeout_honored(void) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.command = "sleep 3; echo survived";
     r.workspace = WS;
-    r.sandbox = 0;
-    r.net_mode = 1;
+    r.plan = TEST_PLAN_NONE;
 
     r.timeout = 1;
     char *res = run_tool_shell(&r);
@@ -161,9 +158,8 @@ static void test_sigkill_attribution(void) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.command = "kill -9 $$";
     r.workspace = WS;
-    r.sandbox = 0;
-    r.net_mode = 1;
-    r.as_mb = 512;      /* limits configured → attribute to them */
+    r.plan = TEST_PLAN_NONE;
+    r.plan.lv.cpu_sec = 60;      /* limits configured → attribute to them */
     char *res = run_tool_shell(&r);
     assert(res && strstr(res, "SIGKILL") != NULL);
     assert(res && strstr(res, "resource limit") != NULL);
@@ -175,8 +171,7 @@ static void test_no_attribution_on_clean_exit(void) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.command = "exit 3";
     r.workspace = WS;
-    r.sandbox = 0;
-    r.net_mode = 1;
+    r.plan = TEST_PLAN_NONE;
     char *res = run_tool_shell(&r);
     assert(res && strstr(res, "[exit 3]"));
     assert(res && strstr(res, "SIGKILL") == NULL);

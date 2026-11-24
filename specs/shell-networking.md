@@ -27,6 +27,25 @@ Key insight: `CLONE_NEWNET` is the hard boundary. The proxy variables are
 plumbing, not enforcement: a program that ignores or unsets them gets zero
 network, not unrestricted network.
 
+That is network `proxied` (and `none`, with no proxy at all) in the namespace
+(`NE_NETNS`, [containment.md](containment.md)). Two plans run without a
+namespace:
+
+- **`NE_CODE`, js only**: cclaw's curl in the js child connects to the
+  broker's proxy socket itself (`HttpRequestOpts.proxy_unix`, `src/http.c`:
+  an already-connected unix socket handed to curl, a numeric placeholder proxy
+  address so nothing is resolved in the child) and asks for each tunnel with
+  `CONNECT host:port HTTP/1.1`. The proxy reads that as its preamble and
+  answers in HTTP; the decision is the same `proxy_decide()`. No variables, no
+  `net_shim`; under network `none` there is no socket and `http_request`
+  refuses.
+- **`NE_ENV`, shell under `advisory`**: the same `net_shim` listens on the
+  host's loopback and the proxy variables, `CCLAW_CONNECT` and
+  `GIT_SSH_COMMAND` are set (the `connect` binary is written into the agent's
+  scratch dir and renamed into place). A program that honors them is decided by
+  the proxy; nothing stops one that does not, and any local process can reach
+  the listener during the call. That is what `advisory` promises, and no more.
+
 **Terminology: "broker" vs "proxy" are not the same scope.** "Broker" names
 the whole forked per-call tool worker (`tool_shell_handler` et al.) — it sets
 up the sandbox, injects secrets, drains the output pipe, *and* hosts the

@@ -223,6 +223,21 @@ CREATE TABLE IF NOT EXISTS extensions (
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
+-- ═══ Containments (specs/containment.md) ═══
+-- How an agent's tool children are contained: a level per axis and the
+-- limits. An agent names one (agents.containment, looked up by name, so a
+-- name with no row refuses that agent's tool calls). The shipped rows
+-- (standard, offline, basic, none) are re-seeded at every start from
+-- CONTAIN_SHIPPED in src/sandbox.c; rows an operator adds are left alone.
+-- Operator-only: no agent-facing verb writes this table.
+CREATE TABLE IF NOT EXISTS containments (
+  name     TEXT PRIMARY KEY,
+  files    TEXT NOT NULL CHECK (files   IN ('private','confined','open')),
+  network  TEXT NOT NULL CHECK (network IN ('none','proxied','advisory','direct')),
+  nproc    INTEGER NOT NULL DEFAULT 0,    -- RLIMIT_NPROC, 0 = no cap
+  cpu_sec  INTEGER NOT NULL DEFAULT 0     -- RLIMIT_CPU seconds, 0 = no cap
+);
+
 -- ═══ Agents ═══
 -- name is the key everywhere (schema-string-keys decision, 2026-07-18): every
 -- agent_name column below is a real FK with ON UPDATE CASCADE, so agent_rename
@@ -238,8 +253,8 @@ CREATE TABLE IF NOT EXISTS agents (
   max_output_tokens INTEGER,                  -- cap on tokens per reply; NULL = the model's
   shell_timeout INTEGER DEFAULT 30,           -- seconds a shell_exec call may run
   shell_path TEXT,               -- interpreter for shell_exec's -c; NULL = /bin/sh
-  containment TEXT DEFAULT 'standard',        -- how tool calls are contained: none | standard |
-                                              -- offline (specs/containment.md)
+  containment TEXT DEFAULT 'standard',        -- how tool calls are contained: a containments
+                                              -- row by name (specs/containment.md)
   created_by TEXT REFERENCES agents(name) ON UPDATE CASCADE,
                                  -- creating agent (update_agent authorization); NULL = operator
   hold_until INTEGER,            -- quiesce lease (cclaw rename-agent): while in the

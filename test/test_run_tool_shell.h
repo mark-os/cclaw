@@ -13,6 +13,7 @@
 #define CCLAW_TEST_RUN_TOOL_SHELL_H
 
 #include "run_tool.h"
+#include "test_util.h"
 #include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -35,12 +36,8 @@ typedef struct {
     const char *db_path;        /* cclaw.db: key + ciphertext masked in the ns */
     const char *tmp_dir;        /* host dir bound as /tmp (NULL = tiny root tmpfs) */
     int timeout;
-    int sandbox;
-    int env_mode;               /* 1 = clean env (default), 0 = inherit */
-    int mount_cwd;
-    int net_mode;               /* 1 = no network (no proxy), 0 = proxy */
+    ContainPlan plan;           /* default TEST_PLAN_STANDARD */
     const char *spill_path;     /* oversized output goes here (NULL = none) */
-    int nproc, as_mb, cpu_sec;
     const char **host_rules;
     size_t host_count;
     const char **read_paths;
@@ -55,56 +52,23 @@ typedef struct {
 #define SHELL_REQ_DEFAULTS { \
     .command = NULL, .shell_path = NULL, .workspace = NULL, .agent_dir = NULL, \
     .cwd_path = NULL, .db_path = NULL, .tmp_dir = NULL, \
-    .timeout = 5, .sandbox = 1, .env_mode = 1, \
-    .mount_cwd = 0, .net_mode = 0, \
-    .nproc = 64, .as_mb = 512, .cpu_sec = 60, \
+    .timeout = 5, .plan = TEST_PLAN_STANDARD, \
     .host_rules = NULL, .host_count = 0, \
     .read_paths = NULL, .read_count = 0, \
     .write_paths = NULL, .write_count = 0, \
     .secrets = NULL, .secret_count = 0, \
 }
 
-/* Send a shell request via the real re-exec path and unpack the whole
- * fd-3 frame: [status][4-byte BE meta_len][meta][result].
- * *out_hosts (optional) gets the hosts JSON, *out_status (optional) the
- * child's explicit tool status (0 ok, 1 error). Caller frees. */
-static inline char *run_tool_shell_full(const ShellToolReq *r, char **out_hosts,
-                                        int *out_status) {
+/* Send any request via the real re-exec path and unpack the whole fd-3
+ * frame: [status][4-byte BE meta_len][meta][result]. *out_hosts (optional)
+ * gets the hosts JSON, *out_status (optional) the child's explicit tool
+ * status (0 ok, 1 error). Caller frees. */
+static inline char *run_tool_req_full(const RunToolReq *req, char **out_hosts,
+                                      int *out_status) {
     if (out_hosts) *out_hosts = NULL;
     if (out_status) *out_status = 0;
-
-    RunToolReq req = {
-        .vehicle = EXEC_SHELL,
-        .tool_name = "shell_exec",
-        .env_mode = r->env_mode,
-        .nproc = r->nproc,
-        .as_mb = r->as_mb,
-        .cpu_sec = r->cpu_sec,
-        .sandbox = r->sandbox,
-        .net_mode = r->net_mode,
-        .spill_path = r->spill_path,
-        .workspace = r->workspace,
-        .cwd_path = r->cwd_path,
-        .db_path = r->db_path,
-        .tmp_dir = r->tmp_dir,
-        .mount_cwd = r->mount_cwd,
-        .read_paths = r->read_paths,
-        .read_count = r->read_count,
-        .write_paths = r->write_paths,
-        .write_count = r->write_count,
-        .agent_dir = r->agent_dir ? r->agent_dir : r->workspace,
-        .host_rules = r->host_rules,
-        .host_count = r->host_count,
-        .command = r->command,
-        .shell_path = r->shell_path,
-        .timeout = r->timeout,
-        .secrets = r->secrets,
-        .secret_count = r->secret_count,
-        .egress_note = r->egress_note,
-    };
-
     size_t blob_len = 0;
-    char *blob = run_tool_serialize_request(&req, &blob_len);
+    char *blob = run_tool_serialize_request(req, &blob_len);
     if (!blob) return strdup("error: serialize failed");
 
     int sp[2];
@@ -164,6 +128,35 @@ static inline char *run_tool_shell_full(const ShellToolReq *r, char **out_hosts,
     char *result = strdup(buf + 5 + meta_len);
     free(buf);
     return result;
+}
+
+/* A shell request via run_tool_req_full. */
+static inline char *run_tool_shell_full(const ShellToolReq *r, char **out_hosts,
+                                        int *out_status) {
+    RunToolReq req = {
+        .vehicle = EXEC_SHELL,
+        .tool_name = "shell_exec",
+        .plan = r->plan,
+        .spill_path = r->spill_path,
+        .workspace = r->workspace,
+        .cwd_path = r->cwd_path,
+        .db_path = r->db_path,
+        .tmp_dir = r->tmp_dir,
+        .read_paths = r->read_paths,
+        .read_count = r->read_count,
+        .write_paths = r->write_paths,
+        .write_count = r->write_count,
+        .agent_dir = r->agent_dir ? r->agent_dir : r->workspace,
+        .host_rules = r->host_rules,
+        .host_count = r->host_count,
+        .command = r->command,
+        .shell_path = r->shell_path,
+        .timeout = r->timeout,
+        .secrets = r->secrets,
+        .secret_count = r->secret_count,
+        .egress_note = r->egress_note,
+    };
+    return run_tool_req_full(&req, out_hosts, out_status);
 }
 
 /* Result text only. */

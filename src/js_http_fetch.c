@@ -2,6 +2,7 @@
 #include "js_http_fetch.h"
 #include "http.h"
 #include "host_match.h"
+#include "sandbox.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,7 @@ int js_http_body_is_binary(const char *body, size_t len) {
 JsHttpResult js_http_fetch_exec(const char *url, const char *method,
                                 const char *req_body, const char **headers,
                                 int timeout_secs, const char *save_to,
-                                size_t max_bytes) {
+                                size_t max_bytes, const char *proxy_unix) {
     JsHttpResult r = {.status = -1, .body = NULL, .body_len = 0, .error = NULL};
 
     /* Scheme guard only — egress (host/IP/redirect gating) is enforced per-hop
@@ -31,7 +32,7 @@ JsHttpResult js_http_fetch_exec(const char *url, const char *method,
     if (save_to) {
         if (max_bytes == 0) max_bytes = JS_HTTP_SAVE_MAX_DEFAULT;
         if (max_bytes > JS_HTTP_SAVE_MAX_CEILING) max_bytes = JS_HTTP_SAVE_MAX_CEILING;
-        sink = fopen(save_to, "wb");
+        sink = contain_path_check(save_to, 1) == 0 ? fopen(save_to, "wb") : NULL;
         if (!sink) {
             char msg[384];
             snprintf(msg, sizeof(msg), "save_to: cannot create %.200s: %s",
@@ -53,6 +54,7 @@ JsHttpResult js_http_fetch_exec(const char *url, const char *method,
         .max_response_bytes = sink ? max_bytes : JS_HTTP_BODY_MAX,
         .user_agent = "cclaw/1.0",
         .sink = sink,
+        .proxy_unix = proxy_unix,
     };
 
     HttpResponse resp = {0};

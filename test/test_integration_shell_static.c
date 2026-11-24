@@ -116,7 +116,7 @@ static void test_static_tunnel_allowed(void) {
     r.command = cmd;
     r.workspace = workspace;
     r.timeout = 15;
-    r.sandbox = 1;
+    r.plan = TEST_PLAN_STANDARD;
     r.host_rules = allow_loopback;
     r.host_count = 1;
 
@@ -142,7 +142,7 @@ static char *run_cmd(const char *cmd) {
     r.command = cmd;
     r.workspace = workspace;
     r.timeout = 15;
-    r.sandbox = 1;
+    r.plan = TEST_PLAN_STANDARD;
     r.host_rules = allow_loopback;
     r.host_count = 1;
     char *result = run_tool_shell(&r);

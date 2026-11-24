@@ -81,7 +81,7 @@ static int granted_exactly(const FileReadCtx *ctx, const char *fullpath,
  * is active at all). */
 static char *path_grant_hint(const FileReadCtx *ctx, const char *fullpath,
                              int want_write, int suggest_parent) {
-    if (!ctx->sb.sandbox) return NULL; /* uncontained / direct call: nothing hidden */
+    if (ctx->fe == FE_NONE) return NULL; /* files 'open' / direct call: nothing hidden */
 
     /* An exact grant that still cannot be opened is a broken grant, not a
      * missing file — say so rather than falling through to a bare error or,
@@ -102,8 +102,6 @@ static char *path_grant_hint(const FileReadCtx *ctx, const char *fullpath,
     }
 
     if (path_under(ctx->workspace, fullpath)) return NULL;
-    if (ctx->sb.mount_cwd && ctx->cwd_path && path_under(ctx->cwd_path, fullpath))
-        return NULL;
     for (size_t i = 0; i < ctx->sb.write_path_count; i++)
         if (path_under(ctx->sb.write_paths[i], fullpath)) return NULL;
     if (!want_write)
@@ -146,7 +144,7 @@ static char *file_read_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_err
     else
         snprintf(fullpath, sizeof(fullpath), "%s/%s", workspace, req_path);
 
-    FILE *f = fopen(fullpath, "rb");
+    FILE *f = contain_path_check(fullpath, 0) == 0 ? fopen(fullpath, "rb") : NULL;
     if (!f) {
         char *hint = path_grant_hint(ctx, fullpath, 0, 0);
         return tool_fail_hint(is_error, hint, "error: cannot open file");
@@ -203,6 +201,10 @@ static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_er
         snprintf(fullpath, sizeof(fullpath), "%s", req_path);
     else
         snprintf(fullpath, sizeof(fullpath), "%s/%s", workspace, req_path);
+
+    if (contain_path_check(fullpath, 1) != 0)
+        return tool_fail_hint(is_error, path_grant_hint(ctx, fullpath, 1, 1),
+                              "error: cannot open file for writing");
 
     /* Overwriting an existing file must be stated, not stumbled into: a model
      * reproducing a file from memory can silently truncate it to a stub. */
@@ -282,7 +284,7 @@ static char *file_list_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_err
     else
         snprintf(resolved, sizeof(resolved), "%s/%s", workspace, req_path);
 
-    DIR *d = opendir(resolved);
+    DIR *d = contain_path_check(resolved, 0) == 0 ? opendir(resolved) : NULL;
     if (!d) {
         char *hint = path_grant_hint(ctx, resolved, 0, 0);
         return tool_fail_hint(is_error, hint, "error: not a directory or cannot open");
@@ -392,7 +394,7 @@ typedef struct {
 
 static void find_walk(const char *absdir, const char *reldir, int depth, FindAcc *a) {
     if (depth > FIND_MAX_DEPTH || a->count >= a->limit) return;
-    DIR *d = opendir(absdir);
+    DIR *d = contain_path_check(absdir, 0) == 0 ? opendir(absdir) : NULL;
     if (!d) return;
 
     struct dirent *ent;
@@ -540,7 +542,7 @@ static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx, int *is_err
     if (req_path[0] == '/') snprintf(fullpath, sizeof(fullpath), "%s", req_path);
     else snprintf(fullpath, sizeof(fullpath), "%s/%s", ctx->workspace, req_path);
 
-    FILE *f = fopen(fullpath, "rb");
+    FILE *f = contain_path_check(fullpath, 1) == 0 ? fopen(fullpath, "rb") : NULL;
     if (!f) {
         char *hint = path_grant_hint(ctx, fullpath, 1, 0);
         return tool_fail_hint(is_error, hint, "error: cannot open file");
@@ -661,7 +663,7 @@ static void grep_file(const char *abspath, const char *relpath, GrepAcc *a) {
     if (stat(abspath, &st) != 0 || !S_ISREG(st.st_mode)) return;
     if (st.st_size > GREP_MAX_FILE_SIZE || st.st_size == 0) return;
 
-    FILE *f = fopen(abspath, "rb");
+    FILE *f = contain_path_check(abspath, 0) == 0 ? fopen(abspath, "rb") : NULL;
     if (!f) return;
 
     char probe[512];
@@ -691,7 +693,7 @@ static void grep_file(const char *abspath, const char *relpath, GrepAcc *a) {
 
 static void grep_walk(const char *absdir, const char *reldir, int depth, GrepAcc *a) {
     if (depth > FIND_MAX_DEPTH || a->count >= a->limit) return;
-    DIR *d = opendir(absdir);
+    DIR *d = contain_path_check(absdir, 0) == 0 ? opendir(absdir) : NULL;
     if (!d) return;
 
     struct dirent *ent;
@@ -793,14 +795,13 @@ static char *dispatch_file(const RunToolParsed *q, FileReadCtx *ctx, int *is_err
 }
 
 char *tool_file_child_run(const RunToolParsed *q, int *is_error) {
-    /* Sandbox is already applied on this process; the run fns never set one
-     * up themselves. sb.sandbox carries "mount enforcement is active" so
-     * open failures outside the granted mounts produce a grant hint. */
+    /* The plan is already applied on this process; the run fns never set
+     * one up themselves. fe says which enforcer keeps paths, so open
+     * failures outside the granted areas produce a grant hint. */
     FileReadCtx fctx = {0};
     fctx.workspace    = q->workspace;
     fctx.cwd_path     = q->cwd_path;
-    fctx.sb.sandbox      = q->sandbox;
-    fctx.sb.mount_cwd    = q->mount_cwd;
+    fctx.fe           = q->plan.fe;
     fctx.sb.read_paths   = q->read_paths;
     fctx.sb.read_path_count = q->read_count;
     fctx.sb.write_paths  = q->write_paths;

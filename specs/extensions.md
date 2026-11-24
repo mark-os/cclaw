@@ -143,9 +143,9 @@ sensitivity deny rules still apply.
   default: a manifest may name hosts, never unpin the bound. Entries are bare
   hosts or `.suffix` in `host_match`'s vocabulary — schemes and paths are
   rejected, because they would silently never match.
-- **`offline` still means no packets.** That containment gives the child no
+- **`offline` still means no packets.** Network `none` gives the child no
   proxy socket at all, so a declared-hosts tool egresses nothing under it.
-  Containment is kernel-enforced and beats any declaration.
+  Containment beats any declaration.
 
 ### Extension skills
 

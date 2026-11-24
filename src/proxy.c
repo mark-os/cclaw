@@ -505,18 +505,41 @@ static int sni_check(const ProxyContext *ctx, int client_fd, uint16_t port,
     }
 }
 
+/* The answer to a preamble, in the form it was asked in. */
+static void answer(int fd, int http, const char *line, const char *status) {
+    char buf[96];
+    int n = http ? snprintf(buf, sizeof(buf), "HTTP/1.1 %s\r\nContent-Length: 0\r\n\r\n", status)
+                 : snprintf(buf, sizeof(buf), "%s\n", line);
+    if (n > 0) (void)!write(fd, buf, (size_t)n);
+}
+
 /* Handle a single client connection from a sandboxed child: one preamble,
- * "host:port". proxy_decide is the whole policy; the address dialed is always
- * the one it returned. */
+ * "host:port". cclaw's own curl in a child with no namespace (NE_CODE) dials
+ * this socket directly and asks in HTTP's spelling of the same line,
+ * "CONNECT host:port HTTP/1.1" plus headers, and is answered in HTTP; the
+ * decision is the same. proxy_decide is the whole policy; the address dialed
+ * is always the one it returned. */
 static void handle_client(ProxyContext *ctx, int client_fd) {
     char preamble[PREAMBLE_MAX];
     int len = proxy_read_line(client_fd, preamble, PREAMBLE_MAX);
     if (len <= 0) { close(client_fd); return; }
+    int http = strncmp(preamble, "CONNECT ", 8) == 0;
+    if (http) {
+        char *sp = strchr(preamble + 8, ' ');
+        if (sp) *sp = '\0';
+        memmove(preamble, preamble + 8, strlen(preamble + 8) + 1);
+        char hdr[PREAMBLE_MAX];
+        for (int i = 0; i < 64; i++) {   /* headers, to the blank line */
+            int hl = proxy_read_line(client_fd, hdr, sizeof(hdr));
+            if (hl < 0) { close(client_fd); return; }
+            if (hl == 0 || (hl == 1 && hdr[0] == '\r')) break;
+        }
+    }
 
     /* Connect request: "host:port" or "ip:port" */
     char *colon = strrchr(preamble, ':');
     if (!colon) {
-        (void)!write(client_fd, "ERROR bad preamble\n", 19);
+        answer(client_fd, http, "ERROR bad preamble", "400 Bad Request");
         close(client_fd);
         return;
     }
@@ -533,7 +556,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     char *pend = NULL;
     long pval = strtol(colon + 1, &pend, 10);
     if (pend == colon + 1 || *pend != '\0' || pval < 1 || pval > 65535) {
-        (void)!write(client_fd, "ERROR bad preamble\n", 19);
+        answer(client_fd, http, "ERROR bad preamble", "400 Bad Request");
         close(client_fd);
         return;
     }
@@ -547,8 +570,8 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
         LOG_WARN_("proxy deny host=%s reason=%s", target,
                   unresolved ? "resolve_failed" : "policy");
         record_denied(ctx, target);
-        if (unresolved) (void)!write(client_fd, "ERROR resolve\n", 14);
-        else            (void)!write(client_fd, "DENIED\n", 7);
+        if (unresolved) answer(client_fd, http, "ERROR resolve", "502 Bad Gateway");
+        else            answer(client_fd, http, "DENIED", "403 Forbidden");
         close(client_fd);
         return;
     }
@@ -557,20 +580,25 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     /* Bound simultaneous relays per call — refuse cleanly when at the cap. */
     if (!relay_acquire(ctx)) {
         LOG_INFO_("proxy relay_full host=%s", target);
-        (void)!write(client_fd, "ERROR busy\n", 11);   /* not policy: do not say DENIED */
+        answer(client_fd, http, "ERROR busy", "503 Service Unavailable");   /* not policy: not DENIED */
         close(client_fd);
         return;
     }
 
     int remote_fd = dial_ip(dial, port);
     if (remote_fd < 0) {
-        (void)!write(client_fd, "ERROR connect\n", 14);
+        answer(client_fd, http, "ERROR connect", "502 Bad Gateway");
         close(client_fd);
         relay_release(ctx);
         return;
     }
 
-    (void)!write(client_fd, "OK\n", 3);
+    if (http) {
+        const char *ok = "HTTP/1.1 200 Connection established\r\n\r\n";
+        (void)!write(client_fd, ok, strlen(ok));
+    } else {
+        (void)!write(client_fd, "OK\n", 3);
+    }
 
     /* Shared-IP CDN check (Q6): a hostname-authorized connection is only as trustworthy
      * as the SNI it actually presents once the IP is shared across unrelated

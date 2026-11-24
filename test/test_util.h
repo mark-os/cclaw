@@ -11,6 +11,12 @@
 #include <string.h>
 #include <unistd.h>
 
+/* Plans the shipped rows get on a host with namespaces, for tests that
+ * build a --run-tool request by hand (the limits are the tests' own). */
+#define TEST_PLAN_STANDARD ((ContainPlan){ {FILES_PRIVATE, NET_PROXIED, 64, 60}, FE_MOUNTNS, NE_NETNS })
+#define TEST_PLAN_OFFLINE  ((ContainPlan){ {FILES_PRIVATE, NET_NONE, 64, 60}, FE_MOUNTNS, NE_NETNS })
+#define TEST_PLAN_NONE     ((ContainPlan){ {FILES_OPEN, NET_DIRECT, 0, 0}, FE_NONE, NE_NONE })
+
 /* First statement of every test main: line-buffer stdout so progress output
  * survives the Makefile timeout-kill (see AGENTS.md Testing Guidelines). */
 #define TEST_INIT() setvbuf(stdout, NULL, _IOLBF, 0)
@@ -176,8 +182,7 @@ static inline char *test_run_child_status(ExecVehicle vehicle, const char *tool,
     if (fctx) {
         q.workspace = (char *)fctx->workspace;
         q.cwd_path  = (char *)fctx->cwd_path;
-        q.sandbox      = fctx->sb.sandbox;
-        q.mount_cwd    = fctx->sb.mount_cwd;
+        q.plan.fe      = fctx->fe;
         q.read_paths   = fctx->sb.read_paths;
         q.read_count   = fctx->sb.read_path_count;
         q.write_paths  = fctx->sb.write_paths;

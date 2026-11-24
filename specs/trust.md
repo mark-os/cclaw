@@ -72,8 +72,8 @@ agent can reach. Details: [security.md](security.md#using-a-secret-is-a-grant).
 **Only sandbox setup reads `agents.containment`. Every authority decision reads
 `grants`.**
 
-`sandbox_policy_from_containment()` (`src/sandbox.c`) is the single consumer
-that turns the containment string into a policy bundle. If a change makes tool,
+`containment_load()` and `contain_plan()` (`src/sandbox.c`) are the only
+consumers: they turn the containment's row into a plan for each child. If a change makes tool,
 secret, or host access depend on the containment, it is on the wrong axis — express
 it as a grant. Concretely:
 
@@ -88,9 +88,10 @@ it as a grant. Concretely:
   `shell_exec` grant**, so granting `js_eval` never silently grants the
   union. Grant cost tracks actual reach, always.
 - `create_agent` caps the child on both axes independently: child
-  `containment` ≤ parent's (the three values are ordered
-  `offline < standard < none` by looseness) AND child grants ⊆ parent
-  grants. Subset-of-grants, not a fuzzy "trust" comparison.
+  `containment` no looser than the parent's in any column (files
+  `private > confined > open`, network `none > proxied > advisory > direct`,
+  each limit with 0 the loosest) AND child grants ⊆ parent grants.
+  Subset-of-grants, not a fuzzy "trust" comparison.
 - **Reach may live on a capability (declared hosts, activated at promotion) or
   on a principal (host grants) — never on a containment.** A promoted tool whose
   manifest declares hosts reaches exactly those; everything else runs under the
@@ -198,7 +199,8 @@ because no proxy is started. See
 `agents.containment` was named `trust_level` until 2026-07, then
 `sandbox_profile` (values `host | standard | restricted`) until schema v71
 (2026-11), when it took its present name and the values became
-`none | standard | offline`. The first rename
+`none | standard | offline`; at v72 a containment became a row of levels
+(`containments`), adding `basic`. The first rename
 records the resolution of a two-meanings ambiguity: the column only ever
 selected the containment bundle, but the name invited authority checks to
 accrete onto it. Design notes that referenced "trust levels" mean the

@@ -33,7 +33,7 @@ static char *run_web_fetch(const char *args, char **rules, size_t n, int sandbox
     q.param_count = 2;
     q.host_rules = rules;
     q.host_count = n;
-    q.sandbox = sandbox;
+    q.plan.ne = sandbox ? NE_NETNS : NE_NONE;
     *is_error = 0;
     return tool_js_child_run(&q, is_error);
 }

@@ -135,7 +135,7 @@ sandboxed child asserting anything.
   `opts.extra` cannot either: a `model` in it is overwritten.
 - **Children never see keys.** Not "held C-side" — absent from the process.
 - **No egress widening.** The child's allowlist is untouched; completions
-  never leave the parent. The `offline` containment (`net_mode=1`, no network) gets no
+  never leave the parent. Network `none` (the `offline` containment) gets no
   bridge socket at all — no packets on the child's behalf, whoever sends
   them.
 - **Spend is metered**: `llm_max_calls_per_tool` per call,

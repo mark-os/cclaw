@@ -208,7 +208,8 @@ When `creator` is non-NULL (agent-initiated: `create_agent`, or a manifest
 promoted by an agent), the child is capped on both axes independently:
 
 - **Containment**: child `containment` ≤ creator's, by looseness order
-  `none > standard > offline`. Requesting a looser containment is a
+  per column of its `containments` row (files, network, nproc, cpu_sec).
+  Requesting a looser containment is a
   hard refusal, not a clamp — the definition was wrong, say so.
 - **Authority**: child grants ⊆ creator's *live* grants (exact
   subset-of-values per kind: tool, host, read_path, write_path). No fuzzy

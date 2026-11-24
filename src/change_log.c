@@ -41,6 +41,12 @@ const ChangeLogColumn CHANGE_LOG_COLUMNS[] = {
     { "agents", "hold_holder",       COL_MEASUREMENT },
     { "agents", "created_at",        COL_MEASUREMENT },
 
+    { "containments", "name",        COL_SETTING },
+    { "containments", "files",       COL_SETTING },
+    { "containments", "network",     COL_SETTING },
+    { "containments", "nproc",       COL_SETTING },
+    { "containments", "cpu_sec",     COL_SETTING },
+
     { "grants", "agent_name",        COL_SETTING },
     { "grants", "kind",              COL_SETTING },
     { "grants", "value",             COL_SETTING },

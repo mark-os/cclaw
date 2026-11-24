@@ -220,7 +220,7 @@ static char *schema_shape(sqlite3 *db) {
     return shape;
 }
 
-/* v70 -> v71 on a frozen v70 database (the schema the v0.8.0 release binary
+/* v70 -> current (v71, v72) on a frozen v70 database (the schema the v0.8.0 release binary
  * creates, its change_log triggers included — never a current DB reshaped),
  * then the startup sequence (compat, ensure_schema), and the result must
  * match a fresh current DB column for column. This is what catches a
@@ -287,6 +287,25 @@ static void test_schema_patch_v71(void) {
                            " AND id IN (1, 2)") == 2);
     assert(test_qi(old_db, "SELECT COUNT(*) FROM sqlite_master"
                            " WHERE sql LIKE '%sandbox_profile%'") == 0);
+
+    /* v72: every agent's containment names a shipped row. The next start
+     * restores an edited shipped row and keeps an operator's own. */
+    assert(test_qi(old_db, "SELECT COUNT(*) FROM agents WHERE containment NOT IN"
+                           " (SELECT name FROM containments)") == 0);
+    assert(test_qi(old_db, "SELECT COUNT(*) FROM containments WHERE"
+                           " (name,files,network,nproc,cpu_sec) IN (VALUES"
+                           " ('standard','private','proxied',256,0),"
+                           " ('offline','private','none',64,120),"
+                           " ('basic','confined','advisory',256,0),"
+                           " ('none','open','direct',0,0))") == 4);
+    assert(sqlite3_exec(old_db,
+        "UPDATE containments SET network='direct' WHERE name='standard';"
+        "INSERT INTO containments VALUES('mine','open','proxied',8,0);",
+        NULL, NULL, NULL) == SQLITE_OK);
+    assert(db_ensure_schema(old_db) == 0);
+    assert(test_qi(old_db, "SELECT COUNT(*) FROM containments WHERE"
+                           " name='standard' AND network='proxied'") == 1);
+    assert(test_qi(old_db, "SELECT nproc FROM containments WHERE name='mine'") == 8);
 
     sqlite3 *new_db = db_open(new_path);
     assert(new_db != NULL && db_ensure_schema(new_db) == 0);

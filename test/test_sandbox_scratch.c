@@ -135,7 +135,7 @@ static void test_tmp_persists_and_is_private(void) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.workspace = WS;
     r.tmp_dir = tmp_dir;
-    r.net_mode = 1;
+    r.plan = TEST_PLAN_OFFLINE;
     r.command = "echo SURVIVED > /tmp/marker.txt; "
                 "test -e " HOST_TMP_MARKER " && echo HOST_TMP_VISIBLE || echo host_tmp_hidden";
     char *out = run_tool_shell(&r);

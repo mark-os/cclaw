@@ -180,11 +180,12 @@ int js_tool_resolve_request(const ToolEntry *te, JsEvalCtx **out_ctx,
 }
 
 char *tool_js_child_run(const RunToolParsed *q, int *is_error) {
-    /* qjs runs in-process in the inner fork: netns + proxy +
-     * mounts are already applied. code/filename/args arrive as pre-extracted
-     * wire params; args is an opaque JSON blob QuickJS itself parses.
-     * http_request's curl honors HTTP_PROXY → decide(); fs.* paths are real
-     * bind-mounts from the blob's read/write paths. */
+    /* qjs runs in-process in the inner fork, the plan already applied.
+     * code/filename/args arrive as pre-extracted wire params; args is an
+     * opaque JSON blob QuickJS itself parses. http_request reaches the
+     * proxy's decide() through HTTP_PROXY in the namespace, or by dialling
+     * the proxy socket itself under NE_CODE; fs.* paths are bind mounts, or
+     * pass the path check under FE_CODE. */
     const char *code = run_tool_param_str(q, "code");
     const char *filename = run_tool_param_str(q, "filename");
     if ((!code || !code[0]) && (!filename || !filename[0]))
@@ -211,12 +212,13 @@ char *tool_js_child_run(const RunToolParsed *q, int *is_error) {
         }
         qjs_host_set_secrets(js_secrets, q->secret_count);
     }
-    qjs_host_set_egress(q->host_rules, q->host_count, q->sandbox);
+    qjs_host_set_egress(q->host_rules, q->host_count, q->plan.ne,
+                        getenv("CCLAW_PROXY_SOCK"));
     /* LLM() reaches the parent's bridge via CCLAW_LLM_SOCK (env, set during
      * sandbox setup from q->llm_sock) — nothing to hand the engine here. */
     char *r = qjs_eval_run(code, filename, args, ext_config, is_error);
     qjs_host_set_secrets(NULL, 0);
-    qjs_host_set_egress(NULL, 0, 0);
+    qjs_host_set_egress(NULL, 0, 0, NULL);
     free(js_secrets);
     return r ? r : tool_fail(is_error, "error: js_eval returned null");
 }

@@ -15,6 +15,7 @@
 #include "monocypher.h"
 #include "util.h"
 #include "inbox_cap.h"
+#include "sandbox.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -360,6 +361,29 @@ sqlite3 *db_open(const char *path) {
     return db;
 }
 
+/* The shipped containments are restored to their shipped levels, unlike the
+ * seed catalog (db_seed_defaults), whose existing rows win: a containment is a promise the code makes, so an edited
+ * `standard` would make every agent on it something other than what the
+ * docs say. An operator who wants other levels adds a row of their own. */
+static int db_seed_containments(sqlite3 *db) {
+    int rc = 0;
+    for (size_t i = 0; i < CONTAIN_SHIPPED_N && rc == 0; i++) {
+        const ContainRow *r = &CONTAIN_SHIPPED[i];
+        char *sql = sqlite3_mprintf(
+            "INSERT INTO containments VALUES(%Q, %Q, %Q, %d, %d) ON CONFLICT(name)"
+            " DO UPDATE SET files=excluded.files, network=excluded.network,"
+            " nproc=excluded.nproc, cpu_sec=excluded.cpu_sec WHERE files IS NOT"
+            " excluded.files OR network IS NOT excluded.network OR nproc IS NOT"
+            " excluded.nproc OR cpu_sec IS NOT excluded.cpu_sec", r->name,
+            files_level_name(r->lv.files), net_level_name(r->lv.net),
+            r->lv.nproc, r->lv.cpu_sec);
+        rc = sql && sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
+        if (rc) LOG_ERROR_("db_seed_containments failed err=%s", sqlite3_errmsg(db));
+        sqlite3_free(sql);
+    }
+    return rc;
+}
+
 /* Apply schema (CREATE TABLE IF NOT EXISTS). Call once from main at startup. */
 int db_ensure_schema(sqlite3 *db) {
     char *err = NULL;
@@ -374,6 +398,10 @@ int db_ensure_schema(sqlite3 *db) {
      * in schema.sql (src/change_log.c says why). A no-op when they already
      * match, so this costs a few sqlite_master reads per start. */
     if (change_log_sync(db) != 0) return -1;
+
+    /* The shipped containments are code, not catalog: every DB has them, as
+     * shipped, from the moment its schema does. */
+    if (db_seed_containments(db) != 0) return -1;
 
     /* Stamp the schema generation. Only reached for a fresh or already-current
      * DB — db_schema_compat() refuses stale ones before we get here. */
@@ -415,6 +443,18 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       " WHERE state='pending' AND tool_name IN ('create_agent','update_agent')"
       "   AND json_valid(args_json)"
       "   AND json_type(args_json,'$.sandbox_profile') IS NOT NULL;",
+      NULL },
+    /* v72: a containment is a row of levels (files, network) and limits, and
+     * agents.containment names one. The shipped rows are written by
+     * db_ensure_schema, which startup runs right after the patches. agents keeps its column unchanged: the name is looked up,
+     * not a foreign key, since adding one would mean rebuilding agents. */
+    { 72,
+      "CREATE TABLE IF NOT EXISTS containments ("
+      "  name TEXT PRIMARY KEY,"
+      "  files TEXT NOT NULL CHECK (files IN ('private','confined','open')),"
+      "  network TEXT NOT NULL CHECK (network IN ('none','proxied','advisory','direct')),"
+      "  nproc INTEGER NOT NULL DEFAULT 0,"
+      "  cpu_sec INTEGER NOT NULL DEFAULT 0);",
       NULL },
     { 0, NULL, NULL },
 };
@@ -609,6 +649,7 @@ int db_seed_defaults(sqlite3 *db) {
     }
     return 0;
 }
+
 
 void db_close(sqlite3 *db) {
     if (db) sqlite3_close(db);

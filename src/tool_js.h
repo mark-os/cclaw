@@ -29,12 +29,10 @@ typedef struct {
 typedef struct {
     char **allowed_hosts;        /* egress allowlist for the per-call proxy */
     size_t allowed_hosts_count;
-    int uncontained;             /* 1 = containment none (sandbox=0), 0 = sandboxed */
-    const char *containment;
     const char *workspace;
     const char *cwd_path;
     const char *db_path;         /* for the shared extension-store mount */
-    Containment sb;              /* trust-derived policy + grant paths */
+    Containment sb;              /* the agent's containment + grant paths */
 } JsEvalCtx;
 
 /* Register js_eval tool into registry. */

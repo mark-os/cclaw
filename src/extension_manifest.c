@@ -5,6 +5,7 @@
 #include "hook.h"
 #include "validate.h"
 #include "log.h"
+#include "sandbox.h"
 #include "skills.h"
 #include "templates.h"
 #include "turn_edit.h"
@@ -484,7 +485,7 @@ static int check_skills(sqlite3 *db, const char *manifest, const char *bundle_di
 }
 
 /* Verify every $.agents[] entry is a plausible agent definition: PascalCase
- * name, known containment, and an existing bundle-relative
+ * name, shipped containment, and an existing bundle-relative
  * system_prompt_file if declared. DB-dependent caps (grants subset, extension
  * visibility) are enforced at install time by agent_definition_validate. */
 static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_dir,
@@ -510,9 +511,13 @@ static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_di
             xerr(err_out, "agents[] entry needs a PascalCase 'name'");
             rc = -1; break;
         }
-        if (p && strcmp(p, "none") != 0 &&
-            strcmp(p, "standard") != 0 && strcmp(p, "offline") != 0) {
-            xerr(err_out, "agents[] containment must be none|standard|offline");
+        /* A bundle travels between hosts, so it may name only a shipped
+         * containment, never a row one operator added on one box. */
+        size_t k = 0;
+        while (p && k < CONTAIN_SHIPPED_N && strcmp(p, CONTAIN_SHIPPED[k].name) != 0) k++;
+        if (p && k == CONTAIN_SHIPPED_N) {
+            xerr(err_out, "agents[] containment must be a shipped one:"
+                 " standard, offline, basic or none");
             rc = -1; break;
         }
         if (f && f[0]) {

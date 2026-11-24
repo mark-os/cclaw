@@ -361,10 +361,11 @@ static void layer_core(sqlite3 *db, const Config *cfg) {
     else print_ok("core", "database, config and a provider key");
 }
 
-/* Layers 2 and 4, per agent: every child vehicle — file, js and shell
- * alike — runs in one contained child, so they stand or fall together, and
- * which it is depends on the agent's containment. */
-static void layer_tools(sqlite3 *db, int contained) {
+/* Layers 2 and 4, per agent: the containment it names, its levels, and for
+ * each child vehicle the enforcers this host gives it — or the refusal. */
+static void layer_tools(sqlite3 *db, unsigned caps) {
+    static const struct { ExecVehicle v; const char *name; } vs[] = {
+        { EXEC_FILE, "file" }, { EXEC_JS, "js" }, { EXEC_SHELL, "shell" } };
     sqlite3_stmt *st;
     if (!db || sqlite3_prepare_v2(db,
             "SELECT name, COALESCE(containment,'standard') FROM agents ORDER BY name;",
@@ -375,30 +376,50 @@ static void layer_tools(sqlite3 *db, int contained) {
     int refused = 0, rows = 0;
     while (sqlite3_step(st) == SQLITE_ROW) {
         const char *name = (const char *)sqlite3_column_text(st, 0);
-        const char *level = (const char *)sqlite3_column_text(st, 1);
+        Containment c = {0};
+        containment_load(db, (const char *)sqlite3_column_text(st, 1), &c);
         char d[320];
         rows++;
-        if (strcmp(level, "none") == 0) {
-            snprintf(d, sizeof(d), "%s (none) — uncontained: acts as this user, "
-                     "with no file, secret or network boundary", name);
-            print_warn("tools", d);
-        } else if (contained) {
-            snprintf(d, sizeof(d), "%s (%s) — file, js and shell contained",
-                     name, level);
-            print_ok("tools", d);
-        } else {
-            snprintf(d, sizeof(d), "%s (%s) — every tool call is refused (exit 126)",
-                     name, level);
+        if (!c.known) {
+            snprintf(d, sizeof(d), "%s (%s) — no such containment: every tool"
+                     " call that forks is refused", name, c.name);
             print_fail("tools", d);
             refused = 1;
+            continue;
+        }
+        snprintf(d, sizeof(d), "%s (%s: files %s, network %s, nproc %d, cpu %ds)",
+                 name, c.name, files_level_name(c.lv.files), net_level_name(c.lv.net),
+                 c.lv.nproc, c.lv.cpu_sec);
+        if (c.lv.files == FILES_OPEN && c.lv.net == NET_DIRECT) {
+            print_warn("tools", d);
+            printf("       uncontained: acts as this user, with no file, secret or"
+                   " network boundary\n");
+        } else {
+            print_ok("tools", d);
+        }
+        for (size_t i = 0; i < 3; i++) {
+            ContainPlan p;
+            char why[640];
+            if (contain_plan(&c, vs[i].v, caps, &p, why, sizeof(why)) != 0) {
+                printf("       %-5s REFUSED — %s\n", vs[i].name,
+                       strncmp(why, "error: ", 7) == 0 ? why + 7 : why);
+                refused = 1;
+                continue;
+            }
+            /* The namespace keeps advisory as proxied: no route out but the
+             * proxy, which is stronger than advisory promises. */
+            printf("       %-5s files: %s; network: %s%s\n", vs[i].name,
+                   files_enforcer_name(p.fe), net_enforcer_name(p.ne),
+                   p.ne == NE_NETNS && c.lv.net == NET_ADVISORY
+                       ? " (forced through the proxy, stronger than advisory)" : "");
         }
     }
     sqlite3_finalize(st);
     if (!rows) printf("  tools: no agents yet\n");
     if (refused)
-        printf("       this host cannot contain a tool child. To run an agent\n"
-               "       uncontained, set its containment to 'none' (CLI:\n"
-               "       --no-containment) — the device itself is then the boundary\n");
+        printf("       a refused tool's calls return the reason instead of running;\n"
+               "       a shipped containment this host keeps for every tool: '%s'\n",
+               contain_suggest(caps) ? contain_suggest(caps) : "none");
 }
 
 static void check_layers(sqlite3 *db, const Config *cfg) {
@@ -406,17 +427,20 @@ static void check_layers(sqlite3 *db, const Config *cfg) {
     layer_core(db, cfg);
 
     char why[160], d[256];
-    int contained = contain_probe(why, sizeof(why));
-    if (contained) {
-        print_ok("containment", contain_backend());
+    unsigned caps = contain_caps(why, sizeof(why));
+    snprintf(d, sizeof(d), "%s — user+mount namespaces %s, network namespace %s%s%s",
+             contain_backend(), (caps & CONTAIN_CAP_MOUNTNS) ? "yes" : "no",
+             (caps & CONTAIN_CAP_NETNS) ? "yes" : "no",
+             why[0] ? "; " : "", why);
+    if (caps & CONTAIN_CAP_MOUNTNS) {
+        print_ok("containment", d);
     } else {
-        snprintf(d, sizeof(d), "%s — %s", contain_backend(), why);
-        print_fail("containment", d);
+        print_warn("containment", d);
         char hint[320];
         contain_hint(hint, sizeof(hint));
         if (hint[0]) printf("       %s\n", hint);
     }
-    layer_tools(db, contained);
+    layer_tools(db, caps);
 
     /* Layer 5: channels and tool children are this binary re-executed. */
     char self[PATH_MAX];

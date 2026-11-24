@@ -7,6 +7,7 @@
 #include "config_registry.h"
 #include "cron.h"
 #include "db.h"
+#include "sandbox.h"
 #include "util.h"
 #include "validate.h"
 #include <limits.h>
@@ -42,15 +43,6 @@ static char *jext(sqlite3 *db, const char *json, const char *path) {
     }
     sqlite3_finalize(st);
     return res;
-}
-
-/* Looseness order none > standard > offline; -1 = unknown. */
-static int containment_rank(const char *c) {
-    if (!c) return -1;
-    if (strcmp(c, "none") == 0) return 2;
-    if (strcmp(c, "standard") == 0) return 1;
-    if (strcmp(c, "offline") == 0) return 0;
-    return -1;
 }
 
 static char *agent_containment(sqlite3 *db, const char *name) {
@@ -175,25 +167,37 @@ static int extensions_check(sqlite3 *db, const char *json, const char *creator,
     return rc;
 }
 
-/* Creator cap on a containment value (validate path). */
+/* A limit of 0 is no cap, the loosest. */
+static int limit_looser(int child, int parent) {
+    return parent > 0 && (child == 0 || child > parent);
+}
+
+/* Creator cap on a containment value (validate path): it must name a row,
+ * and that row may be no looser than the creator's in any column — files,
+ * network, and each limit compared on its own. */
 static int containment_capped(sqlite3 *db, const char *containment,
                               const char *creator, char **err) {
     if (!containment) return 0;
-    int r = containment_rank(containment);
-    if (r < 0)
-        return failf(err, "invalid containment '%s' (none|standard|offline)%s",
-                     containment, "");
-    if (creator) {
-        char *cp = agent_containment(db, creator);
-        int cr = containment_rank(cp);
-        if (r > cr) {
-            failf(err, "containment '%s' looser than creator's '%s'", containment, cp);
-            free(cp);
-            return -1;
-        }
-        free(cp);
+    Containment c, p;
+    if (!containment_load(db, containment, &c))
+        return failf(err, "invalid containment '%s': no such row in the"
+                     " containments table%s", containment, "");
+    if (!creator) return 0;
+    char *cp = agent_containment(db, creator);
+    int known = containment_load(db, cp, &p);
+    const char *col = !known ? "its own row is missing"
+        : c.lv.files < p.lv.files ? "files"
+        : c.lv.net < p.lv.net ? "network"
+        : limit_looser(c.lv.nproc, p.lv.nproc) ? "nproc"
+        : limit_looser(c.lv.cpu_sec, p.lv.cpu_sec) ? "cpu_sec" : NULL;
+    char msg[256];
+    if (col) {
+        snprintf(msg, sizeof(msg), "containment '%s' is looser than the creator's"
+                 " '%s' (%s)", containment, cp, col);
+        fail(err, msg);
     }
-    return 0;
+    free(cp);
+    return col ? -1 : 0;
 }
 
 /* Validate $.models when present (model-routing.md R1/R2): an ordered,

@@ -2,6 +2,7 @@
 #include "qjs_llm.h"
 #include "llm_bridge.h"
 #include "util.h"
+#include "sandbox.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -190,7 +191,8 @@ static char *splice_images(JSContext *ctx, JSValueConst opts,
         const char *path = JS_ToCString(ctx, pv);
         JS_FreeValue(ctx, pv);
         size_t flen = 0;
-        char *raw = path ? util_read_file(path, &flen) : NULL;
+        char *raw = path && contain_path_check(path, 0) == 0
+                  ? util_read_file(path, &flen) : NULL;
         const char *mime = raw ? image_mime((const unsigned char *)raw, flen) : NULL;
         total += flen;
         if (!raw)

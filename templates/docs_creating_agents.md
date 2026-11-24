@@ -80,7 +80,9 @@ registered through `request_config` look like `model@provider`.
 
 An agent you create can never exceed you:
 
-- `containment` ≤ yours in looseness (none > standard > offline).
+- `containment` no looser than yours in any column: files
+  (private > confined > open), network (none > proxied > advisory > direct),
+  and each limit.
 - Every grant ⊆ your own live grants. Exact values, no fuzzy matching. That
   includes `secrets`: a child may use only secrets you may use yourself, and a
   new agent gets none it was not given.

@@ -52,15 +52,18 @@ static int probe_write(const char *path, const char *text) {
     return ok ? 0 : -1;
 }
 
+static int sandbox_bring_up_lo(void);
+
 /* Does what the sandbox does first, not only what it asks for first: creates
- * the namespaces, maps the user and makes the mount tree private — the first
- * step that needs a capability inside the new namespace. Creating alone is
- * not the test: Ubuntu's AppArmor restriction lets an unprivileged process
- * create a user namespace and then denies it every capability in it, so
- * unshare() succeeds and the first mount() fails. A probe that stopped at
- * unshare() called such a host contained, and every tool call then refused
- * (seen on a real Ubuntu 24.04 kernel in CI, 2026-11-23). */
-int contain_probe(char *why, size_t cap) {
+ * the namespaces, maps the user, then takes the first step that needs a
+ * capability inside them — making the mount tree private (MOUNTNS) or bringing
+ * up lo (NETNS). Creating alone is not the test: Ubuntu's AppArmor restriction
+ * lets an unprivileged process create a user namespace and then denies it
+ * every capability in it, so unshare() succeeds and the first mount() fails.
+ * A probe that stopped at unshare() called such a host contained, and every
+ * tool call then refused (seen on a real Ubuntu 24.04 kernel in CI,
+ * 2026-11-23). Returns 1 if the child got through. */
+static int probe(int flags, int mount_step, char *why, size_t cap) {
     if (why && cap) why[0] = '\0';
     int pfd[2];
     if (pipe(pfd) != 0) {
@@ -78,8 +81,9 @@ int contain_probe(char *why, size_t cap) {
     if (pid == 0) {
         close(pfd[0]);
         char map[64];
-        if (unshare(CONTAIN_NS_FLAGS) != 0)
-            probe_fail(pfd[1], "unshare(user, mount, network, ipc, pid)");
+        if (unshare(flags) != 0)
+            probe_fail(pfd[1], mount_step ? "unshare(user, mount, network, ipc, pid)"
+                                          : "unshare(user, network)");
         snprintf(map, sizeof(map), "%u %u 1\n", (unsigned)uid, (unsigned)uid);
         if (probe_write("/proc/self/uid_map", map) != 0)
             probe_fail(pfd[1], "writing the user namespace's uid_map");
@@ -89,8 +93,10 @@ int contain_probe(char *why, size_t cap) {
         snprintf(map, sizeof(map), "%u %u 1\n", (unsigned)gid, (unsigned)gid);
         if (probe_write("/proc/self/gid_map", map) != 0)
             probe_fail(pfd[1], "writing the user namespace's gid_map");
-        if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
+        if (mount_step && mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
             probe_fail(pfd[1], "mount inside the new namespace");
+        if (!mount_step && sandbox_bring_up_lo() != 0)
+            probe_fail(pfd[1], "bringing up lo in the new network namespace");
         _exit(0);
     }
     close(pfd[1]);
@@ -108,6 +114,26 @@ int contain_probe(char *why, size_t cap) {
     if (WIFEXITED(st) && WEXITSTATUS(st) == 0) return 1;
     if (why) snprintf(why, cap, "%s", msg[0] ? msg : "namespace probe child failed");
     return 0;
+}
+
+unsigned contain_caps(char *why, size_t cap) {
+    static int probed;
+    static unsigned caps;
+    static char reason[160];
+    if (!probed) {
+        caps = CONTAIN_CAP_SHIM;
+        if (probe(CONTAIN_NS_FLAGS, 1, reason, sizeof(reason))) caps |= CONTAIN_CAP_MOUNTNS;
+        if (probe(CLONE_NEWUSER | CLONE_NEWNET, 0, NULL, 0)) caps |= CONTAIN_CAP_NETNS;
+        probed = 1;
+    }
+    unsigned out = caps;
+    const char *mask = getenv("CCLAW_CONTAIN_CAPS_MASK");
+    if (mask && mask[0]) out &= (unsigned)strtoul(mask, NULL, 0);
+    if (why && cap)
+        snprintf(why, cap, "%s", (out & CONTAIN_CAP_MOUNTNS) ? ""
+                 : (caps & CONTAIN_CAP_MOUNTNS) ? "masked by CCLAW_CONTAIN_CAPS_MASK"
+                 : reason);
+    return out;
 }
 
 /* A sysctl's integer value, or -1 when this kernel does not have it. */
@@ -428,10 +454,10 @@ static void bind_path_into(const char *newroot, const char *abspath, int ro) {
 
 /* Apply namespace sandbox in the child.
  * unshare(USER|MNT|PID|NET), write uid/gid maps, pivot_root into minimal fs.
- * System dirs mounted ro, workspace rw, cwd_path rw (CLI mode).
+ * System dirs mounted ro, workspace rw.
  * Returns 0 on success, -1 on failure. */
-int contain_enter(const char *workspace, const char *cwd_path,
-                  const char *db_path, const SandboxConfig *full_cfg) {
+int contain_enter(const char *workspace, const char *db_path,
+                  const SandboxConfig *full_cfg) {
     uid_t uid = getuid();
     gid_t gid = getgid();
 
@@ -441,13 +467,6 @@ int contain_enter(const char *workspace, const char *cwd_path,
     if (workspace && workspace[0]) {
         if (realpath(workspace, ws_abs))
             ws_resolved = ws_abs;
-    }
-
-    char cwd_abs[PATH_MAX];
-    const char *cwd_resolved = NULL;
-    if (cwd_path && cwd_path[0]) {
-        if (realpath(cwd_path, cwd_abs))
-            cwd_resolved = cwd_abs;
     }
 
     /* CLONE_NEWIPC: System V IPC and POSIX message queues are keyed by IPC
@@ -525,27 +544,20 @@ int contain_enter(const char *workspace, const char *cwd_path,
     if (mount("none", newroot, "tmpfs", MS_NOSUID | MS_NODEV, "size=4m") != 0)
         return -1;
 
-    /* Bind-mount system dirs read-only */
-    /* /opt is here because that is where real toolchains land — distro node
-     * packages, vendored JDKs, hand-unpacked SDKs. Read-only like the rest, and
-     * absent on most systems, where the stat() below skips it. */
-    static const char *sys_dirs[] = {
-        "/bin", "/usr", "/lib", "/lib64", "/etc", "/proc", "/dev", "/sbin",
-        "/opt", NULL
-    };
-    for (int i = 0; sys_dirs[i]; i++) {
-        /* File and js (skip_pid_ns): exclude /proc — no PID namespace backs it,
-         * and the host procfs would leak process info. uid_map/gid_map writes
-         * happen before pivot_root using the original /proc, so they're fine. */
-        if (full_cfg && full_cfg->skip_pid_ns &&
-            strcmp(sys_dirs[i], "/proc") == 0)
-            continue;
+    /* Bind-mount system dirs read-only (absent ones are skipped). /proc only
+     * for the shell: file and js (skip_pid_ns) have no PID namespace to back
+     * it, and the host procfs would leak process info. uid_map/gid_map writes
+     * happen before pivot_root using the original /proc, so they're fine. */
+    int with_proc = !full_cfg || !full_cfg->skip_pid_ns;
+    for (int i = -1; i < 0 || SANDBOX_SYS_DIRS[i]; i++) {
+        const char *sys = i < 0 ? "/proc" : SANDBOX_SYS_DIRS[i];
+        if (i < 0 && !with_proc) continue;
         struct stat st;
-        if (stat(sys_dirs[i], &st) != 0) continue;
+        if (stat(sys, &st) != 0) continue;
         char dst[256];
-        snprintf(dst, sizeof(dst), "%s%s", newroot, sys_dirs[i]);
+        snprintf(dst, sizeof(dst), "%s%s", newroot, sys);
         mkdir(dst, 0755);
-        if (mount(sys_dirs[i], dst, NULL, MS_BIND | MS_REC, NULL) == 0) {
+        if (mount(sys, dst, NULL, MS_BIND | MS_REC, NULL) == 0) {
             /* RO remount of the top bind, then of each host submount the
              * recursive bind brought along (a recursive RO remount is refused
              * in an unprivileged userns). A failure means something would be
@@ -614,10 +626,6 @@ int contain_enter(const char *workspace, const char *cwd_path,
     if (ws_resolved)
         bind_path_into(newroot, ws_resolved, 0);
 
-    /* Bind-mount CWD rw (CLI mode) */
-    if (cwd_resolved)
-        bind_path_into(newroot, cwd_resolved, 0);
-
     /* Layer 2: extra bind-mounts from read_path/write_path grants.
      * Canonicalize + dedup (rw wins) + sort shallow→deep so a child mount
      * shadows its parent, independent of grant insertion order. */
@@ -632,8 +640,8 @@ int contain_enter(const char *workspace, const char *cwd_path,
         }
     }
 
-    /* Mask the secret key + DB ciphertext if a bound path (CWD, workspace, or
-     * a grant) would otherwise expose them. After binds, before pivot_root. */
+    /* Mask the secret key + DB ciphertext if a bound path (workspace or a
+     * grant) would otherwise expose them. After binds, before pivot_root. */
     sandbox_mask_state_files(newroot, db_path);
 
     /* pivot_root into new root */
@@ -707,50 +715,51 @@ static int sandbox_bring_up_lo(void) {
     return rc;
 }
 
-/* The HTTP proxy every sandboxed program is pointed at: bring up lo, bind a
- * loopback listener, and fork the link-isolated net_shim to serve it. A
- * program that honors HTTP_PROXY / HTTPS_PROXY tunnels through the shim → the
- * per-call UDS → the broker, the sole policy authority. A program that does
- * not has no network: the namespace has no other route.
- *
- * Best-effort: any failure simply leaves the proxy env unset and the child
- * networkless. Runs as PID 1, before the exec. */
-static void sandbox_setup_proxy(const char *uds_path) {
-    if (sandbox_bring_up_lo() != 0) return;
+/* The HTTP proxy every contained program is pointed at: bind a loopback
+ * listener and fork the link-isolated net_shim to serve it. A program that
+ * honors HTTP_PROXY / HTTPS_PROXY tunnels through the shim → the per-call UDS
+ * → the broker, the sole policy authority. In the namespace (in_ns) lo is
+ * brought up first, and a program that ignores the variables has no network.
+ * On the host's loopback (NE_ENV) nothing stops such a program, and the
+ * listener can be reached by any local process for the length of the call:
+ * that is what 'advisory' says. Runs before the exec; -1 on any failure,
+ * leaving the proxy variables unset. */
+static int sandbox_setup_proxy(const char *uds_path, int in_ns) {
+    if (in_ns && sandbox_bring_up_lo() != 0) return -1;
 
     /* Bind 127.0.0.1:0 — the shim's HTTP CONNECT listener. Not CLOEXEC: the
      * forked shim must keep it across its exec. */
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (lfd < 0) return;
+    if (lfd < 0) return -1;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = 0;
     if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
-        listen(lfd, 16) != 0) { close(lfd); return; }
+        listen(lfd, 16) != 0) { close(lfd); return -1; }
     socklen_t alen = sizeof(addr);
-    if (getsockname(lfd, (struct sockaddr *)&addr, &alen) != 0) { close(lfd); return; }
+    if (getsockname(lfd, (struct sockaddr *)&addr, &alen) != 0) { close(lfd); return -1; }
     int port = ntohs(addr.sin_port);
 
     /* Materialize the shim in an anonymous memfd — no on-disk artifact and no
      * dependency on /tmp being exec-able. Not MFD_CLOEXEC: the fork must keep it
      * across exec (it execs /proc/self/fd/<mfd>). */
     int mfd = memfd_create("net_shim", 0);
-    if (mfd < 0) { close(lfd); return; }
+    if (mfd < 0) { close(lfd); return -1; }
     ssize_t wr = write(mfd, net_shim_blob, (size_t)net_shim_blob_len);
-    if (wr != (ssize_t)net_shim_blob_len) { close(mfd); close(lfd); return; }
+    if (wr != (ssize_t)net_shim_blob_len) { close(mfd); close(lfd); return -1; }
 
     pid_t parent = getpid();
     pid_t shim = fork();
-    if (shim < 0) { close(mfd); close(lfd); return; }
+    if (shim < 0) { close(mfd); close(lfd); return -1; }
     if (shim == 0) {
-        /* No PID namespace backs this child (skip_pid_ns), so there's no
-         * kernel-enforced teardown when the tool process exits — without this,
-         * the shim orphans to init and lingers forever. PDEATHSIG doesn't
-         * survive fork(), so it must be set here, not inherited from the
-         * sandboxed process that forked us (same reasoning as the PID-ns
-         * init's re-arm, contain_enter above). */
+        /* No PID namespace backs this child (skip_pid_ns, or no namespace at
+         * all), so there's no kernel-enforced teardown when the tool process
+         * exits — without this, the shim orphans to init and lingers forever.
+         * PDEATHSIG doesn't survive fork(), so it must be set here, not
+         * inherited from the process that forked us (same reasoning as the
+         * PID-ns init's re-arm, contain_enter above). */
         prctl(PR_SET_PDEATHSIG, SIGKILL);
         /* The signal is sent when the parent dies, so arming it after the
          * parent is already gone arms nothing. A trivial script finishes
@@ -778,7 +787,7 @@ static void sandbox_setup_proxy(const char *uds_path) {
 
     close(mfd);
 
-    /* PID 1: the shim owns the listener now; advertise it to the command. The
+    /* The shim owns the listener now; advertise it to the command. The
      * command never sees lfd (closed here, and it is not CLOEXEC-safe to leak). */
     close(lfd);
     char url[64];
@@ -788,37 +797,56 @@ static void sandbox_setup_proxy(const char *uds_path) {
     setenv("ALL_PROXY", url, 1);   setenv("all_proxy", url, 1);
     setenv("NO_PROXY", "localhost,127.0.0.1,::1", 1);
     setenv("no_proxy", "localhost,127.0.0.1,::1", 1);
+    return 0;
 }
 
-/* Give the contained child its only route out: the broker's proxy socket,
- * bound at a fixed in-boundary path by contain_enter. Runs after the env
- * scrub. A failure here leaves the child with no network, never with an
- * unfiltered one. */
-void contain_egress(const SandboxConfig *cfg) {
-    setenv("CCLAW_PROXY_SOCK", SANDBOX_PROXY_SOCK_PATH, 1);
+/* net_shim as a file the shell can run by name (`connect` mode, for ssh's
+ * ProxyCommand). In the namespace: the root tmpfs, rebuilt per call. On the
+ * host (NE_ENV): the agent's scratch dir, written beside and renamed into
+ * place, so a concurrent call still running the old copy is undisturbed and a
+ * symlink planted at the name is replaced, never followed. Best-effort:
+ * without the file, ssh simply has no proxy route. */
+static void write_connect_shim(const SandboxConfig *cfg, int in_ns) {
+    char path[PATH_MAX], tmp[PATH_MAX + 16];
+    if (in_ns) snprintf(path, sizeof(path), "%s", SANDBOX_CONNECT_PATH);
+    else if (!cfg->tmp_dir || !cfg->tmp_dir[0] ||
+             snprintf(path, sizeof(path), "%s/.cclaw_connect", cfg->tmp_dir)
+                 >= (int)sizeof(path)) return;
+    snprintf(tmp, sizeof(tmp), in_ns ? "%s" : "%s.%d", path, (int)getpid());
+    /* O_NOFOLLOW: refuse to follow a symlink at this path rather than
+     * writing 0755 content wherever it points. */
+    int cfd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0755);
+    ssize_t wr = cfd >= 0 ? write(cfd, net_shim_blob, (size_t)net_shim_blob_len) : -1;
+    if (cfd >= 0) close(cfd);
+    if (wr != (ssize_t)net_shim_blob_len || (!in_ns && rename(tmp, path) != 0)) {
+        if (!in_ns) unlink(tmp);
+        return;
+    }
+    char cmd[PATH_MAX + 64];
+    snprintf(cmd, sizeof(cmd), "%s connect", path);
+    setenv("CCLAW_CONNECT", cmd, 1);
+    snprintf(cmd, sizeof(cmd), "ssh -o ProxyCommand='%s connect %%h %%p'", path);
+    setenv("GIT_SSH_COMMAND", cmd, 1);
+}
+
+/* Give the child its route out: the broker's proxy socket — bound at a fixed
+ * in-boundary path by contain_enter (NE_NETNS), or at its real path in the
+ * agent folder (NE_ENV). Runs after the env scrub. */
+int contain_egress(const SandboxConfig *cfg) {
+    int in_ns = cfg->plan.ne == NE_NETNS;
+    const char *uds = in_ns ? SANDBOX_PROXY_SOCK_PATH : cfg->proxy_sock;
+    setenv("CCLAW_PROXY_SOCK", uds, 1);
 
     /* The loopback HTTP proxy: the one mechanism for every child — our own
      * libcurl (js) and whatever the shell runs. */
-    sandbox_setup_proxy(SANDBOX_PROXY_SOCK_PATH);
+    if (sandbox_setup_proxy(uds, in_ns) != 0) return -1;
 
     /* Shell only: programs that take a proxy *command* rather than proxy
      * variables. ssh is the one that matters, and git reads GIT_SSH_COMMAND,
      * so git-over-ssh works unprompted; a bare `ssh` needs the option spelled
-     * out (the shell tool's description says how). Best-effort like the rest:
-     * without the file, ssh simply has no route. */
-    if (!cfg->skip_pid_ns) {
-        /* O_NOFOLLOW: refuse to follow a symlink at this path rather than
-         * writing 0755 content wherever it points. */
-        int cfd = open(SANDBOX_CONNECT_PATH,
-                       O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0755);
-        ssize_t wr = cfd >= 0 ? write(cfd, net_shim_blob, (size_t)net_shim_blob_len) : -1;
-        if (cfd >= 0) close(cfd);
-        if (wr == (ssize_t)net_shim_blob_len) {
-            setenv("CCLAW_CONNECT", SANDBOX_CONNECT_PATH " connect", 1);
-            setenv("GIT_SSH_COMMAND",
-                   "ssh -o ProxyCommand='" SANDBOX_CONNECT_PATH " connect %h %p'", 1);
-        }
-    }
+     * out (the shell tool's description says how). */
+    if (!cfg->skip_pid_ns) write_connect_shim(cfg, in_ns);
+    return 0;
 }
 
 const char *contain_llm_sock_path(void) { return SANDBOX_LLM_SOCK_PATH; }

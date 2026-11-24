@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include "http.h"
 #include "buf.h"
 #include "log.h"
@@ -8,6 +8,11 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 /* Strip leading whitespace (provider keep-alive newlines) from response in-place */
 static void resp_strip_leading_ws(HttpResponse *resp) {
@@ -131,6 +136,39 @@ static int http_debug_cb(CURL *handle, curl_infotype type, char *data,
     return 0;
 }
 
+/* NE_CODE (HttpRequestOpts.proxy_unix): curl's connection is a unix socket
+ * to the egress proxy, handed over already connected, and curl asks the
+ * proxy for each tunnel with CONNECT. The proxy address it is given is a
+ * numeric placeholder never dialled, so nothing is resolved here: the proxy
+ * resolves, filters and dials. A path past sun_path goes through a
+ * descriptor for its directory (/proc/self/fd), as proxy_bind binds it. */
+static curl_socket_t proxy_unix_open(void *clientp, curlsocktype purpose,
+                                     struct curl_sockaddr *address) {
+    (void)purpose; (void)address;
+    const char *path = clientp;
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    int dirfd = -1;
+    if (strlen(path) < sizeof(a.sun_path)) {
+        memcpy(a.sun_path, path, strlen(path) + 1);
+    } else {
+        char dir[PATH_MAX];
+        const char *sl = strrchr(path, '/');
+        if (!sl || snprintf(dir, sizeof(dir), "%.*s", (int)(sl - path), path) >= (int)sizeof(dir) ||
+            (dirfd = open(dir, O_PATH | O_DIRECTORY | O_CLOEXEC)) < 0)
+            return CURL_SOCKET_BAD;
+        snprintf(a.sun_path, sizeof(a.sun_path), "/proc/self/fd/%d/%s", dirfd, sl + 1);
+    }
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd >= 0 && connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { close(fd); fd = -1; }
+    if (dirfd >= 0) close(dirfd);
+    return fd >= 0 ? fd : CURL_SOCKET_BAD;
+}
+
+static int proxy_unix_connected(void *clientp, curl_socket_t fd, curlsocktype purpose) {
+    (void)clientp; (void)fd; (void)purpose;
+    return CURL_SOCKOPT_ALREADY_CONNECTED;
+}
+
 /* General-purpose HTTP request */
 int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     memset(resp, 0, sizeof(*resp));
@@ -197,6 +235,15 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     if (opts->follow_redirects) {
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_MAXREDIRS, opts->max_redirects > 0 ? (long)opts->max_redirects : 5L);
+    }
+
+    if (opts->proxy_unix) {
+        curl_easy_setopt(curl, CURLOPT_PROXY, "http://127.0.0.1:9");
+        curl_easy_setopt(curl, CURLOPT_HTTPPROXYTUNNEL, 1L);
+        curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
+        curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, proxy_unix_open);
+        curl_easy_setopt(curl, CURLOPT_OPENSOCKETDATA, (void *)opts->proxy_unix);
+        curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, proxy_unix_connected);
     }
 
     /* User agent */

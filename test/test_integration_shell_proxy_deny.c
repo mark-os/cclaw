@@ -57,7 +57,7 @@ static void test_denied_summary_advice(void) {
     r.command = "curl -s --max-time 5 https://denied.test/";
     r.workspace = workspace;
     r.timeout = 10;
-    r.sandbox = 1;
+    r.plan = TEST_PLAN_STANDARD;
     r.host_rules = allow_named;
     r.host_count = 1;
     r.egress_note = "this call ran narrowed to its secrets' bound hosts "

@@ -45,94 +45,72 @@ from outside, required wherever it is not. The shell needs containment because a
 command can do anything. File access, HTTP and QuickJS do not, because every
 file open and every connection is a line of cclaw's C.
 
-## As built (2026-11-12)
+## As built (2026-11-24, step 4a)
 
-Layer 2 does not exist yet as a separate thing. All three child vehicles
-(file, js, shell) run in a `cclaw --run-tool` child that enters the same
-namespace sandbox, and the policy for the "mediated" ones (file, js) is in
-fact enforced by that namespace:
+Each level of an agent's containment is kept by the strongest enforcer the
+host has ([containment.md](containment.md)); what no enforcer can keep is
+refused at dispatch. Layer 2 now exists for files `confined`:
 
-| Policy | Where it is enforced today | In cclaw's code? |
+| Policy | With user namespaces | Without them |
 |---|---|---|
-| Workspace and path grants, file tools | Mount namespace: an ungranted path is simply absent. `tool_file.c` opens whatever path it is given; `path_grant_hint` only words the error | No |
-| Workspace and path grants, JS `fs.*` | Mount namespace. `fs.readFile` is a bare `fopen` | No |
-| `cclaw.db` / `.cclaw_key` masking | Mount namespace (outside every mount set) | No |
-| Host allowlist, `web_fetch` and JS `http_request` | Network namespace: the only route out is `HTTP_PROXY` → `net_shim` → the broker's proxy → `host_decide()` | The decision is; the *forcing* is the namespace |
-| Host allowlist, shell | Network namespace: the same `HTTP_PROXY` → `net_shim` → proxy path, for programs that honor the variables; the rest have no network | Same |
+| Paths, file tools and JS `fs.*` | Mount namespace: an ungranted path is absent | `confined`: the path check in cclaw's code (`contain_path_check`); `private`: refused |
+| `cclaw.db` / `.cclaw_key` | Outside every mount set, masked if a bind would show them | The path check refuses them by path and by inode |
+| Host allowlist, `web_fetch` and JS `http_request` | Network namespace; the only route out is the broker's proxy | curl dials the proxy's unix socket itself (`NE_CODE`): the same `proxy_decide()`, metadata and private-address blocks, SNI check, narrowing and contacted-host log |
+| Host allowlist, shell | Network namespace + `net_shim` | `advisory`: the shim on the host's loopback and the proxy variables, nothing more; `proxied`/`none`: refused |
+| Files, shell | Mount namespace | `confined`: refused until Landlock (4b) |
 
-So on a kernel without unprivileged user namespaces there are two outcomes
-and nothing between them:
+So on a kernel without unprivileged user namespaces:
 
-- `standard` / `offline`: every tool call exits 126 (fail-closed,
-  [containment.md](containment.md)). The agent can talk and
-  reconfigure itself, and nothing else.
-- `none`: every tool runs with no policy at all — any file, any host, and the
-  shell.
+- `standard` / `offline`: every tool call is refused at dispatch, with the
+  reason and a containment the host can keep.
+- `basic`: file tools and JS (so `web_fetch`) run with paths checked and
+  egress forced through the proxy in code; the shell is refused.
+- `none`: every tool runs as the user, with no policy.
 
-`--doctor` `[layers]` reports which of these applies, per agent.
+`--doctor` `[layers]` prints, per agent, each vehicle's enforcers or refusal.
 
 What is already in good shape:
 
 - **The containment mechanism is one file.** `src/contain.h` is the backend
-  interface (name, probe, hint, enter, egress); `contain_linux.c` implements it with
-  namespaces and `contain_none.c` with nothing. `sandbox.c` holds only policy
-  and child setup. `make CONTAIN=none` builds without the Linux backend. What
-  remains Linux-specific outside it is `prctl(PR_SET_PDEATHSIG)` in
-  `run_tool.c` and `channel.c`, and reading `/proc/self/exe`.
+  interface (name, capabilities, hint, enter, egress); `contain_linux.c`
+  implements it with namespaces and `contain_none.c` with nothing (no
+  capabilities: `basic`'s file and js tools and `none` run). `sandbox.c` holds
+  the planner, the path check and child setup. What remains Linux-specific
+  outside it is `prctl(PR_SET_PDEATHSIG)` in `run_tool.c` and `channel.c`, and
+  reading `/proc/self/exe`.
 - **Old kernels.** Outside `contain_linux.c` the only post-3.x syscalls are
   `getrandom` and `close_range`, and both fall back.
 - **One egress decision.** `proxy_decide()` in `proxy.c` is the single
-  implementation — allowlist, one resolution, IP filter, and the literal
-  address to dial ([egress-filter.md](egress-filter.md)). It is a plain
-  function over the rule set. Mediation must reuse it, not copy it.
+  implementation ([egress-filter.md](egress-filter.md)); mediation reuses it
+  over the same socket.
 
 ## Boundaries, by what the host offers
 
-- **Host with a containment backend** (Linux with unprivileged user
-  namespaces): everything in [security.md](security.md) and
-  [containment.md](containment.md) holds. Every tool call, JS
-  included, runs in a forked, namespaced child.
-- **Host without one** (old kernels, vendor kernels built without user
-  namespaces, Android): containment `none` is the answer, and it means what it
-  says. The agent acts as the user running cclaw: any file that user can read,
-  including cclaw's own database and key; any host on the network; the shell.
-  Agents are not isolated from each other, so a sub-agent has the same reach
-  as its parent. The device is the boundary, and the network boundary is the
-  operator's firewall.
+- **Host with user namespaces**: everything in [security.md](security.md) and
+  [containment.md](containment.md) holds; `standard`, `offline` and `basic`
+  run every vehicle in a namespaced child.
+- **Host without them** (old or vendor kernels, Docker's default profile,
+  Ubuntu's AppArmor restriction, Android): `basic` keeps file and JS policy in
+  cclaw's code, and `none` means what it says — the agent acts as the user
+  running cclaw, on any file and any host, and agents are not isolated from
+  each other. The device is the boundary.
 
-That second case is a supported way to run cclaw, not a degraded one: a
-lightweight agent loop on a device given over to it. What it must never be is
-a surprise — a sandboxed containment still fails closed rather than sliding
-into it.
+A containment never slides from one to the other: a level the host cannot
+keep is refused, not weakened.
 
 ## Work, in order
 
-Done: one probe for "can this host contain a child" (`contain_probe`),
-`--doctor` `[layers]`, containment as a backend (`CONTAIN=linux|none`), and
-the answer at startup: when the probe fails and an agent has a sandboxed
-containment, the CLI and the daemon say so before the first tool call does, with
-the backend's hint (`contain_hint` — on Linux, whichever of the AppArmor
-restriction, `unprivileged_userns_clone` or `max_user_namespaces` is set
-against it) and the way to run uncontained. Nothing is switched
-automatically: `none` stays the operator's choice.
+Done: the capability probe (`contain_caps`), `--doctor` `[layers]`,
+containment as a backend (`CONTAIN=linux|none`), the startup warning naming a
+containment the host can keep (with the backend's hint — on Linux whichever of
+the AppArmor restriction, `unprivileged_userns_clone` or `max_user_namespaces`
+is set against it), and mediation without a namespace (`basic`).
 
-1. **Mediation without a namespace.** See the placeholders below: on a host with no
-   containment the choice today is all or nothing.
+1. **Kernel enforcers without a namespace (4b).** Landlock for files
+   `confined` (the shell, and a backstop under the path check), seccomp for
+   network `none`, a network namespace without a mount namespace.
 2. **Platform backends.** A build for a platform with its own sandbox
    (Android) starts from `contain_none.c`.
-
-## Placeholders — layer 2 enforced without a namespace
-
-Not planned work. Recorded so the code leaves room for it.
-
-- **Egress for `web_fetch` and JS.** The proxy is ordinary socket code and
-  needs no namespace; only *forcing* traffic through it does. cclaw's own
-  libcurl can simply be pointed at it, which would give the js child (and so
-  web_fetch, a JS tool) a real host allowlist on any host. The shell cannot be forced this way: proxy
-  environment variables are advice a program is free to ignore.
-- **Path policy in code.** One function deciding "may this call read / write
-  this path" for file tools and JS `fs.*`, in place of relying on what is
-  mounted.
 
 ## Decided
 

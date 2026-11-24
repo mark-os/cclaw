@@ -110,6 +110,45 @@ static void test_containment_escalation_refused(void) {
         "{\"name\":\"Tight\",\"containment\":\"offline\"}", "Std", NULL) == 0);
 }
 
+/* "Not looser than the creator" is per column — files, network, nproc,
+ * cpu_sec — with a limit of 0 the loosest. One column looser refuses, even
+ * when every other is tighter; the refusal names the column. */
+static void test_containment_capped_per_column(void) {
+    sqlite3_exec(g_db,
+        "INSERT OR REPLACE INTO containments VALUES"
+        " ('privdirect','private','direct',64,0),"
+        " ('nocap','private','none',0,120),"
+        " ('cpu0','private','none',64,0),"
+        " ('cpu60','private','none',64,60);", NULL, NULL, NULL);
+    static const struct { const char *creator, *child, *col; } rows[] = {
+        { "basic",    "standard",   NULL },       /* stricter files and network */
+        { "basic",    "none",       "files" },
+        { "basic",    "privdirect", "network" },  /* files tighter, network looser */
+        { "offline",  "standard",   "network" },
+        { "offline",  "nocap",      "nproc" },    /* 0 = no cap, looser than 64 */
+        { "offline",  "cpu0",       "cpu_sec" },
+        { "offline",  "cpu60",      NULL },
+        { "offline",  "offline",    NULL },
+        { "standard", "offline",    NULL },       /* a cap under no cap is tighter */
+        { "none",     "basic",      NULL },
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        char cname[32], def[128];
+        snprintf(cname, sizeof(cname), "Cap%zu", i);
+        seed_creator(cname, rows[i].creator);
+        snprintf(def, sizeof(def), "{\"name\":\"Kid%zu\",\"containment\":\"%s\"}",
+                 i, rows[i].child);
+        char *err = NULL;
+        int rc = agent_definition_validate(g_db, def, cname, &err);
+        int ok = rows[i].col ? (rc != 0 && err && strstr(err, "looser") &&
+                                strstr(err, rows[i].col))
+                             : rc == 0;
+        if (!ok) printf("    row %zu: rc=%d %s\n", i, rc, err ? err : "");
+        assert(ok);
+        free(err);
+    }
+}
+
 static void test_grants_superset_refused(void) {
     seed_creator("Parent", "standard");
     agent_config_grant(g_db, "Parent", "tool", "web_fetch", 0, GRANT_ORIGIN("operator", 0));
@@ -520,6 +559,7 @@ int main(void) {
     assert(g_db);
     RUN(test_operator_apply);
     RUN(test_containment_escalation_refused);
+    RUN(test_containment_capped_per_column);
     RUN(test_grants_superset_refused);
     RUN(test_extension_gate);
     RUN(test_clone_from);

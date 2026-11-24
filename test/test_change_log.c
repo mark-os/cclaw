@@ -150,8 +150,9 @@ static void test_grant_without_source_refused(void) {
 static void test_actions_and_noops(void) {
     sqlite3 *db = fresh();
     db_set_actor(db, "cli");
+    int64_t base = log_rows(db);                      /* the shipped containments */
     test_seed_agent(db, "Ann");                       /* agents insert: 1 row */
-    assert(log_rows(db) == 1);
+    assert(log_rows(db) == base + 1);
     db_set_context(db, "approval:41");
     assert(agent_config_grant(db, "Ann", "host", "a.example", 0,
                               GRANT_ORIGIN("approval", 0)) == 0);
@@ -256,7 +257,8 @@ static void test_secret_value_never_logged(void) {
     sqlite3_stmt *st;
     assert(sqlite3_prepare_v2(db, "SELECT COALESCE(actor,'')||' '||COALESCE(context,'')"
         "||' '||table_name||' '||row_key||' '||action||' '||COALESCE(old_values,'')"
-        "||' '||COALESCE(new_values,'') FROM change_log", -1, &st, NULL) == SQLITE_OK);
+        "||' '||COALESCE(new_values,'') FROM change_log WHERE table_name='secrets'",
+        -1, &st, NULL) == SQLITE_OK);
     int rows = 0;
     while (sqlite3_step(st) == SQLITE_ROW) {
         const char *line = (const char *)sqlite3_column_text(st, 0);

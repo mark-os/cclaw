@@ -46,6 +46,11 @@ typedef struct {
      * other status still lands in resp->data, so the caller can show the
      * server's error text. Caller opens and closes it. */
     FILE *sink;
+    /* If non-NULL, the path of the egress proxy's unix socket (proxy.c):
+     * every connection, each redirect hop included, is a tunnel through it,
+     * and this process resolves no name and opens no inet socket of its own.
+     * What enforces network levels in cclaw's own code (NE_CODE). */
+    const char *proxy_unix;
 } HttpRequestOpts;
 
 /* General-purpose HTTP request. Returns HTTP status, -1 on curl error, -2 on timeout. */

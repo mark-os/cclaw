@@ -91,9 +91,10 @@ typedef struct {
 typedef struct {
     ExecVehicle vehicle;          /* EXEC_FILE, EXEC_SHELL or EXEC_JS */
     const char *tool_name;
-    int env_mode, nproc, as_mb, cpu_sec;
-    int sandbox, net_mode;
-    /* file/all */
+    /* The parent's plan for this child: levels, limits and the enforcer for
+     * each (sandbox.h). The child applies exactly this. */
+    ContainPlan plan;
+    /* file/all. cwd_path: the CLI's CWD, sent only under files 'open'. */
     const char *workspace, *cwd_path;
     /* cclaw.db path — carried so the child can mask the key + ciphertext out
      * of any bound path. The child never opens the DB. */
@@ -101,7 +102,6 @@ typedef struct {
     /* Host directory bind-mounted as /tmp in the child: the agent's persistent
      * scratch, created and owned by the parent (scratch_dir_ensure). */
     const char *tmp_dir;
-    int mount_cwd;
     const char **read_paths;  size_t read_count;
     const char **write_paths; size_t write_count;
     /* network vehicles (shell/js) */
@@ -138,12 +138,10 @@ typedef struct {
 typedef struct {
     ExecVehicle vehicle;  /* as read off the wire: not yet checked */
     char *tool_name;
-    int   env_mode, nproc, as_mb, cpu_sec;
-    int   sandbox, net_mode;
+    ContainPlan plan;     /* range-checked by the reader */
     char *workspace, *cwd_path;
     char *db_path;
     char *tmp_dir;
-    int   mount_cwd;
     char **read_paths;  size_t read_count;
     char **write_paths; size_t write_count;
     char *agent_dir;
@@ -172,19 +170,22 @@ const char *run_tool_param_json(const RunToolParsed *q, const char *key);
 /* Flattened string list (TOOL_ARG_LIST); NULL + *n=0 if absent. */
 char **run_tool_param_list(const RunToolParsed *q, const char *key, size_t *n);
 
-/* Zero req; set vehicle/tool_name plus all Containment-derived fields and
- * workspace/cwd_path. Callers set vehicle-specific fields (params, command,
- * egress rules) after.
+/* Zero req; plan the containment for this vehicle on this host (contain_plan
+ * over contain_caps) and set vehicle/tool_name, the plan, the grant paths and
+ * workspace/cwd_path. Returns -1 with `why` set when the containment cannot be
+ * kept here: the caller refuses the call before forking, with `why` as the
+ * result. Callers set vehicle-specific fields (params, command, egress rules)
+ * after.
  *
  * db_path is a parameter rather than a field the caller may set afterwards
  * because forgetting it is silent and unsafe: sandbox_mask_state_files()
  * returns immediately on NULL, so a vehicle that omits it ships with the key
  * mask disabled. The file vehicle did exactly that. Pass the path (never the
  * handle — the child does not open the DB); NULL only where there is no DB. */
-void run_tool_req_init(RunToolReq *req, ExecVehicle vehicle, const char *tool_name,
-                       const Containment *sb,
-                       const char *workspace, const char *cwd_path,
-                       const char *db_path);
+int run_tool_req_init(RunToolReq *req, ExecVehicle vehicle, const char *tool_name,
+                      const Containment *sb,
+                      const char *workspace, const char *cwd_path,
+                      const char *db_path, char *why, size_t why_cap);
 
 /* Serialize a request into a length-prefixed blob. Returns malloc'd buffer;
  * *out_len = total size. NULL on OOM or if the blob exceeds

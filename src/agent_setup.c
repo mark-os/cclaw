@@ -230,16 +230,14 @@ static void containment_refresh(AgentSetup *setup, sqlite3 *db, const char *agen
     if (shell_path) setenv("CCLAW_SHELL_PATH", shell_path, 1);
     else unsetenv("CCLAW_SHELL_PATH");
 
-    /* Trust-derived policy, whole-struct copied into each ctx; the caps
-     * rebind that follows overwrites the grant-path half. */
+    /* The row the agent names, whole-struct copied into each ctx; the caps
+     * rebind that follows overwrites the grant-path half. A name with no row
+     * stays known=0, and every child call is then refused at dispatch. */
     Containment policy = {0};
-    containment_resolve(containment, &policy);
+    containment_load(db, containment, &policy);
 
     setup->file_read_ctx.sb = policy;
-
     setup->js_eval_ctx.sb = policy;
-    setup->js_eval_ctx.uncontained = policy.sandbox ? 0 : 1;
-    setup->js_eval_ctx.containment = containment;
 
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {

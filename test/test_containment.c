@@ -1,97 +1,114 @@
-/* Unit tests for sandbox_policy_from_containment / containment_resolve: the
- * containment value → policy-bundle mapping (specs/containment.md).
- * Pure functions, no namespaces required. Locks in the fall-through rule:
- * unknown/NULL values get the standard bundle, never something looser. */
+/* The containment planner (specs/containment.md): (row, vehicle, host
+ * capabilities) → the enforcer for each level, or a refusal. Pure, no
+ * namespaces needed. Every refusal rule has a row; a plan that would be
+ * weaker than its level is the bug this guards against. */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include "sandbox.h"
+#include "contain.h"
 #include "test_util.h"
 
-static SandboxConfig cfg_for(const char *containment) {
-    SandboxConfig c; memset(&c, 0xAA, sizeof(c)); /* poison: catch unset fields */
-    sandbox_policy_from_containment(containment, &c);
+#define NS   (CONTAIN_CAP_MOUNTNS | CONTAIN_CAP_NETNS | CONTAIN_CAP_SHIM)
+#define BARE CONTAIN_CAP_SHIM   /* a Linux host without user namespaces */
+
+static Containment row(const char *name) {
+    Containment c = { .known = 0 };
+    snprintf(c.name, sizeof(c.name), "%s", name);
+    for (size_t i = 0; i < CONTAIN_SHIPPED_N; i++)
+        if (strcmp(CONTAIN_SHIPPED[i].name, name) == 0) {
+            c.known = 1;
+            c.lv = CONTAIN_SHIPPED[i].lv;
+        }
     return c;
 }
 
-static void test_none(void) {
-    SandboxConfig c = cfg_for("none");
-    assert(c.sandbox == 0 && c.env_mode == 0 && c.net_mode == 0 &&
-        c.mount_cwd == 1 &&
-        c.rlimits.nproc == 0 && c.rlimits.as_mb == 0 && c.rlimits.cpu_sec == 0);
-}
+#define OK(fe, ne) fe, ne, NULL
+#define NO(word)   FE_NONE, NE_NONE, word
 
-static void test_standard(void) {
-    /* standard is the merged former 'trusted': clean env, no CWD mount, no
-     * CPU cap. NPROC stays as the fork-bomb backstop, nothing else. */
-    SandboxConfig c = cfg_for("standard");
-    assert(c.sandbox == 1 && c.env_mode == 1 && c.net_mode == 0 &&
-        c.mount_cwd == 0 &&
-        c.rlimits.nproc == 256 && c.rlimits.as_mb == 0 && c.rlimits.cpu_sec == 0);
-}
-
-static void test_offline(void) {
-    /* What makes offline offline is net_mode=1 (empty netns, no proxy
-     * socket). The workspace stays rw so $HOME works, and the limits are a
-     * runaway backstop that still permits a real build. */
-    SandboxConfig c = cfg_for("offline");
-    assert(c.sandbox == 1 && c.env_mode == 1 && c.net_mode == 1 &&
-        c.mount_cwd == 0 &&
-        c.rlimits.nproc == 64 && c.rlimits.as_mb == 0 && c.rlimits.cpu_sec == 120);
-}
-
-static void test_fallthrough(void) {
-    /* Unknown values must land on standard — a typo'd value, or a retired
-     * one ('bootstrap', 'trusted', and the pre-v71 'host'), must never yield
-     * the uncontained bundle. The v71 patch rewrites stored 'host' and
-     * 'restricted'; a hand-edited row could still carry one. */
-    const char *unknowns[] = {NULL, "", "bootstrap", "trusted", "TRUSTED",
-                              "host", "NONE", "yolo"};
-    SandboxConfig std = cfg_for("standard");
-    for (size_t i = 0; i < sizeof(unknowns)/sizeof(unknowns[0]); i++) {
-        SandboxConfig c = cfg_for(unknowns[i]);
-        if (memcmp(&c, &std, sizeof(c)) != 0) {
-            printf("  row '%s'\n", unknowns[i] ? unknowns[i] : "(null)");
-            assert(!"unknown containment must resolve to the standard bundle");
-        }
+static void test_plan_table(void) {
+    static const struct {
+        const char *row; FilesLevel files; NetLevel net;  /* row NULL: use files/net */
+        ExecVehicle v; unsigned caps;
+        FilesEnforcer fe; NetEnforcer ne; const char *refusal;
+    } t[] = {
+        /* With namespaces: the shipped rows run as they always have. */
+        { "standard", 0, 0, EXEC_SHELL, NS, OK(FE_MOUNTNS, NE_NETNS) },
+        { "standard", 0, 0, EXEC_JS,    NS, OK(FE_MOUNTNS, NE_NETNS) },
+        { "standard", 0, 0, EXEC_FILE,  NS, OK(FE_MOUNTNS, NE_NETNS) },
+        { "offline",  0, 0, EXEC_SHELL, NS, OK(FE_MOUNTNS, NE_NETNS) },
+        { "basic",    0, 0, EXEC_SHELL, NS, OK(FE_MOUNTNS, NE_NETNS) },
+        { "none",     0, 0, EXEC_SHELL, NS, OK(FE_NONE, NE_NONE) },
+        { "none",     0, 0, EXEC_JS,    NS, OK(FE_NONE, NE_NONE) },
+        /* files private needs the mount namespace for every vehicle. */
+        { "standard", 0, 0, EXEC_FILE,  BARE, NO("user namespaces") },
+        { "standard", 0, 0, EXEC_JS,    BARE, NO("user namespaces") },
+        { "offline",  0, 0, EXEC_SHELL, BARE, NO("user namespaces") },
+        { "standard", 0, 0, EXEC_SHELL, 0,    NO("user namespaces") },
+        /* files confined: file and js keep it in code, the shell refuses. */
+        { "basic",    0, 0, EXEC_FILE,  BARE, OK(FE_CODE, NE_NONE) },
+        { "basic",    0, 0, EXEC_JS,    BARE, OK(FE_CODE, NE_CODE) },
+        { "basic",    0, 0, EXEC_JS,    0,    OK(FE_CODE, NE_CODE) },
+        { "basic",    0, 0, EXEC_SHELL, BARE, NO("confined") },
+        /* Network with no namespace: js in code, the shell refuses, except
+         * advisory, which is the proxy variables — when the backend has the
+         * loopback proxy at all. */
+        { NULL, FILES_OPEN, NET_PROXIED, EXEC_JS,    BARE, OK(FE_NONE, NE_CODE) },
+        { NULL, FILES_OPEN, NET_NONE,    EXEC_JS,    BARE, OK(FE_NONE, NE_CODE) },
+        { NULL, FILES_OPEN, NET_NONE,    EXEC_FILE,  BARE, OK(FE_NONE, NE_NONE) },
+        { NULL, FILES_OPEN, NET_PROXIED, EXEC_SHELL, BARE, NO("proxied") },
+        { NULL, FILES_OPEN, NET_PROXIED, EXEC_SHELL, NS,   NO("proxied") },
+        { NULL, FILES_OPEN, NET_NONE,    EXEC_SHELL, BARE, NO("'none'") },
+        { NULL, FILES_OPEN, NET_ADVISORY, EXEC_SHELL, BARE, OK(FE_NONE, NE_ENV) },
+        { NULL, FILES_OPEN, NET_ADVISORY, EXEC_SHELL, 0,   NO("advisory") },
+        /* The namespace cannot be direct. */
+        { NULL, FILES_CONFINED, NET_DIRECT, EXEC_JS, NS,   NO("direct") },
+        { NULL, FILES_CONFINED, NET_DIRECT, EXEC_JS, BARE, OK(FE_CODE, NE_NONE) },
+    };
+    for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+        Containment c = t[i].row ? row(t[i].row)
+            : (Containment){ .name = "custom", .known = 1, .lv = { t[i].files, t[i].net, 0, 0 } };
+        ContainPlan p;
+        char why[640];
+        int rc = contain_plan(&c, t[i].v, t[i].caps, &p, why, sizeof(why));
+        int ok = t[i].refusal
+            ? rc != 0 && strstr(why, t[i].refusal) && strstr(why, c.name)
+            : rc == 0 && p.fe == t[i].fe && p.ne == t[i].ne &&
+              p.lv.files == c.lv.files && p.lv.net == c.lv.net &&
+              p.lv.nproc == c.lv.nproc && p.lv.cpu_sec == c.lv.cpu_sec;
+        if (!ok) printf("    row %zu: rc=%d fe=%d ne=%d %s\n", i, rc, p.fe, p.ne, why);
+        assert(ok);
     }
 }
 
-static void test_resolve_matches_policy(void) {
-    /* containment_resolve copies the policy half field-by-field (the
-     * structs differ, so no memcmp across them) — pin each field instead. */
-    static const char *levels[] = {"none", "standard", "offline"};
-    for (size_t i = 0; i < sizeof(levels)/sizeof(levels[0]); i++) {
-        SandboxConfig c = cfg_for(levels[i]);
-        Containment p; memset(&p, 0, sizeof(p));
-        containment_resolve(levels[i], &p);
-        if (p.sandbox != c.sandbox || p.env_mode != c.env_mode ||
-            p.net_mode != c.net_mode || p.mount_cwd != c.mount_cwd ||
-            p.rlimits.nproc != c.rlimits.nproc ||
-            p.rlimits.as_mb != c.rlimits.as_mb ||
-            p.rlimits.cpu_sec != c.rlimits.cpu_sec) {
-            printf("  row %s\n", levels[i]);
-            assert(!"containment/policy field drift");
-        }
-        if (p.read_paths != NULL || p.write_paths != NULL ||
-            p.read_path_count != 0 || p.write_path_count != 0) {
-            printf("  row %s\n", levels[i]);
-            assert(!"resolve touched grant-path fields");
-        }
-    }
-}
+/* A refusal names a shipped containment this host can keep for the vehicle,
+ * found by the same rules; an unknown name is refused outright, never read
+ * as a default. */
+static void test_refusal_names_alternative(void) {
+    char why[640];
+    ContainPlan p;
+    Containment std = row("standard");
+    assert(contain_plan(&std, EXEC_JS, BARE, &p, why, sizeof(why)) != 0);
+    assert(strstr(why, "'basic'"));
+    assert(contain_plan(&std, EXEC_SHELL, BARE, &p, why, sizeof(why)) != 0);
+    assert(strstr(why, "'none'"));
 
-/* The workspace is unconditionally writable now — HOME points at it, so
- * npm/cargo/go need it, and `workspace_ro` was deleted rather than left as a
- * field no containment sets. Nothing to assert: it is structural, not policy.
- * /tmp is likewise a parent-created host bind, not a containment field. */
+    static const char *unknown[] = { "", "trusted", "host", "restricted", "STANDARD" };
+    for (size_t i = 0; i < sizeof(unknown) / sizeof(unknown[0]); i++) {
+        Containment u = row(unknown[i]);
+        assert(contain_plan(&u, EXEC_FILE, NS, &p, why, sizeof(why)) != 0);
+        assert(strstr(why, "not a row"));
+    }
+
+    assert(contain_suggest(NS) && strcmp(contain_suggest(NS), "standard") == 0);
+    assert(contain_suggest(BARE) && strcmp(contain_suggest(BARE), "none") == 0);
+    Containment basic = row("basic");
+    assert(contain_keepable(&basic, NS) && !contain_keepable(&basic, BARE));
+}
 
 int main(void) {
     TEST_INIT();
-    RUN(test_none);
-    RUN(test_standard);
-    RUN(test_offline);
-    RUN(test_fallthrough);
-    RUN(test_resolve_matches_policy);
+    RUN(test_plan_table);
+    RUN(test_refusal_names_alternative);
     return 0;
 }

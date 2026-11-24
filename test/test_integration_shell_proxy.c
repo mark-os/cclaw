@@ -135,8 +135,7 @@ static void test_shell_curl_through_proxy(void) {
     r.workspace = workspace;
     r.agent_dir = workspace;
     r.timeout = 10;
-    r.sandbox = 1;
-    r.net_mode = 0;
+    r.plan = TEST_PLAN_STANDARD;
     r.host_rules = allow_loopback;
     r.host_count = 1;
 
@@ -190,8 +189,7 @@ static void test_proxy_relay_integrity(void) {
     r.workspace = workspace;
     r.agent_dir = workspace;
     r.timeout = 10;
-    r.sandbox = 1;
-    r.net_mode = 0;
+    r.plan = TEST_PLAN_STANDARD;
     r.host_rules = allow_loopback;
     r.host_count = 1;
 

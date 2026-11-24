@@ -1,224 +1,204 @@
-# Containment — Per-Agent Policy Bundles (as built)
+# Containment — levels, enforcers, shipped rows (as built)
 
-`agents.containment` selects a **policy bundle** for the agent's tool children —
-containment only. It carries no authority: which tools an agent may call and
-which hosts it may reach are governed by the `grants` table, never by the
-containment. Complements
-[security.md](security.md) (secret handling, defense-in-depth),
-[egress-filter.md](egress-filter.md) (proxy host rules) and
-[portability.md](portability.md) (containment as layer 3, and what a host
-without a containment backend gets).
+A containment says how an agent's tool children are contained. It carries no
+authority: which tools an agent may call and which hosts it may reach are
+`grants`, never the containment. Complements [security.md](security.md),
+[egress-filter.md](egress-filter.md) (the proxy's host rules) and
+[portability.md](portability.md) (what each kind of host can enforce).
 
-Resolution happens in ONE place: `sandbox_policy_from_containment()`
-(`src/sandbox.c`), called from `agent_setup_init()` (`src/agent_setup.c`),
-which fills the `Containment` used by every sandboxed tool child (shell,
-js, file — all via the `--run-tool` broker, `src/run_tool.c`).
+## The model
 
-`src/sandbox.c` holds the policy and the child setup. The mechanism that
-establishes the boundary is the containment backend (`src/contain.h`), chosen
-at build time: `make CONTAIN=linux` (default, `src/contain_linux.c`:
-namespaces, mounts, the proxy wiring) or `make CONTAIN=none`
-(`src/contain_none.c`: no boundary, so only containment `none` runs tools).
+A containment is a row of the `containments` table, and `agents.containment`
+names one (looked up by name; the column default is `standard`):
 
-## Policy bundles
+| column | values | meaning |
+|---|---|---|
+| `files` | `private` > `confined` > `open` | what the child can open |
+| `network` | `none` > `proxied` > `advisory` > `direct` | where its packets go |
+| `nproc`, `cpu_sec` | integer, `0` = no cap | `RLIMIT_NPROC`, `RLIMIT_CPU` |
 
-Three values, deliberately: no sandbox, sandbox, sandbox-without-network.
-None of them is merely a tuning preset.
+Shipped rows, restored to these values at every start (`CONTAIN_SHIPPED`,
+`src/sandbox.c`, written by `db_ensure_schema`). An operator may add rows (SQL
+or the explorer); those are left alone. No agent-facing verb writes the table.
 
-| Policy                  | none             | standard (default) | offline    |
-|-------------------------|------------------|--------------------|------------|
-| namespace sandbox       | **none**         | required           | required   |
-| env                     | inherit+scrub    | clean allowlist    | clean allowlist |
-| network                 | direct           | proxy              | none (no proxy sock) |
-| CWD mount (CLI)         | rw (host fs)     | **no**             | no         |
-| workspace mount         | rw (host fs)     | rw                 | rw         |
-| `$HOME`                 | user's real home | workspace          | workspace  |
-| `/tmp`                  | host `/tmp`      | private scratch bind | private scratch bind |
-| rlimits NPROC / CPU     | none             | 256 / none         | 64 / 120s  |
-| `RLIMIT_AS`             | **never**        | **never**          | **never**  |
+| name | files | network | nproc | cpu_sec |
+|---|---|---|---|---|
+| `standard` (default) | private | proxied | 256 | 0 |
+| `offline` | private | none | 64 | 120 |
+| `basic` | confined | advisory | 256 | 0 |
+| `none` | open | direct | 0 | 0 |
 
-**Containment is about reach, not resources.** `standard` mounts no CWD, so an
-agent sees its own workspace and whatever `read_path`/`write_path` grants add,
-and nothing of the user's files or another agent's workspace. Widening
-visibility is the grant system's job (and therefore the approval flow's), never
-a side effect of picking a looser containment. `none` is the one value that
-sees the user's files, because it establishes no namespace at all.
+**A level is a promise.** For each call the parent picks the strongest
+enforcer this host has for each level, for the vehicle at hand; if no enforcer
+can keep a level, the call is refused before anything forks, and the tool
+result says which containment, which level, what the host lacks and a shipped
+containment it can keep. A level is never silently weakened, and a name with no
+row is refused, not read as a default.
 
-**Why `standard` has NPROC but no CPU cap.** The NPROC cap is not policy, it is
-the fork-bomb backstop: on a 128 MB target one bad generated shell line
-otherwise takes the daemon down with it. A per-process CPU cap punishes nothing
-real — legitimate builds brush it — so it is gone. (`standard` absorbed the
-former `trusted` value, whose mount set was already identical; the merge cost
-`trusted`'s env inheritance, which was a hygiene regression acquired as a side
-effect rather than anything anyone chose.)
+### Enforcers
 
-**`offline` means no packets, ever.** The child gets no proxy socket and an
-empty netns, so the denial is kernel-enforced rather than a `grants` row —
-not even a promoted tool with declared hosts egresses. Parent-side tools
-(memory, `db_query`, the LLM loop itself) are untouched, so an `offline`
-note-taking agent converses, remembers, and runs local programs fine. File
-grants to an `offline` agent remain legal: the containment constrains packets,
-not files.
+| | enforcer | what it is |
+|---|---|---|
+| files | `FE_MOUNTNS` | the user + mount namespace sandbox (`contain_enter`) |
+| | `FE_CODE` | the path check in cclaw's own file tools and js globals |
+| | `FE_NONE` | nothing (`open`) |
+| network | `NE_NETNS` | the empty network namespace the mount namespace brings; the proxy socket is the only way out |
+| | `NE_CODE` | js's curl dials the egress proxy's socket itself |
+| | `NE_ENV` | the proxy runs on the host's loopback and the proxy variables are set; nothing else |
+| | `NE_NONE` | nothing |
 
-**`$HOME` is set under every containment.** Sandboxed values point it at the
-agent workspace: it is bind-mounted rw at its own absolute path and persists across
-tool calls, so `pip install --user`, `cargo install`, and `npm -g --prefix
-$HOME` land inside the one directory the agent owns and are on `PATH` next call
-— an agent can bootstrap its own toolchain without a grant. `none` reads the
-invoking user's home from the passwd database (the `--run-tool` child starts
-from an empty environ, so there is nothing to inherit). This is also why no
-sandboxed containment mounts the workspace read-only any more: `$HOME` has to be
-writable or every toolchain fails on its cache.
+### The planner
 
-**`PATH`** is the agent's workspace-local bin dirs (`$HOME/.local/bin`,
-`$HOME/.cargo/bin`, `$HOME/bin`) followed by the system dirs including
-`/usr/local/bin` and `/usr/local/go/bin`. Real toolchains (`node`, `go`,
-`cargo`, `rustc`) install outside `/bin:/usr/bin`, so a shorter `PATH` hides
-them.
+`contain_plan()` (`src/sandbox.c`) is one pure function: (row, vehicle,
+`contain_caps()`) → plan or refusal. `run_tool_req_init` calls it for every
+child call; `--doctor` and the startup warning call it per agent.
 
-**`/tmp` is a bind of the agent's own scratch directory on the host machine**, not a
-directory on the (deliberately tiny) root tmpfs and not a tmpfs we size
-ourselves. Toolchains write real volume there — `cc` intermediates, configure
-scripts, npm staging — and a shared 1 MB root failed every build with ENOSPC.
+| files | file | js | shell |
+|---|---|---|---|
+| `private` | MOUNTNS, else refuse | MOUNTNS, else refuse | MOUNTNS, else refuse |
+| `confined` | MOUNTNS, else CODE | MOUNTNS, else CODE | MOUNTNS, else refuse |
+| `open` | NONE | NONE | NONE |
 
-Binding a host directory means temp storage inherits whatever the host already
-does, tmpfs or disk, plus the host's own `tmpfiles.d` cleaner — rather than this
-code inventing a size policy that cannot be right for both a 128 MB SoC and a
-16 GB server. (An earlier cut mounted a tmpfs at a percentage of RAM. That was
-backwards: it put the *most* write-heavy workload in RAM, and on a 128 MB
-Pogoplug it yielded a 64 MB `/tmp`, reintroducing the ENOSPC it was added to
-fix. Most toolchain bulk lands under `$HOME` anyway, which is the workspace.)
+| network (no mount namespace) | file | js | shell |
+|---|---|---|---|
+| `none` | NONE | CODE (http_request refuses) | refuse |
+| `proxied` | NONE | CODE | refuse |
+| `advisory` | NONE | CODE | ENV (needs the backend's loopback proxy) |
+| `direct` | NONE | NONE | NONE |
 
-Layout is `<tmp_root>/cclaw-<uid>/<agent>/`, created by the *parent* — `tmp_root`
-defaults to the host's `/tmp`. The uid keeps two users running cclaw on one box
-from colliding on a 0700 directory; it is not what stops squatting, since `/tmp`
-is mode 1777 and anyone can pre-create a name. That is the ownership check: every
-level is created 0700 and, if it already exists, must be a real directory owned
-by us with mode 0700 and not a symlink, or the call fails and the child simply
-gets no scratch bind. It is never the host's *shared* `/tmp` — that would hand
-the child every other process's scratch, ssh-agent and gpg-agent sockets
+With the mount namespace the network enforcer is always `NETNS`: there the
+proxy is the only route out, which keeps `none` and `proxied` and keeps
+`advisory` more strongly than it promises (`--doctor` says so). `direct` cannot
+be combined with the mount namespace and is refused. The file vehicle opens no
+socket — it is cclaw's own file code — so no network level needs an enforcer
+there. js is cclaw's code too, and QuickJS exposes no socket primitive (no
+`os`/`std` modules): its one way out is `http_request`.
+
+What this means for the shipped rows:
+
+- On a host with user namespaces, `standard`, `offline` and `basic` all run in
+  the namespace sandbox, and `none` runs with no boundary.
+- On a host without them, `standard` and `offline` are refused for every
+  vehicle; under `basic` the file tools and js run (path check in code, proxy
+  forced in code) and **the shell is refused** — it needs a kernel enforcer
+  for `confined`, and Landlock is not built yet.
+
+### The child
+
+The plan rides the `--run-tool` wire (levels, limits, enforcers). The child
+applies exactly it (`sandbox_child_setup`) and exits 126 if any step fails; it
+never picks a weaker enforcer.
+
+`contain_caps()` (`src/contain.h`) is probed once per process by fork-and-try
+— `MOUNTNS` (unshare user, mount, IPC, PID and network namespaces, map the user,
+make the mount tree private: the first step that needs a capability, which is
+what Ubuntu's AppArmor restriction denies), `NETNS` (a network namespace with
+`lo` up; reported now, planned with in 4b), `SHIM` (the backend can serve the
+loopback proxy; always on Linux) — cached in memory, never persisted.
+`CCLAW_CONTAIN_CAPS_MASK`, a test and diagnostic knob read only there, is ANDed
+in: it can only take capabilities away. `make CONTAIN=none` reports none.
+
+## Under every plan
+
+Empty-env exec, fd hygiene, `PR_SET_PDEATHSIG`, the row's rlimits when
+non-zero, and `HOME`/`PATH`/`TMPDIR`:
+
+- **`HOME`** is the agent workspace under any files enforcer: rw, persistent,
+  the one directory the agent owns, so `pip install --user`, `cargo install`
+  and `npm -g --prefix $HOME` land there and are on `PATH` next call. Under
+  `open` it is the invoking user's home from the passwd database (the child
+  starts from an empty environ, so there is nothing to inherit).
+- **`PATH`** is `$HOME/.local/bin`, `$HOME/.cargo/bin`, `$HOME/bin`, then the
+  system dirs including `/usr/local/bin` and `/usr/local/go/bin`.
+- **`TMPDIR`** is `/tmp` — in the namespace a bind of the agent's scratch dir;
+  under `FE_CODE` the scratch dir itself.
+
+Additions: shell and js get `CCLAW_PROXY_SOCK` and, under `NETNS`/`ENV`, the
+proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and
+lowercase); the shell also `CCLAW_CONNECT` and `GIT_SSH_COMMAND`
+([shell-networking.md](shell-networking.md)); js gets `CCLAW_LLM_SOCK` unless
+the network is `none`; a shell child gets the `CCLAW_SECRET_*` values its
+command references.
+
+**`no_new_privs`** is set on every child except files `open` with network
+`direct` (containment `none`), which keeps the operator's own reach, `sudo`
 included.
 
-It **persists across tool calls** on purpose: `./configure` in one call and
-`make` in the next need the same `/tmp`, package caches want to persist, and the
-tool-call boundary is invisible to the agent, so wiping it presents as "my files
-vanished" rather than anything diagnosable.
+**No row sets `RLIMIT_AS`**: it caps address space, which every modern runtime
+reserves far beyond its footprint (Go arenas, V8 cages). NPROC is the
+fork-bomb backstop; a CPU cap punishes legitimate builds, so only `offline`
+has one.
 
-The namespace root lives under the same tree (`.ns/<pid>`). The child removes
-that directory itself as soon as it has pivoted into it; the parent also sweeps
-`.ns/` for ones a child abandoned before that point, without tracking pids: one
-still being set up holds a mount and refuses `rmdir`, a dead one is empty and
-goes.
+**The CLI's CWD** reaches the child only under files `open`: there it inherits
+the user's CWD (`cclaw` in a repo operates on that repo); under `--daemon`, and
+under every other files level, the child starts in the workspace.
 
-**System directories are read-only all the way down.** `/usr`, `/etc`, `/dev`
-and the rest are recursive binds, and a recursive bind brings the host's
-submounts with it (`/dev/shm`, `/dev/mqueue`, `/dev/pts`; a container
-runtime's `/etc/resolv.conf`). The read-only remount of the top bind does not
-reach them, and a recursive read-only remount is refused in an unprivileged
-user namespace, so `contain_enter()` walks `/proc/self/mountinfo` and remounts
-each submount read-only on its own, locked flags preserved. Then `/dev/shm`
-(tmpfs), `/dev/mqueue` and `/dev/pts` (a new devpts instance, which `/dev/ptmx`
-allocates from) get instances of their own, and the child has its own IPC
-namespace, so POSIX shared memory, message queues, System V IPC and ptys work
-inside a call and none of them is the host's. Any of these failing refuses the
-call.
+## files `private`: the mount namespace
 
-**`no_new_privs` is set on every sandboxed `--run-tool` child**
-(`sandbox_child_setup`): a setuid or file-capability binary the payload runs
-gets no more than the caller has. Nothing a sandboxed child does needs
-elevation; the namespace and its mounts come from the user namespace.
-Containment `none` does not set it: it is the operator's own reach, `sudo`
-included.
+A tmpfs root, `pivot_root`, and binds: the system dirs (`/bin /usr /lib /lib64
+/etc /dev /sbin /opt`, plus `/proc` for the shell, which has a PID namespace)
+read-only all the way down — every submount a recursive bind brings along is
+remounted read-only on its own, and `/dev/shm`, `/dev/mqueue` and `/dev/pts`
+get instances of their own in the child's own IPC namespace; the workspace rw;
+`/tmp` a bind of the agent's scratch dir (`<tmp_root>/cclaw-<uid>/<agent>/`,
+created 0700 by the parent, persistent across calls on purpose, never the
+host's shared `/tmp`); path grants ro or rw, planned shallow→deep so a nested
+grant shadows its parent, a grant naming a single file binding just that file.
+Everything else does not exist. Any of these failing refuses the call.
 
-**No containment sets `RLIMIT_AS`.** It caps *address space*, not resident memory,
-and every modern runtime reserves VA far beyond its footprint — Go's allocator
-arenas, V8's heap cages, LLVM. A cap loose enough to be safe bounds nothing; a
-cap tight enough to bound anything refuses to start `go`, `node`, or `rustc`
-before they do a byte of work. NPROC and CPU bound a runaway; a cgroup memory
-limit is the right tool if a real memory ceiling is ever wanted.
+## files `confined` without a namespace: the path check
 
-**Containment `none` and the CWD.** `none` runs no namespace, so nothing is
-mounted and no `chdir` is implied. In CLI mode the child inherits the user's
-CWD — that is the point of `none`, since `cclaw` invoked in a repo should operate on that repo.
-Under `--daemon` there is no meaningful user CWD, so the child starts in the
-agent workspace instead.
-
-- **Unknown or NULL values fall through to `standard`.** There is no
-  `bootstrap` and no `trusted` — both are treated like any other unknown
-  value (→ standard, which is strictly tighter than the old `trusted`). The
-  pre-v71 names `host` and `restricted` are unknown too; the v71 schema patch
-  rewrites stored rows to `none` and `offline`, and agent definitions naming
-  them are refused. The seeded default agent (`Assistant`) is `standard`.
-- **clean allowlist env**: the environment is wiped, then only `PATH`,
-  `TMPDIR` and `HOME` are set. Additions by vehicle: shell and js get
-  `CCLAW_PROXY_SOCK` and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`,
-  `ALL_PROXY`, `NO_PROXY`, and their lowercase forms); the shell also
-  gets `CCLAW_CONNECT` and `GIT_SSH_COMMAND`
-  ([shell-networking.md](shell-networking.md)); JS gets `CCLAW_LLM_SOCK`
-  except under `offline`; a shell child gets the `CCLAW_SECRET_*` values
-  its command references. `none` uses a blacklist scrub instead
-  (inherit-minus-blacklist: `CCLAW_*` names and names containing
-  API_KEY/APIKEY/TOKEN/SECRET/PASSWORD/CREDENTIALS are dropped,
-  `CCLAW_SECRET_*` re-injected as the deliberate channel).
-- **no network** (`offline`): no proxy is started and no proxy socket
-  or proxy variable reaches the child; the empty netns then has zero egress.
-- **grant-path bind mounts**: `read_path`/`write_path` grants add bind
-  mounts on top of the bundle (`contain_enter()`, `src/contain_linux.c`);
-  they extend *visibility*, chosen per-agent via the approval flow
-  (`request_config` → `apply_grant`), and are refreshed per dispatch batch.
-  A grant may name a **single file** or a directory (`bind_path_into` creates
-  a matching mount point for either), so an agent that needs one file can be
-  given exactly that instead of its parent. Mounts are planned shallow→deep,
-  so a file grant nested inside a granted directory correctly shadows it.
-  A grant on a path that does not exist yet cannot be mounted — to create
-  files, grant the directory.
-- Sanitizer builds skip `RLIMIT_AS` (see AGENTS.md — ASan shadow VA).
+`FE_CODE` (`contain_path_check`) runs before every open, stat, list or write in
+the file tools, js `fs.*`, `http_request`'s `save_to`, `LLM()`'s `images` and a
+js `filename`. It allows what the mount namespace would bind: workspace and
+scratch rw, grants with their ro/rw (the deepest matching grant decides), the
+system dirs read-only. The path is resolved first — `realpath` of the deepest
+existing ancestor, plus the part not yet created, where a `..` is refused — so
+a symlink in the workspace cannot point out. `.cclaw_key` and `cclaw.db*` are
+refused by resolved path and by inode (a hard link has no other name).
+Differences from the namespace, all narrower or equal except the last: `/proc`
+is not readable, `/` and other ungranted parents cannot be listed, a stat of an
+ungranted path is refused rather than "not found", and it is a check, not a
+kernel boundary — two concurrent calls of the same agent racing a symlink swap
+could pass it, which is what Landlock (4b) closes as a backstop.
 
 ## Fail-closed rule
 
-Every containment except `none` **requires** the containment backend. If
-`contain_enter()` cannot establish the boundary (`unshare`/`pivot_root`
-fails on Linux; always under `CONTAIN=none`), the child prints an error and
-exits 126 instead of degrading. A runtime failure must not grant what only
-`none` may grant. `none` never attempts the sandbox; it is the explicit
-opt-out, per-agent via `agents.containment` or session-wide via
-`--no-containment` (sets `CCLAW_CONTAINMENT=none`). Sandbox on/off is derived
-from the containment; there is no separate sandbox knob. `contain_probe()` answers
-"can this host contain a child" ahead of time, and `cclaw --doctor` `[layers]`
-reports it per agent ([portability.md](portability.md)).
+A refusal at dispatch is the normal outcome on a host that cannot keep a
+level; a child that cannot apply its plan exits 126. Neither degrades.
+`--no-containment` sets `CCLAW_CONTAINMENT=none` for a CLI run; `cclaw
+--doctor` `[layers]` prints, per agent, the containment, its levels and each
+vehicle's enforcers or refusal, and the startup warning names a shipped
+containment the host can keep.
+
+`create_agent` and `update_agent` refuse a containment with no row, and one
+looser than the caller's in any single column (files, network, nproc, cpu_sec;
+a limit of 0 is the loosest).
+
+`cclaw.db` and `.cclaw_key` are out of reach under every files level but
+`open`, and a `read_path`/`write_path` grant naming either, or a directory
+holding them, is refused at grant time (`grant_path_hits_db`). Agent
+self-inspection is `db_query`, which runs in the trusted parent.
 
 ## Interaction with other axes (do not conflate)
 
-- **Authority** = `grants` (kind/value, per-tool `approval_mode`,
-  `expires_at`). Withholding a `tool` grant for `shell_exec` is the strongest
-  lockdown; an empty host-grant set is deny-all egress at the proxy.
-- **Escalation** = `approvals` (park/resolve, `rerun`/`apply`).
-- The containment must never gate a capability. If a change makes tool/secret
-  access depend on `agents.containment`, it belongs on `grants` instead.
+- **Authority** = `grants`. Withholding `shell_exec` is the strongest lockdown;
+  an empty host-grant set is deny-all egress at the proxy.
+- **Escalation** = `approvals`.
+- The containment must never gate a capability.
 
-## Test coverage
+## Tests
 
-Integration tests exercise the namespace, proxy-deny, and static-mount paths
-(`test/test_shell_namespace.c`, `test_integration_shell_proxy*.c`,
-`test_sandbox_mounts.c`). The containment→bundle mapping is pinned field-by-field in
-`test/test_containment.c`, which also enforces two invariants directly: no
-containment may set `RLIMIT_AS`, and every unknown value (`trusted`, `bootstrap`
-and the retired `host` included) falls through to `standard`. The state-file mask has its own suite,
-`test/test_sandbox_key_mask.c` — every masking assertion there is paired with a
-positive control read of a decoy file in the same granted directory.
+`test/test_containment.c` (the planner, every refusal rule),
+`test/test_contain_code.c` (`basic` with capabilities masked, through the real
+`--run-tool` child: the path check, js through the proxy, refusals),
+`test/test_contain.c` (the probe and the mask), the namespace suites
+(`test_shell_namespace.c`, `test_run_tool_escape.c`, `test_sandbox_mounts.c`,
+`test_sandbox_key_mask.c`, `test_integration_shell_proxy*.c`), and the per-column
+cap in `test/test_agent_define.c`.
 
-`cclaw.db` and `.cclaw_key` are masked **unconditionally** under every sandboxed
-containment, and no grant can unmask either: the DB is the policy store for the
-containment mechanism itself, so read is reconnaissance and write is
-escalation. A `read_path`/`write_path` grant naming the DB, one of its
-`-wal`/`-shm` siblings, or any directory containing it is refused at *grant*
-time (`grant_path_hits_db`, `src/agent_config.c`) — never silently masked at
-mount, because an approved grant that quietly does nothing is its own class of
-bug. Agent self-inspection is `db_query`, which runs in the trusted parent.
+## Not yet (step 4b)
 
-## Non-goals
-
-- seccomp syscall filtering — maintenance tax; namespaces+proxy already cover
-  the realistic threats; revisit only with a concrete bypass in hand.
-- Container/VM isolation — the shell still runs as the user's uid under the
-  shared kernel; that boundary is out of scope for cclaw itself.
+Landlock (files `confined` for the shell, and a backstop under `FE_CODE`),
+seccomp (network `none` without a namespace), and a network namespace without
+a mount namespace (`proxied` for the shell, and js, under files `open`).

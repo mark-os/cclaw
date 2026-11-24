@@ -206,7 +206,7 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
     q->plan.lv.cpu_sec = (int)r_u32(r);
     uint32_t fe = r_u32(r), ne = r_u32(r);
     /* An enum out of range is a malformed request, never a default. */
-    if (files > FILES_PRIVATE || net > NET_NONE || fe > FE_MOUNTNS || ne > NE_NETNS)
+    if (files > FILES_PRIVATE || net > NET_NONE || fe > FE_LANDLOCK || ne > NE_SECCOMP)
         r->err = 1;
     q->plan.lv.files = (FilesLevel)files;
     q->plan.lv.net   = (NetLevel)net;

@@ -73,14 +73,16 @@ const size_t CONTAIN_SHIPPED_N = sizeof(CONTAIN_SHIPPED) / sizeof(CONTAIN_SHIPPE
 
 static const char *const FILES_NAMES[] = { "open", "confined", "private" };
 static const char *const NET_NAMES[]   = { "direct", "advisory", "proxied", "none" };
-static const char *const FE_NAMES[]    = { "none", "path check in cclaw's code", "mount namespace" };
+static const char *const FE_NAMES[]    = { "none", "path check in cclaw's code",
+                                           "mount namespace", "Landlock" };
 static const char *const NE_NAMES[]    = { "none", "proxy variables only",
-                                           "cclaw's code dials the proxy", "network namespace" };
+                                           "cclaw's code dials the proxy", "network namespace",
+                                           "seccomp refuses socket()" };
 
 const char *files_level_name(FilesLevel l) { return (unsigned)l < 3 ? FILES_NAMES[l] : "?"; }
 const char *net_level_name(NetLevel l) { return (unsigned)l < 4 ? NET_NAMES[l] : "?"; }
-const char *files_enforcer_name(FilesEnforcer e) { return (unsigned)e < 3 ? FE_NAMES[e] : "?"; }
-const char *net_enforcer_name(NetEnforcer e) { return (unsigned)e < 4 ? NE_NAMES[e] : "?"; }
+const char *files_enforcer_name(FilesEnforcer e) { return (unsigned)e < 4 ? FE_NAMES[e] : "?"; }
+const char *net_enforcer_name(NetEnforcer e) { return (unsigned)e < 5 ? NE_NAMES[e] : "?"; }
 
 static int name_index(const char *const *names, int n, const char *s) {
     for (int i = 0; s && i < n; i++) if (strcmp(names[i], s) == 0) return i;
@@ -117,8 +119,10 @@ static const char *vehicle_noun(ExecVehicle v) {
     return v == EXEC_SHELL ? "the shell" : v == EXEC_JS ? "js" : "file tools";
 }
 
-/* The rules, for one row. Returns NULL with *out filled, or what the host
- * lacks (or why the combination cannot be built) for `why`. */
+/* The rules, for one row: per level the strongest enforcer the host has —
+ * mount namespace, then Landlock, then (file and js only) the path check;
+ * network namespace, then (for 'none') seccomp. Returns NULL with *out
+ * filled, or what the host lacks (or why the combination cannot be built). */
 static const char *plan_levels(const ContainLevels *lv, ExecVehicle v,
                                unsigned caps, ContainPlan *p) {
     memset(p, 0, sizeof(*p));
@@ -130,10 +134,12 @@ static const char *plan_levels(const ContainLevels *lv, ExecVehicle v,
         p->fe = FE_MOUNTNS;
         break;
     case FILES_CONFINED:
+        /* For file and js, FE_LANDLOCK keeps the path check on too. */
         if (ns) p->fe = FE_MOUNTNS;
+        else if (caps & CONTAIN_CAP_LANDLOCK) p->fe = FE_LANDLOCK;
         else if (v != EXEC_SHELL) p->fe = FE_CODE;
         else return "files 'confined' for the shell needs unprivileged user namespaces"
-                    " (Landlock is not supported yet)";
+                    " or Landlock (kernel 5.13+)";
         break;
     case FILES_OPEN:
         p->fe = FE_NONE;
@@ -162,11 +168,13 @@ static const char *plan_levels(const ContainLevels *lv, ExecVehicle v,
         p->ne = NE_ENV;
         return NULL;
     }
+    if (caps & CONTAIN_CAP_NETNS) { p->ne = NE_NETNS; return NULL; }
+    if (lv->net == NET_NONE && (caps & CONTAIN_CAP_SECCOMP)) { p->ne = NE_SECCOMP; return NULL; }
     return lv->net == NET_NONE
-        ? "network 'none' for the shell needs a network namespace, built here only"
-          " with the mount namespace (seccomp is not supported yet)"
-        : "network 'proxied' for the shell needs a network namespace, built here"
-          " only with the mount namespace";
+        ? "network 'none' for the shell needs unprivileged user namespaces (a network"
+          " namespace) or seccomp"
+        : "network 'proxied' for the shell needs unprivileged user namespaces (a"
+          " network namespace)";
 }
 
 /* Can lv be kept for vehicle `only` (0 = every child vehicle)? */
@@ -331,6 +339,28 @@ static int confine_arm(const SandboxConfig *cfg, const char *ws) {
     return 0;
 }
 
+/* FE_LANDLOCK: the same roots, as kernel rules. /dev is not one: only the
+ * nodes every program expects, read-write (never /dev/shm). /proc is
+ * readable: tools need /proc/self, and Landlock's ptrace scoping refuses
+ * other processes' sensitive files (environ, fd, mem) there. The key and the
+ * DB are in no rule, so they cannot be opened. */
+static int confine_landlock(void) {
+    static const char *const extra[] = { "/dev/null", "/dev/zero", "/dev/full",
+        "/dev/random", "/dev/urandom", "/dev/tty", "/proc", NULL };
+    SandboxMount *r = calloc(g_conf.n + 7, sizeof(*r));
+    if (!r) return -1;
+    size_t k = 0;
+    for (size_t i = 0; i < g_conf.n; i++)
+        if (strcmp(g_conf.roots[i].path, "/dev") != 0) r[k++] = g_conf.roots[i];
+    for (int i = 0; extra[i]; i++, k++) {
+        snprintf(r[k].path, sizeof(r[k].path), "%s", extra[i]);
+        r[k].ro = extra[i][1] == 'p' ? CONTAIN_LL_RO : CONTAIN_LL_DEV;
+    }
+    int rc = contain_landlock(r, k);
+    free(r);
+    return rc;
+}
+
 /* ── Child setup ──────────────────────────────────────────────────────── */
 
 /* HOME: with any files enforcer, the agent workspace (`ws`, canonical — the
@@ -372,7 +402,7 @@ static void sandbox_scrub_env(const SandboxConfig *cfg, const char *ws) {
     sandbox_set_path(home);
     setenv("HOME", home, 1);
     const char *tmp = "/tmp";
-    if (cfg->plan.fe == FE_CODE)
+    if (cfg->plan.fe == FE_CODE || cfg->plan.fe == FE_LANDLOCK)
         tmp = cfg->tmp_dir && cfg->tmp_dir[0] ? cfg->tmp_dir : home;
     setenv("TMPDIR", tmp, 1);
 }
@@ -419,13 +449,16 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
             fprintf(stderr, "error: namespace sandbox unavailable (errno=%d)\n", e);
             return -1;
         }
+    } else if (p->ne == NE_NETNS && contain_enter_net() != 0) {
+        fprintf(stderr, "error: network namespace unavailable (errno=%d)\n", errno);
+        return -1;
     } else if (!cfg->cwd_path && ws && ws[0] && chdir(ws) != 0) {
-        /* Outside a namespace, start in the workspace — except a CLI run under
-         * files 'open', where the user's CWD is the point (`cclaw` in a repo
-         * operates on that repo). */
+        /* Outside the mount namespace, start in the workspace — except a CLI
+         * run under files 'open', where the user's CWD is the point (`cclaw`
+         * in a repo operates on that repo). */
         LOG_INFO_("sandbox chdir_fail errno=%d", errno);
     }
-    if (p->fe == FE_CODE && confine_arm(cfg, ws) != 0) {
+    if ((p->fe == FE_CODE || p->fe == FE_LANDLOCK) && confine_arm(cfg, ws) != 0) {
         fprintf(stderr, "error: the path check could not be set up\n");
         return -1;
     }
@@ -448,6 +481,20 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
                 return -1;
             }
         }
+    }
+
+    /* Last, once the shim (ours, needing its socket) is forked off. Under
+     * Landlock there is no PID namespace: ptrace and process_vm_* are refused
+     * here as well as by Landlock's own scoping. */
+    if (p->fe == FE_LANDLOCK && confine_landlock() != 0) {
+        fprintf(stderr, "error: the Landlock ruleset could not be applied (errno=%d)\n", errno);
+        return -1;
+    }
+    unsigned sc = (p->fe == FE_LANDLOCK ? CONTAIN_SC_NOTRACE : 0) |
+                  (p->ne == NE_SECCOMP ? CONTAIN_SC_NOSOCKET : 0);
+    if (sc && contain_seccomp(sc) != 0) {
+        fprintf(stderr, "error: the seccomp filter could not be installed (errno=%d)\n", errno);
+        return -1;
     }
     return 0;
 }

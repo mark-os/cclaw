@@ -45,27 +45,41 @@ from outside, required wherever it is not. The shell needs containment because a
 command can do anything. File access, HTTP and QuickJS do not, because every
 file open and every connection is a line of cclaw's C.
 
-## As built (2026-11-24, step 4a)
+## As built (2026-11-24, step 4b)
 
 Each level of an agent's containment is kept by the strongest enforcer the
 host has ([containment.md](containment.md)); what no enforcer can keep is
-refused at dispatch. Layer 2 now exists for files `confined`:
+refused at dispatch. The capability layers a Linux host may have, each probed
+by fork-and-try:
 
-| Policy | With user namespaces | Without them |
+| Capability | Kernel | Where it is missing |
 |---|---|---|
-| Paths, file tools and JS `fs.*` | Mount namespace: an ungranted path is absent | `confined`: the path check in cclaw's code (`contain_path_check`); `private`: refused |
-| `cclaw.db` / `.cclaw_key` | Outside every mount set, masked if a bind would show them | The path check refuses them by path and by inode |
-| Host allowlist, `web_fetch` and JS `http_request` | Network namespace; the only route out is the broker's proxy | curl dials the proxy's unix socket itself (`NE_CODE`): the same `proxy_decide()`, metadata and private-address blocks, SNI check, narrowing and contacted-host log |
-| Host allowlist, shell | Network namespace + `net_shim` | `advisory`: the shim on the host's loopback and the proxy variables, nothing more; `proxied`/`none`: refused |
-| Files, shell | Mount namespace | `confined`: refused until Landlock (4b) |
+| user + mount namespaces | 3.8+, unprivileged | Docker's default profile, Ubuntu 23.10+ (AppArmor), hardened kernels, `max_user_namespaces=0` |
+| Landlock | 5.13+ (ABI 1; 2 from 5.19, 3 from 6.2, 5 from 6.10, 6 from 6.12), built in and in the LSM list | older kernels; some vendor and embedded kernels |
+| seccomp | 3.5+ (ARM 3.8+) | kernels built without it |
 
-So on a kernel without unprivileged user namespaces:
+What each policy gets:
 
-- `standard` / `offline`: every tool call is refused at dispatch, with the
-  reason and a containment the host can keep.
-- `basic`: file tools and JS (so `web_fetch`) run with paths checked and
-  egress forced through the proxy in code; the shell is refused.
-- `none`: every tool runs as the user, with no policy.
+| Policy | With user namespaces | Without them, with Landlock + seccomp | With none of these |
+|---|---|---|---|
+| Paths, file tools and JS `fs.*` | Mount namespace: an ungranted path is absent | `confined`: the path check in cclaw's code, Landlock beneath it | `confined`: the path check; `private`: refused |
+| Files, shell | Mount namespace | `confined`: Landlock (existence visible, no private `/tmp`/`/proc`) | refused |
+| `cclaw.db` / `.cclaw_key` | Outside every mount set, masked if a bind would show them | In no Landlock rule; the path check refuses them by path and by inode | The path check |
+| Host allowlist, `web_fetch` and JS `http_request` | Network namespace; the only route out is the broker's proxy | curl dials the proxy's unix socket itself (`NE_CODE`): the same `proxy_decide()`, metadata and private-address blocks, SNI check, narrowing and contacted-host log | same |
+| Host allowlist, shell | Network namespace + `net_shim` | `advisory`: the shim on the host's loopback and the proxy variables, nothing more; `none`: seccomp, no sockets; `proxied`: refused | `advisory` as left; `proxied`/`none`: refused |
+
+So, per shipped containment:
+
+| Host | `standard` / `offline` | `basic` | `none` |
+|---|---|---|---|
+| user namespaces | every vehicle in the namespace | every vehicle in the namespace | no boundary |
+| Landlock + seccomp, no user namespaces | refused, naming `basic` | every vehicle: Landlock files; shell egress advisory | no boundary |
+| none of these | refused, naming `none` | file tools and JS; shell refused | no boundary |
+
+Expected: AL2023 and Debian 12 (6.1) ABI 2 with namespaces; Ubuntu 24.04
+(6.8) ABI 4, namespaces denied by AppArmor, so `basic` with Landlock; Docker
+depends on its profile (the default blocks `unshare` and, in recent versions,
+allows Landlock and a nested seccomp filter — check `cclaw --doctor`).
 
 `--doctor` `[layers]` prints, per agent, each vehicle's enforcers or refusal.
 
@@ -89,11 +103,15 @@ What is already in good shape:
 - **Host with user namespaces**: everything in [security.md](security.md) and
   [containment.md](containment.md) holds; `standard`, `offline` and `basic`
   run every vehicle in a namespaced child.
-- **Host without them** (old or vendor kernels, Docker's default profile,
-  Ubuntu's AppArmor restriction, Android): `basic` keeps file and JS policy in
-  cclaw's code, and `none` means what it says — the agent acts as the user
-  running cclaw, on any file and any host, and agents are not isolated from
-  each other. The device is the boundary.
+- **Host without them, with Landlock** (Docker, Ubuntu's AppArmor
+  restriction): `basic` keeps the shell's files with Landlock and file and JS
+  policy in cclaw's code with Landlock beneath it; the shell's network is
+  advisory.
+- **Host with neither** (old or vendor kernels, Android): `basic` keeps file
+  and JS policy in cclaw's code and refuses the shell, and `none` means what
+  it says — the agent acts as the user running cclaw, on any file and any
+  host, and agents are not isolated from each other. The device is the
+  boundary.
 
 A containment never slides from one to the other: a level the host cannot
 keep is refused, not weakened.
@@ -106,10 +124,11 @@ containment the host can keep (with the backend's hint — on Linux whichever of
 the AppArmor restriction, `unprivileged_userns_clone` or `max_user_namespaces`
 is set against it), and mediation without a namespace (`basic`).
 
-1. **Kernel enforcers without a namespace (4b).** Landlock for files
-   `confined` (the shell, and a backstop under the path check), seccomp for
-   network `none`, a network namespace without a mount namespace.
-2. **Platform backends.** A build for a platform with its own sandbox
+Done in 4b: Landlock for files `confined` (the shell, and a backstop under
+the path check), seccomp for network `none`, and a network namespace without a
+mount namespace.
+
+1. **Platform backends.** A build for a platform with its own sandbox
    (Android) starts from `contain_none.c`.
 
 ## Decided

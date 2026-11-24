@@ -1,15 +1,18 @@
 /* Containment `basic` on a host with no namespaces, through the real
- * --run-tool child: the capabilities are masked to the loopback proxy alone
- * (CCLAW_CONTAIN_CAPS_MASK), the parent plans with run_tool_req_init exactly
- * as dispatch does, and the child keeps files 'confined' with the path check
- * in cclaw's code (FE_CODE) and network with js's curl dialling the egress
- * proxy itself (NE_CODE). What cannot be kept is refused before any fork.
- * The mock server is on loopback: no real network. */
+ * --run-tool child: the capabilities are masked (CCLAW_CONTAIN_CAPS_MASK) to
+ * what such a host has, the parent plans with run_tool_req_init exactly as
+ * dispatch does, and the child applies the plan. Twice: with the loopback
+ * proxy alone (files 'confined' kept by the path check in cclaw's code,
+ * FE_CODE, network by js's curl dialling the proxy, NE_CODE; the shell is
+ * refused), and with Landlock and seccomp too (FE_LANDLOCK for every vehicle,
+ * NE_SECCOMP for the shell under network 'none'). What cannot be kept is
+ * refused before any fork. The mock server is on loopback: no real network. */
 #define _GNU_SOURCE
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "contain.h"
@@ -19,6 +22,10 @@
 static char root[64];
 static char state[128], db[160], key[160], agent_dir[160], ws[200], other[200];
 static char granted[128], writable[128], scratch[128];
+static FilesEnforcer g_fe;   /* what the planner must pick for file and js */
+
+#define MASK_BARE     "0x4"    /* the loopback proxy only */
+#define MASK_LANDLOCK "0x1c"   /* + Landlock + seccomp, still no namespaces */
 
 static void put(const char *path, const char *text) {
     FILE *f = fopen(path, "w");
@@ -72,7 +79,7 @@ static char *file_call(const char *tool, const char *k1, const char *v1,
     RunToolReq req;
     char why[640];
     assert(run_tool_req_init(&req, EXEC_FILE, tool, &c, ws, NULL, db, why, sizeof(why)) == 0);
-    assert(req.plan.fe == FE_CODE);
+    assert(req.plan.fe == g_fe);
     req.tmp_dir = scratch;
     ToolWireArg a[3] = {
         { (char *)k1, TOOL_ARG_TEXT, (char *)v1, NULL, 0 },
@@ -152,7 +159,7 @@ static char *js_call(const Containment *c, const char *code, const char **hosts,
     RunToolReq req;
     char why[640];
     assert(run_tool_req_init(&req, EXEC_JS, "js_eval", c, ws, NULL, db, why, sizeof(why)) == 0);
-    assert(req.plan.fe == FE_CODE && req.plan.ne == NE_CODE);
+    assert(req.plan.fe == g_fe && req.plan.ne == NE_CODE);
     req.tmp_dir = scratch;
     req.agent_dir = agent_dir;
     req.host_rules = hosts;
@@ -237,17 +244,213 @@ static void test_refused_not_weakened(void) {
     assert(strstr(why, "'offline'"));
 }
 
+/* A shell call planned from the row, as dispatch plans it. */
+static char *shell_call(const Containment *c, const char *cmd, FilesEnforcer fe,
+                        NetEnforcer ne, const char **hosts, size_t nhosts) {
+    RunToolReq req;
+    char why[640];
+    if (run_tool_req_init(&req, EXEC_SHELL, "shell_exec", c, ws, NULL, db, why,
+                          sizeof(why)) != 0) {
+        printf("    refused: %s\n", why);
+        assert(0);
+    }
+    assert(req.plan.fe == fe && req.plan.ne == ne);
+    req.tmp_dir = scratch;
+    req.agent_dir = agent_dir;
+    req.host_rules = hosts;
+    req.host_count = nhosts;
+    req.command = cmd;
+    req.timeout = 10;
+    return run_tool_req_full(&req, NULL, NULL);
+}
+
+/* The shell under `basic` with Landlock: the key, the DB, another agent's
+ * workspace and the host's own writable places (/tmp, the user's home,
+ * /dev/shm) are out of reach; its workspace, scratch and grants are as
+ * granted; programs run; other processes' /proc secrets are refused by
+ * Landlock's ptrace scoping. Every "DENIED" row fails without Landlock. */
+static void test_shell_landlock(void) {
+    char home_probe[300], shm_probe[64], tmp_probe[64];
+    struct passwd *pw = getpwuid(getuid());
+    assert(pw && pw->pw_dir);
+    snprintf(home_probe, sizeof(home_probe), "%s/.cclaw_ll_probe_%d", pw->pw_dir, (int)getpid());
+    snprintf(shm_probe, sizeof(shm_probe), "/dev/shm/cclaw_ll_probe_%d", (int)getpid());
+    snprintf(tmp_probe, sizeof(tmp_probe), "/tmp/cclaw_ll_probe_%d", (int)getpid());
+    struct { const char *fmt, *arg, *want; } t[] = {
+        { "cat %s 2>/dev/null || echo DENIED",            key,        "DENIED" },
+        { "cat %s 2>/dev/null || echo DENIED",            db,         "DENIED" },
+        { "cat %s/secret.txt 2>/dev/null || echo DENIED", other,      "DENIED" },
+        { "cat key_link 2>/dev/null || echo DENIED",      NULL,       "DENIED" },
+        { "echo x > %s 2>/dev/null || echo DENIED",       tmp_probe,  "DENIED" },
+        { "echo x > %s 2>/dev/null || echo DENIED",       home_probe, "DENIED" },
+        { "echo x > %s 2>/dev/null || echo DENIED",       shm_probe,  "DENIED" },
+        { "echo x > %s/new.txt 2>/dev/null || echo DENIED", granted,  "DENIED" },
+        { "cat /proc/$PPID/environ 2>/dev/null || echo DENIED", NULL, "DENIED" },
+        { "cat /proc/%s/environ 2>/dev/null || echo DENIED", "<test>", "DENIED" },
+        { "cat %s/g.txt",                                 granted,    "granted" },
+        { "echo w > %s/w.txt && cat %s/w.txt",            writable,   "w\n" },
+        { "echo own > o2.txt && cat o2.txt",              NULL,       "own\n" },
+        { "echo t > \"$TMPDIR/t\" && cat \"$TMPDIR/t\" && echo $TMPDIR", NULL, scratch },
+        { "head -c 4 /usr/bin/env | od -c | head -1",     NULL,       "E   L   F" },
+        { "grep -c ^Name: /proc/self/status",             NULL,       "1\n" },
+        { "ls / | grep -c ^usr$; echo a b | grep b | wc -l >/dev/null && echo PIPE", NULL, "PIPE" },
+    };
+    Containment c = named("basic");
+    char testpid[16];
+    snprintf(testpid, sizeof(testpid), "%d", (int)getpid());
+    int bad = 0;
+    for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+        char cmd[1024];
+        const char *arg = t[i].arg && strcmp(t[i].arg, "<test>") == 0 ? testpid : t[i].arg;
+        snprintf(cmd, sizeof(cmd), t[i].fmt, arg, arg);
+        char *r = shell_call(&c, cmd, FE_LANDLOCK, NE_ENV, NULL, 0);
+        int ok = strstr(r, t[i].want) && !strstr(r, "SECRET") && strstr(r, "[exit 0]");
+        if (!ok) printf("    row %zu (%s): %s\n", i, cmd, r);
+        bad += !ok;
+        free(r);
+    }
+    int left = access(home_probe, F_OK) == 0 || access(shm_probe, F_OK) == 0 ||
+               access(tmp_probe, F_OK) == 0;
+    unlink(home_probe), unlink(shm_probe), unlink(tmp_probe);  /* after a failure */
+    assert(bad == 0 && !left);
+}
+
+/* Files 'confined' + network 'none' with no namespaces: Landlock and the
+ * seccomp filter. No socket of any family — inet, unix (so no pathname socket
+ * on the host either, docker.sock's kind, which Landlock does not mediate),
+ * netlink; a socketpair still works. Under `basic` (advisory) inet must work: the
+ * proxy variables point at a loopback port. */
+static void test_shell_seccomp_none(void) {
+    const char *py = access("/usr/bin/python3", X_OK) == 0 ? "/usr/bin/python3" : NULL;
+    if (!py) { printf("    SKIP: no /usr/bin/python3 to open sockets with\n"); return; }
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "cat > s.py <<'EOF'\nimport socket\nr = []\n"
+             "for f in (socket.AF_INET, socket.AF_INET6, socket.AF_UNIX, socket.AF_NETLINK):\n"
+             "    try: socket.socket(f); r.append('open')\n"
+             "    except OSError as e: r.append('errno%%d' %% e.errno)\n"
+             "socket.socketpair(); print(' '.join(r) + ' pair')\nEOF\n%s s.py", py);
+    Containment off = { .name = "confined-none", .known = 1,
+                        .lv = { FILES_CONFINED, NET_NONE, 0, 0 } };
+    char *r = shell_call(&off, cmd, FE_LANDLOCK, NE_SECCOMP, NULL, 0);
+    int ok = strstr(r, "errno13 errno13 errno13 errno13 pair") != NULL;
+    if (!ok) printf("    none: %s\n", r);
+    assert(ok);
+    free(r);
+    Containment basic = named("basic");
+    r = shell_call(&basic, cmd, FE_LANDLOCK, NE_ENV, NULL, 0);
+    ok = strstr(r, "open open open ") != NULL;   /* inet, inet6, unix */
+    if (!ok) printf("    basic: %s\n", r);
+    assert(ok);
+    free(r);
+}
+
+/* Something only the kernel catches for file and js: the path check lets
+ * them read the system directories, /dev included; Landlock allows only the
+ * device nodes programs need, so a file in the host's /dev/shm is refused. */
+static void test_file_kernel_backstop(void) {
+    char shm[64];
+    snprintf(shm, sizeof(shm), "/dev/shm/cclaw_cc_%d", (int)getpid());
+    put(shm, "SHMSECRET\n");
+    int status = -1;
+    char *r = file_call("file_read", "path", shm, NULL, NULL, &status);
+    unlink(shm);
+    if (status != 1 || strstr(r, "SHMSECRET")) printf("    shm: status=%d %s\n", status, r);
+    assert(status == 1 && !strstr(r, "SHMSECRET"));
+    free(r);
+}
+
+/* Files 'open' with network 'proxied' on a host with user namespaces but
+ * (masked) no mount namespace: a user + network namespace alone. The proxy
+ * fetches a granted address (--noproxy '': the variables exempt loopback);
+ * a program that ignores the proxy variables reaches nothing on the host,
+ * which advisory could not promise. */
+static void test_shell_netns_only(void) {
+    int port = mock_server_start();
+    assert(port > 0);
+    mock_server_enqueue(200, "via-proxy");
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "curl -s -m 5 --noproxy '' http://127.0.0.1:%d/v1/chat/completions; echo;"
+             " curl -s -m 5 --noproxy '*' http://127.0.0.1:%d/v1/chat/completions || echo NO_ROUTE", port, port);
+    const char *grant[] = { "127.0.0.1/32" };
+    Containment c = { .name = "open-proxied", .known = 1, .lv = { FILES_OPEN, NET_PROXIED, 0, 0 } };
+    char *r = shell_call(&c, cmd, FE_NONE, NE_NETNS, grant, 1);
+    int ok = strstr(r, "via-proxy") && strstr(r, "NO_ROUTE") && mock_server_request_count() == 1;
+    if (!ok) printf("    netns: %s requests=%d\n", r, mock_server_request_count());
+    assert(ok);
+    free(r);
+    mock_server_stop();
+}
+
+/* Under `basic` the shell's shim dials the proxy socket at its real path in
+ * the agent folder; one deep enough to pass sun_path (108 bytes) still gets
+ * through. net_shim truncated the path and the shell had no proxy (fails on
+ * 7980e0c). */
+static void test_shell_advisory_deep_dir(void) {
+    char deep[256], mk[300];
+    int n = snprintf(deep, sizeof(deep), "%s/", agent_dir);
+    while (n < 130) n += snprintf(deep + n, sizeof(deep) - (size_t)n, "deep_agent_dir/");
+    deep[n - 1] = '\0';
+    snprintf(mk, sizeof(mk), "mkdir -p %s", deep);
+    assert(system(mk) == 0);
+    int port = mock_server_start();
+    assert(port > 0);
+    mock_server_enqueue(200, "deep-ok");
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "curl -s -m 5 --noproxy '' http://127.0.0.1:%d/v1/chat/completions", port);
+    const char *grant[] = { "127.0.0.1/32" };
+    Containment c = named("basic");
+    RunToolReq req;
+    char why[640];
+    assert(run_tool_req_init(&req, EXEC_SHELL, "shell_exec", &c, ws, NULL, db, why, sizeof(why)) == 0);
+    req.tmp_dir = scratch;
+    req.agent_dir = deep;
+    req.host_rules = grant;
+    req.host_count = 1;
+    req.command = cmd;
+    req.timeout = 10;
+    char *r = run_tool_req_full(&req, NULL, NULL);
+    if (!strstr(r, "deep-ok")) printf("    deep: %s\n", r);
+    assert(strstr(r, "deep-ok"));
+    free(r);
+    mock_server_stop();
+}
+
 int main(void) {
     TEST_INIT();
-    /* The loopback proxy only: what a Linux host without user namespaces
-     * has. (CONTAIN=none has nothing, and nothing here needs more.) */
-    setenv("CCLAW_CONTAIN_CAPS_MASK", "0x4", 1);
-    assert(!(contain_caps(NULL, 0) & (CONTAIN_CAP_MOUNTNS | CONTAIN_CAP_NETNS)));
+    unsigned host = contain_caps(NULL, 0);
     setup();
+
+    /* No namespaces, no Landlock: the path check, the shell refused. */
+    setenv("CCLAW_CONTAIN_CAPS_MASK", MASK_BARE, 1);
+    assert(!(contain_caps(NULL, 0) & (CONTAIN_CAP_MOUNTNS | CONTAIN_CAP_NETNS)));
+    g_fe = FE_CODE;
     RUN(test_file_tools_confined);
     RUN(test_js_fs_confined);
     RUN(test_js_http_through_proxy);
     RUN(test_refused_not_weakened);
+
+    /* No namespaces, with Landlock and seccomp. */
+    if ((host & (CONTAIN_CAP_LANDLOCK | CONTAIN_CAP_SECCOMP)) !=
+        (CONTAIN_CAP_LANDLOCK | CONTAIN_CAP_SECCOMP)) {
+        printf("  SKIP: this kernel has no Landlock or no seccomp (caps %#x)\n", host);
+    } else {
+        setenv("CCLAW_CONTAIN_CAPS_MASK", MASK_LANDLOCK, 1);
+        g_fe = FE_LANDLOCK;
+        RUN(test_file_tools_confined);
+        RUN(test_js_fs_confined);
+        RUN(test_js_http_through_proxy);
+        RUN(test_file_kernel_backstop);
+        RUN(test_shell_landlock);
+        RUN(test_shell_seccomp_none);
+        RUN(test_shell_advisory_deep_dir);
+    }
+
+    if (!(host & CONTAIN_CAP_NETNS)) {
+        printf("  SKIP: no unprivileged network namespace here\n");
+    } else {
+        setenv("CCLAW_CONTAIN_CAPS_MASK", "0x6", 1);
+        RUN(test_shell_netns_only);
+    }
     char cmd[128];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", root);
     assert(system(cmd) == 0);

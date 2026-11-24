@@ -40,9 +40,11 @@ row is refused, not read as a default.
 | | enforcer | what it is |
 |---|---|---|
 | files | `FE_MOUNTNS` | the user + mount namespace sandbox (`contain_enter`) |
+| | `FE_LANDLOCK` | a Landlock ruleset (kernel 5.13+); for file and js the path check stays on beneath it |
 | | `FE_CODE` | the path check in cclaw's own file tools and js globals |
 | | `FE_NONE` | nothing (`open`) |
-| network | `NE_NETNS` | the empty network namespace the mount namespace brings; the proxy socket is the only way out |
+| network | `NE_NETNS` | an empty network namespace — the one the mount namespace brings, or a user + network namespace alone (`contain_enter_net`); the proxy socket is the only way out |
+| | `NE_SECCOMP` | a seccomp filter that refuses `socket()` for every family (network `none` only) |
 | | `NE_CODE` | js's curl dials the egress proxy's socket itself |
 | | `NE_ENV` | the proxy runs on the host's loopback and the proxy variables are set; nothing else |
 | | `NE_NONE` | nothing |
@@ -53,16 +55,18 @@ row is refused, not read as a default.
 `contain_caps()`) → plan or refusal. `run_tool_req_init` calls it for every
 child call; `--doctor` and the startup warning call it per agent.
 
+Strongest first, per level:
+
 | files | file | js | shell |
 |---|---|---|---|
 | `private` | MOUNTNS, else refuse | MOUNTNS, else refuse | MOUNTNS, else refuse |
-| `confined` | MOUNTNS, else CODE | MOUNTNS, else CODE | MOUNTNS, else refuse |
+| `confined` | MOUNTNS, else LANDLOCK (+ path check), else CODE | MOUNTNS, else LANDLOCK (+ path check), else CODE | MOUNTNS, else LANDLOCK, else refuse |
 | `open` | NONE | NONE | NONE |
 
 | network (no mount namespace) | file | js | shell |
 |---|---|---|---|
-| `none` | NONE | CODE (http_request refuses) | refuse |
-| `proxied` | NONE | CODE | refuse |
+| `none` | NONE | CODE (http_request refuses) | NETNS, else SECCOMP, else refuse |
+| `proxied` | NONE | CODE | NETNS, else refuse |
 | `advisory` | NONE | CODE | ENV (needs the backend's loopback proxy) |
 | `direct` | NONE | NONE | NONE |
 
@@ -78,10 +82,26 @@ What this means for the shipped rows:
 
 - On a host with user namespaces, `standard`, `offline` and `basic` all run in
   the namespace sandbox, and `none` runs with no boundary.
-- On a host without them, `standard` and `offline` are refused for every
-  vehicle; under `basic` the file tools and js run (path check in code, proxy
-  forced in code) and **the shell is refused** — it needs a kernel enforcer
-  for `confined`, and Landlock is not built yet.
+- On a host without them but with Landlock (kernel 5.13+; Docker, Ubuntu's
+  AppArmor restriction), `standard` and `offline` are refused for every
+  vehicle and `basic` runs every vehicle: Landlock for files (with the path
+  check under file and js), the proxy forced in code for js, the proxy
+  variables for the shell.
+- On a host with neither, `basic` runs file tools and js (path check, proxy
+  forced in code) and **refuses the shell**, which needs a kernel enforcer
+  for `confined`.
+
+**Offline without namespaces.** `confined` + `none` on a host with Landlock
+and seccomp is Landlock plus a filter refusing every socket: the observer
+row such a host can have. It is not shipped — withholding `shell_exec`, or
+`basic` with no host grants (the proxy denies everything), covers most
+observer agents, and a shipped row would sit in every suggestion. An
+operator who wants it adds it:
+
+```sql
+INSERT INTO containments (name, files, network, nproc, cpu_sec)
+VALUES ('basic-offline', 'confined', 'none', 64, 120);
+```
 
 ### The child
 
@@ -90,13 +110,21 @@ applies exactly it (`sandbox_child_setup`) and exits 126 if any step fails; it
 never picks a weaker enforcer.
 
 `contain_caps()` (`src/contain.h`) is probed once per process by fork-and-try
-— `MOUNTNS` (unshare user, mount, IPC, PID and network namespaces, map the user,
-make the mount tree private: the first step that needs a capability, which is
-what Ubuntu's AppArmor restriction denies), `NETNS` (a network namespace with
-`lo` up; reported now, planned with in 4b), `SHIM` (the backend can serve the
-loopback proxy; always on Linux) — cached in memory, never persisted.
-`CCLAW_CONTAIN_CAPS_MASK`, a test and diagnostic knob read only there, is ANDed
-in: it can only take capabilities away. `make CONTAIN=none` reports none.
+— `MOUNTNS` 0x1 (unshare user, mount, IPC, PID and network namespaces, map the
+user, make the mount tree private: the first step that needs a capability,
+which is what Ubuntu's AppArmor restriction denies), `NETNS` 0x2 (a user and
+network namespace with `lo` up), `SHIM` 0x4 (the backend can serve the
+loopback proxy; always on Linux), `LANDLOCK` 0x8 (a child enforces a ruleset
+through `contain_landlock` and then sees `/dev/null` open and `/` refused),
+`SECCOMP` 0x10 (a child installs the `socket()` filter through
+`contain_seccomp` and then sees a socketpair made and `socket()` refused) —
+cached in memory, never persisted. Each probe checks both directions, so a
+kernel that accepts the call but enforces nothing is reported as lacking it
+(`test_contain.c` runs the probe under a filter that answers as a kernel
+without either, and it reports neither). `CCLAW_CONTAIN_CAPS_MASK`, a test and
+diagnostic knob read only there, is ANDed in: it can only take capabilities
+away (`0x1c` is a host with Landlock and seccomp and no user namespaces).
+`make CONTAIN=none` reports none.
 
 ## Under every plan
 
@@ -111,7 +139,7 @@ non-zero, and `HOME`/`PATH`/`TMPDIR`:
 - **`PATH`** is `$HOME/.local/bin`, `$HOME/.cargo/bin`, `$HOME/bin`, then the
   system dirs including `/usr/local/bin` and `/usr/local/go/bin`.
 - **`TMPDIR`** is `/tmp` — in the namespace a bind of the agent's scratch dir;
-  under `FE_CODE` the scratch dir itself.
+  under `FE_CODE` and `FE_LANDLOCK` the scratch dir itself.
 
 Additions: shell and js get `CCLAW_PROXY_SOCK` and, under `NETNS`/`ENV`, the
 proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and
@@ -146,7 +174,63 @@ host's shared `/tmp`); path grants ro or rw, planned shallow→deep so a nested
 grant shadows its parent, a grant naming a single file binding just that file.
 Everything else does not exist. Any of these failing refuses the call.
 
-## files `confined` without a namespace: the path check
+## files `confined` without a namespace: Landlock
+
+`FE_LANDLOCK` restricts the child, and everything it execs, to the same roots
+the path check and the mount planner use (`confine_landlock`,
+`contain_landlock`), applied last in child setup, after `no_new_privs` and
+once the loopback shim is forked off:
+
+| path | rights |
+|---|---|
+| workspace, scratch dir, `write_path` grants | everything the kernel's ABI knows (read, write, execute, create, remove, link/rename across them, truncate) |
+| `read_path` grants, `/usr /bin /sbin /lib /lib64 /etc /opt` | execute, read file, read dir |
+| `/dev/null /dev/zero /dev/full /dev/random /dev/urandom /dev/tty` | read, write, truncate, device ioctl |
+| `/proc` | execute, read file, read dir |
+
+The key and the DB are in no rule, so they cannot be opened, by any name a
+symlink gives them; another agent's workspace, the user's home, the host's
+`/tmp` and `/dev/shm` likewise. `/proc` is readable because tools need
+`/proc/self`; Landlock scopes ptrace from ABI 1, so other processes'
+sensitive files there (`environ`, `fd`, `mem`, `root`) are refused.
+
+**ABI.** The child asks the kernel for its Landlock ABI and handles only the
+rights that version knows: ABI 1 the base set, `REFER` from 2 (cross-directory
+link and rename; without it the kernel refuses those outright), `TRUNCATE`
+from 3, `IOCTL_DEV` from 5. From ABI 6 it also scopes abstract unix sockets
+and signals to the child's own domain. The network rights (ABI 4) are not
+used: they filter by port only. Structs, constants and the syscall numbers
+(444–446 on every architecture) are local, so no new kernel headers are
+needed to build.
+
+**Also under Landlock**, there being no PID namespace: a seccomp filter
+refusing `ptrace`, `process_vm_readv` and `process_vm_writev` (Landlock's
+scoping is the first line; this is the belt) and io_uring.
+
+**What it does not promise, next to the mount namespace:**
+
+- Existence is visible: `stat`, `ls` of a parent, error codes tell a file that
+  exists from one that does not. Contents are what is protected.
+- No private `/tmp`, `/dev/shm` or `/proc`. A program that hard-codes `/tmp`
+  gets `EACCES` (`TMPDIR` points at the scratch dir); `/dev/shm` is simply
+  out of reach (so POSIX semaphores, e.g. Python multiprocessing locks, fail);
+  `ps` and other processes' command lines are visible.
+- `connect()` to an existing pathname socket is not mediated by Landlock:
+  under `basic` the shell can reach `/run/dbus/system_bus_socket` or
+  `/var/run/docker.sock`, subject to their file permissions. Only network
+  `none` (seccomp, no sockets at all) closes that.
+- Below ABI 6, signals to processes of the same uid outside the child (the
+  daemon included) and abstract unix sockets are reachable.
+- A hard link to the key placed in the workspace by someone outside the child
+  is readable (the mount namespace masks by path too). The child cannot make
+  one: a link needs the source's directory in a rule.
+
+For file and js, the path check runs first and Landlock closes its
+symlink-swap race. One difference is visible: the path check allows the
+system directories, `/dev` included, so under `FE_CODE` a file in the host's
+`/dev/shm` is readable; Landlock refuses it.
+
+## files `confined` without a namespace or Landlock: the path check
 
 `FE_CODE` (`contain_path_check`) runs before every open, stat, list or write in
 the file tools, js `fs.*`, `http_request`'s `save_to`, `LLM()`'s `images` and a
@@ -160,7 +244,32 @@ Differences from the namespace, all narrower or equal except the last: `/proc`
 is not readable, `/` and other ungranted parents cannot be listed, a stat of an
 ungranted path is refused rather than "not found", and it is a check, not a
 kernel boundary — two concurrent calls of the same agent racing a symlink swap
-could pass it, which is what Landlock (4b) closes as a backstop.
+could pass it, which is why Landlock is added beneath it when the kernel has
+it (`FE_LANDLOCK`).
+
+## network without the mount namespace
+
+**`NE_NETNS` alone** (files `open`, or `confined` by Landlock, on a host with
+user namespaces): `contain_enter_net` unshares a user and a network namespace,
+maps the user to itself and brings `lo` up; the files stay the host's. The
+shim reaches the proxy socket at its real path in the agent folder, and the
+ssh connect helper is written to the scratch dir. A program that ignores the
+proxy variables has no route anywhere — the host's own loopback included. No
+PID namespace (it would need its own `/proc`, which needs the mount namespace).
+
+**`NE_SECCOMP`** (the shell under network `none` with no network namespace):
+`socket()` fails with `EACCES` for every family — inet, inet6, netlink and
+unix, so a pathname socket on the host (`docker.sock`) is closed too —
+`socketpair()` still works (it reaches nothing), io_uring is `ENOSYS` (its
+operations would bypass a syscall filter), and on i386 the `socketcall`
+multiplexer's socket call is refused the same way. The filter's first
+instruction kills any architecture but the build's (and, on x86_64, the x32
+ABI).
+
+**Under `advisory`** the shell needs `AF_INET` to reach the loopback shim, so
+there is no socket filter: `docker.sock` and other pathname sockets remain
+reachable subject to file permissions, and so does anything a program can
+dial while ignoring the proxy variables. That is what advisory says.
 
 ## Fail-closed rule
 
@@ -190,15 +299,19 @@ self-inspection is `db_query`, which runs in the trusted parent.
 ## Tests
 
 `test/test_containment.c` (the planner, every refusal rule),
-`test/test_contain_code.c` (`basic` with capabilities masked, through the real
-`--run-tool` child: the path check, js through the proxy, refusals),
-`test/test_contain.c` (the probe and the mask), the namespace suites
-(`test_shell_namespace.c`, `test_run_tool_escape.c`, `test_sandbox_mounts.c`,
-`test_sandbox_key_mask.c`, `test_integration_shell_proxy*.c`), and the per-column
-cap in `test/test_agent_define.c`.
+`test/test_contain_code.c` (with capabilities masked, through the real
+`--run-tool` child: `basic` by the path check and by Landlock for every
+vehicle, the shell under `confined` + `none` with no sockets, a network
+namespace without a mount namespace, js through the proxy, refusals),
+`test/test_contain.c` (the probe in both directions, the mask), the namespace
+suites (`test_shell_namespace.c`,
+`test_run_tool_escape.c`, `test_sandbox_mounts.c`, `test_sandbox_key_mask.c`,
+`test_integration_shell_proxy*.c`), and the per-column cap in
+`test/test_agent_define.c`.
 
-## Not yet (step 4b)
+## Not built
 
-Landlock (files `confined` for the shell, and a backstop under `FE_CODE`),
-seccomp (network `none` without a namespace), and a network namespace without
-a mount namespace (`proxied` for the shell, and js, under files `open`).
+- Landlock's TCP port rules (ABI 4): port-only, a speed bump, not a boundary.
+- js through a network namespace without the mount namespace: js keeps
+  `NE_CODE` there, which needs no namespace and keeps the same promise.
+- Dropping to another uid under a root daemon; cgroups.

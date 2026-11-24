@@ -25,6 +25,7 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -63,14 +64,27 @@ static void drain_headers(int fd) {
     }
 }
 
+/* A path past sun_path (an agent folder a few levels deep, outside the mount
+ * namespace where the socket is at its real path) goes through a descriptor
+ * for its directory, as proxy_bind binds it; truncating it meant no network. */
 static int uds_connect(const char *path) {
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
     struct sockaddr_un a;
     memset(&a, 0, sizeof(a));
     a.sun_family = AF_UNIX;
-    strncpy(a.sun_path, path, sizeof(a.sun_path) - 1);
-    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { close(fd); return -1; }
+    int dirfd = -1;
+    const char *sl = strrchr(path, '/');
+    if (strlen(path) < sizeof(a.sun_path)) {
+        memcpy(a.sun_path, path, strlen(path) + 1);
+    } else {
+        char dir[4096];
+        if (!sl || snprintf(dir, sizeof(dir), "%.*s", (int)(sl - path), path) >= (int)sizeof(dir) ||
+            (dirfd = open(dir, O_PATH | O_DIRECTORY | O_CLOEXEC)) < 0)
+            return -1;
+        snprintf(a.sun_path, sizeof(a.sun_path), "/proc/self/fd/%d/%s", dirfd, sl + 1);
+    }
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd >= 0 && connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { close(fd); fd = -1; }
+    if (dirfd >= 0) close(dirfd);
     return fd;
 }
 

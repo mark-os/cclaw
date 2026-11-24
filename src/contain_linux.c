@@ -13,6 +13,8 @@
 #include <netinet/in.h>
 #include <sched.h>
 #include <signal.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +55,46 @@ static int probe_write(const char *path, const char *text) {
 }
 
 static int sandbox_bring_up_lo(void);
+
+/* Map the invoking user and group to themselves in a fresh user namespace
+ * (setgroups denied first, as an unprivileged gid_map requires). */
+static int map_identity(uid_t uid, gid_t gid) {
+    char map[64];
+    snprintf(map, sizeof(map), "%u %u 1\n", (unsigned)uid, (unsigned)uid);
+    if (probe_write("/proc/self/uid_map", map) != 0) return -1;
+    if (access("/proc/self/setgroups", F_OK) == 0 &&
+        probe_write("/proc/self/setgroups", "deny\n") != 0) return -1;
+    snprintf(map, sizeof(map), "%u %u 1\n", (unsigned)gid, (unsigned)gid);
+    return probe_write("/proc/self/gid_map", map);
+}
+
+/* Landlock and seccomp proven in a forked child, in both directions: what is
+ * allowed works and what is not is refused, through the same functions a tool
+ * child uses. Returns 1 if the child saw both. */
+static int probe_enforcer(unsigned cap) {
+    pid_t pid = fork();
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) _exit(1);
+        int sp[2], fd;
+        if (cap == CONTAIN_CAP_LANDLOCK) {
+            static const SandboxMount devnull = { "/dev/null", CONTAIN_LL_DEV };
+            if (contain_landlock(&devnull, 1) != 0) _exit(1);
+            if ((fd = open("/dev/null", O_RDWR)) < 0) _exit(1);
+            _exit(open("/", O_RDONLY | O_DIRECTORY) < 0 && errno == EACCES ? 0 : 1);
+        }
+        if (contain_seccomp(CONTAIN_SC_NOSOCKET) != 0) _exit(1);
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) != 0) _exit(1);
+        _exit(socket(AF_UNIX, SOCK_STREAM, 0) < 0 && errno == EACCES ? 0 : 1);
+    }
+    int st;
+    while (waitpid(pid, &st, 0) < 0)
+        if (errno != EINTR) return 0;
+    return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+static long landlock_abi_now(void);
+static int g_landlock_abi;
 
 /* Does what the sandbox does first, not only what it asks for first: creates
  * the namespaces, maps the user, then takes the first step that needs a
@@ -124,6 +166,11 @@ unsigned contain_caps(char *why, size_t cap) {
         caps = CONTAIN_CAP_SHIM;
         if (probe(CONTAIN_NS_FLAGS, 1, reason, sizeof(reason))) caps |= CONTAIN_CAP_MOUNTNS;
         if (probe(CLONE_NEWUSER | CLONE_NEWNET, 0, NULL, 0)) caps |= CONTAIN_CAP_NETNS;
+        if (probe_enforcer(CONTAIN_CAP_LANDLOCK)) {
+            caps |= CONTAIN_CAP_LANDLOCK;
+            g_landlock_abi = (int)landlock_abi_now();
+        }
+        if (probe_enforcer(CONTAIN_CAP_SECCOMP)) caps |= CONTAIN_CAP_SECCOMP;
         probed = 1;
     }
     unsigned out = caps;
@@ -135,6 +182,8 @@ unsigned contain_caps(char *why, size_t cap) {
                  : reason);
     return out;
 }
+
+int contain_landlock_abi(void) { contain_caps(NULL, 0); return g_landlock_abi; }
 
 /* A sysctl's integer value, or -1 when this kernel does not have it. */
 static long sysctl_long(const char *path) {
@@ -477,34 +526,13 @@ int contain_enter(const char *workspace, const char *db_path,
     if (unshare(clone_flags) != 0)
         return -1;
 
-    /* Identity uid_map: the payload keeps the invoking user's uid, not ns
-     * root. Fake root confused models (apt/sudo attempts, npm root-mode) and
+    /* Identity map: the payload keeps the invoking user's uid, not ns root.
+     * Fake root confused models (apt/sudo attempts, npm root-mode) and
      * granted the payload in-ns privileges it shouldn't have (low ports,
      * mounts). Namespace setup below still works: the ns *creator* holds
      * full caps in it regardless of the map; caps drop only at execve. */
-    int fd = open("/proc/self/uid_map", O_WRONLY);
-    if (fd < 0) return -1;
-    char map[64];
-    int len = snprintf(map, sizeof(map), "%u %u 1\n", uid, uid);
-    int ok = (write(fd, map, (size_t)len) == len);
-    close(fd);
-    if (!ok) return -1;
-
-    /* Deny setgroups (required before writing gid_map on unprivileged) */
-    fd = open("/proc/self/setgroups", O_WRONLY);
-    if (fd >= 0) {
-        ok = (write(fd, "deny\n", 5) == 5);
-        close(fd);
-        if (!ok) return -1;
-    }
-
-    /* Identity gid_map, same reasoning */
-    fd = open("/proc/self/gid_map", O_WRONLY);
-    if (fd < 0) return -1;
-    len = snprintf(map, sizeof(map), "%u %u 1\n", gid, gid);
-    ok = (write(fd, map, (size_t)len) == len);
-    close(fd);
-    if (!ok) return -1;
+    if (map_identity(uid, gid) != 0)
+        return -1;
 
     /* Make entire mount tree private so changes don't propagate */
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
@@ -801,25 +829,25 @@ static int sandbox_setup_proxy(const char *uds_path, int in_ns) {
 }
 
 /* net_shim as a file the shell can run by name (`connect` mode, for ssh's
- * ProxyCommand). In the namespace: the root tmpfs, rebuilt per call. On the
- * host (NE_ENV): the agent's scratch dir, written beside and renamed into
- * place, so a concurrent call still running the old copy is undisturbed and a
+ * ProxyCommand). In the mount namespace: the root tmpfs, rebuilt per call.
+ * Otherwise: the agent's scratch dir, written beside and renamed into place,
+ * so a concurrent call still running the old copy is undisturbed and a
  * symlink planted at the name is replaced, never followed. Best-effort:
  * without the file, ssh simply has no proxy route. */
-static void write_connect_shim(const SandboxConfig *cfg, int in_ns) {
+static void write_connect_shim(const SandboxConfig *cfg, int mounted) {
     char path[PATH_MAX], tmp[PATH_MAX + 16];
-    if (in_ns) snprintf(path, sizeof(path), "%s", SANDBOX_CONNECT_PATH);
+    if (mounted) snprintf(path, sizeof(path), "%s", SANDBOX_CONNECT_PATH);
     else if (!cfg->tmp_dir || !cfg->tmp_dir[0] ||
              snprintf(path, sizeof(path), "%s/.cclaw_connect", cfg->tmp_dir)
                  >= (int)sizeof(path)) return;
-    snprintf(tmp, sizeof(tmp), in_ns ? "%s" : "%s.%d", path, (int)getpid());
+    snprintf(tmp, sizeof(tmp), mounted ? "%s" : "%s.%d", path, (int)getpid());
     /* O_NOFOLLOW: refuse to follow a symlink at this path rather than
      * writing 0755 content wherever it points. */
     int cfd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0755);
     ssize_t wr = cfd >= 0 ? write(cfd, net_shim_blob, (size_t)net_shim_blob_len) : -1;
     if (cfd >= 0) close(cfd);
-    if (wr != (ssize_t)net_shim_blob_len || (!in_ns && rename(tmp, path) != 0)) {
-        if (!in_ns) unlink(tmp);
+    if (wr != (ssize_t)net_shim_blob_len || (!mounted && rename(tmp, path) != 0)) {
+        if (!mounted) unlink(tmp);
         return;
     }
     char cmd[PATH_MAX + 64];
@@ -830,11 +858,12 @@ static void write_connect_shim(const SandboxConfig *cfg, int in_ns) {
 }
 
 /* Give the child its route out: the broker's proxy socket — bound at a fixed
- * in-boundary path by contain_enter (NE_NETNS), or at its real path in the
- * agent folder (NE_ENV). Runs after the env scrub. */
+ * in-boundary path by contain_enter (the mount namespace), or at its real
+ * path in the agent folder (NE_ENV, and a network namespace with no mount
+ * namespace). Runs after the env scrub. */
 int contain_egress(const SandboxConfig *cfg) {
-    int in_ns = cfg->plan.ne == NE_NETNS;
-    const char *uds = in_ns ? SANDBOX_PROXY_SOCK_PATH : cfg->proxy_sock;
+    int in_ns = cfg->plan.ne == NE_NETNS, mounted = cfg->plan.fe == FE_MOUNTNS;
+    const char *uds = mounted ? SANDBOX_PROXY_SOCK_PATH : cfg->proxy_sock;
     setenv("CCLAW_PROXY_SOCK", uds, 1);
 
     /* The loopback HTTP proxy: the one mechanism for every child — our own
@@ -845,8 +874,173 @@ int contain_egress(const SandboxConfig *cfg) {
      * variables. ssh is the one that matters, and git reads GIT_SSH_COMMAND,
      * so git-over-ssh works unprompted; a bare `ssh` needs the option spelled
      * out (the shell tool's description says how). */
-    if (!cfg->skip_pid_ns) write_connect_shim(cfg, in_ns);
+    if (!cfg->skip_pid_ns) write_connect_shim(cfg, mounted);
     return 0;
 }
 
 const char *contain_llm_sock_path(void) { return SANDBOX_LLM_SOCK_PATH; }
+
+int contain_enter_net(void) {
+    uid_t uid = getuid();
+    gid_t gid = getgid();
+    if (unshare(CLONE_NEWUSER | CLONE_NEWNET) != 0 || map_identity(uid, gid) != 0)
+        return -1;
+    return sandbox_bring_up_lo();
+}
+
+/* ── Landlock ───────────────────────────────────────────────────────────
+ * Raw syscalls and local definitions, so the static cross builds need no
+ * kernel headers newer than they have. The numbers are the same on every
+ * architecture (allocated after the syscall tables were unified). */
+#ifndef __NR_landlock_create_ruleset
+#define __NR_landlock_create_ruleset 444
+#define __NR_landlock_add_rule       445
+#define __NR_landlock_restrict_self  446
+#endif
+#define LL_EXECUTE   (1ull << 0)
+#define LL_WRITE     (1ull << 1)
+#define LL_READ      (1ull << 2)
+#define LL_READ_DIR  (1ull << 3)
+#define LL_ABI1      ((1ull << 13) - 1)  /* every right ABI 1 knows */
+#define LL_REFER     (1ull << 13)        /* ABI 2 */
+#define LL_TRUNCATE  (1ull << 14)        /* ABI 3 */
+#define LL_IOCTL_DEV (1ull << 15)        /* ABI 5 */
+#define LL_FILE_RIGHTS (LL_EXECUTE | LL_WRITE | LL_READ | LL_TRUNCATE | LL_IOCTL_DEV)
+#define LL_SCOPE_ALL 0x3ull  /* ABI 6: abstract unix sockets, signals */
+
+struct ll_ruleset_attr { uint64_t fs, net, scoped; };
+struct ll_path_beneath { uint64_t allowed; int32_t parent_fd; } __attribute__((packed));
+
+static long landlock_abi_now(void) {
+    long v = syscall(__NR_landlock_create_ruleset, NULL, 0, 1u /* _VERSION */);
+    return v < 0 ? 0 : v;
+}
+
+/* Only rights this ABI knows are asked for: a newer one is refused (EINVAL)
+ * by an older kernel. The network rights (ABI 4) are not used: port-only. */
+int contain_landlock(const SandboxMount *rules, size_t n) {
+    long abi = landlock_abi_now();
+    if (abi < 1) { errno = ENOSYS; return -1; }
+    uint64_t all = LL_ABI1 | (abi >= 2 ? LL_REFER : 0) | (abi >= 3 ? LL_TRUNCATE : 0) |
+                   (abi >= 5 ? LL_IOCTL_DEV : 0);
+    struct ll_ruleset_attr ra = { .fs = all, .scoped = abi >= 6 ? LL_SCOPE_ALL : 0 };
+    size_t size = abi >= 6 ? 24 : abi >= 4 ? 16 : 8;  /* what this kernel reads */
+    int rs = (int)syscall(__NR_landlock_create_ruleset, &ra, size, 0);
+    if (rs < 0) return -1;
+    int rc = 0;
+    for (size_t i = 0; i < n && rc == 0; i++) {
+        uint64_t acc = rules[i].ro == CONTAIN_LL_RW ? all
+                     : rules[i].ro == CONTAIN_LL_RO ? LL_EXECUTE | LL_READ | LL_READ_DIR
+                     : LL_READ | LL_WRITE | LL_TRUNCATE | LL_IOCTL_DEV;
+        int fd = open(rules[i].path, O_PATH | O_CLOEXEC);
+        if (fd < 0) continue;  /* absent: nothing to allow */
+        struct stat st;
+        if (fstat(fd, &st) != 0) rc = -1;
+        else if (!S_ISDIR(st.st_mode)) acc &= LL_FILE_RIGHTS;
+        struct ll_path_beneath pb = { acc & all, fd };
+        if (rc == 0) rc = (int)syscall(__NR_landlock_add_rule, rs, 1 /* PATH_BENEATH */, &pb, 0);
+        close(fd);
+    }
+    if (rc == 0) rc = (int)syscall(__NR_landlock_restrict_self, rs, 0);
+    close(rs);
+    return rc == 0 ? 0 : -1;
+}
+
+/* ── seccomp ────────────────────────────────────────────────────────────
+ * Classic BPF and the seccomp ABI, defined here: the static builds compile
+ * against musl's headers alone, which carry no <linux/...>. These values are
+ * kernel ABI and never change. The build architecture's own syscall numbers;
+ * anything else is killed. A target not listed reports no seccomp, and the
+ * planner refuses what needs it. */
+#if defined(__x86_64__)
+#define SC_ARCH 0xC000003Eu          /* AUDIT_ARCH_X86_64 */
+#elif defined(__i386__)
+#define SC_ARCH 0x40000003u          /* AUDIT_ARCH_I386 */
+#elif defined(__aarch64__)
+#define SC_ARCH 0xC00000B7u          /* AUDIT_ARCH_AARCH64 */
+#elif defined(__arm__) && !defined(__ARMEB__)
+#define SC_ARCH 0x40000028u          /* AUDIT_ARCH_ARM */
+#elif defined(__riscv) && __riscv_xlen == 64
+#define SC_ARCH 0xC00000F3u          /* AUDIT_ARCH_RISCV64 */
+#endif
+#ifndef __NR_io_uring_setup
+#define __NR_io_uring_setup    425   /* unified numbers, as Landlock's */
+#define __NR_io_uring_enter    426
+#define __NR_io_uring_register 427
+#endif
+
+#ifdef SC_ARCH
+struct sc_insn { uint16_t code; uint8_t jt, jf; uint32_t k; };   /* sock_filter */
+struct sc_prog { unsigned short len; struct sc_insn *filter; };  /* sock_fprog */
+struct sc_data { int nr; uint32_t arch; uint64_t ip; uint64_t args[6]; };
+#define SC_LD_ABS  0x20u   /* BPF_LD | BPF_W | BPF_ABS */
+#define SC_JEQ     0x15u   /* BPF_JMP | BPF_JEQ | BPF_K */
+#define SC_JGE     0x35u   /* BPF_JMP | BPF_JGE | BPF_K */
+#define SC_RET_K   0x06u   /* BPF_RET | BPF_K */
+#define SC_KILL    0x80000000u  /* SECCOMP_RET_KILL_PROCESS; before 4.14 it kills the thread */
+#define SC_ERRNO   0x00050000u
+#define SC_ALLOW   0x7fff0000u
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define SC_ARG0 (offsetof(struct sc_data, args) + 4)
+#else
+#define SC_ARG0 offsetof(struct sc_data, args)   /* the low word */
+#endif
+#define SC_INSN(c, t, f, v) (struct sc_insn){ (uint16_t)(c), (t), (f), (uint32_t)(v) }
+#define SC_RET(v) SC_INSN(SC_RET_K, 0, 0, (v))
+
+static void sc_deny(struct sc_insn *f, unsigned *k, unsigned nr, unsigned e) {
+    f[(*k)++] = SC_INSN(SC_JEQ, 0, 1, nr);
+    f[(*k)++] = SC_RET(SC_ERRNO | e);
+}
+
+#ifdef __NR_socketcall
+/* Syscall nr with its first argument tested by `op` (SC_JEQ) against
+ * val: deny on a match, allow otherwise. The accumulator then holds the
+ * argument, so these blocks come after every plain sc_deny. */
+static void sc_deny_arg0(struct sc_insn *f, unsigned *k, unsigned nr,
+                         unsigned op, unsigned val, unsigned e) {
+    f[(*k)++] = SC_INSN(SC_JEQ, 0, 4, nr);
+    f[(*k)++] = SC_INSN(SC_LD_ABS, 0, 0, SC_ARG0);
+    f[(*k)++] = SC_INSN(op, 0, 1, val);
+    f[(*k)++] = SC_RET(SC_ERRNO | e);
+    f[(*k)++] = SC_RET(SC_ALLOW);
+}
+#endif
+#endif
+
+int contain_seccomp(unsigned flags) {
+#ifndef SC_ARCH
+    (void)flags;
+    errno = ENOSYS;
+    return -1;
+#else
+    struct sc_insn f[48];
+    unsigned k = 0;
+    f[k++] = SC_INSN(SC_LD_ABS, 0, 0, offsetof(struct sc_data, arch));
+    f[k++] = SC_INSN(SC_JEQ, 1, 0, SC_ARCH);
+    f[k++] = SC_RET(SC_KILL);
+    f[k++] = SC_INSN(SC_LD_ABS, 0, 0, offsetof(struct sc_data, nr));
+#ifdef __x86_64__
+    f[k++] = SC_INSN(SC_JGE, 0, 1, 0x40000000u);
+    f[k++] = SC_RET(SC_KILL);  /* the x32 ABI's syscall bit */
+#endif
+    sc_deny(f, &k, __NR_io_uring_setup, ENOSYS);
+    sc_deny(f, &k, __NR_io_uring_enter, ENOSYS);
+    sc_deny(f, &k, __NR_io_uring_register, ENOSYS);
+#ifdef __NR_socket
+    if (flags & CONTAIN_SC_NOSOCKET) sc_deny(f, &k, __NR_socket, EACCES);
+#endif
+    if (flags & CONTAIN_SC_NOTRACE) {
+        sc_deny(f, &k, __NR_ptrace, EPERM);
+        sc_deny(f, &k, __NR_process_vm_readv, EPERM);
+        sc_deny(f, &k, __NR_process_vm_writev, EPERM);
+    }
+#ifdef __NR_socketcall
+    /* i386's multiplexer: its first argument is the call, 1 = socket. */
+    if (flags & CONTAIN_SC_NOSOCKET) sc_deny_arg0(f, &k, __NR_socketcall, SC_JEQ, 1, EACCES);
+#endif
+    f[k++] = SC_RET(SC_ALLOW);
+    struct sc_prog prog = { .len = (unsigned short)k, .filter = f };
+    return prctl(PR_SET_SECCOMP, 2 /* SECCOMP_MODE_FILTER */, &prog, 0, 0) == 0 ? 0 : -1;
+#endif
+}

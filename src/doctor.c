@@ -408,8 +408,11 @@ static void layer_tools(sqlite3 *db, unsigned caps) {
             }
             /* The namespace keeps advisory as proxied: no route out but the
              * proxy, which is stronger than advisory promises. */
-            printf("       %-5s files: %s; network: %s%s\n", vs[i].name,
-                   files_enforcer_name(p.fe), net_enforcer_name(p.ne),
+            printf("       %-5s files: %s%s; network: %s%s\n", vs[i].name,
+                   files_enforcer_name(p.fe),
+                   p.fe == FE_LANDLOCK && vs[i].v != EXEC_SHELL
+                       ? " and the path check in cclaw's code" : "",
+                   net_enforcer_name(p.ne),
                    p.ne == NE_NETNS && c.lv.net == NET_ADVISORY
                        ? " (forced through the proxy, stronger than advisory)" : "");
         }
@@ -426,11 +429,14 @@ static void check_layers(sqlite3 *db, const Config *cfg) {
     printf("\n[layers]\n");
     layer_core(db, cfg);
 
-    char why[160], d[256];
+    char why[160], d[320], ll[32] = "no";
     unsigned caps = contain_caps(why, sizeof(why));
-    snprintf(d, sizeof(d), "%s — user+mount namespaces %s, network namespace %s%s%s",
+    if (caps & CONTAIN_CAP_LANDLOCK) snprintf(ll, sizeof(ll), "ABI %d", contain_landlock_abi());
+    snprintf(d, sizeof(d), "%s — user+mount namespaces %s, network namespace %s,"
+             " Landlock %s, seccomp %s%s%s",
              contain_backend(), (caps & CONTAIN_CAP_MOUNTNS) ? "yes" : "no",
-             (caps & CONTAIN_CAP_NETNS) ? "yes" : "no",
+             (caps & CONTAIN_CAP_NETNS) ? "yes" : "no", ll,
+             (caps & CONTAIN_CAP_SECCOMP) ? "yes" : "no",
              why[0] ? "; " : "", why);
     if (caps & CONTAIN_CAP_MOUNTNS) {
         print_ok("containment", d);

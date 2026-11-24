@@ -23,6 +23,11 @@ int contain_enter(const char *workspace, const char *db_path,
     return -1;
 }
 
+int contain_landlock_abi(void) { return 0; }
+int contain_enter_net(void) { errno = ENOSYS; return -1; }
+int contain_landlock(const SandboxMount *r, size_t n) { (void)r; (void)n; return -1; }
+int contain_seccomp(unsigned flags) { (void)flags; return -1; }
+
 int contain_egress(const SandboxConfig *cfg) { (void)cfg; return -1; }
 
 const char *contain_llm_sock_path(void) { return ""; }

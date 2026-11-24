@@ -22,10 +22,13 @@ typedef enum { FILES_OPEN, FILES_CONFINED, FILES_PRIVATE } FilesLevel;
 typedef enum { NET_DIRECT, NET_ADVISORY, NET_PROXIED, NET_NONE } NetLevel;
 
 /* Enforcers. FE_CODE: the path check in cclaw's own file and js code.
- * NE_ENV: the proxy variables only. NE_CODE: cclaw's curl dials the proxy
- * socket itself. 4b adds FE_LANDLOCK and NE_SECCOMP after the last value. */
-typedef enum { FE_NONE, FE_CODE, FE_MOUNTNS } FilesEnforcer;
-typedef enum { NE_NONE, NE_ENV, NE_CODE, NE_NETNS } NetEnforcer;
+ * FE_LANDLOCK: a Landlock ruleset (for file and js, on top of the path
+ * check). NE_ENV: the proxy variables only. NE_CODE: cclaw's curl dials the
+ * proxy socket itself. NE_NETNS: an empty network namespace (with the mount
+ * namespace, or alone). NE_SECCOMP: a filter refusing socket(). Wire values:
+ * append only. */
+typedef enum { FE_NONE, FE_CODE, FE_MOUNTNS, FE_LANDLOCK } FilesEnforcer;
+typedef enum { NE_NONE, NE_ENV, NE_CODE, NE_NETNS, NE_SECCOMP } NetEnforcer;
 
 /* One containments row. Limits: 0 = no cap. */
 typedef struct {
@@ -76,7 +79,7 @@ typedef struct {
     const char *llm_sock;   /* parent's LLM bridge UDS (NULL = no LLM()) */
     const char *tmp_dir;    /* the agent's persistent scratch dir, created and
                              * owned by the parent: /tmp in the mount namespace,
-                             * TMPDIR under FE_CODE. NULL = none. */
+                             * TMPDIR otherwise. NULL = none. */
     ContainPlan plan;
     int skip_pid_ns;        /* 1 = omit CLONE_NEWPID (no inner fork); file, js */
     SandboxMountReq *extra_mounts;   /* path grants */
@@ -111,9 +114,9 @@ const char *net_level_name(NetLevel l);
 const char *files_enforcer_name(FilesEnforcer e);
 const char *net_enforcer_name(NetEnforcer e);
 
-/* FE_CODE: may this process open `path` (write = for writing)? 0 when it
- * may, or no path check is armed (FE_NONE, FE_MOUNTNS); -1 with errno=EACCES
- * otherwise. Armed by sandbox_child_setup under FE_CODE; called by the file
+/* FE_CODE, FE_LANDLOCK: may this process open `path` (write = for writing)?
+ * 0 when it may, or no path check is armed (FE_NONE, FE_MOUNTNS); -1 with
+ * errno=EACCES otherwise. Armed by sandbox_child_setup; called by the file
  * tools and the js fs/http/LLM globals before every open, stat or list. */
 int contain_path_check(const char *path, int write);
 
@@ -126,7 +129,8 @@ size_t sandbox_plan_mounts(const SandboxMountReq *in, size_t n, SandboxMount *ou
 
 /* System directories a contained child reads: bound read-only in the mount
  * namespace, readable under FE_CODE. NULL-terminated. (/proc is the backend's
- * own business: only the shell, with its PID namespace, gets one.) */
+ * own business: only the shell, with its PID namespace, gets one. Landlock
+ * takes /dev node by node and /proc read-only: sandbox.c.) */
 extern const char *const SANDBOX_SYS_DIRS[];
 
 #endif

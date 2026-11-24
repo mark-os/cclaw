@@ -201,7 +201,7 @@ See [specs/security.md](specs/security.md) for full details and [specs/trust.md]
 |-------|---|---------|
 | `standard` | private / proxied | **The default.** Namespace sandbox, network via the proxy, workspace rw, no CWD — it cannot see the user's files or another agent's workspace without a grant. NPROC 256 as a fork-bomb backstop; no CPU cap. Needs unprivileged user namespaces. |
 | `offline` | private / none | Observer/audit agents — **no packets, ever** (no proxy socket in the child); still able to run real programs (workspace rw, NPROC 64, CPU 120 s). File grants remain legal. Needs user namespaces. |
-| `basic` | confined / advisory | Hosts **without** user namespaces (Docker, AppArmor-restricted Ubuntu). File tools and js keep paths in cclaw's code and js egress is forced through the proxy in code; the shell is refused until Landlock lands (4b). On a host with namespaces it runs in the sandbox like `standard`. |
+| `basic` | confined / advisory | Hosts **without** user namespaces (Docker, AppArmor-restricted Ubuntu). The shell's files are kept by Landlock (kernel 5.13+; refused without it); file tools and js check paths in cclaw's code, with Landlock beneath when present, and js egress is forced through the proxy in code. The shell's egress is advisory: proxy variables only. On a host with namespaces it runs in the sandbox like `standard`. |
 | `none` | open / direct | **No containment at all** — no namespace, no proxy (traffic goes direct, unfiltered). Use when the surrounding environment already provides isolation. `--no-containment` forces this. |
 
 Widening what an agent can see is the `grants` + approval path, never a side

@@ -32,7 +32,8 @@ const char *contain_backend(void) { return "linux-ns"; }
 /* The widest set the sandbox ever asks for (the shell; the file and js
  * children omit the PID namespace). Probing a narrower set would call a host usable that
  * then refuses the shell. */
-#define CONTAIN_NS_FLAGS (CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID)
+#define CONTAIN_NS_FLAGS (CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC | \
+                          CLONE_NEWPID)
 
 /* One line into the probe's pipe: which step failed and why. */
 static void probe_fail(int fd, const char *step) {
@@ -78,7 +79,7 @@ int contain_probe(char *why, size_t cap) {
         close(pfd[0]);
         char map[64];
         if (unshare(CONTAIN_NS_FLAGS) != 0)
-            probe_fail(pfd[1], "unshare(user, mount, network, pid)");
+            probe_fail(pfd[1], "unshare(user, mount, network, ipc, pid)");
         snprintf(map, sizeof(map), "%u %u 1\n", (unsigned)uid, (unsigned)uid);
         if (probe_write("/proc/self/uid_map", map) != 0)
             probe_fail(pfd[1], "writing the user namespace's uid_map");
@@ -247,6 +248,86 @@ static int sandbox_remount_ro(const char *path) {
     return mount(NULL, path, NULL, flags, NULL);
 }
 
+/* Undo mountinfo's octal escapes (\040 space, \011 tab, \012 newline,
+ * \134 backslash) in place. */
+static void mountinfo_unescape(char *s) {
+    char *w = s;
+    for (char *r = s; *r; ) {
+        if (r[0] == '\\' && r[1] >= '0' && r[1] <= '3' && r[2] >= '0' && r[2] <= '7' &&
+            r[3] >= '0' && r[3] <= '7') {
+            *w++ = (char)(((r[1] - '0') << 6) | ((r[2] - '0') << 3) | (r[3] - '0'));
+            r += 4;
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w = '\0';
+}
+
+/* Make every mount strictly below `dst` read-only, one by one. A recursive
+ * bind of a system directory carries the host's submounts along (/dev/shm,
+ * /dev/mqueue, /dev/pts under /dev; a container runtime's resolv.conf under
+ * /etc), and the read-only remount of the top bind does not reach them: they
+ * stayed the host's, writable — a channel between agents and to the host.
+ * A recursive read-only remount is refused in an unprivileged user namespace,
+ * but remounting each one individually with its locked flags preserved is
+ * allowed (sandbox_remount_ro). Generic on purpose: whatever this host mounts
+ * under a system directory, nothing of it stays writable.
+ *
+ * autofs mount points are skipped: only their daemon can create entries in
+ * one, and touching an untriggered one would ask a daemon in another mount
+ * namespace to mount it. Returns 0, or -1 if any remount failed. */
+static int sandbox_lock_submounts(const char *dst) {
+    FILE *f = fopen("/proc/self/mountinfo", "re");
+    if (!f) return -1;
+    size_t dlen = strlen(dst);
+    int rc = 0;
+    char line[4096];
+    while (fgets(line, sizeof(line), f)) {
+        /* id parent maj:min root mountpoint options [optional...] - fstype ... */
+        char mp[PATH_MAX], fstype[64];
+        if (sscanf(line, "%*s %*s %*s %*s %4095s", mp) != 1) continue;
+        const char *sep = strstr(line, " - ");
+        if (!sep || sscanf(sep + 3, "%63s", fstype) != 1) continue;
+        mountinfo_unescape(mp);
+        if (strncmp(mp, dst, dlen) != 0 || mp[dlen] != '/') continue;
+        if (strcmp(fstype, "autofs") == 0) continue;
+        if (sandbox_remount_ro(mp) != 0) {
+            LOG_INFO_("sandbox submount_ro_fail path=%s errno=%d", mp, errno);
+            rc = -1;
+        }
+    }
+    fclose(f);
+    return rc;
+}
+
+/* The writable parts of /dev that programs expect, each replaced by an
+ * instance of its own: POSIX shared memory (/dev/shm), message queues (the
+ * mount for this child's own IPC namespace) and pseudo-terminals (a new devpts
+ * instance, which /dev/ptmx then allocates from). They work inside the call
+ * and are gone with it; the host's stay out of reach. Each is mounted only
+ * where the host has the directory; a failure is fatal to the call, since the
+ * alternative is the host's instance or nothing. */
+static int sandbox_private_dev(const char *newroot) {
+    static const struct { const char *path, *fstype, *opts; unsigned long flags; } dev[] = {
+        { "/dev/shm",    "tmpfs",  "mode=1777", MS_NOSUID | MS_NODEV },
+        { "/dev/mqueue", "mqueue", NULL,        MS_NOSUID | MS_NODEV | MS_NOEXEC },
+        { "/dev/pts",    "devpts", "newinstance,ptmxmode=0666,mode=0620",
+                                                MS_NOSUID | MS_NOEXEC },
+    };
+    for (size_t i = 0; i < sizeof(dev) / sizeof(dev[0]); i++) {
+        char dst[256];
+        snprintf(dst, sizeof(dst), "%s%s", newroot, dev[i].path);
+        struct stat st;
+        if (stat(dst, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (mount(dev[i].fstype, dst, dev[i].fstype, dev[i].flags, dev[i].opts) != 0) {
+            LOG_INFO_("sandbox private_dev_fail path=%s errno=%d", dev[i].path, errno);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /* Which read-only mount swallowed this mount point? Walks the target's
  * ancestors under newroot outward and keeps the last one statvfs reports
  * read-only — that is the root of the read-only bind (a read grant, or a
@@ -369,7 +450,9 @@ int contain_enter(const char *workspace, const char *cwd_path,
             cwd_resolved = cwd_abs;
     }
 
-    int clone_flags = CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET;
+    /* CLONE_NEWIPC: System V IPC and POSIX message queues are keyed by IPC
+     * namespace, not by path, so without it a child shares the host's. */
+    int clone_flags = CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC;
     if (!full_cfg || !full_cfg->skip_pid_ns)
         clone_flags |= CLONE_NEWPID;
     if (unshare(clone_flags) != 0)
@@ -463,14 +546,16 @@ int contain_enter(const char *workspace, const char *cwd_path,
         snprintf(dst, sizeof(dst), "%s%s", newroot, sys_dirs[i]);
         mkdir(dst, 0755);
         if (mount(sys_dirs[i], dst, NULL, MS_BIND | MS_REC, NULL) == 0) {
-            /* Non-recursive RO remount of the top bind (recursive RO can't
-             * relock host submounts under /dev,/proc in an unprivileged
-             * userns; /proc is replaced fresh below). A failure means the dir
-             * would be writable — fail closed. */
-            if (sandbox_remount_ro(dst) != 0)
+            /* RO remount of the top bind, then of each host submount the
+             * recursive bind brought along (a recursive RO remount is refused
+             * in an unprivileged userns). A failure means something would be
+             * writable — fail closed. */
+            if (sandbox_remount_ro(dst) != 0 || sandbox_lock_submounts(dst) != 0)
                 return -1;
         }
     }
+    if (sandbox_private_dev(newroot) != 0)
+        return -1;
 
     /* /tmp is a bind of the agent's own scratch directory on the host, not a
      * tmpfs of our own. The root tmpfs above stays tiny because it only holds
@@ -584,7 +669,10 @@ int contain_enter(const char *workspace, const char *cwd_path,
         }
 
         /* PID 1 in new namespace: remount /proc for correct PID view */
-        mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+        /* If this fails the host's /proc bind would stay, showing every
+         * host process: refuse instead. */
+        if (mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) != 0)
+            _exit(126);
 
         /* Tie this PID-namespace init to its parent (the sandbox child). If the
          * parent is killed — e.g. the daemon's backstop SIGKILLs the broker and

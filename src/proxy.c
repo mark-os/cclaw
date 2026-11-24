@@ -696,6 +696,7 @@ int proxy_bind(ProxyContext *ctx, const char *dir,
     ctx->cidr_rule_count = 0;
 
     int fd = -1;  /* function-scope so the `fail` cleanup can close it */
+    int err;
 
     if (host_count > 0) {
         ctx->host_rules = malloc(host_count * sizeof(char *));
@@ -729,13 +730,27 @@ int proxy_bind(ProxyContext *ctx, const char *dir,
     fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) goto fail;
 
+    /* sun_path holds 108 bytes, and an agent folder a few levels deep is
+     * longer than that: the bind failed and the child silently ran with no
+     * network. Past the limit, bind through a descriptor for the folder —
+     * /proc/self/fd/<n>/<name> names the same file in a few dozen bytes. The
+     * socket still lives at sock_path, which is what the sandbox bind-mounts
+     * and what proxy_stop unlinks. */
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    if (strlen(ctx->sock_path) >= sizeof(addr.sun_path)) goto fail;
-    strncpy(addr.sun_path, ctx->sock_path, sizeof(addr.sun_path) - 1);
-
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) goto fail;
+    int dirfd = -1;
+    if (strlen(ctx->sock_path) < sizeof(addr.sun_path)) {
+        memcpy(addr.sun_path, ctx->sock_path, strlen(ctx->sock_path) + 1);
+    } else {
+        dirfd = open(dir, O_PATH | O_DIRECTORY | O_CLOEXEC);
+        if (dirfd < 0) goto fail;
+        snprintf(addr.sun_path, sizeof(addr.sun_path), "/proc/self/fd/%d/%s",
+                 dirfd, strrchr(ctx->sock_path, '/') + 1);
+    }
+    int brc = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (dirfd >= 0) { int e = errno; close(dirfd); errno = e; }
+    if (brc != 0) goto fail;
 
     if (listen(fd, PROXY_BACKLOG) != 0) goto fail;
 
@@ -744,7 +759,9 @@ int proxy_bind(ProxyContext *ctx, const char *dir,
 
 fail:
     /* Every error path lands here: free the just-allocated partition arrays
-     * (proxy_stop is NOT called on a failed bind), the socket path, and the fd. */
+     * (proxy_stop is NOT called on a failed bind), the socket path, and the fd.
+     * errno is the failure's, for the caller's message. */
+    err = errno;
     if (fd >= 0) close(fd);
     if (ctx->sock_path) {
         unlink(ctx->sock_path);
@@ -753,6 +770,7 @@ fail:
     }
     free(ctx->host_rules);  ctx->host_rules = NULL;  ctx->host_rule_count = 0;
     free(ctx->cidr_rules);  ctx->cidr_rules = NULL;  ctx->cidr_rule_count = 0;
+    errno = err;
     return -1;
 }
 

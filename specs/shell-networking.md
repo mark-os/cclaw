@@ -61,6 +61,13 @@ get misread as "the whole tool-exec worker is the firewall."
 └──────────────────────────────────────────────────────────────┘
 ```
 
+The broker's socket is `<agent dir>/.proxy.<pid>.sock`, bind-mounted into the
+sandbox at `/tmp/.cclaw_proxy.sock`. A deep agent dir makes that path longer
+than `sun_path` (108 bytes); the broker then binds it through a descriptor for
+the folder (`/proc/self/fd/<n>/.proxy.<pid>.sock`). If the socket cannot be
+created at all the call is refused with the reason, never run without a
+proxy.
+
 ## Connection Flow
 
 ```

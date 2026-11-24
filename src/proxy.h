@@ -62,7 +62,8 @@ typedef struct {
  * (`hosts`/`host_count`) is borrowed — it must outlive the proxy; the broker
  * holds no DB handle. `deny_rules`/`deny_count` are sensitive-host labels
  * (borrowed) checked before any allow logic — deny wins unconditionally.
- * Returns 0 on success. */
+ * A dir too long for sun_path is bound through a descriptor for it. Returns 0
+ * on success, -1 with errno set. */
 int proxy_bind(ProxyContext *ctx, const char *dir,
                char **hosts, size_t host_count,
                char **deny_rules, size_t deny_count);

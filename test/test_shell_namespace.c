@@ -210,11 +210,93 @@ static void test_sandbox_none_skips_namespace(void) {
     system(rm);
 }
 
+/* Nothing under /dev that the host shares is writable from inside: a file
+ * the child creates in /dev/shm or /dev/mqueue must not appear on the host.
+ * Recursive binds carried the host's /dev submounts in read-write — the top
+ * remount did not reach them — so both were a channel between agents and to
+ * the host (fails on 8a6ba35). The child still gets working, private ones:
+ * the write must succeed inside, or the row proves nothing. */
+static void test_host_dev_not_shared(void) {
+    static const char *dirs[] = { "/dev/shm", "/dev/mqueue" };
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        struct stat st;
+        if (stat(dirs[i], &st) != 0) {
+            printf("  SKIP %s (absent on this host)\n", dirs[i]);
+            continue;
+        }
+        char name[128], cmd[512];
+        snprintf(name, sizeof(name), "%s/cclaw_ns_probe_%d", dirs[i], getpid());
+        unlink(name);
+        snprintf(cmd, sizeof(cmd), "touch %s && echo WROTE", name);
+        ShellToolReq r = SHELL_REQ_DEFAULTS;
+        r.workspace = workspace;
+        r.command = cmd;
+        char *res = run_tool_shell(&r);
+        assert(res != NULL);
+        int host_sees = access(name, F_OK) == 0;
+        unlink(name);
+        if (host_sees) printf("  host sees %s\n", name);
+        assert(!host_sees);
+        assert(strstr(res, "WROTE") != NULL);
+        free(res);
+    }
+}
+
+/* A sandboxed child runs with no_new_privs, so a setuid binary the payload
+ * runs does not elevate (fails on 8a6ba35, where it was never set). host does
+ * not set it: that profile keeps the operator's own reach, sudo included. */
+static int g_ns_ok;
+static void test_no_new_privs(void) {
+    static const struct { int sandbox; const char *want; } cases[] = {
+        { 1, "NoNewPrivs:\t1" }, { 0, "NoNewPrivs:\t0" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (cases[i].sandbox && !g_ns_ok) {
+            printf("  SKIP no_new_privs sandboxed row (namespaces unavailable)\n");
+            continue;
+        }
+        ShellToolReq r = SHELL_REQ_DEFAULTS;
+        r.workspace = workspace;
+        r.sandbox = cases[i].sandbox;
+        r.env_mode = cases[i].sandbox;
+        r.command = "grep NoNewPrivs /proc/self/status";
+        char *res = run_tool_shell(&r);
+        assert(res != NULL);
+        if (!strstr(res, cases[i].want)) printf("  row %zu: %s\n", i, res);
+        assert(strstr(res, cases[i].want) != NULL);
+        free(res);
+    }
+}
+
+/* An agent folder deep enough that <dir>/.proxy.<pid>.sock exceeds sun_path
+ * (108 bytes) still gets its proxy. The bind used to fail and the child ran
+ * with no proxy variables and no word why (fails on 8a6ba35). */
+static void test_deep_agent_dir_proxy(void) {
+    char deep[256];
+    int n = snprintf(deep, sizeof(deep), "%s/", workspace);
+    while (n < 120) n += snprintf(deep + n, sizeof(deep) - (size_t)n, "deep_agent_dir/");
+    deep[n - 1] = '\0';
+    char mk[512];
+    snprintf(mk, sizeof(mk), "mkdir -p %s", deep);
+    assert(system(mk) == 0);
+
+    ShellToolReq r = SHELL_REQ_DEFAULTS;
+    r.workspace = workspace;
+    r.agent_dir = deep;
+    r.command = "echo \"P=[$HTTP_PROXY]\"; test -S /tmp/.cclaw_proxy.sock && echo SOCK";
+    char *res = run_tool_shell(&r);
+    assert(res != NULL);
+    assert(strstr(res, "P=[http://127.0.0.1:") != NULL);
+    assert(strstr(res, "SOCK") != NULL);
+    free(res);
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_shell_namespace:\n");
     setup_workspace();
-    if (!run_tool_ns_available(workspace)) {
+    g_ns_ok = run_tool_ns_available(workspace);
+    if (!g_ns_ok) {
         printf("  SKIP (namespaces unavailable on this system)\n");
     } else {
         RUN(test_write_inside_workspace);
@@ -225,8 +307,11 @@ int main(void) {
         RUN(test_etc_shadow_inaccessible);
         RUN(test_cwd_path_rw);
         RUN(test_no_cwd_path_blocked);
+        RUN(test_host_dev_not_shared);
+        RUN(test_deep_agent_dir_proxy);
     }
     RUN(test_sandbox_none_skips_namespace);
+    RUN(test_no_new_privs);
     cleanup_workspace();
     return 0;
 }

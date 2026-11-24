@@ -777,8 +777,17 @@ static void serve_network_child(const VehicleDescriptor *desc, RunToolParsed *q,
     int proxy_active = 0;
     if (q->agent_dir && !q->net_mode && q->sandbox) {
         if (proxy_bind(&proxy, q->agent_dir, q->host_rules, q->host_count,
-                       q->deny_rules, q->deny_count) == 0)
-            proxy_active = 1;
+                       q->deny_rules, q->deny_count) != 0) {
+            /* Running on with no proxy would be a call that silently has no
+             * network. Say why instead. */
+            char msg[512];
+            snprintf(msg, sizeof(msg), "error: the egress proxy socket could "
+                     "not be created in %s (%s), so the tool refused to run. "
+                     "This is an environment problem — report it to the "
+                     "operator", q->agent_dir, strerror(errno));
+            die(msg);
+        }
+        proxy_active = 1;
     }
     const char *psock = proxy_active ? proxy_sock_path(&proxy) : NULL;
 

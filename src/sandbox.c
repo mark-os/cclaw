@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <unistd.h>
 #include "sandbox.h"
@@ -186,6 +187,16 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
      * failure mode, and host (no namespace, no bind) is unaffected either way. */
     char ws_abs[PATH_MAX];
     if (ws && ws[0] && realpath(ws, ws_abs)) ws = ws_abs;
+
+    /* No privilege gain for a contained child: a setuid or file-capability
+     * binary the payload runs gets the caller's own rights. Inherited across
+     * fork and exec, never cleared; unshare(CLONE_NEWUSER) is allowed under
+     * it. Not under host, which promises the operator's own reach, sudo
+     * included. Fail closed. */
+    if (cfg->sandbox && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        fprintf(stderr, "error: could not set no_new_privs, refusing to run\n");
+        return -1;
+    }
 
     /* namespace sandbox — fail closed if requested but unavailable */
     if (cfg->sandbox && contain_enter(ws, cwd, cfg->db_path, cfg) != 0) {

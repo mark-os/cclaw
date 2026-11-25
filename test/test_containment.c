@@ -120,7 +120,7 @@ static void test_refusal_names_alternative(void) {
     ContainPlan p;
     Containment std = row("standard");
     assert(contain_plan(&std, EXEC_JS, BARE, &p, why, sizeof(why)) != 0);
-    assert(strstr(why, "'basic'"));
+    assert(strstr(why, "'basic-firewalled'"));
     assert(contain_plan(&std, EXEC_SHELL, BARE, &p, why, sizeof(why)) != 0);
     assert(strstr(why, "'none'"));
 

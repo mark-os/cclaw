@@ -853,7 +853,7 @@ static int sandbox_setup_proxy(const char *uds_path, int in_ns) {
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = 0;
     if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
-        listen(lfd, 16) != 0) { close(lfd); return -1; }
+        listen(lfd, SOMAXCONN) != 0) { close(lfd); return -1; }
     socklen_t alen = sizeof(addr);
     if (getsockname(lfd, (struct sockaddr *)&addr, &alen) != 0) { close(lfd); return -1; }
     int port = ntohs(addr.sin_port);

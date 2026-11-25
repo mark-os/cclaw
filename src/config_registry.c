@@ -33,7 +33,8 @@ static const ConfigDef s_defs[] = {
       " transcription); raise on slow links or slow providers" },
     { "job_timeout_max",    "3600",
       "Ceiling on a background job's timeout parameter (seconds); background"
-      " calls default to 600s within it" },
+      " calls default to 600s within it. 0 = no ceiling: a job runs for as"
+      " long as its call asks (it still ends when the daemon restarts)" },
     { "web_port",           "8080",
       "Embedded web server port" },
     { "web_bind",           "127.0.0.1",

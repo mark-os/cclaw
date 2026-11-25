@@ -1492,14 +1492,21 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 return tool_inline_error(session_id, tc,
                     "error: shell_exec requires a 'command' string argument", NULL);
             /* A background job outlives the turn, so its timeout answers to
-             * the job ceiling (config job_timeout_max), not the turn clamp. */
+             * the job ceiling (config job_timeout_max), not the turn clamp.
+             * 0 is the operator's "no ceiling": the job still ends at the
+             * timeout the call names. A value that cannot be read is the
+             * default, never no ceiling. */
             int cmd_timeout;
             if (background) {
-                int ceil = (int)config_get_int(proc_db(), "job_timeout_max");
-                if (ceil <= 0) ceil = 3600;
+                const long most = INT_MAX - 60;   /* the backstop adds a margin */
+                char *cv = config_get(proc_db(), "job_timeout_max"), *end = cv;
+                long ceil = cv ? strtol(cv, &end, 10) : -1;
+                if (end == cv || ceil < 0) ceil = 3600;
+                else if (ceil == 0 || ceil > most) ceil = most;
+                free(cv);
                 int raw = tool_args_int(proc_db(), tc->arguments, "timeout", 600);
                 if (raw <= 0) raw = 600;
-                cmd_timeout = raw > ceil ? ceil : raw;
+                cmd_timeout = raw > ceil ? (int)ceil : raw;
             } else {
                 cmd_timeout = tool_call_timeout(tc->arguments, sc->timeout);
             }

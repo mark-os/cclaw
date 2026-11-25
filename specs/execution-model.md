@@ -73,7 +73,8 @@ state would be a lie.
    answers the call with `"job started (job_id=N, log=…)"` and sets status
    `background`, stamping the dispatching `instance_id` in `resolved_by`.
    Timeout: `timeout` argument, default 600s, ceiling `job_timeout_max`
-   (config, default 3600) — not the turn clamp.
+   (config, default 3600; 0 = no ceiling, the call's own `timeout` is then
+   the only limit) — not the turn clamp.
 2. **Live output**: the drain appends the child's pipe output to
    `<workspace>/.tool_results/<session>/<call_id>.log` — bounded by disk,
    readable live from inside the sandbox (`tail`/`file_read`; the same

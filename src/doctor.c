@@ -298,13 +298,35 @@ static void check_provider(const Config *cfg) {
     http_response_free(&resp);
 }
 
-/* ── TLS trust: which CA bundle outbound HTTPS verifies against ──── */
+/* ── HTTP stack: which libcurl, what it can do, which CA bundle ──── */
 
 static void check_tls(void) {
-    printf("\n[tls]\n");
+    printf("\n[http]\n");
     curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
-    printf("  libcurl: %s (%s)\n", v ? v->version : "?",
-           v && v->ssl_version ? v->ssl_version : "no TLS");
+    /* The release binary carries its own pinned libcurl; a source build uses
+     * the host's, so what follows differs per box and is worth printing. */
+    printf("  libcurl: %s (%s), %s\n", v ? v->version : "?",
+           v && v->ssl_version ? v->ssl_version : "no TLS",
+#ifdef CCLAW_CURL_BUILTIN
+           "built into this binary"
+#else
+           "the system library"
+#endif
+           );
+    if (v) {
+        printf("  protocols:");
+        for (const char *const *p = v->protocols; p && *p; p++) printf(" %s", *p);
+        printf("\n  compression:");
+        int any = 0;
+        if (v->features & CURL_VERSION_LIBZ) { printf(" gzip"); any = 1; }
+#ifdef CURL_VERSION_BROTLI
+        if (v->features & CURL_VERSION_BROTLI) { printf(" brotli"); any = 1; }
+#endif
+#ifdef CURL_VERSION_ZSTD
+        if (v->features & CURL_VERSION_ZSTD) { printf(" zstd"); any = 1; }
+#endif
+        printf("%s\n", any ? "" : " none — responses are downloaded uncompressed");
+    }
     int missing = 0;
     const char *ca = util_ca_bundle(&missing);
     if (missing)

@@ -235,7 +235,19 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     if (opts->follow_redirects) {
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_MAXREDIRS, opts->max_redirects > 0 ? (long)opts->max_redirects : 5L);
+        /* A redirect leads to a web address and nothing else. The release
+         * build has no other protocol; a system libcurl usually has ftp. */
+#if LIBCURL_VERSION_NUM >= 0x075500
+        curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+        curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+#endif
     }
+
+    /* Ask for every encoding this libcurl can decode (none: "identity").
+     * max_response_bytes counts decoded bytes, so a small compressed body
+     * cannot expand past the caller's cap. */
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
 
     if (opts->proxy_unix) {
         curl_easy_setopt(curl, CURLOPT_PROXY, "http://127.0.0.1:9");

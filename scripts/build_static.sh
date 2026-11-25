@@ -9,7 +9,7 @@
 # Runs on an x86_64 host with the distro GCC for the target (gcc,
 # gcc-aarch64-linux-gnu, gcc-i686-linux-gnu, gcc-arm-linux-gnueabi). musl is
 # built from source and wrapped around that GCC with its own musl-gcc specs,
-# so the only inputs are apt packages and three checksummed tarballs.
+# so the only inputs are apt packages and four checksummed tarballs.
 #
 # Dependencies land in build-deps/<target>/ and are reused; the cclaw build
 # itself goes through the ordinary Makefile into build/. Extra arguments are
@@ -20,6 +20,8 @@ MUSL_VERSION=1.2.6
 MUSL_SHA256=d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a
 MBEDTLS_VERSION=3.6.7
 MBEDTLS_SHA256=a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
+ZLIB_VERSION=1.4
+ZLIB_SHA256=4f11c512053d7bab8d9e9b89bde3575add3e4c50a383b42ef6cb837035fc5a7c
 CURL_VERSION=8.23.0
 CURL_SHA256=8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5
 
@@ -96,11 +98,25 @@ if [ ! -f "$prefix/lib/libmbedtls.a" ]; then
     ) >"$work/mbedtls.log" 2>&1 || failed mbedtls
 fi
 
+# ── zlib ─────────────────────────────────────────────────────────────
+# gzip for HTTP responses: a page or an LLM reply is several times smaller on
+# the wire, which is what a slow link notices. About 60 KB of the binary.
+if [ ! -f "$prefix/lib/libz.a" ]; then
+    fetch "https://github.com/madler/zlib/releases/download/v$ZLIB_VERSION/zlib-$ZLIB_VERSION.tar.xz" "$ZLIB_SHA256"
+    unpack "zlib-$ZLIB_VERSION.tar.xz" "zlib-$ZLIB_VERSION"
+    (cd "$work/zlib-$ZLIB_VERSION" &&
+     CC="$cc" AR="${cross}ar" RANLIB="${cross}ranlib" CFLAGS="-O2" \
+        ./configure --static --prefix="$prefix" &&
+     make -j"$jobs" libz.a && make install
+    ) >"$work/zlib.log" 2>&1 || failed zlib
+fi
+
 # ── libcurl ──────────────────────────────────────────────────────────
 # HTTP(S), WebSocket and file:// (pre-release update channels) only. No CA
 # path is baked in — it would describe this build machine; util_ca_bundle()
 # finds the host's bundle at runtime.
-if [ ! -f "$prefix/lib/libcurl.a" ]; then
+# Built after zlib and rebuilt when an older tree's libcurl was built without it.
+if [ ! -f "$prefix/lib/libcurl.a" ] || ! grep -q 'define HAVE_LIBZ 1' "$work/curl-$CURL_VERSION/lib/curl_config.h" 2>/dev/null; then
     fetch "https://curl.se/download/curl-$CURL_VERSION.tar.xz" "$CURL_SHA256"
     unpack "curl-$CURL_VERSION.tar.xz" "curl-$CURL_VERSION"
     (cd "$work/curl-$CURL_VERSION" &&
@@ -113,7 +129,7 @@ if [ ! -f "$prefix/lib/libcurl.a" ]; then
         --disable-imap --disable-smb --disable-smtp --disable-gopher \
         --disable-mqtt --disable-ipfs --disable-manual --disable-docs \
         --disable-ntlm --disable-unix-sockets --disable-alt-svc --disable-hsts \
-        --without-zlib --without-brotli --without-zstd --without-libpsl \
+        --with-zlib="$prefix" --without-brotli --without-zstd --without-libpsl \
         --without-libidn2 --without-nghttp2 --without-libssh2 &&
      make -j"$jobs" -C lib && make -C lib install && make -C include install
     ) >"$work/curl.log" 2>&1 || failed curl
@@ -126,8 +142,8 @@ cd "$root"
 
 make -j"$jobs" "${@:-all}" \
     CC="$cc" NET_SHIM_LDFLAGS=-static \
-    EXTRA_CFLAGS="-I$prefix/include" \
-    LDFLAGS="-static -L$prefix/lib -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lm -lpthread"
+    EXTRA_CFLAGS="-I$prefix/include -DCCLAW_CURL_BUILTIN" \
+    LDFLAGS="-static -L$prefix/lib -lcurl -lz -lmbedtls -lmbedx509 -lmbedcrypto -lm -lpthread"
 
 # The property the whole exercise is for — check it, do not assume it.
 if "${cross}readelf" -lW build/cclaw | grep -Eq 'INTERP|DYNAMIC'; then

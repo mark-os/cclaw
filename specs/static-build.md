@@ -5,7 +5,7 @@ Two ways to build cclaw, on purpose:
 | | Source build (`make`) | Release build (`scripts/build_static.sh <target>`) |
 |---|---|---|
 | libc | host's, dynamic | musl, static |
-| libcurl + TLS | system `libcurl.so` | pinned curl + mbedTLS, linked in |
+| libcurl + TLS + gzip | system `libcurl.so` | pinned curl + mbedTLS + zlib, linked in |
 | Runs on | the machine that built it | any Linux kernel of that architecture |
 | Used by | developers, `make test`, CI `test`/`compat`/`no-containment` jobs | CI `release-build`, GitHub releases, `cclaw update` |
 
@@ -20,15 +20,15 @@ x86_64 host with the distro GCC for the target:
 
 1. Builds **musl** from source and installs its `musl-gcc` wrapper (the target
    GCC plus a specs file swapping in musl's headers and libc).
-2. Builds **mbedTLS** and a minimal **curl** (http, https, ws, wss, file) with
-   that wrapper.
+2. Builds **mbedTLS**, **zlib** and a minimal **curl** (http, https, ws, wss,
+   file; gzip responses) with that wrapper.
 3. Runs the ordinary Makefile with `-static`. Extra arguments are make
    targets, so `build_static.sh x64 test-integration` builds and runs the
    suite as static binaries against the static `build/cclaw`.
 4. Fails unless `build/cclaw` has no `PT_INTERP`/`PT_DYNAMIC`.
 
 Versions and SHA-256 sums are pinned at the top of the script. Dependencies
-are built once into `build-deps/<target>/` (gitignored). **A curl or mbedTLS
+are built once into `build-deps/<target>/` (gitignored). **A curl, mbedTLS or zlib
 security advisory now means bumping the pin and cutting a release** — that is
 the cost of not depending on the host's copy.
 
@@ -37,8 +37,17 @@ the cost of not depending on the host's copy.
 - **CA bundle.** A bundled libcurl has no trustworthy compiled-in CA path, so
   curl is configured without one and `util_ca_bundle()` resolves it at
   runtime: `$SSL_CERT_FILE`, else libcurl's default if it exists, else the
-  well-known distro paths. `cclaw --doctor` `[tls]` shows the result. Nothing
+  well-known distro paths. `cclaw --doctor` `[http]` shows the result. Nothing
   found is a logged error and failing HTTPS requests, not a startup exit.
+- **What the HTTP stack can do.** The release curl speaks http, https, ws, wss
+  and file, and decodes gzip. A system libcurl usually has more protocols and
+  brotli, and on a minimal distro package may lack websockets or gzip.
+  `cclaw --doctor` `[http]` prints, for the binary in hand: the libcurl
+  version, whether it is built in or the system library, its protocols, the
+  encodings it decodes and whether websockets work. Every request asks for
+  the encodings curl can decode (`max_response_bytes` counts decoded bytes),
+  and a redirect is followed only to http or https whichever libcurl is
+  linked.
 - **Nothing in a release binary speaks the host's libc.** Until v0.6.0 one
   thing did: `libcclaw_net.so`, built with the build machine's glibc and
   `LD_PRELOAD`ed into the host's programs inside the sandbox. v0.6.0 shipped

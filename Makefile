@@ -58,7 +58,7 @@ TEMPLATES := $(wildcard templates/*)
 # (extension_install_builtin); the rest of extensions/ is copy-and-promote.
 SHIPPED_BUNDLES := extensions/compaction extensions/web-fetch
 TEMPLATES += $(foreach d,$(SHIPPED_BUNDLES),$(wildcard $(d)/*))
-SRC      := $(filter-out src/net_shim.c $(filter-out src/contain_$(CONTAIN).c,$(wildcard src/contain_*.c)),$(wildcard src/*.c))
+SRC      := $(filter-out src/net_shim.c $(filter-out $(wildcard src/contain_$(CONTAIN)*.c),$(wildcard src/contain_*.c)),$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 # Recursive (=): TEST_BIN/INTEG_BIN/E2E_BIN are defined below; expansion
 # happens at the -include site after all of them exist. Test binaries compile

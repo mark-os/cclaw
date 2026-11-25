@@ -57,6 +57,7 @@ by fork-and-try:
 | user + mount namespaces | 3.8+, unprivileged | Docker's default profile, Ubuntu 23.10+ (AppArmor), hardened kernels, `max_user_namespaces=0` |
 | Landlock | 5.13+ (ABI 1; 2 from 5.19, 3 from 6.2, 5 from 6.10, 6 from 6.12), built in and in the LSM list | older kernels; some vendor and embedded kernels |
 | seccomp | 3.5+ (ARM 3.8+) | kernels built without it |
+| connect() interception | 5.19+ (seccomp user notification with `WAIT_KILLABLE_RECV`, `pidfd_getfd`) | older kernels; Docker's default profile (`pidfd_getfd` needs `CAP_SYS_PTRACE`); i386 (`socketcall`) |
 
 What each policy gets:
 
@@ -66,20 +67,24 @@ What each policy gets:
 | Files, shell | Mount namespace | `confined`: Landlock (existence visible, no private `/tmp`/`/proc`) | refused |
 | `cclaw.db` / `.cclaw_key` | Outside every mount set, masked if a bind would show them | In no Landlock rule; the path check refuses them by path and by inode | The path check |
 | Host allowlist, `web_fetch` and JS `http_request` | Network namespace; the only route out is the broker's proxy | curl dials the proxy's unix socket itself (`NE_CODE`): the same `proxy_decide()`, metadata and private-address blocks, SNI check, narrowing and contacted-host log | same |
-| Host allowlist, shell | Network namespace + `net_shim` | `advisory`: the shim on the host's loopback and the proxy variables, nothing more; `none`: seccomp, no sockets; `firewalled`: refused | `advisory` as left; `firewalled`/`none`: refused |
+| Host allowlist, shell | Network namespace + `net_shim`; with interception every TCP `connect()` too, names through a DNS stub | `firewalled`, and `advisory`: with interception every TCP `connect()` goes through the proxy, no UDP, host loopback reachable; without it `advisory` is the shim and the proxy variables, `firewalled` refused; `none`: seccomp, no sockets | `advisory` as left; `firewalled`/`none`: refused |
 
 So, per shipped containment:
 
-| Host | `standard` / `offline` | `basic` | `none` |
-|---|---|---|---|
-| user namespaces | every vehicle in the namespace | every vehicle in the namespace | no boundary |
-| Landlock + seccomp, no user namespaces | refused, naming `basic` | every vehicle: Landlock files; shell egress advisory | no boundary |
-| none of these | refused, naming `none` | file tools and JS; shell refused | no boundary |
+| Host | `standard` / `offline` | `basic-firewalled` | `basic` | `none` |
+|---|---|---|---|---|
+| user namespaces | every vehicle in the namespace | every vehicle in the namespace | every vehicle in the namespace | no boundary |
+| Landlock + seccomp + interception (5.19+), no user namespaces | refused, naming `basic-firewalled` | every vehicle: Landlock files; shell egress forced by interception | as `basic-firewalled` | no boundary |
+| Landlock + seccomp, no user namespaces | refused, naming `basic` | file tools and JS; shell refused | every vehicle: Landlock files; shell egress advisory | no boundary |
+| none of these | refused, naming `none` | file tools and JS; shell refused | file tools and JS; shell refused | no boundary |
 
-Expected: AL2023 and Debian 12 (6.1) ABI 2 with namespaces; Ubuntu 24.04
-(6.8) ABI 4, namespaces denied by AppArmor, so `basic` with Landlock; Docker
-depends on its profile (the default blocks `unshare` and, in recent versions,
-allows Landlock and a nested seccomp filter — check `cclaw --doctor`).
+Expected: AL2023 and Debian 12 (6.1) ABI 2 with namespaces and
+interception; Ubuntu 24.04 (6.8) ABI 4, namespaces denied by AppArmor, so
+`basic-firewalled` with Landlock and interception; Docker depends on its
+profile (the default blocks `unshare` and `pidfd_getfd` and, in recent
+versions, allows Landlock and a nested seccomp filter, so `basic` with
+advisory egress; `--cap-add SYS_PTRACE` adds interception — check `cclaw
+--doctor`).
 
 `--doctor` `[layers]` prints, per agent, each vehicle's enforcers or refusal.
 
@@ -106,7 +111,8 @@ What is already in good shape:
 - **Host without them, with Landlock** (Docker, Ubuntu's AppArmor
   restriction): `basic` keeps the shell's files with Landlock and file and JS
   policy in cclaw's code with Landlock beneath it; the shell's network is
-  advisory.
+  forced through the proxy by connect() interception on 5.19+ (where the
+  host allows `pidfd_getfd`), else advisory.
 - **Host with neither** (old or vendor kernels, Android): `basic` keeps file
   and JS policy in cclaw's code and refuses the shell, and `none` means what
   it says — the agent acts as the user running cclaw, on any file and any
@@ -126,7 +132,8 @@ is set against it), and mediation without a namespace (`basic`).
 
 Done in 4b: Landlock for files `confined` (the shell, and a backstop under
 the path check), seccomp for network `none`, and a network namespace without a
-mount namespace.
+mount namespace. Step 5: connect() interception (`NE_NOTIF`, and transparent
+in the namespace).
 
 1. **Platform backends.** A build for a platform with its own sandbox
    (Android) starts from `contain_none.c`.
@@ -138,4 +145,6 @@ mount namespace.
   was the last host-libc dependency, and was removed in v0.6.1: layer 4 now
   needs layer 3 and nothing else from the host. The cost is that raw-socket
   programs have no network inside the sandbox; ssh goes through `net_shim`'s
-  `connect` mode ([shell-networking.md](shell-networking.md)).
+  `connect` mode ([shell-networking.md](shell-networking.md)). On 5.19+
+  connect() interception gives raw-socket programs their network back from
+  outside the program, with no host code loaded into it.

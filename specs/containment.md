@@ -46,9 +46,14 @@ row is refused, not read as a default.
 | | `FE_NONE` | nothing (`open`) |
 | network | `NE_NETNS` | an empty network namespace — the one the mount namespace brings, or a user + network namespace alone (`contain_enter_net`); the proxy socket is the only way out |
 | | `NE_SECCOMP` | a seccomp filter that refuses `socket()` for every family (network `none` only) |
+| | `NE_NOTIF` | a seccomp filter that hands every `connect()` to a supervisor thread in the broker, which tunnels it through the proxy; no UDP or raw sockets (the shell, no network namespace; [below](#connect-interception)) |
 | | `NE_CODE` | js's curl dials the egress proxy's socket itself |
 | | `NE_ENV` | the proxy runs on the host's loopback and the proxy variables are set; nothing else |
 | | `NE_NONE` | nothing |
+
+A plan with `NE_NETNS` for the shell also carries `transparent` when the host
+has `NOTIF` (never under `none`): the same interception inside the namespace,
+as a convenience — the namespace keeps the level either way.
 
 ### The planner
 
@@ -67,8 +72,8 @@ Strongest first, per level:
 | network (no mount namespace) | file | js | shell |
 |---|---|---|---|
 | `none` | NONE | CODE (http_request refuses) | NETNS, else SECCOMP, else refuse |
-| `firewalled` | NONE | CODE | NETNS, else refuse |
-| `advisory` | NONE | CODE | ENV (needs the backend's loopback proxy) |
+| `firewalled` | NONE | CODE | NETNS, else NOTIF, else refuse |
+| `advisory` | NONE | CODE | NOTIF, else ENV (both need the backend's loopback proxy) |
 | `direct` | NONE | NONE | NONE |
 
 With the mount namespace the network enforcer is always `NETNS`: there the
@@ -86,8 +91,9 @@ What this means for the shipped rows:
 - On a host without them but with Landlock (kernel 5.13+; Docker, Ubuntu's
   AppArmor restriction), `standard` and `offline` are refused for every
   vehicle and `basic` runs every vehicle: Landlock for files (with the path
-  check under file and js), the proxy forced in code for js, the proxy
-  variables for the shell.
+  check under file and js), the proxy forced in code for js, and for the
+  shell connect() interception (kernel 5.19+), else the proxy variables.
+  `basic-firewalled` runs the shell only with interception.
 - On a host with neither, `basic` runs file tools and js (path check, proxy
   forced in code) and **refuses the shell**, which needs a kernel enforcer
   for `confined`.
@@ -118,13 +124,20 @@ network namespace with `lo` up), `SHIM` 0x4 (the backend can serve the
 loopback proxy; always on Linux), `LANDLOCK` 0x8 (a child enforces a ruleset
 through `contain_landlock` and then sees `/dev/null` open and `/` refused),
 `SECCOMP` 0x10 (a child installs the `socket()` filter through
-`contain_seccomp` and then sees a socketpair made and `socket()` refused) —
+`contain_seccomp` and then sees a socketpair made and `socket()` refused),
+`NOTIF` 0x20 (a child installs the connect filter with
+`SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV`, and the parent takes the child's
+listener with `pidfd_getfd` and reads the child's memory with
+`process_vm_readv`; never offered on i386, whose programs reach the socket calls through
+`socketcall` with the arguments in memory; on 32-bit ARM, where programs call
+them directly, the old multiplexer is refused whole instead) —
 cached in memory, never persisted. Each probe checks both directions, so a
 kernel that accepts the call but enforces nothing is reported as lacking it
 (`test_contain.c` runs the probe under a filter that answers as a kernel
 without either, and it reports neither). `CCLAW_CONTAIN_CAPS_MASK`, a test and
 diagnostic knob read only there, is ANDed in: it can only take capabilities
-away (`0x1c` is a host with Landlock and seccomp and no user namespaces).
+away (`0x1c` is a host with Landlock and seccomp and no user namespaces,
+`0x3c` the same with connect() interception).
 `make CONTAIN=none` reports none.
 
 ## Under every plan
@@ -263,14 +276,76 @@ PID namespace (it would need its own `/proc`, which needs the mount namespace).
 unix, so a pathname socket on the host (`docker.sock`) is closed too —
 `socketpair()` still works (it reaches nothing), io_uring is `ENOSYS` (its
 operations would bypass a syscall filter), and on i386 the `socketcall`
-multiplexer's socket call is refused the same way. The filter's first
+multiplexer's socket call is refused the same way (on 32-bit ARM the whole
+multiplexer, which EABI programs do not use). The filter's first
 instruction kills any architecture but the build's (and, on x86_64, the x32
 ABI).
 
-**Under `advisory`** the shell needs `AF_INET` to reach the loopback shim, so
-there is no socket filter: `docker.sock` and other pathname sockets remain
-reachable subject to file permissions, and so does anything a program can
-dial while ignoring the proxy variables. That is what advisory says.
+**`NE_ENV`** (`advisory` on a host without interception): the shell needs
+`AF_INET` to reach the loopback shim, so there is no socket filter:
+`docker.sock` and other pathname sockets remain reachable subject to file
+permissions, and so does anything a program can dial while ignoring the proxy
+variables. That is what advisory says.
+
+## connect() interception
+
+`src/contain_linux_notif.c`. The shell child's seccomp filter returns
+`SECCOMP_RET_USER_NOTIF` for `connect()` and the child sends the listener (and
+the DNS stub's socket, and the shim's port) to the broker over a socketpair
+made before the fork. A thread in the broker — outside every namespace,
+Landlock domain and filter, an ancestor of every contained process — answers
+each call on a thread of its own (a slow destination holds up only its own
+caller; every wait ends when the caller stops waiting, checked each second):
+
+1. `pidfd_open`, `SECCOMP_IOCTL_NOTIF_ID_VALID`, `pidfd_getfd` takes the
+   socket object the call names, `process_vm_readv` reads the address once,
+   `NOTIF_ID_VALID` again. Any failure: `EPERM`.
+2. An inet or inet6 stream socket to anywhere but loopback: the supervisor
+   connects that socket itself to the shim's loopback port, sends the shim's
+   `CONNECT host:port`, reads the reply's head a byte at a time (what the
+   destination sends first stays for the caller) and returns 0 — the caller
+   holds a real TCP socket, tunnelled. A refusal disconnects it
+   (`AF_UNSPEC`) and returns `ECONNREFUSED`; the proxy's denial note reaches
+   the tool result as for any other connection. `host` is the name the DNS
+   stub handed the address out for, or the literal address.
+3. Anything else: continued inside a network namespace (the kernel already
+   holds the line there); performed by the supervisor on the object it took
+   when interception is the enforcer, never continued — the kernel would
+   re-read an address the caller can change after the check.
+
+The flag `WAIT_KILLABLE_RECV` (kernel 5.19) is required: without it a Go
+runtime's preemption signals restart the call under the supervisor.
+`getpeername()` on a tunnelled socket shows the shim, not the destination.
+Docker's default seccomp profile allows `pidfd_getfd` only with
+`CAP_SYS_PTRACE` (`--cap-add SYS_PTRACE`), so there the probe reports no
+`NOTIF`.
+
+**`NE_NOTIF`** (the shell, no network namespace: `firewalled`, and `advisory`
+when the host has it). The filter also decides, on register arguments only:
+`socket()` for inet and inet6 only as a TCP stream (UDP, raw, SCTP, MPTCP:
+`EACCES`), unix and netlink as asked, every other family `EACCES`;
+`sendto`/`sendmsg`/`sendmmsg` with `MSG_FASTOPEN` `EPERM` (it connects
+without `connect()`); ptrace and `process_vm_*` `EPERM` (a traced process
+outside the filter would connect for the caller); io_uring `ENOSYS`. The
+supervisor connects loopback destinations and netlink directly, and unix
+pathname sockets with a relative path resolved against the caller's working
+directory; an abstract unix address only under files `open` (Landlock's
+scoping would refuse it). So: no UDP and no DNS — a program that ignores the
+proxy reaches only literal addresses the proxy allows; the host's loopback
+stays reachable (the agent's own dev servers, and whatever else listens
+there); listening sockets are untouched.
+
+**Transparent** (`NE_NETNS` + `NOTIF`): unhandled connects are continued.
+With the mount namespace the child also binds a UDP socket on
+`127.0.0.1:53` before the exec and `/etc/resolv.conf` says
+`nameserver 127.0.0.1` (a bind of our own file, or, when it is a symlink,
+our file created where it points on the root tmpfs). The stub answers an A
+query with one address per name from `198.18.0.0/15` for the life of the
+call, AAAA with an empty answer, anything else `NOTIMP`; a name with other
+than hostname characters is `NXDOMAIN`. No lookup happens there: the proxy
+resolves the real name when the connection is made. A network namespace
+without a mount namespace has no resolv.conf to replace: interception
+without the stub.
 
 ## Fail-closed rule
 
@@ -303,7 +378,10 @@ self-inspection is `db_query`, which runs in the trusted parent.
 `test/test_contain_code.c` (with capabilities masked, through the real
 `--run-tool` child: `basic` by the path check and by Landlock for every
 vehicle, the shell under `confined` + `none` with no sockets, a network
-namespace without a mount namespace, js through the proxy, refusals),
+namespace without a mount namespace, js through the proxy, refusals;
+interception: a proxy-unaware program by name in the namespace,
+`basic-firewalled` without namespaces in both directions, a sockaddr
+rewritten during the call, the DNS stub's malformed packets),
 `test/test_contain.c` (the probe in both directions, the mask), the namespace
 suites (`test_shell_namespace.c`,
 `test_run_tool_escape.c`, `test_sandbox_mounts.c`, `test_sandbox_key_mask.c`,

@@ -27,6 +27,12 @@ int contain_landlock_abi(void) { return 0; }
 int contain_enter_net(void) { errno = ENOSYS; return -1; }
 int contain_landlock(const SandboxMount *r, size_t n) { (void)r; (void)n; return -1; }
 int contain_seccomp(unsigned flags) { (void)flags; return -1; }
+int contain_intercept(const SandboxConfig *c, unsigned sc, int port) {
+    (void)c; (void)sc; (void)port;
+    return -1;
+}
+ContainSup *contain_supervise(int sock, const ContainPlan *p) { (void)sock; (void)p; return NULL; }
+void contain_supervise_end(ContainSup *s) { (void)s; }
 
 int contain_egress(const SandboxConfig *cfg) { (void)cfg; return -1; }
 

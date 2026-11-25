@@ -78,12 +78,13 @@ static const char *const FE_NAMES[]    = { "none", "path check in cclaw's code",
                                            "mount namespace", "Landlock" };
 static const char *const NE_NAMES[]    = { "none", "proxy variables only",
                                            "cclaw's code dials the proxy", "network namespace",
-                                           "seccomp refuses socket()" };
+                                           "seccomp refuses socket()",
+                                           "seccomp hands connect() to the proxy" };
 
 const char *files_level_name(FilesLevel l) { return (unsigned)l < 3 ? FILES_NAMES[l] : "?"; }
 const char *net_level_name(NetLevel l) { return (unsigned)l < 4 ? NET_NAMES[l] : "?"; }
 const char *files_enforcer_name(FilesEnforcer e) { return (unsigned)e < 4 ? FE_NAMES[e] : "?"; }
-const char *net_enforcer_name(NetEnforcer e) { return (unsigned)e < 5 ? NE_NAMES[e] : "?"; }
+const char *net_enforcer_name(NetEnforcer e) { return (unsigned)e < 6 ? NE_NAMES[e] : "?"; }
 
 static int name_index(const char *const *names, int n, const char *s) {
     for (int i = 0; s && i < n; i++) if (strcmp(names[i], s) == 0) return i;
@@ -122,8 +123,9 @@ static const char *vehicle_noun(ExecVehicle v) {
 
 /* The rules, for one row: per level the strongest enforcer the host has —
  * mount namespace, then Landlock, then (file and js only) the path check;
- * network namespace, then (for 'none') seccomp. Returns NULL with *out
- * filled, or what the host lacks (or why the combination cannot be built). */
+ * network namespace, then seccomp ('none': refusing socket(); otherwise
+ * handing connect() to the proxy). Returns NULL with *out filled, or what the
+ * host lacks (or why the combination cannot be built). */
 static const char *plan_levels(const ContainLevels *lv, ExecVehicle v,
                                unsigned caps, ContainPlan *p) {
     memset(p, 0, sizeof(*p));
@@ -149,11 +151,13 @@ static const char *plan_levels(const ContainLevels *lv, ExecVehicle v,
     /* The mount namespace always brings an empty network namespace: there
      * the proxy is the only way out, which keeps none, firewalled and (more
      * strongly than it promises) advisory, but cannot be direct. */
+    int notif = (caps & CONTAIN_CAP_NOTIF) && (caps & CONTAIN_CAP_SHIM);
     if (p->fe == FE_MOUNTNS) {
         if (lv->net == NET_DIRECT)
             return "network 'direct' cannot be combined with the mount namespace"
                    " this files level uses";
         p->ne = NE_NETNS;
+        p->transparent = notif && v == EXEC_SHELL && lv->net != NET_NONE;
         return NULL;
     }
     /* The file vehicle is cclaw's own file code: it opens no socket, so no
@@ -166,16 +170,23 @@ static const char *plan_levels(const ContainLevels *lv, ExecVehicle v,
         if (!(caps & CONTAIN_CAP_SHIM))
             return "network 'advisory' for the shell needs the loopback proxy,"
                    " which this build's containment backend does not have";
-        p->ne = NE_ENV;
+        p->ne = notif ? NE_NOTIF : NE_ENV;
         return NULL;
     }
-    if (caps & CONTAIN_CAP_NETNS) { p->ne = NE_NETNS; return NULL; }
+    if (caps & CONTAIN_CAP_NETNS) {
+        p->ne = NE_NETNS;
+        p->transparent = notif && lv->net != NET_NONE;
+        return NULL;
+    }
     if (lv->net == NET_NONE && (caps & CONTAIN_CAP_SECCOMP)) { p->ne = NE_SECCOMP; return NULL; }
+    if (lv->net == NET_FIREWALLED && notif) { p->ne = NE_NOTIF; return NULL; }
     return lv->net == NET_NONE
         ? "network 'none' for the shell needs unprivileged user namespaces (a network"
           " namespace) or seccomp"
         : "network 'firewalled' for the shell needs unprivileged user namespaces (a"
-          " network namespace)";
+          " network namespace) or seccomp user notification (kernel 5.19+, and"
+          " pidfd_getfd, which Docker's default seccomp profile allows only with"
+          " CAP_SYS_PTRACE)";
 }
 
 /* Can lv be kept for vehicle `only` (0 = every child vehicle)? */
@@ -470,14 +481,17 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
                p->fe == FE_MOUNTNS ? contain_llm_sock_path() : cfg->llm_sock, 1);
     sandbox_apply_rlimits(&p->lv);
 
+    int port = 0;
     if (cfg->proxy_sock) {
         if (p->ne == NE_CODE) {
             setenv("CCLAW_PROXY_SOCK", cfg->proxy_sock, 1);
-        } else if (p->ne == NE_NETNS || p->ne == NE_ENV) {
+        } else if (p->ne == NE_NETNS || p->ne == NE_ENV || p->ne == NE_NOTIF) {
             /* In the namespace a failure leaves no network (soft); on the
              * host it would leave the proxy variables unset while nothing
-             * else holds the program back, so it refuses. */
-            if (contain_egress(cfg) != 0 && p->ne == NE_ENV) {
+             * else holds the program back (NE_ENV), or no way out at all
+             * (NE_NOTIF), so it refuses. */
+            port = contain_egress(cfg);
+            if (port < 0 && p->ne != NE_NETNS) {
                 fprintf(stderr, "error: the loopback proxy could not be started\n");
                 return -1;
             }
@@ -486,14 +500,19 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
 
     /* Last, once the shim (ours, needing its socket) is forked off. Under
      * Landlock there is no PID namespace: ptrace and process_vm_* are refused
-     * here as well as by Landlock's own scoping. */
+     * here as well as by Landlock's own scoping — and under NE_NOTIF, where a
+     * traced process outside the filter would connect for the caller. */
     if (p->fe == FE_LANDLOCK && confine_landlock() != 0) {
         fprintf(stderr, "error: the Landlock ruleset could not be applied (errno=%d)\n", errno);
         return -1;
     }
-    unsigned sc = (p->fe == FE_LANDLOCK ? CONTAIN_SC_NOTRACE : 0) |
-                  (p->ne == NE_SECCOMP ? CONTAIN_SC_NOSOCKET : 0);
-    if (sc && contain_seccomp(sc) != 0) {
+    unsigned sc = (p->fe == FE_LANDLOCK || p->ne == NE_NOTIF ? CONTAIN_SC_NOTRACE : 0) |
+                  (p->ne == NE_SECCOMP ? CONTAIN_SC_NOSOCKET : 0) |
+                  (p->ne == NE_NOTIF ? CONTAIN_SC_INETSTREAM : 0);
+    int rc = p->ne == NE_NOTIF || p->transparent
+        ? contain_intercept(cfg, sc, port > 0 ? port : 0)
+        : sc ? contain_seccomp(sc) : 0;
+    if (rc != 0) {
         fprintf(stderr, "error: the seccomp filter could not be installed (errno=%d)\n", errno);
         return -1;
     }

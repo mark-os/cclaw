@@ -25,10 +25,11 @@ typedef enum { NET_DIRECT, NET_ADVISORY, NET_FIREWALLED, NET_NONE } NetLevel;
  * FE_LANDLOCK: a Landlock ruleset (for file and js, on top of the path
  * check). NE_ENV: the proxy variables only. NE_CODE: cclaw's curl dials the
  * proxy socket itself. NE_NETNS: an empty network namespace (with the mount
- * namespace, or alone). NE_SECCOMP: a filter refusing socket(). Wire values:
- * append only. */
+ * namespace, or alone). NE_SECCOMP: a filter refusing socket(). NE_NOTIF: a
+ * filter that hands every connect() to the broker, which tunnels it through
+ * the proxy (no namespace). Wire values: append only. */
 typedef enum { FE_NONE, FE_CODE, FE_MOUNTNS, FE_LANDLOCK } FilesEnforcer;
-typedef enum { NE_NONE, NE_ENV, NE_CODE, NE_NETNS, NE_SECCOMP } NetEnforcer;
+typedef enum { NE_NONE, NE_ENV, NE_CODE, NE_NETNS, NE_SECCOMP, NE_NOTIF } NetEnforcer;
 
 /* One containments row. Limits: 0 = no cap. */
 typedef struct {
@@ -43,6 +44,10 @@ typedef struct {
     ContainLevels lv;
     FilesEnforcer fe;
     NetEnforcer ne;
+    int transparent;  /* NE_NETNS, shell: connect() is tunnelled through the
+                       * proxy too, and with the mount namespace a DNS stub
+                       * answers names. A convenience: the namespace keeps the
+                       * level either way. */
 } ContainPlan;
 
 /* The shipped rows, re-seeded at every start (db_seed_defaults). */
@@ -82,6 +87,9 @@ typedef struct {
                              * TMPDIR otherwise. NULL = none. */
     ContainPlan plan;
     int skip_pid_ns;        /* 1 = omit CLONE_NEWPID (no inner fork); file, js */
+    int notif_sock;         /* NE_NOTIF or transparent: the broker's end of a
+                             * socketpair the filter's listener is sent on
+                             * (0 = none) */
     SandboxMountReq *extra_mounts;   /* path grants */
     size_t extra_mount_count;
 } SandboxConfig;

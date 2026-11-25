@@ -13,9 +13,9 @@
 
 /* Plans the shipped rows get on a host with namespaces, for tests that
  * build a --run-tool request by hand (the limits are the tests' own). */
-#define TEST_PLAN_STANDARD ((ContainPlan){ {FILES_PRIVATE, NET_FIREWALLED, 64, 60}, FE_MOUNTNS, NE_NETNS })
-#define TEST_PLAN_OFFLINE  ((ContainPlan){ {FILES_PRIVATE, NET_NONE, 64, 60}, FE_MOUNTNS, NE_NETNS })
-#define TEST_PLAN_NONE     ((ContainPlan){ {FILES_OPEN, NET_DIRECT, 0, 0}, FE_NONE, NE_NONE })
+#define TEST_PLAN_STANDARD ((ContainPlan){ {FILES_PRIVATE, NET_FIREWALLED, 64, 60}, FE_MOUNTNS, NE_NETNS, 0 })
+#define TEST_PLAN_OFFLINE  ((ContainPlan){ {FILES_PRIVATE, NET_NONE, 64, 60}, FE_MOUNTNS, NE_NETNS, 0 })
+#define TEST_PLAN_NONE     ((ContainPlan){ {FILES_OPEN, NET_DIRECT, 0, 0}, FE_NONE, NE_NONE, 0 })
 
 /* First statement of every test main: line-buffer stdout so progress output
  * survives the Makefile timeout-kill (see AGENTS.md Testing Guidelines). */

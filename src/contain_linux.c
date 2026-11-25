@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -91,6 +92,51 @@ static int probe_enforcer(unsigned cap) {
     while (waitpid(pid, &st, 0) < 0)
         if (errno != EINTR) return 0;
     return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+#ifndef __NR_pidfd_open
+#define __NR_pidfd_open  434   /* unified numbers, as Landlock's */
+#endif
+#ifndef __NR_pidfd_getfd
+#define __NR_pidfd_getfd 438
+#endif
+
+/* NOTIF, by doing what a call does: a child installs the connect filter with
+ * its flags (EINVAL before 5.19), and this process takes the child's listener
+ * with pidfd_getfd and reads the child's memory — the two steps the broker
+ * takes on every connect, which a container's own seccomp profile may refuse
+ * (Docker's default does pidfd_getfd without CAP_SYS_PTRACE). */
+static volatile uint32_t g_probe_cookie = 0x6e6f7466;
+static int probe_notif(void) {
+    int sp[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sp) != 0) return 0;
+    pid_t pid = fork();
+    if (pid < 0) { close(sp[0]); close(sp[1]); return 0; }
+    if (pid == 0) {
+        int l = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
+                ? contain_seccomp(CONTAIN_SC_CONNECT) : -1;
+        char c;
+        if (write(sp[1], &l, sizeof(l)) == sizeof(l) && read(sp[1], &c, 1) == 1) _exit(0);
+        _exit(1);
+    }
+    close(sp[1]);
+    int l = -1, ok = 0;
+    if (read(sp[0], &l, sizeof(l)) == sizeof(l) && l >= 0) {
+        int pfd = (int)syscall(__NR_pidfd_open, pid, 0);
+        int got = pfd >= 0 ? (int)syscall(__NR_pidfd_getfd, pfd, l, 0) : -1;
+        uint32_t v = 0;
+        struct iovec mine = { &v, sizeof(v) }, theirs = { (void *)&g_probe_cookie, sizeof(v) };
+        ok = got >= 0 && process_vm_readv(pid, &mine, 1, &theirs, 1, 0) == sizeof(v) &&
+             v == g_probe_cookie;
+        if (got >= 0) close(got);
+        if (pfd >= 0) close(pfd);
+    }
+    if (write(sp[0], "x", 1) != 1) ok = 0;
+    close(sp[0]);
+    int st;
+    while (waitpid(pid, &st, 0) < 0)
+        if (errno != EINTR) return 0;
+    return ok;
 }
 
 static long landlock_abi_now(void);
@@ -171,6 +217,7 @@ unsigned contain_caps(char *why, size_t cap) {
             g_landlock_abi = (int)landlock_abi_now();
         }
         if (probe_enforcer(CONTAIN_CAP_SECCOMP)) caps |= CONTAIN_CAP_SECCOMP;
+        if ((caps & CONTAIN_CAP_SECCOMP) && probe_notif()) caps |= CONTAIN_CAP_NOTIF;
         probed = 1;
     }
     unsigned out = caps;
@@ -501,6 +548,44 @@ static void bind_path_into(const char *newroot, const char *abspath, int ro) {
     if (ro) sandbox_remount_ro(dst);
 }
 
+/* Transparent: point the namespace's resolver at the DNS stub on
+ * 127.0.0.1:53. /etc is the host's, read-only; resolv.conf is replaced by a
+ * bind of our own file — or, when it is a symlink (systemd-resolved's
+ * /run/...), by our file created where the link points, which in the new
+ * root is an empty directory on the root tmpfs. Best-effort: without it a
+ * name simply does not resolve, as without the stub. */
+static void stub_resolv_conf(const char *newroot) {
+    static const char text[] = "nameserver 127.0.0.1\n";
+    char conf[256], link[256], dst[512], own[256];
+    snprintf(conf, sizeof(conf), "%s/etc/resolv.conf", newroot);
+    snprintf(own, sizeof(own), "%s/.cclaw_resolv.conf", newroot);
+    ssize_t ln = readlink(conf, link, sizeof(link) - 1);
+    if (ln > 0) {
+        link[ln] = '\0';   /* resolved inside the new root, never the host's */
+        snprintf(dst, sizeof(dst), "%s%s%s", newroot, link[0] == '/' ? "" : "/etc/", link);
+    } else {
+        snprintf(dst, sizeof(dst), "%s", conf);
+    }
+    struct stat st;
+    int bind = lstat(dst, &st) == 0;
+    if (bind && !S_ISREG(st.st_mode)) goto fail;
+    if (!bind) {   /* a dangling link: the directories are the root tmpfs's */
+        if (ln <= 0 || errno != ENOENT) goto fail;
+        for (char *sl = dst + strlen(newroot) + 1; (sl = strchr(sl, '/')); *sl++ = '/') {
+            *sl = '\0';
+            mkdir(dst, 0755);
+        }
+    }
+    int fd = open(bind ? own : dst, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+    ssize_t w = fd >= 0 ? write(fd, text, sizeof(text) - 1) : -1;
+    if (fd >= 0) close(fd);
+    if (w == (ssize_t)sizeof(text) - 1 &&
+        (!bind || (mount(own, dst, NULL, MS_BIND, NULL) == 0 && sandbox_remount_ro(dst) == 0)))
+        return;
+fail:
+    LOG_INFO_("sandbox resolv_stub_fail errno=%d", errno);
+}
+
 /* Apply namespace sandbox in the child.
  * unshare(USER|MNT|PID|NET), write uid/gid maps, pivot_root into minimal fs.
  * System dirs mounted ro, workspace rw.
@@ -596,6 +681,8 @@ int contain_enter(const char *workspace, const char *db_path,
     }
     if (sandbox_private_dev(newroot) != 0)
         return -1;
+    if (full_cfg && full_cfg->plan.transparent && full_cfg->proxy_sock)
+        stub_resolv_conf(newroot);
 
     /* /tmp is a bind of the agent's own scratch directory on the host, not a
      * tmpfs of our own. The root tmpfs above stays tiny because it only holds
@@ -750,8 +837,9 @@ static int sandbox_bring_up_lo(void) {
  * brought up first, and a program that ignores the variables has no network.
  * On the host's loopback (NE_ENV) nothing stops such a program, and the
  * listener can be reached by any local process for the length of the call:
- * that is what 'advisory' says. Runs before the exec; -1 on any failure,
- * leaving the proxy variables unset. */
+ * that is what 'advisory' says (under NE_NOTIF every connect() is the
+ * supervisor's anyway). Runs before the exec; the listener's port, or -1 on
+ * any failure, leaving the proxy variables unset. */
 static int sandbox_setup_proxy(const char *uds_path, int in_ns) {
     if (in_ns && sandbox_bring_up_lo() != 0) return -1;
 
@@ -825,7 +913,7 @@ static int sandbox_setup_proxy(const char *uds_path, int in_ns) {
     setenv("ALL_PROXY", url, 1);   setenv("all_proxy", url, 1);
     setenv("NO_PROXY", "localhost,127.0.0.1,::1", 1);
     setenv("no_proxy", "localhost,127.0.0.1,::1", 1);
-    return 0;
+    return port;
 }
 
 /* net_shim as a file the shell can run by name (`connect` mode, for ssh's
@@ -868,14 +956,15 @@ int contain_egress(const SandboxConfig *cfg) {
 
     /* The loopback HTTP proxy: the one mechanism for every child — our own
      * libcurl (js) and whatever the shell runs. */
-    if (sandbox_setup_proxy(uds, in_ns) != 0) return -1;
+    int port = sandbox_setup_proxy(uds, in_ns);
+    if (port < 0) return -1;
 
     /* Shell only: programs that take a proxy *command* rather than proxy
      * variables. ssh is the one that matters, and git reads GIT_SSH_COMMAND,
      * so git-over-ssh works unprompted; a bare `ssh` needs the option spelled
      * out (the shell tool's description says how). */
     if (!cfg->skip_pid_ns) write_connect_shim(cfg, mounted);
-    return 0;
+    return port;
 }
 
 const char *contain_llm_sock_path(void) { return SANDBOX_LLM_SOCK_PATH; }
@@ -963,6 +1052,11 @@ int contain_landlock(const SandboxMount *rules, size_t n) {
 #elif defined(__riscv) && __riscv_xlen == 64
 #define SC_ARCH 0xC00000F3u          /* AUDIT_ARCH_RISCV64 */
 #endif
+/* i386 programs reach the socket calls through socketcall(), whose arguments
+ * are in memory: sockets can be refused there, not inspected. */
+#if defined(__NR_socketcall) && !defined(__arm__)
+#define SC_MUX __NR_socketcall
+#endif
 #ifndef __NR_io_uring_setup
 #define __NR_io_uring_setup    425   /* unified numbers, as Landlock's */
 #define __NR_io_uring_enter    426
@@ -993,7 +1087,7 @@ static void sc_deny(struct sc_insn *f, unsigned *k, unsigned nr, unsigned e) {
     f[(*k)++] = SC_RET(SC_ERRNO | e);
 }
 
-#ifdef __NR_socketcall
+#ifdef SC_MUX
 /* Syscall nr with its first argument tested by `op` (SC_JEQ) against
  * val: deny on a match, allow otherwise. The accumulator then holds the
  * argument, so these blocks come after every plain sc_deny. */
@@ -1005,6 +1099,46 @@ static void sc_deny_arg0(struct sc_insn *f, unsigned *k, unsigned nr,
     f[(*k)++] = SC_RET(SC_ERRNO | e);
     f[(*k)++] = SC_RET(SC_ALLOW);
 }
+#else
+#define SC_NOTIF   0x7fc00000u  /* SECCOMP_RET_USER_NOTIF */
+#define SC_JSET    0x45u        /* BPF_JMP | BPF_JSET | BPF_K */
+#define SC_AND     0x54u        /* BPF_ALU | BPF_AND | BPF_K */
+#define SC_ARG(n)  (SC_ARG0 + 8 * (n))  /* the low word: the kernel takes ints */
+
+/* A send that connects (TCP Fast Open) without connect(): EPERM when the
+ * flags argument has MSG_FASTOPEN. Ends in a return, like the block below. */
+static void sc_deny_fastopen(struct sc_insn *f, unsigned *k, unsigned nr, unsigned arg) {
+    f[(*k)++] = SC_INSN(SC_JEQ, 0, 4, nr);
+    f[(*k)++] = SC_INSN(SC_LD_ABS, 0, 0, SC_ARG(arg));
+    f[(*k)++] = SC_INSN(SC_JSET, 0, 1, 0x20000000u /* MSG_FASTOPEN */);
+    f[(*k)++] = SC_RET(SC_ERRNO | EPERM);
+    f[(*k)++] = SC_RET(SC_ALLOW);
+}
+
+/* socket(): unix and netlink as asked; inet and inet6 only as TCP streams,
+ * so every inet connection is one connect() the supervisor sees; the rest
+ * EACCES. Registers only — no pointer is read. */
+static void sc_inet_stream(struct sc_insn *f, unsigned *k) {
+    const struct sc_insn b[] = {
+        SC_INSN(SC_JEQ, 0, 14, __NR_socket),
+        SC_INSN(SC_LD_ABS, 0, 0, SC_ARG(0)),
+        SC_INSN(SC_JEQ, 11, 0, AF_UNIX),
+        SC_INSN(SC_JEQ, 10, 0, AF_NETLINK),
+        SC_INSN(SC_JEQ, 2, 0, AF_INET),
+        SC_INSN(SC_JEQ, 1, 0, AF_INET6),
+        SC_RET(SC_ERRNO | EACCES),
+        SC_INSN(SC_LD_ABS, 0, 0, SC_ARG(1)),
+        SC_INSN(SC_AND, 0, 0, ~(unsigned)(SOCK_NONBLOCK | SOCK_CLOEXEC)),
+        SC_INSN(SC_JEQ, 0, 3, SOCK_STREAM),
+        SC_INSN(SC_LD_ABS, 0, 0, SC_ARG(2)),
+        SC_INSN(SC_JEQ, 2, 0, 0),
+        SC_INSN(SC_JEQ, 1, 0, IPPROTO_TCP),
+        SC_RET(SC_ERRNO | EACCES),
+        SC_RET(SC_ALLOW),
+    };
+    memcpy(f + *k, b, sizeof(b));
+    *k += sizeof(b) / sizeof(b[0]);
+}
 #endif
 #endif
 
@@ -1014,7 +1148,7 @@ int contain_seccomp(unsigned flags) {
     errno = ENOSYS;
     return -1;
 #else
-    struct sc_insn f[48];
+    struct sc_insn f[96];
     unsigned k = 0;
     f[k++] = SC_INSN(SC_LD_ABS, 0, 0, offsetof(struct sc_data, arch));
     f[k++] = SC_INSN(SC_JEQ, 1, 0, SC_ARCH);
@@ -1035,12 +1169,81 @@ int contain_seccomp(unsigned flags) {
         sc_deny(f, &k, __NR_process_vm_readv, EPERM);
         sc_deny(f, &k, __NR_process_vm_writev, EPERM);
     }
-#ifdef __NR_socketcall
+#ifdef __arm__
+    /* EABI programs make the socket calls directly, but the old multiplexer
+     * (102) still answers: refused whole wherever sockets are filtered. */
+    if (flags & (CONTAIN_SC_NOSOCKET | CONTAIN_SC_CONNECT | CONTAIN_SC_INETSTREAM))
+        sc_deny(f, &k, 102, ENOSYS);
+#endif
+#ifdef SC_MUX
     /* i386's multiplexer: its first argument is the call, 1 = socket. */
-    if (flags & CONTAIN_SC_NOSOCKET) sc_deny_arg0(f, &k, __NR_socketcall, SC_JEQ, 1, EACCES);
+    if (flags & CONTAIN_SC_NOSOCKET) sc_deny_arg0(f, &k, SC_MUX, SC_JEQ, 1, EACCES);
+    /* Socket arguments live in memory there: no connect filter can be written. */
+    if (flags & (CONTAIN_SC_CONNECT | CONTAIN_SC_INETSTREAM)) { errno = ENOSYS; return -1; }
+#else
+    if (flags & CONTAIN_SC_CONNECT) {
+        f[k++] = SC_INSN(SC_JEQ, 0, 1, __NR_connect);
+        f[k++] = SC_RET(SC_NOTIF);
+    }
+    if (flags & CONTAIN_SC_INETSTREAM) {
+        sc_deny_fastopen(f, &k, __NR_sendto, 3);
+        sc_deny_fastopen(f, &k, __NR_sendmsg, 2);
+        sc_deny_fastopen(f, &k, __NR_sendmmsg, 3);
+        sc_inet_stream(f, &k);
+    }
 #endif
     f[k++] = SC_RET(SC_ALLOW);
     struct sc_prog prog = { .len = (unsigned short)k, .filter = f };
-    return prctl(PR_SET_SECCOMP, 2 /* SECCOMP_MODE_FILTER */, &prog, 0, 0) == 0 ? 0 : -1;
+    if (!(flags & CONTAIN_SC_CONNECT))
+        return prctl(PR_SET_SECCOMP, 2 /* SECCOMP_MODE_FILTER */, &prog, 0, 0) == 0 ? 0 : -1;
+#ifndef __NR_seccomp
+    errno = ENOSYS;
+    return -1;
+#else
+    /* NEW_LISTENER: the return is the supervisor's fd. WAIT_KILLABLE_RECV
+     * (5.19): once the supervisor has the call, only a fatal signal ends the
+     * wait — without it Go's preemption signals restart connect() under it. */
+    int l = (int)syscall(__NR_seccomp, 1 /* SET_MODE_FILTER */, (1u << 3) | (1u << 5), &prog);
+    if (l >= 0) fcntl(l, F_SETFD, FD_CLOEXEC);
+    return l;
 #endif
+#endif
+}
+
+/* The DNS stub's socket, inside the namespace: 127.0.0.1:53, which the
+ * namespace's creator may bind before the exec drops its capabilities. */
+static int dns_socket(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(53),
+                             .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    if (fd >= 0 && bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0) { close(fd); fd = -1; }
+    return fd;
+}
+
+int contain_intercept(const SandboxConfig *cfg, unsigned sc, int port) {
+    /* The stub only where resolv.conf could be pointed at it (contain_enter). */
+    int dns = cfg->plan.transparent && cfg->plan.fe == FE_MOUNTNS && port > 0
+              ? dns_socket() : -1;
+    int l = cfg->notif_sock > 0 ? contain_seccomp(sc | CONTAIN_SC_CONNECT) : -1;
+    if (l < 0) {
+        if (dns >= 0) close(dns);
+        return -1;
+    }
+    int fds[2] = { l, dns }, n = dns >= 0 ? 2 : 1;
+    int32_t p = port;
+    union { struct cmsghdr h; char b[CMSG_SPACE(sizeof(fds))]; } c;
+    memset(&c, 0, sizeof(c));
+    struct iovec io = { &p, sizeof(p) };
+    struct msghdr m = { .msg_iov = &io, .msg_iovlen = 1, .msg_control = c.b,
+                        .msg_controllen = CMSG_SPACE(n * sizeof(int)) };
+    struct cmsghdr *h = CMSG_FIRSTHDR(&m);
+    h->cmsg_level = SOL_SOCKET;
+    h->cmsg_type = SCM_RIGHTS;
+    h->cmsg_len = CMSG_LEN(n * sizeof(int));
+    memcpy(CMSG_DATA(h), fds, n * sizeof(int));
+    ssize_t w = sendmsg(cfg->notif_sock, &m, MSG_NOSIGNAL);
+    close(l);
+    if (dns >= 0) close(dns);
+    close(cfg->notif_sock);
+    return w == (ssize_t)sizeof(p) ? 0 : -1;
 }

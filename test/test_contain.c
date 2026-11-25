@@ -33,7 +33,8 @@ static int really_landlocks(void) {
 /* The other direction: a kernel that has neither. A filter in a fresh fork
  * (nothing probed yet) answers landlock_create_ruleset with ENOSYS and every
  * way of installing a seccomp filter with EINVAL, as a kernel built without
- * them does; the probe must then report neither. */
+ * them does; the probe must then report neither (nor user notification,
+ * which is installed the same way). */
 static unsigned caps_on_kernel_without_them(void) {
     int pfd[2];
     assert(pipe(pfd) == 0);
@@ -72,7 +73,7 @@ int main(void) {
     /* First, before this process probes and caches. */
     unsigned without = caps_on_kernel_without_them();
     assert(without != 0xffffffffu);
-    assert(!(without & (CONTAIN_CAP_LANDLOCK | CONTAIN_CAP_SECCOMP)));
+    assert(!(without & (CONTAIN_CAP_LANDLOCK | CONTAIN_CAP_SECCOMP | CONTAIN_CAP_NOTIF)));
 
     assert(contain_backend() && contain_backend()[0]);
 
@@ -100,7 +101,7 @@ int main(void) {
     setenv("CCLAW_CONTAIN_CAPS_MASK", "0", 1);
     assert(contain_caps(why, sizeof(why)) == 0);
     assert(!ok || strstr(why, "CCLAW_CONTAIN_CAPS_MASK"));
-    setenv("CCLAW_CONTAIN_CAPS_MASK", "0x17", 1);   /* everything but Landlock */
+    setenv("CCLAW_CONTAIN_CAPS_MASK", "0x37", 1);   /* everything but Landlock */
     assert(contain_caps(NULL, 0) == (caps & ~CONTAIN_CAP_LANDLOCK));
     setenv("CCLAW_CONTAIN_CAPS_MASK", "0xffffffff", 1);
     assert(contain_caps(NULL, 0) == caps);

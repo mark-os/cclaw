@@ -97,6 +97,7 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     w_u32(&b, (uint32_t)req->plan.lv.cpu_sec);
     w_u32(&b, (uint32_t)req->plan.fe);
     w_u32(&b, (uint32_t)req->plan.ne);
+    w_u8(&b, (unsigned char)req->plan.transparent);
     w_str(&b, req->workspace);
     w_str(&b, req->plan.lv.files == FILES_OPEN ? req->cwd_path : NULL);
     w_str(&b, req->db_path);
@@ -205,9 +206,12 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
     q->plan.lv.nproc   = (int)r_u32(r);
     q->plan.lv.cpu_sec = (int)r_u32(r);
     uint32_t fe = r_u32(r), ne = r_u32(r);
+    unsigned char transparent = r_u8(r);
     /* An enum out of range is a malformed request, never a default. */
-    if (files > FILES_PRIVATE || net > NET_NONE || fe > FE_LANDLOCK || ne > NE_SECCOMP)
+    if (files > FILES_PRIVATE || net > NET_NONE || fe > FE_LANDLOCK || ne > NE_NOTIF ||
+        transparent > 1 || (transparent && ne != NE_NETNS))
         r->err = 1;
+    q->plan.transparent = transparent;
     q->plan.lv.files = (FilesLevel)files;
     q->plan.lv.net   = (NetLevel)net;
     q->plan.fe = (FilesEnforcer)fe;
@@ -379,7 +383,7 @@ static SandboxMountReq *build_extra_mounts(char **read_paths, size_t read_count,
 /* Fill a SandboxConfig from the parsed request + descriptor. proxy_sock may be
  * NULL. extra_mounts must be freed by the caller after sandbox_child_setup. */
 static void build_sandbox_cfg(const RunToolParsed *q, int skip_pid_ns,
-                              const char *proxy_sock, SandboxConfig *cfg,
+                              const char *proxy_sock, int notif_sock, SandboxConfig *cfg,
                               SandboxMountReq **extra, size_t *n_extra) {
     memset(cfg, 0, sizeof(*cfg));
     cfg->workspace    = q->workspace;
@@ -392,6 +396,7 @@ static void build_sandbox_cfg(const RunToolParsed *q, int skip_pid_ns,
     cfg->plan         = q->plan;
     cfg->skip_pid_ns  = skip_pid_ns;
     cfg->tmp_dir      = q->tmp_dir;
+    cfg->notif_sock   = notif_sock;
     *n_extra = 0;
     *extra = build_extra_mounts(q->read_paths, q->read_count,
                                 q->write_paths, q->write_count, n_extra);
@@ -454,7 +459,7 @@ static void run_tool_verify_clean(void) {
  * pipe, apply the sandbox, then exec (shell) or run the js leaf in-process. */
 __attribute__((noreturn))
 static void sandbox_child_main(const VehicleDescriptor *desc, RunToolParsed *q,
-                               const char *psock, int pipefd[2]) {
+                               const char *psock, int pipefd[2], int notif_sock) {
     setpgid(0, 0);
     /* Die if the broker dies (daemon SIGKILLs on backstop deadline):
      * the broker can no longer kill our group, so tie our lifetime to it.
@@ -470,7 +475,7 @@ static void sandbox_child_main(const VehicleDescriptor *desc, RunToolParsed *q,
     SandboxConfig cfg;
     SandboxMountReq *extra = NULL;
     size_t n_extra = 0;
-    build_sandbox_cfg(q, desc->skip_pid_ns, psock, &cfg, &extra, &n_extra);
+    build_sandbox_cfg(q, desc->skip_pid_ns, psock, notif_sock, &cfg, &extra, &n_extra);
     if (sandbox_child_setup(&cfg) != 0) {
         fprintf(stderr, "%s\n", CONTAIN_FAILED_MSG);
         _exit(126);
@@ -781,18 +786,34 @@ static void serve_network_child(const VehicleDescriptor *desc, RunToolParsed *q,
     }
     const char *psock = proxy_active ? proxy_sock_path(&proxy) : NULL;
 
+    /* NE_NOTIF or transparent: the child sends its filter's listener back on
+     * this pair, and a thread here answers its connects (contain.h). */
+    int nsp[2] = { 0, 0 };
+    if (desc->inner_exec && (q->plan.ne == NE_NOTIF || q->plan.transparent) &&
+        socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, nsp) != 0) {
+        if (proxy_active) proxy_stop(&proxy);
+        die("error: net: socketpair failed");
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         if (proxy_active) proxy_stop(&proxy);
         die("error: net: fork failed");
     }
 
-    if (pid == 0)
-        sandbox_child_main(desc, q, psock, pipefd);  /* never returns */
+    if (pid == 0) {
+        if (nsp[0]) close(nsp[0]);
+        sandbox_child_main(desc, q, psock, pipefd, nsp[1]);  /* never returns */
+    }
 
     /* ── BROKER (parent of sandbox child) ── */
     setpgid(pid, pid);
     close(pipefd[1]);
+    ContainSup *sup = NULL;
+    if (nsp[0]) {
+        close(nsp[1]);
+        sup = contain_supervise(nsp[0], &q->plan);
+    }
 
     /* The broker outlives the fork for the whole command. It needs no secret
      * material post-fork (the child has COW copies), so scrub plaintext now to
@@ -820,6 +841,8 @@ static void serve_network_child(const VehicleDescriptor *desc, RunToolParsed *q,
     int drain_spilled = 0;
     int timed_out = drain_child(pid, pipefd[0], q->timeout, output, &out_len,
                                 &total_len, q->spill_path, &drain_spilled, &status);
+
+    contain_supervise_end(sup);
 
     /* Capture the contacted-hosts tag before proxy_stop frees the list. */
     char *hosts_json = proxy_active ? proxy_hosts_json(&proxy) : NULL;
@@ -973,7 +996,7 @@ int run_tool_main(void) {
     SandboxConfig cfg;
     SandboxMountReq *extra = NULL;
     size_t n_extra = 0;
-    build_sandbox_cfg(&q, desc->skip_pid_ns, NULL, &cfg, &extra, &n_extra);
+    build_sandbox_cfg(&q, desc->skip_pid_ns, NULL, 0, &cfg, &extra, &n_extra);
     if (sandbox_child_setup(&cfg) != 0)
         die(CONTAIN_FAILED_MSG);
 

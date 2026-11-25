@@ -13,6 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pwd.h>
+#include <ifaddrs.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "contain.h"
@@ -26,6 +31,7 @@ static FilesEnforcer g_fe;   /* what the planner must pick for file and js */
 
 #define MASK_BARE     "0x4"    /* the loopback proxy only */
 #define MASK_LANDLOCK "0x1c"   /* + Landlock + seccomp, still no namespaces */
+#define MASK_NOTIF    "0x3c"   /* + connect() interception (kernel 5.19+) */
 
 static void put(const char *path, const char *text) {
     FILE *f = fopen(path, "w");
@@ -244,6 +250,17 @@ static void test_refused_not_weakened(void) {
     assert(strstr(why, "'offline'"));
 }
 
+/* Landlock and seccomp but no connect() interception: the forced network
+ * level has no enforcer for the shell, and the refusal says what is missing. */
+static void test_firewalled_needs_notif(void) {
+    RunToolReq req;
+    char why[640];
+    Containment bf = named("basic-firewalled");
+    assert(run_tool_req_init(&req, EXEC_SHELL, "shell_exec", &bf, ws, NULL, db,
+                             why, sizeof(why)) != 0);
+    assert(strstr(why, "'basic-firewalled'") && strstr(why, "5.19") && strstr(why, "'basic'"));
+}
+
 /* A shell call planned from the row, as dispatch plans it. */
 static char *shell_call(const Containment *c, const char *cmd, FilesEnforcer fe,
                         NetEnforcer ne, const char **hosts, size_t nhosts) {
@@ -415,6 +432,263 @@ static void test_shell_advisory_deep_dir(void) {
     mock_server_stop();
 }
 
+/* The DNS stub parses whatever a contained program sends to 127.0.0.1:53.
+ * One table of packets: a reply's rcode and answer count, or none at all. A
+ * name reaches a CONNECT line, so only hostname characters are kept. */
+#define HDR(op, qd) 0x12, 0x34, op, 0, 0, qd, 0, 0, 0, 0, 0, 0
+#define EXAMPLE 1, 'a', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0
+static void test_dns_stub_parser(void) {
+    static const unsigned char a[] = { HDR(1, 1), EXAMPLE, 0, 1, 0, 1 },
+        a_again[] = { HDR(1, 1), 1, 'A', 7, 'E', 'x', 'a', 'm', 'p', 'l', 'e', 0, 0, 1, 0, 1 },
+        b[] = { HDR(1, 1), 1, 'b', 0, 0, 1, 0, 1 },
+        aaaa[] = { HDR(1, 1), EXAMPLE, 0, 28, 0, 1 },
+        mx[] = { HDR(1, 1), EXAMPLE, 0, 15, 0, 1 },
+        chaos[] = { HDR(1, 1), EXAMPLE, 0, 1, 0, 3 },
+        shorthdr[] = { 0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0 },
+        reply[] = { HDR(0x81, 1), EXAMPLE, 0, 1, 0, 1 },
+        two_q[] = { HDR(1, 2), EXAMPLE, 0, 1, 0, 1 },
+        no_q[] = { HDR(1, 0) },
+        opcode[] = { HDR(0x11, 1), EXAMPLE, 0, 1, 0, 1 },
+        overrun[] = { HDR(1, 1), 9, 'a', 'b', 0, 1, 0, 1 },
+        pointer[] = { HDR(1, 1), 0xc0, 0x0c, 0, 1, 0, 1 },
+        no_end[] = { HDR(1, 1), 1, 'a', 1, 'b' },
+        no_type[] = { HDR(1, 1), EXAMPLE, 0, 1 },
+        badchar[] = { HDR(1, 1), 3, 'a', ':', 'b', 0, 0, 1, 0, 1 },
+        crlf[] = { HDR(1, 1), 3, 'a', '\r', '\n', 0, 0, 1, 0, 1 },
+        root[] = { HDR(1, 1), 0, 0, 1, 0, 1 };
+    unsigned char lab64[12 + 66 + 4] = { HDR(1, 1), 64 }, long_name[12 + 5 * 64 + 5] = { HDR(1, 1) };
+    memset(lab64 + 13, 'x', 64);
+    for (int i = 0; i < 5; i++) {
+        long_name[12 + i * 64] = 63;
+        memset(long_name + 13 + i * 64, 'y', 63);
+    }
+    long_name[sizeof(long_name) - 4] = 1;   /* type A after a missing root: still too long */
+    struct { const unsigned char *p; size_t n; int rcode, an; unsigned addr; } t[] = {
+        { a,        sizeof(a),        0, 1, 1 },
+        { a_again,  sizeof(a_again),  0, 1, 1 },   /* same name, any case: same address */
+        { b,        sizeof(b),        0, 1, 2 },
+        { aaaa,     sizeof(aaaa),     0, 0, 0 },
+        { mx,       sizeof(mx),       4, 0, 0 },
+        { chaos,    sizeof(chaos),    4, 0, 0 },
+        { shorthdr, sizeof(shorthdr), -1, 0, 0 },
+        { reply,    sizeof(reply),    -1, 0, 0 },
+        { two_q,    sizeof(two_q),    1, 0, 0 },
+        { no_q,     sizeof(no_q),     1, 0, 0 },
+        { opcode,   sizeof(opcode),   4, 0, 0 },
+        { overrun,  sizeof(overrun),  1, 0, 0 },
+        { pointer,  sizeof(pointer),  1, 0, 0 },
+        { no_end,   sizeof(no_end),   1, 0, 0 },
+        { no_type,  sizeof(no_type),  1, 0, 0 },
+        { badchar,  sizeof(badchar),  3, 0, 0 },
+        { crlf,     sizeof(crlf),     3, 0, 0 },
+        { root,     sizeof(root),     3, 0, 0 },
+        { lab64,    sizeof(lab64),    1, 0, 0 },
+        { long_name, sizeof(long_name), 1, 0, 0 },
+    };
+    static ContainDnsNames names;
+    for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+        unsigned char out[512];
+        size_t n = contain_dns_reply(&names, t[i].p, t[i].n, out, sizeof(out));
+        int ok = t[i].rcode < 0 ? n == 0
+            : n >= 12 && out[0] == 0x12 && out[1] == 0x34 && (out[2] & 0x80) &&
+              (out[3] & 0x0f) == t[i].rcode && out[7] == t[i].an &&
+              (!t[i].an || (n == t[i].n + 16 && out[n - 4] == 198 && out[n - 3] == 18 &&
+                            out[n - 2] == 0 && out[n - 1] == t[i].addr));
+        if (!ok) printf("    row %zu: n=%zu rcode=%d an=%d\n", i, n, n ? out[3] & 0x0f : -1,
+                        n ? out[7] : -1);
+        assert(ok);
+    }
+    assert(names.n == 2 && strcmp(names.name[0], "a.example") == 0);
+}
+
+/* A non-loopback IPv4 address of this host, for destinations that must go
+ * through the proxy (the mock listens on every address). "" when none. */
+static void host_ip(char *out, size_t cap) {
+    struct ifaddrs *ifa, *i;
+    out[0] = '\0';
+    if (getifaddrs(&ifa) != 0) return;
+    for (i = ifa; i; i = i->ifa_next)
+        if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET &&
+            (ntohl(((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr) >> 24) != 127) {
+            inet_ntop(AF_INET, &((struct sockaddr_in *)i->ifa_addr)->sin_addr, out, (socklen_t)cap);
+            break;
+        }
+    freeifaddrs(ifa);
+}
+
+/* A shell call that must be planned transparent (the namespace) or not. */
+static char *shell_call_t(const Containment *c, const char *cmd, FilesEnforcer fe,
+                          NetEnforcer ne, int transparent, const char **hosts, size_t n) {
+    RunToolReq req;
+    char why[640];
+    assert(run_tool_req_init(&req, EXEC_SHELL, "shell_exec", c, ws, NULL, db, why,
+                             sizeof(why)) == 0);
+    assert(req.plan.fe == fe && req.plan.ne == ne && req.plan.transparent == transparent);
+    req.tmp_dir = scratch;
+    req.agent_dir = agent_dir;
+    req.host_rules = hosts;
+    req.host_count = n;
+    req.command = cmd;
+    req.timeout = 20;
+    return run_tool_req_full(&req, NULL, NULL);
+}
+
+static const char PY_GET[] =
+    "import socket, sys\n"
+    "def get(h, p):\n"
+    "    try:\n"
+    "        s = socket.create_connection((h, p), timeout=5)\n"
+    "        s.sendall(b'GET /v1/chat/completions HTTP/1.0\\r\\nConnection: close\\r\\n\\r\\n')\n"
+    "        d = b''\n"
+    "        while True:\n"
+    "            c = s.recv(4096)\n"
+    "            if not c: break\n"
+    "            d += c\n"
+    "        return d.split(b'\\r\\n\\r\\n', 1)[-1].decode()\n"
+    "    except OSError as e:\n"
+    "        return 'errno%d' % e.errno\n"
+    /* From a second thread: the supervisor is told the calling thread's id,
+     * and must find the process (and its descriptors) from that. */
+    "import threading\n"
+    "out = []\n"
+    "t = threading.Thread(target=lambda: out.append("
+    "' '.join(get(a, int(sys.argv[1])) for a in sys.argv[2:])))\n"
+    "t.start(); t.join(); print(out[0])\n";
+
+static void write_ws_file(const char *name, const char *text) {
+    char p[320];
+    snprintf(p, sizeof(p), "%s/%s", ws, name);
+    put(p, text);
+}
+
+/* In the namespace, with interception: a program that knows nothing of
+ * proxies resolves a name (the DNS stub) and connects; the proxy lets the
+ * granted name through and refuses the other. A proxy-aware call still
+ * works. Without interception the first would have had no route at all. */
+static void test_shell_transparent(void) {
+    struct addrinfo *ai;
+    if (access("/usr/bin/python3", X_OK) != 0 ||
+        getaddrinfo("cclaw-mock.localhost", NULL, NULL, &ai) != 0) {
+        printf("    SKIP: needs /usr/bin/python3 and a host resolver that answers"
+               " *.localhost\n");
+        return;
+    }
+    freeaddrinfo(ai);
+    write_ws_file("get.py", PY_GET);
+    int port = mock_server_start();
+    assert(port > 0);
+    mock_server_enqueue(200, "transparent-ok");
+    mock_server_enqueue(200, "via-proxy");
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "python3 get.py %d cclaw-mock.localhost cclaw-denied.localhost;"
+             " curl -s -m 5 --noproxy '' http://127.0.0.1:%d/v1/chat/completions", port, port);
+    const char *grant[] = { "cclaw-mock.localhost", "127.0.0.1/32" };
+    Containment c = named("standard");
+    char *r = shell_call_t(&c, cmd, FE_MOUNTNS, NE_NETNS, 1, grant, 2);
+    int ok = strstr(r, "transparent-ok errno111") && strstr(r, "via-proxy") &&
+             mock_server_request_count() == 2;
+    if (!ok) printf("    transparent: %s requests=%d\n", r, mock_server_request_count());
+    assert(ok);
+    free(r);
+    mock_server_stop();
+}
+
+/* No namespaces, interception the enforcer (basic-firewalled): a direct
+ * connection to an ungranted address is refused, to a granted one it goes
+ * through the proxy; no UDP or raw socket can be made, and no Fast Open send
+ * connects past connect(); a proxy-aware call works. */
+static void test_shell_notif_forced(void) {
+    char ip[64];
+    host_ip(ip, sizeof(ip));
+    if (!ip[0] || access("/usr/bin/python3", X_OK) != 0) {
+        printf("    SKIP: needs a non-loopback IPv4 address and /usr/bin/python3\n");
+        return;
+    }
+    int port = mock_server_start();
+    assert(port > 0);
+    mock_server_enqueue(200, "direct-tunnelled");
+    mock_server_enqueue(200, "proxy-aware");
+    char cmd[1024], grant_ip[80];
+    snprintf(cmd, sizeof(cmd),
+             "curl -s -m 5 --noproxy '*' http://%s:%d/v1/chat/completions || echo DIRECT_REFUSED;"
+             " curl -s -m 5 http://%s:%d/v1/chat/completions; echo;"
+             " python3 -c \"import socket\n"
+             "for t in (socket.SOCK_STREAM, socket.SOCK_DGRAM, socket.SOCK_RAW):\n"
+             "    try: socket.socket(socket.AF_INET, t); print('open')\n"
+             "    except OSError as e: print('errno%%d' %% e.errno)\n"
+             "try: socket.socket().sendto(b'x', socket.MSG_FASTOPEN, ('%s', %d)); print('fastopen')\n"
+             "except OSError as e: print('errno%%d' %% e.errno)\"",
+             ip, port, ip, port, ip, port);
+    snprintf(grant_ip, sizeof(grant_ip), "%s/32", ip);
+    const char *grant[] = { grant_ip };
+    Containment c = named("basic-firewalled");
+    char *r = shell_call_t(&c, cmd, FE_LANDLOCK, NE_NOTIF, 0, NULL, 0);
+    int ok = strstr(r, "DIRECT_REFUSED") && !strstr(r, "direct-tunnelled") &&
+             strstr(r, "open\nerrno13\nerrno13\nerrno1\n") && mock_server_request_count() == 0;
+    if (!ok) printf("    ungranted: %s requests=%d\n", r, mock_server_request_count());
+    assert(ok);
+    free(r);
+    r = shell_call_t(&c, cmd, FE_LANDLOCK, NE_NOTIF, 0, grant, 1);
+    ok = strstr(r, "direct-tunnelled") && strstr(r, "proxy-aware") &&
+         !strstr(r, "DIRECT_REFUSED") && mock_server_request_count() == 2;
+    if (!ok) printf("    granted: %s requests=%d\n", r, mock_server_request_count());
+    assert(ok);
+    free(r);
+    mock_server_stop();
+}
+
+/* The supervisor reads the address once and connects the socket itself, so
+ * a second thread rewriting the sockaddr during connect() cannot move the
+ * connection: the address flips between closed loopback (connected directly)
+ * and an ungranted listener on this host's own address, which a continued
+ * call would reach. No grants: nothing may ever be accepted there. */
+static void test_shell_notif_toctou(void) {
+    char ip[64];
+    host_ip(ip, sizeof(ip));
+    if (!ip[0] || system("command -v cc >/dev/null 2>&1") != 0) {
+        printf("    SKIP: needs a non-loopback IPv4 address and a C compiler\n");
+        return;
+    }
+    static const char src[] =
+        "#include <arpa/inet.h>\n#include <pthread.h>\n#include <stdio.h>\n"
+        "#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n"
+        "static struct sockaddr_in a, good, bad;\n"
+        "static void *flip(void *x) { volatile struct sockaddr_in *p = &a;"
+        " for (;;) { *p = bad; *p = good; } return x; }\n"
+        "int main(int c, char **v) { (void)c;\n"
+        "  good.sin_family = bad.sin_family = AF_INET;\n"
+        "  inet_pton(AF_INET, \"127.0.0.1\", &good.sin_addr); good.sin_port = htons(atoi(v[1]));\n"
+        "  inet_pton(AF_INET, v[2], &bad.sin_addr); bad.sin_port = htons(atoi(v[3]));\n"
+        "  a = good; pthread_t t; pthread_create(&t, 0, flip, 0); int ok = 0;\n"
+        "  for (int i = 0; i < 300; i++) { int s = socket(AF_INET, SOCK_STREAM, 0);\n"
+        "    if (connect(s, (struct sockaddr *)&a, sizeof a) == 0) ok++; close(s); }\n"
+        "  printf(\"connected=%d\\n\", ok); return 0; }\n";
+    write_ws_file("flip.c", src);
+    char cmd[640];
+    snprintf(cmd, sizeof(cmd), "cc -O2 -pthread -o %s/flip %s/flip.c", ws, ws);
+    assert(system(cmd) == 0);
+    int lis = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0), closed = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in la = { .sin_family = AF_INET }, ca = { .sin_family = AF_INET };
+    inet_pton(AF_INET, ip, &la.sin_addr);
+    inet_pton(AF_INET, "127.0.0.1", &ca.sin_addr);
+    socklen_t ll = sizeof(la), cl = sizeof(ca);
+    assert(bind(lis, (struct sockaddr *)&la, sizeof(la)) == 0 && listen(lis, 512) == 0);
+    assert(bind(closed, (struct sockaddr *)&ca, sizeof(ca)) == 0);
+    assert(getsockname(lis, (struct sockaddr *)&la, &ll) == 0 &&
+           getsockname(closed, (struct sockaddr *)&ca, &cl) == 0);
+    close(closed);   /* nothing listens on that loopback port now */
+    snprintf(cmd, sizeof(cmd), "./flip %d %s %d", ntohs(ca.sin_port), ip, ntohs(la.sin_port));
+    Containment c = named("basic-firewalled");
+    char *r = shell_call_t(&c, cmd, FE_LANDLOCK, NE_NOTIF, 0, NULL, 0);
+    int accepted = 0;
+    while (accept(lis, NULL, NULL) >= 0) accepted++;
+    close(lis);
+    int ok = strstr(r, "connected=0") && accepted == 0;
+    if (!ok) printf("    toctou: %s accepted=%d\n", r, accepted);
+    assert(ok);
+    free(r);
+}
+
 int main(void) {
     TEST_INIT();
     unsigned host = contain_caps(NULL, 0);
@@ -443,6 +717,23 @@ int main(void) {
         RUN(test_shell_landlock);
         RUN(test_shell_seccomp_none);
         RUN(test_shell_advisory_deep_dir);
+        RUN(test_firewalled_needs_notif);
+    }
+
+    RUN(test_dns_stub_parser);
+    if (!(host & CONTAIN_CAP_NOTIF)) {
+        printf("  SKIP: no seccomp user notification with pidfd_getfd here (kernel"
+               " 5.19+; caps %#x)\n", host);
+    } else {
+        if (host & CONTAIN_CAP_MOUNTNS) {
+            unsetenv("CCLAW_CONTAIN_CAPS_MASK");
+            RUN(test_shell_transparent);
+        } else {
+            printf("  SKIP: no user namespaces, so no transparent namespace test\n");
+        }
+        setenv("CCLAW_CONTAIN_CAPS_MASK", MASK_NOTIF, 1);
+        RUN(test_shell_notif_forced);
+        RUN(test_shell_notif_toctou);
     }
 
     if (!(host & CONTAIN_CAP_NETNS)) {

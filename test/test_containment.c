@@ -14,6 +14,8 @@
 #define LL   (BARE | CONTAIN_CAP_LANDLOCK | CONTAIN_CAP_SECCOMP)  /* ... with 5.13+ */
 #define ALL  (NS | LL)
 #define LLNS (LL | CONTAIN_CAP_NETNS)  /* a network namespace, no mount namespace */
+#define LLN  (LL | CONTAIN_CAP_NOTIF)  /* no namespaces, 5.19+: connect() interception */
+#define T    1                         /* transparent */
 
 static Containment row(const char *name) {
     Containment c = { .known = 0 };
@@ -26,14 +28,15 @@ static Containment row(const char *name) {
     return c;
 }
 
-#define OK(fe, ne) fe, ne, NULL
-#define NO(word)   FE_NONE, NE_NONE, word
+#define OK(fe, ne) fe, ne, 0, NULL
+#define OKT(fe, ne) fe, ne, T, NULL
+#define NO(word)   FE_NONE, NE_NONE, 0, word
 
 static void test_plan_table(void) {
     static const struct {
         const char *row; FilesLevel files; NetLevel net;  /* row NULL: use files/net */
         ExecVehicle v; unsigned caps;
-        FilesEnforcer fe; NetEnforcer ne; const char *refusal;
+        FilesEnforcer fe; NetEnforcer ne; int transparent; const char *refusal;
     } t[] = {
         /* With namespaces: the shipped rows run as they always have. */
         { "standard", 0, 0, EXEC_SHELL, NS, OK(FE_MOUNTNS, NE_NETNS) },
@@ -92,6 +95,23 @@ static void test_plan_table(void) {
         { NULL, FILES_OPEN, NET_ADVISORY, EXEC_SHELL, ALL, OK(FE_NONE, NE_ENV) },
         { NULL, FILES_OPEN, NET_ADVISORY, EXEC_SHELL, BARE, OK(FE_NONE, NE_ENV) },
         { NULL, FILES_OPEN, NET_ADVISORY, EXEC_SHELL, 0,   NO("advisory") },
+        /* With connect() interception: the namespace's shell is also
+         * transparent (never offline's, never js or file tools); without a
+         * namespace it is the enforcer for firewalled and advisory, and needs
+         * the loopback proxy. */
+        { "standard", 0, 0, EXEC_SHELL, ALL | CONTAIN_CAP_NOTIF, OKT(FE_MOUNTNS, NE_NETNS) },
+        { "basic",    0, 0, EXEC_SHELL, ALL | CONTAIN_CAP_NOTIF, OKT(FE_MOUNTNS, NE_NETNS) },
+        { "standard", 0, 0, EXEC_JS,    ALL | CONTAIN_CAP_NOTIF, OK(FE_MOUNTNS, NE_NETNS) },
+        { "offline",  0, 0, EXEC_SHELL, ALL | CONTAIN_CAP_NOTIF, OK(FE_MOUNTNS, NE_NETNS) },
+        { NULL, FILES_OPEN, NET_FIREWALLED, EXEC_SHELL, LLNS | CONTAIN_CAP_NOTIF, OKT(FE_NONE, NE_NETNS) },
+        { "basic-firewalled", 0, 0, EXEC_SHELL, LLN, OK(FE_LANDLOCK, NE_NOTIF) },
+        { "basic-firewalled", 0, 0, EXEC_SHELL, LL,  NO("5.19") },
+        { "basic-firewalled", 0, 0, EXEC_JS,    LLN, OK(FE_LANDLOCK, NE_CODE) },
+        { "basic",    0, 0, EXEC_SHELL, LLN, OK(FE_LANDLOCK, NE_NOTIF) },
+        { "basic",    0, 0, EXEC_FILE,  LLN, OK(FE_LANDLOCK, NE_NONE) },
+        { NULL, FILES_OPEN, NET_FIREWALLED, EXEC_SHELL, BARE | CONTAIN_CAP_SECCOMP | CONTAIN_CAP_NOTIF, OK(FE_NONE, NE_NOTIF) },
+        { NULL, FILES_OPEN, NET_FIREWALLED, EXEC_SHELL, CONTAIN_CAP_SECCOMP | CONTAIN_CAP_NOTIF, NO("firewalled") },
+        { NULL, FILES_OPEN, NET_NONE,       EXEC_SHELL, LLN, OK(FE_NONE, NE_SECCOMP) },
         /* The namespace cannot be direct. */
         { NULL, FILES_CONFINED, NET_DIRECT, EXEC_JS, NS,   NO("direct") },
         { NULL, FILES_CONFINED, NET_DIRECT, EXEC_JS, BARE, OK(FE_CODE, NE_NONE) },
@@ -104,10 +124,11 @@ static void test_plan_table(void) {
         int rc = contain_plan(&c, t[i].v, t[i].caps, &p, why, sizeof(why));
         int ok = t[i].refusal
             ? rc != 0 && strstr(why, t[i].refusal) && strstr(why, c.name)
-            : rc == 0 && p.fe == t[i].fe && p.ne == t[i].ne &&
+            : rc == 0 && p.fe == t[i].fe && p.ne == t[i].ne && p.transparent == t[i].transparent &&
               p.lv.files == c.lv.files && p.lv.net == c.lv.net &&
               p.lv.nproc == c.lv.nproc && p.lv.cpu_sec == c.lv.cpu_sec;
-        if (!ok) printf("    row %zu: rc=%d fe=%d ne=%d %s\n", i, rc, p.fe, p.ne, why);
+        if (!ok) printf("    row %zu: rc=%d fe=%d ne=%d t=%d %s\n", i, rc, p.fe, p.ne,
+                        p.transparent, why);
         assert(ok);
     }
 }
@@ -134,6 +155,7 @@ static void test_refusal_names_alternative(void) {
     assert(contain_suggest(NS) && strcmp(contain_suggest(NS), "standard") == 0);
     assert(contain_suggest(BARE) && strcmp(contain_suggest(BARE), "none") == 0);
     assert(contain_suggest(LL) && strcmp(contain_suggest(LL), "basic") == 0);
+    assert(contain_suggest(LLN) && strcmp(contain_suggest(LLN), "basic-firewalled") == 0);
     assert(contain_plan(&std, EXEC_SHELL, LL, &p, why, sizeof(why)) != 0);
     assert(strstr(why, "'basic'"));
     Containment basic = row("basic");

@@ -72,14 +72,15 @@ int contain_landlock(const SandboxMount *rules, size_t n);
  * NOSOCKET socket() for every family (EACCES; socketpair stays), NOTRACE
  * ptrace and process_vm_readv/writev (EPERM), INETSTREAM every inet socket
  * but TCP and every family but unix and netlink (EACCES), and a send with
- * MSG_FASTOPEN (EPERM). CONNECT hands connect() to a supervisor: the return
- * is then the listener. io_uring is ENOSYS under every flag: its operations
+ * MSG_FASTOPEN (EPERM), NOLISTEN listen() (EACCES: nothing connects in).
+ * CONNECT hands connect() to a supervisor: the return is then the listener. io_uring is ENOSYS under every flag: its operations
  * would bypass a syscall filter. 0 (or the listener), or -1 (the caller must
  * not run the tool). */
 #define CONTAIN_SC_NOSOCKET   0x1u
 #define CONTAIN_SC_NOTRACE    0x2u
 #define CONTAIN_SC_CONNECT    0x4u
 #define CONTAIN_SC_INETSTREAM 0x8u
+#define CONTAIN_SC_NOLISTEN   0x10u
 int contain_seccomp(unsigned flags);
 
 /* NE_NOTIF or transparent, the child's last step: install the filter (sc plus
@@ -90,10 +91,14 @@ int contain_intercept(const SandboxConfig *cfg, unsigned sc, int port);
 
 /* The broker's side (a thread per call, ended by contain_supervise_end once
  * the child is reaped): receives the hand-off on `sock` (taken over) and
- * answers every connect() and DNS query until the end. NULL when it cannot
- * start; the child's connects then fail. */
+ * answers every connect() and DNS query until the end. Under NE_NOTIF with
+ * network 'firewalled' the host itself is out of reach too: on loopback only
+ * the shim's port, and (unless files are 'open') only a unix socket whose
+ * file is under one of `roots` or is one of them. NULL when it cannot start;
+ * the child's connects then fail. */
 typedef struct ContainSup ContainSup;
-ContainSup *contain_supervise(int sock, const ContainPlan *p);
+ContainSup *contain_supervise(int sock, const ContainPlan *p, const char *const *roots,
+                              size_t n);
 void contain_supervise_end(ContainSup *s);
 
 /* The DNS stub's table: one address from 198.18.0.0/15 per name, for the

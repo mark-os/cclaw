@@ -31,7 +31,11 @@ int contain_intercept(const SandboxConfig *c, unsigned sc, int port) {
     (void)c; (void)sc; (void)port;
     return -1;
 }
-ContainSup *contain_supervise(int sock, const ContainPlan *p) { (void)sock; (void)p; return NULL; }
+ContainSup *contain_supervise(int sock, const ContainPlan *p, const char *const *roots,
+                              size_t n) {
+    (void)sock; (void)p; (void)roots; (void)n;
+    return NULL;
+}
 void contain_supervise_end(ContainSup *s) { (void)s; }
 
 int contain_egress(const SandboxConfig *cfg) { (void)cfg; return -1; }

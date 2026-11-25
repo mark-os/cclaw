@@ -231,8 +231,10 @@ scoping is the first line; this is the belt) and io_uring.
   `ps` and other processes' command lines are visible.
 - `connect()` to an existing pathname socket is not mediated by Landlock:
   under `basic` the shell can reach `/run/dbus/system_bus_socket` or
-  `/var/run/docker.sock`, subject to their file permissions. Only network
-  `none` (seccomp, no sockets at all) closes that.
+  `/var/run/docker.sock`, subject to their file permissions. Network `none`
+  (seccomp, no sockets at all) closes that, and so does `firewalled` under
+  `NE_NOTIF`, where the supervisor makes every unix connection and refuses
+  one outside the agent's directories (below).
 - Below ABI 6, signals to processes of the same uid outside the child (the
   daemon included) and abstract unix sockets are reachable.
 - A hard link to the key placed in the workspace by someone outside the child
@@ -331,9 +333,27 @@ supervisor connects loopback destinations and netlink directly, and unix
 pathname sockets with a relative path resolved against the caller's working
 directory; an abstract unix address only under files `open` (Landlock's
 scoping would refuse it). So: no UDP and no DNS — a program that ignores the
-proxy reaches only literal addresses the proxy allows; the host's loopback
-stays reachable (the agent's own dev servers, and whatever else listens
-there); listening sockets are untouched.
+proxy reaches only literal addresses the proxy allows.
+
+What is left of the host itself depends on the level. Under `advisory` the
+host's loopback stays reachable (the agent's own dev servers, and whatever
+else listens there), any pathname socket the user may open connects, and
+listening sockets are untouched. Under `firewalled` the host's own services
+are out of reach as well, since a local daemon would act or connect for the
+caller:
+
+- on loopback only the shim's port connects (`ECONNREFUSED` otherwise), so
+  the agent cannot reach a server it started itself either;
+- a unix socket connects only when its file — the real path, after links —
+  is under the workspace, the scratch dir or a path grant, or is the proxy's
+  own socket (`EACCES` otherwise). The supervisor holds the file open and
+  connects to what it holds, so a link swapped in afterwards is not followed.
+  Under files `open` every pathname socket connects: that level already lets
+  the shell write anywhere the user can;
+- `listen()` is `EACCES`, for unix sockets too: nothing connects in.
+
+A datagram sent to a unix address without `connect()` (`sendto` to
+`/dev/log`) is not seen by the supervisor and still goes.
 
 **Transparent** (`NE_NETNS` + `NOTIF`): unhandled connects are continued.
 With the mount namespace the child also binds a UDP socket on
@@ -380,7 +400,8 @@ self-inspection is `db_query`, which runs in the trusted parent.
 vehicle, the shell under `confined` + `none` with no sockets, a network
 namespace without a mount namespace, js through the proxy, refusals;
 interception: a proxy-unaware program by name in the namespace,
-`basic-firewalled` without namespaces in both directions, a sockaddr
+`basic-firewalled` without namespaces in both directions and the host's
+own services closed to it (open to `basic`), a sockaddr
 rewritten during the call, the DNS stub's malformed packets),
 `test/test_contain.c` (the probe in both directions, the mask), the namespace
 suites (`test_shell_namespace.c`,

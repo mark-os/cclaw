@@ -508,7 +508,8 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     }
     unsigned sc = (p->fe == FE_LANDLOCK || p->ne == NE_NOTIF ? CONTAIN_SC_NOTRACE : 0) |
                   (p->ne == NE_SECCOMP ? CONTAIN_SC_NOSOCKET : 0) |
-                  (p->ne == NE_NOTIF ? CONTAIN_SC_INETSTREAM : 0);
+                  (p->ne == NE_NOTIF ? CONTAIN_SC_INETSTREAM : 0) |
+                  (p->ne == NE_NOTIF && p->lv.net == NET_FIREWALLED ? CONTAIN_SC_NOLISTEN : 0);
     int rc = p->ne == NE_NOTIF || p->transparent
         ? contain_intercept(cfg, sc, port > 0 ? port : 0)
         : sc ? contain_seccomp(sc) : 0;

@@ -812,7 +812,19 @@ static void serve_network_child(const VehicleDescriptor *desc, RunToolParsed *q,
     ContainSup *sup = NULL;
     if (nsp[0]) {
         close(nsp[1]);
-        sup = contain_supervise(nsp[0], &q->plan);
+        /* Where a unix socket may be: the agent's own directories, its path
+         * grants, and the proxy's socket (net_shim's connect mode dials it). */
+        size_t nr = 0;
+        const char **roots = calloc(q->read_count + q->write_count + 3, sizeof(*roots));
+        if (roots) {
+            roots[nr++] = q->workspace;
+            roots[nr++] = q->tmp_dir;
+            roots[nr++] = psock;
+            for (size_t i = 0; i < q->read_count; i++) roots[nr++] = q->read_paths[i];
+            for (size_t i = 0; i < q->write_count; i++) roots[nr++] = q->write_paths[i];
+        }
+        sup = contain_supervise(nsp[0], &q->plan, roots, nr);
+        free(roots);
     }
 
     /* The broker outlives the fork for the whole command. It needs no secret

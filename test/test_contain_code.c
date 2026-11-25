@@ -19,6 +19,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include "contain.h"
 #include "mock_server.h"
@@ -637,6 +638,72 @@ static void test_shell_notif_forced(void) {
     mock_server_stop();
 }
 
+/* A unix listener at `path`, or a TCP one on loopback (path NULL; *port set). */
+static int host_listener(const char *path, int *port) {
+    int fd = socket(path ? AF_UNIX : AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_un u = { .sun_family = AF_UNIX };
+    struct sockaddr_in in = { .sin_family = AF_INET,
+                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t il = sizeof(in);
+    if (path) {
+        snprintf(u.sun_path, sizeof(u.sun_path), "%s", path);
+        unlink(path);
+        assert(bind(fd, (struct sockaddr *)&u, sizeof(u)) == 0);
+    } else {
+        assert(bind(fd, (struct sockaddr *)&in, sizeof(in)) == 0 &&
+               getsockname(fd, (struct sockaddr *)&in, &il) == 0);
+        *port = ntohs(in.sin_port);
+    }
+    assert(listen(fd, 8) == 0);
+    return fd;
+}
+
+/* 'firewalled' without a namespace keeps the host's own services out of
+ * reach as well: a unix socket outside the agent's directories (also through
+ * a link inside them), a port on the host's loopback, and listening for a
+ * connection in. 'advisory' on the same enforcer promises none of it.
+ * Before this, every one of them connected under basic-firewalled. */
+static void test_shell_notif_host(void) {
+    if (access("/usr/bin/python3", X_OK) != 0) {
+        printf("    SKIP: needs /usr/bin/python3\n");
+        return;
+    }
+    char in_ws[320], outside[320], link_p[320], cmd[1024];
+    int port = 0;
+    snprintf(in_ws, sizeof(in_ws), "%s/in.sock", ws);
+    snprintf(outside, sizeof(outside), "%s/out.sock", root);
+    snprintf(link_p, sizeof(link_p), "%s/out_link", ws);
+    int a = host_listener(in_ws, NULL), b = host_listener(outside, NULL);
+    int t = host_listener(NULL, &port);
+    unlink(link_p);
+    assert(symlink(outside, link_p) == 0);
+    snprintf(cmd, sizeof(cmd),
+             "python3 -c \"import socket\n"
+             "def go(fam, addr):\n"
+             "    try: socket.socket(fam).connect(addr); print('ok')\n"
+             "    except OSError as e: print('errno%%d' %% e.errno)\n"
+             "go(socket.AF_UNIX, 'in.sock')\n"
+             "go(socket.AF_UNIX, '%s')\n"
+             "go(socket.AF_UNIX, 'out_link')\n"
+             "go(socket.AF_INET, ('127.0.0.1', %d))\n"
+             "try: socket.socket().listen(); print('ok')\n"
+             "except OSError as e: print('errno%%d' %% e.errno)\"", outside, port);
+    Containment c = named("basic-firewalled");
+    char *r = shell_call_t(&c, cmd, FE_LANDLOCK, NE_NOTIF, 0, NULL, 0);
+    int ok = strstr(r, "ok\nerrno13\nerrno13\nerrno111\nerrno13\n") != NULL;
+    if (!ok) printf("    firewalled: %s\n", r);
+    assert(ok);
+    free(r);
+    c = named("basic");
+    r = shell_call_t(&c, cmd, FE_LANDLOCK, NE_NOTIF, 0, NULL, 0);
+    ok = strstr(r, "ok\nok\nok\nok\nok\n") != NULL;
+    if (!ok) printf("    advisory: %s\n", r);
+    assert(ok);
+    free(r);
+    close(a); close(b); close(t);
+    unlink(in_ws); unlink(outside); unlink(link_p);
+}
+
 /* The supervisor reads the address once and connects the socket itself, so
  * a second thread rewriting the sockaddr during connect() cannot move the
  * connection: the address flips between closed loopback (connected directly)
@@ -733,6 +800,7 @@ int main(void) {
         }
         setenv("CCLAW_CONTAIN_CAPS_MASK", MASK_NOTIF, 1);
         RUN(test_shell_notif_forced);
+        RUN(test_shell_notif_host);
         RUN(test_shell_notif_toctou);
     }
 

@@ -1181,6 +1181,7 @@ int contain_seccomp(unsigned flags) {
     /* Socket arguments live in memory there: no connect filter can be written. */
     if (flags & (CONTAIN_SC_CONNECT | CONTAIN_SC_INETSTREAM)) { errno = ENOSYS; return -1; }
 #else
+    if (flags & CONTAIN_SC_NOLISTEN) sc_deny(f, &k, __NR_listen, EACCES);
     if (flags & CONTAIN_SC_CONNECT) {
         f[k++] = SC_INSN(SC_JEQ, 0, 1, __NR_connect);
         f[k++] = SC_RET(SC_NOTIF);

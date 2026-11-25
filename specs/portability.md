@@ -67,7 +67,7 @@ What each policy gets:
 | Files, shell | Mount namespace | `confined`: Landlock (existence visible, no private `/tmp`/`/proc`) | refused |
 | `cclaw.db` / `.cclaw_key` | Outside every mount set, masked if a bind would show them | In no Landlock rule; the path check refuses them by path and by inode | The path check |
 | Host allowlist, `web_fetch` and JS `http_request` | Network namespace; the only route out is the broker's proxy | curl dials the proxy's unix socket itself (`NE_CODE`): the same `proxy_decide()`, metadata and private-address blocks, SNI check, narrowing and contacted-host log | same |
-| Host allowlist, shell | Network namespace + `net_shim`; with interception every TCP `connect()` too, names through a DNS stub | `firewalled`, and `advisory`: with interception every TCP `connect()` goes through the proxy, no UDP, host loopback reachable; without it `advisory` is the shim and the proxy variables, `firewalled` refused; `none`: seccomp, no sockets | `advisory` as left; `firewalled`/`none`: refused |
+| Host allowlist, shell | Network namespace + `net_shim`; with interception every TCP `connect()` too, names through a DNS stub | `firewalled`, and `advisory`: with interception every TCP `connect()` goes through the proxy, no UDP (`firewalled`: also no host loopback, no unix socket outside the agent's directories, no `listen()`; `advisory`: those stay); without it `advisory` is the shim and the proxy variables, `firewalled` refused; `none`: seccomp, no sockets | `advisory` as left; `firewalled`/`none`: refused |
 
 So, per shipped containment:
 

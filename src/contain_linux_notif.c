@@ -55,6 +55,11 @@ struct ContainSup {
     int sock, listener, dns, port, stop[2];
     int enforce;               /* NE_NOTIF: nothing is continued */
     int abstract_ok;           /* files 'open': host abstract sockets are in reach */
+    int strict;                /* NE_NOTIF, 'firewalled': the host's own services
+                                * are out of reach too */
+    char (*roots)[PATH_MAX];   /* strict, files not 'open': where a unix socket
+                                * may be connected to */
+    size_t nroots;
     ContainDnsNames *names;
 };
 
@@ -239,29 +244,48 @@ refuse:;
 }
 
 /* NE_NOTIF, AF_UNIX: the supervisor connects S itself, a relative path
- * resolved against the caller's working directory. The path is resolved as
- * the caller would (same user, same mount namespace; Landlock does not
- * mediate a pathname socket's connect). An abstract address is the host's
- * namespace-wide one, which Landlock's scoping would refuse: only under files
+ * resolved against the caller's working directory, as the caller would
+ * (same user, same mount namespace). Landlock does not mediate a pathname
+ * socket's connect, so under 'firewalled' this is what keeps a local daemon
+ * (a container engine, a session bus) from acting for the caller: the socket
+ * file is held open, its real path must be under a root, and the connection
+ * is made to the file held — no link swapped in afterwards is followed. An
+ * abstract address is the host's namespace-wide one: only under files
  * 'open'. */
 static int unix_connect(ContainSup *s, int S, const struct sockaddr_storage *ss,
                         socklen_t len, pid_t pid) {
     const struct sockaddr_un *u = (const struct sockaddr_un *)ss;
     size_t off = offsetof(struct sockaddr_un, sun_path);
     if (len <= off) return EINVAL;
-    if (u->sun_path[0] == '\0' && !s->abstract_ok) return EPERM;
-    if (u->sun_path[0] == '\0' || u->sun_path[0] == '/')
-        return connect(S, (const struct sockaddr *)u, len) == 0 ? 0 : errno;
-    char dir[64];
-    snprintf(dir, sizeof(dir), "/proc/%d/cwd", (int)pid);
-    int dfd = open(dir, O_PATH | O_DIRECTORY | O_CLOEXEC);
-    if (dfd < 0) return EPERM;
+    if (u->sun_path[0] == '\0')
+        return !s->abstract_ok ? EPERM
+             : connect(S, (const struct sockaddr *)u, len) == 0 ? 0 : errno;
+    char path[PATH_MAX], real[PATH_MAX];
+    int nl = (int)strnlen(u->sun_path, len - off), dfd = -1;
+    if (u->sun_path[0] == '/') {
+        snprintf(path, sizeof(path), "%.*s", nl, u->sun_path);
+    } else {
+        snprintf(path, sizeof(path), "/proc/%d/cwd", (int)pid);
+        if ((dfd = open(path, O_PATH | O_DIRECTORY | O_CLOEXEC)) < 0) return EPERM;
+        snprintf(path, sizeof(path), "/proc/self/fd/%d/%.*s", dfd, nl, u->sun_path);
+    }
+    int held = open(path, O_PATH | O_CLOEXEC);
+    int rc = held < 0 ? errno : 0;
+    if (dfd >= 0) close(dfd);
+    if (held < 0) return rc;
     struct sockaddr_un a = { .sun_family = AF_UNIX };
-    int rc = ENAMETOOLONG;
-    if (snprintf(a.sun_path, sizeof(a.sun_path), "/proc/self/fd/%d/%.*s", dfd,
-                 (int)strnlen(u->sun_path, len - off), u->sun_path) < (int)sizeof(a.sun_path))
-        rc = connect(S, (struct sockaddr *)&a, sizeof(a)) == 0 ? 0 : errno;
-    close(dfd);
+    snprintf(a.sun_path, sizeof(a.sun_path), "/proc/self/fd/%d", held);
+    if (s->strict && !s->abstract_ok) {
+        ssize_t n = readlink(a.sun_path, real, sizeof(real) - 1);
+        rc = EACCES;
+        real[n > 0 ? n : 0] = '\0';
+        for (size_t i = 0; i < s->nroots && rc; i++) {
+            size_t rl = strlen(s->roots[i]);
+            if (strncmp(real, s->roots[i], rl) == 0 && (real[rl] == '/' || !real[rl])) rc = 0;
+        }
+    }
+    if (rc == 0 && connect(S, (struct sockaddr *)&a, sizeof(a)) != 0) rc = errno;
+    close(held);
     return rc;
 }
 
@@ -286,6 +310,13 @@ static int decide(ContainSup *s, uint64_t id, int S, const struct sockaddr_stora
         return tunnel(s, id, S, dom, hp);
     }
     if (!s->enforce) { *cont = 1; return 0; }
+    /* The host's loopback is the host's services, not the agent's: under
+     * 'firewalled' only the shim is there. */
+    if (inet && s->strict &&
+        !(fam == AF_INET && s->port > 0 &&
+          ((const struct sockaddr_in *)ss)->sin_addr.s_addr == htonl(INADDR_LOOPBACK) &&
+          ntohs(((const struct sockaddr_in *)ss)->sin_port) == s->port))
+        return ECONNREFUSED;
     if (inet || fam == AF_UNSPEC || (dom == AF_NETLINK && fam == AF_NETLINK))
         return connect(S, (const struct sockaddr *)ss, len) == 0 ? 0 : errno;
     if (dom == AF_UNIX && fam == AF_UNIX) return unix_connect(s, S, ss, len, pid);
@@ -415,9 +446,12 @@ static void *sup_main(void *arg) {
     return NULL;
 }
 
-ContainSup *contain_supervise(int sock, const ContainPlan *p) {
+ContainSup *contain_supervise(int sock, const ContainPlan *p, const char *const *roots,
+                              size_t n) {
     ContainSup *s = calloc(1, sizeof(*s));
-    if (!s || pipe2(s->stop, O_CLOEXEC) != 0) {
+    if (s) s->roots = calloc(n + 1, sizeof(*s->roots));
+    if (!s || !s->roots || pipe2(s->stop, O_CLOEXEC) != 0) {
+        if (s) free(s->roots);
         free(s);
         close(sock);
         return NULL;
@@ -425,7 +459,10 @@ ContainSup *contain_supervise(int sock, const ContainPlan *p) {
     s->sock = sock;
     s->listener = s->dns = -1;
     s->enforce = p->ne == NE_NOTIF;
+    s->strict = s->enforce && p->lv.net == NET_FIREWALLED;
     s->abstract_ok = p->lv.files == FILES_OPEN;
+    for (size_t i = 0; i < n; i++)   /* one that does not resolve holds no socket */
+        if (roots[i] && realpath(roots[i], s->roots[s->nroots])) s->nroots++;
     pthread_mutex_init(&s->mu, NULL);
     pthread_attr_init(&s->detached);
     pthread_attr_setdetachstate(&s->detached, PTHREAD_CREATE_DETACHED);
@@ -434,6 +471,7 @@ ContainSup *contain_supervise(int sock, const ContainPlan *p) {
         close(sock);
         close(s->stop[0]);
         close(s->stop[1]);
+        free(s->roots);
         free(s);
         return NULL;
     }

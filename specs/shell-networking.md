@@ -194,7 +194,8 @@ too. How the program was linked does not matter.
 | `ssh` | With `-o ProxyCommand="$CCLAW_CONNECT %h %p"` | Yes | With the ProxyCommand (no DNS) |
 | HTTP clients that ignore the variables (Node's built-in `fetch`, a JVM without proxy flags) | No | Yes, by name | Literal addresses only (no DNS) |
 | TCP clients: `nc`, `socat`, `socket.connect()`, database clients | No | Yes, by name | Literal addresses only (no DNS) |
-| The host's own loopback (`127.0.0.1:<port>`) | No | No | Yes, directly — the agent's dev servers and anything else listening there |
+| The host's own loopback (`127.0.0.1:<port>`), a server the command starts itself | Its own servers only (the namespace has its own loopback) | same | `advisory`: yes, directly — the agent's dev servers and anything else listening there. `firewalled`: no — no loopback port but the proxy's, and no `listen()` |
+| A unix socket on the host (`docker.sock`, a session bus) | No (not mounted) | No | `advisory`: yes, subject to file permissions. `firewalled`: only under the agent's own directories and path grants |
 | UDP, ICMP (`ping`), raw sockets, DNS tools (`dig`) | No | No (the stub answers only A/AAAA through the resolver) | No: such sockets cannot be made |
 
 The "No" cells fail safe, not open. If a tool call gets "network

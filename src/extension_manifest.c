@@ -517,7 +517,7 @@ static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_di
         while (p && k < CONTAIN_SHIPPED_N && strcmp(p, CONTAIN_SHIPPED[k].name) != 0) k++;
         if (p && k == CONTAIN_SHIPPED_N) {
             xerr(err_out, "agents[] containment must be a shipped one:"
-                 " standard, offline, basic or none");
+                 " standard, offline, basic-firewalled, basic or none");
             rc = -1; break;
         }
         if (f && f[0]) {

@@ -22,7 +22,7 @@ static const char *CREATE_AGENT_PARAMS =
     "\"description\":{\"type\":\"string\",\"description\":\"One-line hint: when to delegate to this agent\"},"
     "\"system_prompt\":{\"type\":\"string\",\"description\":\"The agent's role and persona. The built-in operating rules (tools, secrets, escalation) are added above it for every agent — do not repeat them\"},"
     "\"models\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Routing order: registered model ids, first is primary (omit to inherit your own list)\"},"
-    "\"containment\":{\"type\":\"string\",\"description\":\"How the agent's tool calls are contained: a row of the containments table (shipped: standard, offline, basic, none); no looser than yours in any column\"},"
+    "\"containment\":{\"type\":\"string\",\"description\":\"How the agent's tool calls are contained: a row of the containments table (shipped: standard, offline, basic-firewalled, basic, none); no looser than yours in any column\"},"
     "\"grants\":{\"type\":\"object\",\"properties\":{"
       "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
       "\"hosts\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"

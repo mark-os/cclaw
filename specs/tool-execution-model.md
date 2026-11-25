@@ -96,7 +96,7 @@ serve_network_child(const VehicleDescriptor *desc, RunToolParsed *q,
                     unsigned char *body, size_t body_len):
     proxy_bind(&proxy, agent_dir, q->host_rules, q->deny_rules)
         // bind while single-threaded, BEFORE the fork below;
-        // only for network proxied/advisory: none and direct have no proxy
+        // only for network firewalled/advisory: none and direct have no proxy
     pid = fork()                         // safe: this image is sterile/1-thread
     if child:
         setpgid(0,0)

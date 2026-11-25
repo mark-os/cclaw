@@ -19,7 +19,7 @@
 
 /* Levels, loosest first: a larger value is a stronger promise. */
 typedef enum { FILES_OPEN, FILES_CONFINED, FILES_PRIVATE } FilesLevel;
-typedef enum { NET_DIRECT, NET_ADVISORY, NET_PROXIED, NET_NONE } NetLevel;
+typedef enum { NET_DIRECT, NET_ADVISORY, NET_FIREWALLED, NET_NONE } NetLevel;
 
 /* Enforcers. FE_CODE: the path check in cclaw's own file and js code.
  * FE_LANDLOCK: a Landlock ruleset (for file and js, on top of the path

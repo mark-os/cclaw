@@ -428,7 +428,7 @@ static void layer_tools(sqlite3 *db, unsigned caps) {
                 refused = 1;
                 continue;
             }
-            /* The namespace keeps advisory as proxied: no route out but the
+            /* The namespace keeps advisory as firewalled: no route out but the
              * proxy, which is stronger than advisory promises. */
             printf("       %-5s files: %s%s; network: %s%s\n", vs[i].name,
                    files_enforcer_name(p.fe),

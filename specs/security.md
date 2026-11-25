@@ -257,7 +257,7 @@ shell and js `RunToolReq`, in this order:
 Under network `none` (`offline`) none of this reaches the wire: the child gets
 no proxy socket, so a declared-hosts tool still egresses nothing. Containment
 beats every declaration. The same rule set governs js under network
-`proxied`/`advisory` on a host with no namespace: its curl dials the proxy's
+`firewalled`/`advisory` on a host with no namespace: its curl dials the proxy's
 socket itself ([shell-networking.md](shell-networking.md)), so narrowing,
 deny labels and the metadata block hold there too; a shell under `advisory`
 is subject to them only when it honors the proxy variables.

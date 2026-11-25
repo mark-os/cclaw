@@ -304,7 +304,7 @@ Shared extension registry. Each extension is a directory in the shared store `~/
 ## containments
 
 How an agent's tool children are contained ([containment.md](containment.md)).
-The shipped rows (`standard`, `offline`, `basic`, `none`) are restored to
+The shipped rows (`standard`, `offline`, `basic-firewalled`, `basic`, `none`) are restored to
 their shipped values at every start (`CONTAIN_SHIPPED`, `src/sandbox.c`);
 rows an operator adds are left alone. No agent-facing verb writes it.
 `agents.containment` names a row; a name with no row refuses that agent's
@@ -314,7 +314,7 @@ tool calls.
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
 | `files` | TEXT NOT NULL | `private` \| `confined` \| `open` (CHECK) |
-| `network` | TEXT NOT NULL | `none` \| `proxied` \| `advisory` \| `direct` (CHECK) |
+| `network` | TEXT NOT NULL | `none` \| `firewalled` \| `advisory` \| `direct` (CHECK) |
 | `nproc` | INTEGER NOT NULL DEFAULT 0 | `RLIMIT_NPROC`; 0 = no cap |
 | `cpu_sec` | INTEGER NOT NULL DEFAULT 0 | `RLIMIT_CPU` seconds; 0 = no cap |
 

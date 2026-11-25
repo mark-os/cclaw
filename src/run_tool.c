@@ -761,11 +761,11 @@ static void serve_network_child(const VehicleDescriptor *desc, RunToolParsed *q,
     if (pipe(pipefd) != 0) die("error: net: pipe failed");
 
     /* Proxy: bind while single-threaded (before the fork below). It runs
-     * for network 'proxied' and 'advisory'; 'none' and 'direct' have none. */
+     * for network 'firewalled' and 'advisory'; 'none' and 'direct' have none. */
     ProxyContext proxy;
     int proxy_active = 0;
     if (q->agent_dir &&
-        (q->plan.lv.net == NET_PROXIED || q->plan.lv.net == NET_ADVISORY)) {
+        (q->plan.lv.net == NET_FIREWALLED || q->plan.lv.net == NET_ADVISORY)) {
         if (proxy_bind(&proxy, q->agent_dir, q->host_rules, q->host_count,
                        q->deny_rules, q->deny_count) != 0) {
             /* Running on with no proxy would be a call that silently has no

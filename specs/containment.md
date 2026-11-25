@@ -14,7 +14,7 @@ names one (looked up by name; the column default is `standard`):
 | column | values | meaning |
 |---|---|---|
 | `files` | `private` > `confined` > `open` | what the child can open |
-| `network` | `none` > `proxied` > `advisory` > `direct` | where its packets go |
+| `network` | `none` > `firewalled` > `advisory` > `direct` | where its packets go |
 | `nproc`, `cpu_sec` | integer, `0` = no cap | `RLIMIT_NPROC`, `RLIMIT_CPU` |
 
 Shipped rows, restored to these values at every start (`CONTAIN_SHIPPED`,
@@ -23,8 +23,9 @@ or the explorer); those are left alone. No agent-facing verb writes the table.
 
 | name | files | network | nproc | cpu_sec |
 |---|---|---|---|---|
-| `standard` (default) | private | proxied | 256 | 0 |
+| `standard` (default) | private | firewalled | 256 | 0 |
 | `offline` | private | none | 64 | 120 |
+| `basic-firewalled` | confined | firewalled | 256 | 0 |
 | `basic` | confined | advisory | 256 | 0 |
 | `none` | open | direct | 0 | 0 |
 
@@ -66,12 +67,12 @@ Strongest first, per level:
 | network (no mount namespace) | file | js | shell |
 |---|---|---|---|
 | `none` | NONE | CODE (http_request refuses) | NETNS, else SECCOMP, else refuse |
-| `proxied` | NONE | CODE | NETNS, else refuse |
+| `firewalled` | NONE | CODE | NETNS, else refuse |
 | `advisory` | NONE | CODE | ENV (needs the backend's loopback proxy) |
 | `direct` | NONE | NONE | NONE |
 
 With the mount namespace the network enforcer is always `NETNS`: there the
-proxy is the only route out, which keeps `none` and `proxied` and keeps
+proxy is the only route out, which keeps `none` and `firewalled` and keeps
 `advisory` more strongly than it promises (`--doctor` says so). `direct` cannot
 be combined with the mount namespace and is refused. The file vehicle opens no
 socket — it is cclaw's own file code — so no network level needs an enforcer

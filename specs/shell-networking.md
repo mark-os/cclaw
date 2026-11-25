@@ -27,7 +27,7 @@ Key insight: `CLONE_NEWNET` is the hard boundary. The proxy variables are
 plumbing, not enforcement: a program that ignores or unsets them gets zero
 network, not unrestricted network.
 
-That is network `proxied` (and `none`, with no proxy at all) in the namespace
+That is network `firewalled` (and `none`, with no proxy at all) in the namespace
 (`NE_NETNS`, [containment.md](containment.md)). Two plans run without a
 namespace:
 

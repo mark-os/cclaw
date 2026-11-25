@@ -452,7 +452,7 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "CREATE TABLE IF NOT EXISTS containments ("
       "  name TEXT PRIMARY KEY,"
       "  files TEXT NOT NULL CHECK (files IN ('private','confined','open')),"
-      "  network TEXT NOT NULL CHECK (network IN ('none','proxied','advisory','direct')),"
+      "  network TEXT NOT NULL CHECK (network IN ('none','firewalled','advisory','direct')),"
       "  nproc INTEGER NOT NULL DEFAULT 0,"
       "  cpu_sec INTEGER NOT NULL DEFAULT 0);",
       NULL },

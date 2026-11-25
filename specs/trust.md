@@ -89,7 +89,7 @@ it as a grant. Concretely:
   union. Grant cost tracks actual reach, always.
 - `create_agent` caps the child on both axes independently: child
   `containment` no looser than the parent's in any column (files
-  `private > confined > open`, network `none > proxied > advisory > direct`,
+  `private > confined > open`, network `none > firewalled > advisory > direct`,
   each limit with 0 the loosest) AND child grants ⊆ parent grants.
   Subset-of-grants, not a fuzzy "trust" comparison.
 - **Reach may live on a capability (declared hosts, activated at promotion) or

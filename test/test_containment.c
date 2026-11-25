@@ -73,19 +73,19 @@ static void test_plan_table(void) {
         { NULL, FILES_CONFINED, NET_NONE, EXEC_SHELL, BARE | CONTAIN_CAP_LANDLOCK, NO("seccomp") },
         { NULL, FILES_CONFINED, NET_NONE, EXEC_SHELL, BARE | CONTAIN_CAP_SECCOMP,  NO("Landlock") },
         { NULL, FILES_CONFINED, NET_NONE, EXEC_JS,    LL,   OK(FE_LANDLOCK, NE_CODE) },
-        { NULL, FILES_CONFINED, NET_PROXIED, EXEC_SHELL, LL,   NO("proxied") },
-        { NULL, FILES_CONFINED, NET_PROXIED, EXEC_SHELL, LLNS, OK(FE_LANDLOCK, NE_NETNS) },
+        { NULL, FILES_CONFINED, NET_FIREWALLED, EXEC_SHELL, LL,   NO("firewalled") },
+        { NULL, FILES_CONFINED, NET_FIREWALLED, EXEC_SHELL, LLNS, OK(FE_LANDLOCK, NE_NETNS) },
         { NULL, FILES_CONFINED, NET_DIRECT,  EXEC_SHELL, LL,   OK(FE_LANDLOCK, NE_NONE) },
         /* Network with no mount namespace: js in code; the shell gets a
          * network namespace of its own, else (none only) seccomp, else is
          * refused — except advisory, which is the proxy variables, when the
          * backend has the loopback proxy at all. */
-        { NULL, FILES_OPEN, NET_PROXIED, EXEC_JS,    BARE, OK(FE_NONE, NE_CODE) },
+        { NULL, FILES_OPEN, NET_FIREWALLED, EXEC_JS,    BARE, OK(FE_NONE, NE_CODE) },
         { NULL, FILES_OPEN, NET_NONE,    EXEC_JS,    BARE, OK(FE_NONE, NE_CODE) },
         { NULL, FILES_OPEN, NET_NONE,    EXEC_FILE,  BARE, OK(FE_NONE, NE_NONE) },
-        { NULL, FILES_OPEN, NET_PROXIED, EXEC_SHELL, BARE, NO("proxied") },
-        { NULL, FILES_OPEN, NET_PROXIED, EXEC_SHELL, LL,   NO("proxied") },
-        { NULL, FILES_OPEN, NET_PROXIED, EXEC_SHELL, NS,   OK(FE_NONE, NE_NETNS) },
+        { NULL, FILES_OPEN, NET_FIREWALLED, EXEC_SHELL, BARE, NO("firewalled") },
+        { NULL, FILES_OPEN, NET_FIREWALLED, EXEC_SHELL, LL,   NO("firewalled") },
+        { NULL, FILES_OPEN, NET_FIREWALLED, EXEC_SHELL, NS,   OK(FE_NONE, NE_NETNS) },
         { NULL, FILES_OPEN, NET_NONE,    EXEC_SHELL, ALL,  OK(FE_NONE, NE_NETNS) },
         { NULL, FILES_OPEN, NET_NONE,    EXEC_SHELL, BARE | CONTAIN_CAP_SECCOMP, OK(FE_NONE, NE_SECCOMP) },
         { NULL, FILES_OPEN, NET_NONE,    EXEC_SHELL, BARE, NO("seccomp") },

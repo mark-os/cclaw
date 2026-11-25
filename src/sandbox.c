@@ -64,15 +64,16 @@ const char *const SANDBOX_SYS_DIRS[] = {
  * punishes legitimate builds, so only offline, which runs short local jobs,
  * has one. Strictest first: contain_suggest walks them in this order. */
 const ContainRow CONTAIN_SHIPPED[] = {
-    { "standard", { FILES_PRIVATE,  NET_PROXIED,  256, 0 } },
+    { "standard", { FILES_PRIVATE,  NET_FIREWALLED,  256, 0 } },
     { "offline",  { FILES_PRIVATE,  NET_NONE,      64, 120 } },
+    { "basic-firewalled", { FILES_CONFINED, NET_FIREWALLED, 256, 0 } },
     { "basic",    { FILES_CONFINED, NET_ADVISORY, 256, 0 } },
     { "none",     { FILES_OPEN,     NET_DIRECT,     0, 0 } },
 };
 const size_t CONTAIN_SHIPPED_N = sizeof(CONTAIN_SHIPPED) / sizeof(CONTAIN_SHIPPED[0]);
 
 static const char *const FILES_NAMES[] = { "open", "confined", "private" };
-static const char *const NET_NAMES[]   = { "direct", "advisory", "proxied", "none" };
+static const char *const NET_NAMES[]   = { "direct", "advisory", "firewalled", "none" };
 static const char *const FE_NAMES[]    = { "none", "path check in cclaw's code",
                                            "mount namespace", "Landlock" };
 static const char *const NE_NAMES[]    = { "none", "proxy variables only",
@@ -146,7 +147,7 @@ static const char *plan_levels(const ContainLevels *lv, ExecVehicle v,
         break;
     }
     /* The mount namespace always brings an empty network namespace: there
-     * the proxy is the only way out, which keeps none, proxied and (more
+     * the proxy is the only way out, which keeps none, firewalled and (more
      * strongly than it promises) advisory, but cannot be direct. */
     if (p->fe == FE_MOUNTNS) {
         if (lv->net == NET_DIRECT)
@@ -173,7 +174,7 @@ static const char *plan_levels(const ContainLevels *lv, ExecVehicle v,
     return lv->net == NET_NONE
         ? "network 'none' for the shell needs unprivileged user namespaces (a network"
           " namespace) or seccomp"
-        : "network 'proxied' for the shell needs unprivileged user namespaces (a"
+        : "network 'firewalled' for the shell needs unprivileged user namespaces (a"
           " network namespace)";
 }
 

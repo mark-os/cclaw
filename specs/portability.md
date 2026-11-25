@@ -66,7 +66,7 @@ What each policy gets:
 | Files, shell | Mount namespace | `confined`: Landlock (existence visible, no private `/tmp`/`/proc`) | refused |
 | `cclaw.db` / `.cclaw_key` | Outside every mount set, masked if a bind would show them | In no Landlock rule; the path check refuses them by path and by inode | The path check |
 | Host allowlist, `web_fetch` and JS `http_request` | Network namespace; the only route out is the broker's proxy | curl dials the proxy's unix socket itself (`NE_CODE`): the same `proxy_decide()`, metadata and private-address blocks, SNI check, narrowing and contacted-host log | same |
-| Host allowlist, shell | Network namespace + `net_shim` | `advisory`: the shim on the host's loopback and the proxy variables, nothing more; `none`: seccomp, no sockets; `proxied`: refused | `advisory` as left; `proxied`/`none`: refused |
+| Host allowlist, shell | Network namespace + `net_shim` | `advisory`: the shim on the host's loopback and the proxy variables, nothing more; `none`: seccomp, no sockets; `firewalled`: refused | `advisory` as left; `firewalled`/`none`: refused |
 
 So, per shipped containment:
 

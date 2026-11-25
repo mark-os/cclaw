@@ -294,17 +294,18 @@ static void test_schema_patch_v71(void) {
                            " (SELECT name FROM containments)") == 0);
     assert(test_qi(old_db, "SELECT COUNT(*) FROM containments WHERE"
                            " (name,files,network,nproc,cpu_sec) IN (VALUES"
-                           " ('standard','private','proxied',256,0),"
+                           " ('standard','private','firewalled',256,0),"
                            " ('offline','private','none',64,120),"
+                           " ('basic-firewalled','confined','firewalled',256,0),"
                            " ('basic','confined','advisory',256,0),"
-                           " ('none','open','direct',0,0))") == 4);
+                           " ('none','open','direct',0,0))") == 5);
     assert(sqlite3_exec(old_db,
         "UPDATE containments SET network='direct' WHERE name='standard';"
-        "INSERT INTO containments VALUES('mine','open','proxied',8,0);",
+        "INSERT INTO containments VALUES('mine','open','firewalled',8,0);",
         NULL, NULL, NULL) == SQLITE_OK);
     assert(db_ensure_schema(old_db) == 0);
     assert(test_qi(old_db, "SELECT COUNT(*) FROM containments WHERE"
-                           " name='standard' AND network='proxied'") == 1);
+                           " name='standard' AND network='firewalled'") == 1);
     assert(test_qi(old_db, "SELECT nproc FROM containments WHERE name='mine'") == 8);
 
     sqlite3 *new_db = db_open(new_path);

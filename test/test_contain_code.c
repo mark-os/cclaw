@@ -359,7 +359,7 @@ static void test_file_kernel_backstop(void) {
     free(r);
 }
 
-/* Files 'open' with network 'proxied' on a host with user namespaces but
+/* Files 'open' with network 'firewalled' on a host with user namespaces but
  * (masked) no mount namespace: a user + network namespace alone. The proxy
  * fetches a granted address (--noproxy '': the variables exempt loopback);
  * a program that ignores the proxy variables reaches nothing on the host,
@@ -372,7 +372,7 @@ static void test_shell_netns_only(void) {
     snprintf(cmd, sizeof(cmd), "curl -s -m 5 --noproxy '' http://127.0.0.1:%d/v1/chat/completions; echo;"
              " curl -s -m 5 --noproxy '*' http://127.0.0.1:%d/v1/chat/completions || echo NO_ROUTE", port, port);
     const char *grant[] = { "127.0.0.1/32" };
-    Containment c = { .name = "open-proxied", .known = 1, .lv = { FILES_OPEN, NET_PROXIED, 0, 0 } };
+    Containment c = { .name = "open-firewalled", .known = 1, .lv = { FILES_OPEN, NET_FIREWALLED, 0, 0 } };
     char *r = shell_call(&c, cmd, FE_NONE, NE_NETNS, grant, 1);
     int ok = strstr(r, "via-proxy") && strstr(r, "NO_ROUTE") && mock_server_request_count() == 1;
     if (!ok) printf("    netns: %s requests=%d\n", r, mock_server_request_count());
